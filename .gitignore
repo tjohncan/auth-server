@@ -1,0 +1,29 @@
+.idea/
+.claude/
+*.swp
+*.swo
+*~
+
+# Live configuration
+auth.conf
+.env
+
+# Generated nginx config (from template)
+**/nginx/conf.d/default.conf
+
+# Build artifacts
+*.o
+auth-server
+test-str
+test-http
+test-router
+test-db
+test-crypto
+
+# SQLite amalgamation (downloaded via vendor/setup_notes.txt)
+vendor/sqlite/*
+!vendor/sqlite/.gitkeep
+
+# Runtime data
+data/*
+!data/.gitkeep

@@ -1,0 +1,52 @@
+# Build artifacts
+*.o
+*.a
+auth-server
+
+.idea/
+.claude/
+*.swp
+*.swo
+*~
+
+# Git
+.git/
+.gitignore
+.gitkeep
+
+# Documentation (not needed in container)
+*.md
+*.txt
+
+# Deployment config (not needed inside the image)
+deployment/
+docker-compose*.yml
+
+# Tests
+test/
+
+# Local environment
+.env
+.env.*
+*.local
+auth.conf
+auth.conf.example
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# SQLite databases
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+*.tmp

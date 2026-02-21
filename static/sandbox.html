@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self'; font-src 'self'; connect-src 'self'; form-action 'self'; manifest-src 'self'; base-uri 'self';">
+    <title>Token Sandbox</title>
+    <link rel="stylesheet" href="/css/base.css">
+    <link rel="icon" type="image/svg+xml" href="/favicon/favicon.svg">
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon/favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon/favicon-16x16.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="/favicon/apple-touch-icon.png">
+    <link rel="manifest" href="/favicon/site.webmanifest">
+    <style>
+        .container { max-width: 960px; padding: 0; }
+        .subtitle { color: #888; margin-top: -10px; margin-bottom: 24px; }
+        .tabs { display: flex; gap: 0; border-bottom: 1px solid #444; margin-bottom: 24px; overflow-x: auto; }
+        .tab-btn {
+            background: none; border: none; border-bottom: 2px solid transparent;
+            color: #888; padding: 10px 14px; cursor: pointer; font-size: 14px;
+            white-space: nowrap; font-family: inherit;
+        }
+        .tab-btn:hover { color: silver; }
+        .tab-btn.active { color: #dcdcdc; border-bottom-color: #87ceeb; }
+        .panel { display: none; }
+        .panel.active { display: block; }
+        .desc { color: #aaa; margin-bottom: 20px; line-height: 1.5; }
+        .field { margin-bottom: 14px; }
+        .field label { display: block; margin-bottom: 4px; font-size: 13px; color: #ccc; }
+        .field .req { color: #c66; }
+        .field input[type="text"],
+        .field input[type="password"],
+        .field textarea,
+        .field select {
+            width: 100%; box-sizing: border-box;
+            background: #1a1a1a; color: silver; border: 1px solid #666;
+            padding: 8px; border-radius: 4px; font-size: 14px; font-family: inherit;
+        }
+        .field input:focus, .field textarea:focus, .field select:focus {
+            outline: none; border-color: #87ceeb;
+        }
+        .field textarea { resize: vertical; min-height: 60px; font-family: monospace; font-size: 13px; }
+        .field select { cursor: pointer; }
+        .field .hint { font-size: 12px; color: #666; margin-top: 2px; }
+        .run-btn {
+            background: #1a3a4a; color: #87ceeb; border: 1px solid #87ceeb;
+            padding: 10px 24px; border-radius: 4px; cursor: pointer; font-size: 14px;
+            margin-top: 4px; font-family: inherit;
+        }
+        .run-btn:hover { background: #1a4a5a; }
+        .result { margin-top: 20px; display: none; }
+        .result-block { margin-bottom: 16px; }
+        .result-label { font-size: 12px; color: #888; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .result pre {
+            background: #0d0d0d; border: 1px solid #333; border-radius: 4px;
+            padding: 12px; overflow-x: auto; font-size: 13px; line-height: 1.4;
+            color: #7fffd4; margin: 0;
+        }
+        .status-ok { color: #7fffd4; }
+        .status-err { color: #ff6b6b; }
+        .copy-section { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+        .copy-btn {
+            background: #222; color: #87ceeb; border: 1px solid #444;
+            padding: 4px 12px; border-radius: 3px; cursor: pointer; font-size: 12px;
+            font-family: inherit;
+        }
+        .copy-btn:hover { background: #333; }
+        .note { background: #111; border-left: 3px solid #87ceeb; padding: 10px 14px; margin-bottom: 20px; font-size: 13px; color: #aaa; line-height: 1.5; }
+        .note.warn { border-left-color: #87ceeb; }
+        .field-error { color: #ff6b6b; font-size: 13px; margin-bottom: 14px; display: none; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>Token Sandbox</h1>
+    <p class="subtitle">Interactive testing for the OAuth2 token lifecycle</p>
+
+    <div class="tabs">
+        <button class="tab-btn active" id="tab-cc" data-action="switch-panel" data-panel="cc">Client Credentials</button>
+        <button class="tab-btn" id="tab-introspect" data-action="switch-panel" data-panel="introspect">Introspection</button>
+        <button class="tab-btn" id="tab-revoke" data-action="switch-panel" data-panel="revoke">Revocation</button>
+        <button class="tab-btn" id="tab-refresh" data-action="switch-panel" data-panel="refresh">Refresh Token</button>
+        <button class="tab-btn" id="tab-replay" data-action="switch-panel" data-panel="replay">Replay Detection</button>
+    </div>
+
+    <!-- Panel 1: Client Credentials -->
+    <div id="panel-cc" class="panel active">
+        <p class="desc">Authenticate as a client using <code>client_credentials</code> and receive an access token. No user context — the token represents the application itself.</p>
+        <div class="note">Requires a confidential client with an active client key.</div>
+        <div class="field">
+            <label>Client ID <span class="req">*</span></label>
+            <input type="text" id="cc-client-id" placeholder="32-character hex UUID">
+        </div>
+        <div class="field">
+            <label>Client Key ID <span class="req">*</span></label>
+            <input type="text" id="cc-key-id" placeholder="32-character hex UUID">
+        </div>
+        <div class="field">
+            <label>Client Secret <span class="req">*</span></label>
+            <input type="password" id="cc-secret" placeholder="Client key secret">
+        </div>
+        <div class="field">
+            <label>Scope</label>
+            <input type="text" id="cc-scope" placeholder="e.g. read write">
+        </div>
+        <div class="field">
+            <label>Resource</label>
+            <input type="text" id="cc-resource" placeholder="Resource server address (RFC 8707)">
+        </div>
+        <div id="cc-error" class="field-error"></div>
+        <button class="run-btn" data-action="run-cc">Get Token</button>
+        <div id="cc-result" class="result"></div>
+    </div>
+
+    <!-- Panel 2: Token Introspection -->
+    <div id="panel-introspect" class="panel">
+        <p class="desc">Validate an access token using resource server credentials. Active tokens return metadata including scopes, client, audience, and expiry. Invalid or expired tokens return <code>{"active": false}</code>.</p>
+        <div class="note">The authenticating resource server must be the token's audience.</div>
+        <div class="field">
+            <label>Access Token <span class="req">*</span></label>
+            <textarea id="intro-token" placeholder="Paste access token"></textarea>
+        </div>
+        <div class="field">
+            <label>Resource Server ID <span class="req">*</span></label>
+            <input type="text" id="intro-rs-id" placeholder="32-character hex UUID">
+        </div>
+        <div class="field">
+            <label>Resource Server Key ID <span class="req">*</span></label>
+            <input type="text" id="intro-rs-key-id" placeholder="32-character hex UUID">
+        </div>
+        <div class="field">
+            <label>Resource Server Secret <span class="req">*</span></label>
+            <input type="password" id="intro-rs-secret" placeholder="Resource server key secret">
+        </div>
+        <div id="intro-error" class="field-error"></div>
+        <button class="run-btn" data-action="run-introspect">Introspect</button>
+        <div id="intro-result" class="result"></div>
+    </div>
+
+    <!-- Panel 3: Refresh Token Rotation -->
+    <div id="panel-refresh" class="panel">
+        <p class="desc">Exchange a refresh token for a new access token and refresh token. The old refresh token is invalidated (rotation). Refresh tokens are issued with <code>authorization_code</code> grants.</p>
+        <div class="field">
+            <label>Client ID <span class="req">*</span></label>
+            <input type="text" id="ref-client-id" placeholder="32-character hex UUID">
+        </div>
+        <div class="field">
+            <label>Refresh Token <span class="req">*</span></label>
+            <textarea id="ref-token" placeholder="Paste refresh token"></textarea>
+        </div>
+        <div class="field">
+            <label>Scope</label>
+            <input type="text" id="ref-scope" placeholder="Optional — downscope from original grant">
+        </div>
+        <div id="ref-error" class="field-error"></div>
+        <button class="run-btn" data-action="run-refresh">Refresh</button>
+        <div id="ref-result" class="result"></div>
+    </div>
+
+    <!-- Panel 3: Token Revocation -->
+    <div id="panel-revoke" class="panel">
+        <p class="desc">Revoke an access token using client credentials. Per RFC 7009, the endpoint always returns <code>200 OK</code> regardless of whether the token was valid, already revoked, or the credentials were wrong — preventing information disclosure.</p>
+        <div class="note warn">Only confidential clients can revoke tokens. Public clients do not have client keys and cannot authenticate to this endpoint.</div>
+        <div class="field">
+            <label>Access Token <span class="req">*</span></label>
+            <textarea id="rev-token" placeholder="Paste access token"></textarea>
+        </div>
+        <div class="field">
+            <label>Client ID <span class="req">*</span></label>
+            <input type="text" id="rev-client-id" placeholder="32-character hex UUID">
+        </div>
+        <div class="field">
+            <label>Client Key ID <span class="req">*</span></label>
+            <input type="text" id="rev-key-id" placeholder="32-character hex UUID">
+        </div>
+        <div class="field">
+            <label>Client Secret <span class="req">*</span></label>
+            <input type="password" id="rev-secret" placeholder="Client key secret">
+        </div>
+        <div id="rev-error" class="field-error"></div>
+        <button class="run-btn" data-action="run-revoke">Revoke</button>
+        <div id="rev-result" class="result"></div>
+    </div>
+
+    <!-- Panel 4: Refresh Token Rotation -->
+    <div id="panel-replay" class="panel">
+        <p class="desc">Demonstrate refresh token replay detection. After rotating a token in the Refresh panel, the old token is automatically loaded here. The server detects the replay and revokes the entire token chain — including the new tokens from the rotation.</p>
+        <div class="note warn">This is a destructive test. All tokens in the chain will be revoked.</div>
+        <div class="field">
+            <label>Client ID <span class="req">*</span></label>
+            <input type="text" id="replay-client-id" placeholder="32-character hex UUID">
+        </div>
+        <div class="field">
+            <label>Old Refresh Token <span class="req">*</span></label>
+            <textarea id="replay-token" placeholder="Paste the old refresh token (before rotation)"></textarea>
+        </div>
+        <div id="replay-error" class="field-error"></div>
+        <button class="run-btn" data-action="run-replay">Replay Token</button>
+        <div id="replay-result" class="result"></div>
+    </div>
+
+    <p style="margin-top: 40px;"><a href="/">← Home</a></p>
+</div>
+
+<script>
+'use strict';
+
+/* Helpers */
+function $(id) { return document.getElementById(id); }
+function val(id) { return $(id).value.trim(); }
+function esc(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+
+/* State */
+const copyStore = {};
+
+/* Tab switching */
+function switchPanel(name) {
+    document.querySelectorAll('.panel').forEach(function(p) { p.style.display = 'none'; p.classList.remove('active'); });
+    document.querySelectorAll('.tab-btn').forEach(function(b) { b.classList.remove('active'); });
+    $('panel-' + name).style.display = 'block';
+    $('panel-' + name).classList.add('active');
+    $('tab-' + name).classList.add('active');
+}
+
+/* Validation */
+function requireFields(pairs) {
+    for (var i = 0; i < pairs.length; i++) {
+        if (!val(pairs[i][0])) return pairs[i][1] + ' is required';
+    }
+    return null;
+}
+
+function showError(prefix, msg) {
+    var el = $(prefix + '-error');
+    if (msg) { el.textContent = msg; el.style.display = 'block'; }
+    else { el.style.display = 'none'; }
+}
+
+/* API call */
+async function apiPost(url, params) {
+    var body = new URLSearchParams(params);
+    var res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body.toString()
+    });
+    var text = await res.text();
+    var json = null;
+    try { json = JSON.parse(text); } catch (e) {}
+    return { status: res.status, json: json, text: text };
+}
+
+/* Display result */
+function showResult(panelId, url, params, status, responseText, json) {
+    var container = $(panelId + '-result');
+
+    /* Format request: one param per line */
+    var paramLines = Object.entries(params).map(function(p) {
+        return p[0] + '=' + (/secret/i.test(p[0]) ? '****' : p[1]);
+    }).join('\n');
+    var reqDisplay = 'POST ' + url + '\nContent-Type: application/x-www-form-urlencoded\n\n' + paramLines;
+
+    /* Format response */
+    var resBody = json ? JSON.stringify(json, null, 2) : responseText;
+    var statusClass = status < 400 ? 'status-ok' : 'status-err';
+
+    var html = '<div class="result-block">' +
+        '<div class="result-label">Request</div>' +
+        '<pre>' + esc(reqDisplay) + '</pre>' +
+        '</div>' +
+        '<div class="result-block">' +
+        '<div class="result-label">Response <span class="' + statusClass + '">' + status + '</span></div>' +
+        '<pre>' + esc(resBody) + '</pre>' +
+        '</div>';
+
+    /* Copy buttons for tokens */
+    var copies = [];
+    if (json) {
+        if (json.access_token) copies.push(['Copy Access Token', json.access_token]);
+        if (json.refresh_token) copies.push(['Copy Refresh Token', json.refresh_token]);
+    }
+    if (copies.length) {
+        html += '<div class="copy-section">';
+        for (var i = 0; i < copies.length; i++) {
+            var key = panelId + '-' + i;
+            copyStore[key] = copies[i][1];
+            html += '<button class="copy-btn" data-action="copy" data-key="' + key + '">' + copies[i][0] + '</button>';
+        }
+        html += '</div>';
+    }
+
+    container.innerHTML = html;
+    container.style.display = 'block';
+}
+
+/* Build params object, omitting empty optional values */
+function buildParams(required, optional) {
+    var params = {};
+    for (var k in required) params[k] = required[k];
+    for (var k in optional) {
+        if (optional[k]) params[k] = optional[k];
+    }
+    return params;
+}
+
+/* Strip whitespace from pasted tokens */
+function tokenVal(id) { return val(id).replace(/[\r\n\s]+/g, ''); }
+
+/* Panel handlers */
+async function runClientCredentials() {
+    var err = requireFields([['cc-client-id', 'Client ID'], ['cc-key-id', 'Client Key ID'], ['cc-secret', 'Client Secret']]);
+    showError('cc', err);
+    if (err) return;
+
+    var params = buildParams(
+        { grant_type: 'client_credentials', client_id: val('cc-client-id'), client_key_id: val('cc-key-id'), client_secret: val('cc-secret') },
+        { scope: val('cc-scope'), resource: val('cc-resource') }
+    );
+    var r = await apiPost('/token', params);
+    showResult('cc', '/token', params, r.status, r.text, r.json);
+}
+
+async function runIntrospect() {
+    var err = requireFields([['intro-token', 'Token'], ['intro-rs-id', 'Resource Server ID'], ['intro-rs-key-id', 'Resource Server Key ID'], ['intro-rs-secret', 'Resource Server Secret']]);
+    showError('intro', err);
+    if (err) return;
+
+    var params = buildParams(
+        { token: tokenVal('intro-token'), resource_server_id: val('intro-rs-id'), resource_server_key_id: val('intro-rs-key-id'), resource_server_secret: val('intro-rs-secret') },
+        {}
+    );
+    var r = await apiPost('/introspect', params);
+    showResult('intro', '/introspect', params, r.status, r.text, r.json);
+}
+
+async function runRefresh() {
+    var err = requireFields([['ref-client-id', 'Client ID'], ['ref-token', 'Refresh Token']]);
+    showError('ref', err);
+    if (err) return;
+
+    var oldToken = tokenVal('ref-token');
+    var params = buildParams(
+        { grant_type: 'refresh_token', refresh_token: oldToken, client_id: val('ref-client-id') },
+        { scope: val('ref-scope') }
+    );
+    var r = await apiPost('/token', params);
+    showResult('ref', '/token', params, r.status, r.text, r.json);
+
+    /* Chain: new token back into Refresh input, old token into Replay panel */
+    if (r.json && r.json.refresh_token) {
+        $('ref-token').value = r.json.refresh_token;
+        $('replay-token').value = oldToken;
+        $('replay-client-id').value = val('ref-client-id');
+    }
+}
+
+async function runReplay() {
+    var err = requireFields([['replay-client-id', 'Client ID'], ['replay-token', 'Refresh Token']]);
+    showError('replay', err);
+    if (err) return;
+
+    var params = { grant_type: 'refresh_token', refresh_token: tokenVal('replay-token'), client_id: val('replay-client-id') };
+    var r = await apiPost('/token', params);
+    showResult('replay', '/token', params, r.status, r.text, r.json);
+}
+
+async function runRevoke() {
+    var err = requireFields([['rev-token', 'Token'], ['rev-client-id', 'Client ID'], ['rev-key-id', 'Client Key ID'], ['rev-secret', 'Client Secret']]);
+    showError('rev', err);
+    if (err) return;
+
+    var params = buildParams(
+        { token: tokenVal('rev-token'), client_id: val('rev-client-id'), client_key_id: val('rev-key-id'), client_secret: val('rev-secret') },
+        {}
+    );
+    var r = await apiPost('/revoke', params);
+    showResult('rev', '/revoke', params, r.status, r.text, r.json);
+}
+
+/* Delegated click handler */
+document.addEventListener('click', function(e) {
+    var btn = e.target.closest('[data-action]');
+    if (!btn) return;
+    switch (btn.dataset.action) {
+        case 'switch-panel': switchPanel(btn.dataset.panel); break;
+        case 'run-cc': runClientCredentials(); break;
+        case 'run-introspect': runIntrospect(); break;
+        case 'run-refresh': runRefresh(); break;
+        case 'run-replay': runReplay(); break;
+        case 'run-revoke': runRevoke(); break;
+        case 'copy':
+            var value = copyStore[btn.dataset.key];
+            if (value) {
+                navigator.clipboard.writeText(value);
+                var orig = btn.textContent;
+                btn.textContent = 'Copied!';
+                setTimeout(function() { btn.textContent = orig; }, 1500);
+            }
+            break;
+    }
+});
+</script>
+</body>
+</html>

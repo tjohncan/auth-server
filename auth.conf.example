@@ -1,0 +1,78 @@
+# Auth Server Configuration
+
+# Logging
+# Valid levels: debug, info, warn, error
+# Default: info
+log_level = info
+# Optional: Specify custom environment variable name for log level override
+# log_level_env = MY_LOG_LEVEL
+
+server_host = localhost
+server_port = 8080
+server_workers = 0
+
+# Database — "sqlite" or "postgresql"
+db_type = sqlite
+
+# SQLite
+db_path = ./data/auth.db
+
+# PostgreSQL (used when db_type = postgresql)
+# db_host = localhost
+# db_port = 5432
+# db_name = auth
+# db_user = auth_service
+# db_password = CHANGE_ME
+# Schema owner role for SET ROLE during first-run initialization
+# If not set, falls back to db_user (SET ROLE becomes a no-op)
+# db_owner_role = auth_dbo
+
+schema_dir = ./sql
+
+# Enable history tables for auditing UPDATE/DELETE operations
+# History tables track changes to tables with 'pin' primary keys in lookup/security schemas
+enable_history_tables = true
+
+# Password hashing (argon2id or pbkdf2-sha256)
+secret_hashing_algorithm = argon2id
+secret_hash_min_iterations = 4
+secret_hash_max_iterations = 4
+
+# OAuth2 token limits
+# Maximum TTL for client access tokens (in seconds)
+# Must be >= access token rotation interval to prevent double-rotation invalidation
+# Default: 5184000 (60 days)
+max_access_token_ttl_seconds = 5184000
+
+# JWT clock skew tolerance (in seconds)
+# Allows tokens to be accepted if expired within this tolerance window
+# Default: 0 (strict validation, recommended for single-server deployments)
+# Increase for distributed systems with potential clock drift
+jwt_clock_skew_seconds = 0
+
+# Database Cleaner - Background thread for purging old data
+# Continuously purges expired sessions, tokens, usage logs, and history records
+# to prevent unbounded database growth
+cleaner_enabled = true
+cleaner_interval_seconds = 10
+cleaner_batch_size = 1000
+
+# SQLite only: pages freed per vacuum iteration
+cleaner_sqlite_vacuum_pages = 100
+
+# PostgreSQL only: run VACUUM after deletes (true/false)
+# If false, rely entirely on PostgreSQL's autovacuum
+cleaner_postgres_vacuum_enabled = true
+
+# Retention periods (days)
+retention_usage_logs_days = 60
+retention_history_days = 90
+retention_sessions_grace_days = 8
+retention_tokens_grace_days = 8
+
+# Encryption
+# Passphrase used to derive keys for encrypting sensitive data at rest
+# Protects usernames, emails, MFA secrets, and other PII against database compromise
+# IMPORTANT: Customize this in production! Use encryption_key_env to load from environment
+encryption_key = customize_me
+# encryption_key_env = MY_ENCRYPTION_KEY

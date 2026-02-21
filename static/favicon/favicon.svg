@@ -1,0 +1,103 @@
+<svg
+  width="512"
+  height="512"
+  viewBox="0 0 512 512"
+  xmlns="http://www.w3.org/2000/svg">
+  
+<!-- 
+
+
+commands for generating .png and .ico assets:
+
+# first, install popular image tools ... for example, by:
+# sudo apt-get install librsvg2-bin optipng icoutils
+
+# then:
+
+
+cd favicon
+
+rsvg-convert -w 16 -h 16 favicon.svg -o favicon-16x16.png
+rsvg-convert -w 32 -h 32 favicon.svg -o favicon-32x32.png
+rsvg-convert -w 48 -h 48 favicon.svg -o favicon-48x48.png
+rsvg-convert -w 64 -h 64 favicon.svg -o favicon-64x64.png
+rsvg-convert -w 180 -h 180 favicon.svg -o apple-touch-icon.png
+rsvg-convert -w 192 -h 192 favicon.svg -o icon-192x192.png
+rsvg-convert -w 512 -h 512 favicon.svg -o icon-512x512.png
+
+optipng -o7 *.png
+
+
+cd ..
+
+icotool -c -o favicon.ico favicon/favicon-16x16.png favicon/favicon-32x32.png favicon/favicon-48x48.png
+
+
+-->
+
+  <defs>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ffd700"/>
+      <stop offset="100%" stop-color="#b8860b"/>
+    </linearGradient>
+    <linearGradient id="silver" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#c0c0c0"/>
+      <stop offset="100%" stop-color="#1a1a1a"/>
+    </linearGradient>
+    <linearGradient id="bronze" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#cd7f32"/>
+      <stop offset="100%" stop-color="#3d1f0f"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect x="0" y="0" width="100%" height="100%" fill="#000000" />
+
+  <!-- Shackle -->
+  <path
+    d="
+      M 128 192
+      A 128 128 0 0 1 384 192
+    "
+    fill="url(#bronze)"
+    stroke="url(#gold)"
+    stroke-width="10"
+  />
+
+  <!-- Hole -->
+  <path
+    d="
+      M 176 192
+      A 80 80 0 0 1 336 192
+    "
+    fill="#000000"
+    stroke="url(#gold)"
+    stroke-width="10"
+  />
+
+  <!-- Body -->
+  <rect
+    x="104"
+    y="192"
+    width="304"
+    height="256"
+    fill="url(#silver)"
+    stroke="url(#gold)"
+    stroke-width="10"
+  />
+
+  <!-- Cutout -->
+  <ellipse 
+    cx="256"
+    cy="320"
+    rx="80"
+    ry="72"
+    fill="#000000"
+    stroke="url(#gold)"
+    stroke-width="10"
+  />
+
+  <!-- Wash -->
+  <rect x="0" y="0" width="100%" height="100%" fill="#777777" opacity="0.24" />
+
+</svg>

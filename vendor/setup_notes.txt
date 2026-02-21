@@ -1,0 +1,11 @@
+# SQLite Amalgamation
+#
+# Required for the SQLite backend. Not needed for PostgreSQL-only builds.
+# Run from the repository root:
+
+mkdir -p vendor/sqlite
+curl -o sqlite3.zip https://www.sqlite.org/2026/sqlite-amalgamation-3510200.zip
+unzip -jo sqlite3.zip "*/sqlite3.c" "*/sqlite3.h" -d vendor/sqlite
+rm sqlite3.zip
+
+# Source: https://www.sqlite.org/download.html

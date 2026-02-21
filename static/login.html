@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self'; font-src 'self'; connect-src 'self'; form-action 'self'; manifest-src 'self'; base-uri 'self';">
+    <title>Log In</title>
+    <link rel="stylesheet" href="/css/base.css">
+    <link rel="icon" type="image/svg+xml" href="/favicon/favicon.svg">
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon/favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon/favicon-16x16.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="/favicon/apple-touch-icon.png">
+    <link rel="manifest" href="/favicon/site.webmanifest">
+    <style>
+        .login-container {
+            width: 100%;
+            max-width: 400px;
+            margin-top: 40px;
+        }
+        h1 {
+            margin-bottom: 32px;
+            font-size: 28px;
+        }
+        .form-field {
+            margin-bottom: 24px;
+        }
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-size: 14px;
+            font-weight: 500;
+        }
+        input[type="text"],
+        input[type="password"],
+        select {
+            width: 100%;
+            padding: 12px 16px;
+            font-size: 16px;
+            border: 1px solid #444;
+            border-radius: 4px;
+            background: #1a1a1a;
+            color: #fff;
+            box-sizing: border-box;
+        }
+        input:focus,
+        select:focus {
+            outline: none;
+            border-color: #87ceeb;
+        }
+        button[type="submit"] {
+            width: 100%;
+            padding: 14px;
+            font-size: 16px;
+            font-weight: 600;
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-top: 8px;
+        }
+        button[type="submit"]:hover {
+            background: #0056b3;
+        }
+        button[type="submit"]:disabled {
+            background: #555;
+            cursor: not-allowed;
+        }
+        #message {
+            margin-top: 20px;
+            padding: 12px;
+            border-radius: 4px;
+            text-align: center;
+            font-size: 14px;
+        }
+        #message:not(:empty) {
+            background: #3a1a1a;
+            border: 1px solid #c33;
+            color: #ff6b6b;
+        }
+        .help-text {
+            margin-top: 16px;
+            font-size: 14px;
+            text-align: center;
+        }
+        .totp-container {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            margin-bottom: 8px;
+        }
+        .totp-digit {
+            width: 50px;
+            height: 60px;
+            font-size: 24px;
+            text-align: center;
+            padding: 0;
+            font-weight: 600;
+            caret-color: transparent;
+        }
+        .totp-digit::selection {
+            background: transparent;
+        }
+        .totp-digit:focus {
+            box-shadow: 0 0 0 3px rgba(135, 206, 235, 0.4);
+        }
+    </style>
+</head>
+<body>
+    <div class="login-container">
+        <h1>Log In</h1>
+
+        <form id="loginForm">
+            <div class="form-field">
+                <label for="id">ID</label>
+                <input type="text" id="id" name="id" placeholder="Email or Username" required> <!-- TODO: Email support to be completed later -->
+            </div>
+
+            <div class="form-field">
+                <label for="password">Password</label>
+                <input type="password" id="password" name="password" placeholder="Secret" required>
+            </div>
+
+            <button type="submit">Log In</button>
+        </form>
+
+        <div id="message"></div>
+
+        <p style="margin-top: 40px;"><a href="/">← Home</a></p>
+    </div>
+
+    <script>
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.appendChild(document.createTextNode(str));
+            return div.innerHTML;
+        }
+
+        // Parse ?return= parameter from URL (validated to prevent open redirect)
+        function getReturnUrl() {
+            const params = new URLSearchParams(window.location.search);
+            const url = params.get('return') || '/admin';
+            // Only allow relative paths — block protocol-relative and backslash-relative URLs
+            if (url.startsWith('/') && !url.startsWith('//') && !url.startsWith('/\\')) return url;
+            return '/admin';
+        }
+
+        /* Check if redirected here for MFA challenge (mfa_step=1) */
+        (async function checkMfaStep() {
+            const params = new URLSearchParams(window.location.search);
+            if (params.get('mfa_step') !== '1') return;
+
+            try {
+                const res = await fetch('/api/user/mfa/methods');
+                if (!res.ok) return; /* No valid session - show normal login */
+
+                const data = await res.json();
+                const confirmed = (data.methods || []).filter(m => m.is_confirmed);
+                if (confirmed.length === 0) return; /* No confirmed methods - show normal login */
+
+                /* Remap fields to match what showMfaStep expects (type, not mfa_method) */
+                const methods = confirmed.map(m => ({
+                    id: m.id,
+                    type: m.type,
+                    display_name: m.display_name
+                }));
+
+                showMfaStep(methods);
+            } catch (e) {
+                /* Fetch failed - fall through to normal login */
+            }
+        })();
+
+        document.getElementById('loginForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            const username = document.getElementById('id').value;
+            const password = document.getElementById('password').value;
+            const messageEl = document.getElementById('message');
+            const submitBtn = e.target.querySelector('button[type="submit"]');
+
+            submitBtn.disabled = true;
+
+            try {
+                const response = await fetch('/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password })
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    if (data.mfa_required && data.mfa_methods && data.mfa_methods.length > 0) {
+                        showMfaStep(data.mfa_methods);
+                    } else {
+                        window.location.href = getReturnUrl();
+                    }
+                } else {
+                    submitBtn.disabled = false;
+                    messageEl.textContent = 'Error: ' + (data.error || 'Login failed');
+                }
+            } catch (err) {
+                submitBtn.disabled = false;
+                messageEl.textContent = 'Error: ' + err.message;
+            }
+        });
+
+        function showMfaStep(methods) {
+            const form = document.getElementById('loginForm');
+            const messageEl = document.getElementById('message');
+            messageEl.textContent = '';
+
+            let useRecoveryCode = false;
+
+            function renderMfaForm() {
+                /* Build method options (auto-select if only one) */
+                let methodSelect = '';
+                if (!useRecoveryCode && methods.length > 1) {
+                    methodSelect = '<div class="form-field"><label for="mfaMethod">Method</label>'
+                        + '<select id="mfaMethod">';
+                    for (const m of methods) {
+                        methodSelect += `<option value="${escapeHtml(m.id)}">${escapeHtml(m.display_name)} (${escapeHtml(m.type)})</option>`;
+                    }
+                    methodSelect += '</select></div>';
+                }
+
+                const toggleText = useRecoveryCode ? 'Use authenticator code instead' : 'Use recovery code instead';
+
+                let codeInput;
+                if (useRecoveryCode) {
+                    /* Recovery code: masked input showing last 4 chars when length > 16 */
+                    codeInput = `
+                        <div class="form-field">
+                            <label for="recoveryCode">Recovery Code</label>
+                            <input type="text" id="recoveryCode" name="recoveryCode" placeholder="20-character recovery code"
+                                   maxlength="20" inputmode="text" autocomplete="off"
+                                   style="font-family: monospace; letter-spacing: 2px;" required>
+                        </div>
+                    `;
+                } else {
+                    /* TOTP: 6 digit boxes */
+                    codeInput = `
+                        <div class="form-field">
+                            <label style="text-align: center;">Authenticator Code</label>
+                            <div class="totp-container">
+                                <input type="text" class="totp-digit" maxlength="1" inputmode="numeric" data-index="0" required>
+                                <input type="text" class="totp-digit" maxlength="1" inputmode="numeric" data-index="1" required>
+                                <input type="text" class="totp-digit" maxlength="1" inputmode="numeric" data-index="2" required>
+                                <input type="text" class="totp-digit" maxlength="1" inputmode="numeric" data-index="3" required>
+                                <input type="text" class="totp-digit" maxlength="1" inputmode="numeric" data-index="4" required>
+                                <input type="text" class="totp-digit" maxlength="1" inputmode="numeric" data-index="5" required>
+                            </div>
+                        </div>
+                    `;
+                }
+
+                form.innerHTML = `
+                    <p style="margin-bottom: 24px; text-align: center;">Enter your ${useRecoveryCode ? 'recovery code' : 'authenticator code'} to continue.</p>
+                    ${methodSelect}
+                    ${codeInput}
+                    <button type="submit">Verify</button>
+                    <div class="help-text">
+                        <a href="#" id="toggleMfaMode" style="color: #87ceeb;">${toggleText}</a>
+                    </div>
+                `;
+
+                document.getElementById('toggleMfaMode').addEventListener('click', (e) => {
+                    e.preventDefault();
+                    useRecoveryCode = !useRecoveryCode;
+                    messageEl.textContent = '';
+                    renderMfaForm();
+                });
+
+                /* Setup TOTP digit input handlers if not using recovery code */
+                if (!useRecoveryCode) {
+                    const digitInputs = document.querySelectorAll('.totp-digit');
+
+                    /* Helper: distribute digits starting from index */
+                    const distributeDigits = (digits, startIndex) => {
+                        let currentIndex = startIndex;
+                        for (let i = 0; i < digits.length && currentIndex < 6; i++, currentIndex++) {
+                            digitInputs[currentIndex].value = digits[i];
+                        }
+                        /* Focus next empty box or last box */
+                        const nextIndex = Math.min(currentIndex, 5);
+                        digitInputs[nextIndex].focus();
+                    };
+
+                    digitInputs.forEach((input, index) => {
+                        /* Handle all input via beforeinput for clean control */
+                        input.addEventListener('beforeinput', (e) => {
+                            const inputType = e.inputType;
+
+                            if (inputType === 'insertText') {
+                                e.preventDefault();
+                                const char = e.data;
+                                if (/^\d$/.test(char)) {
+                                    /* Single digit typed - replace current and advance */
+                                    input.value = char;
+                                    if (index < 5) digitInputs[index + 1].focus();
+                                }
+                            } else if (inputType === 'insertFromPaste') {
+                                e.preventDefault();
+                                const pastedText = e.dataTransfer.getData('text');
+                                const digits = pastedText.replace(/\D/g, '');
+                                distributeDigits(digits, index);
+                            } else if (inputType === 'deleteContentBackward') {
+                                if (input.value === '' && index > 0) {
+                                    /* Empty box - move to previous and clear */
+                                    e.preventDefault();
+                                    digitInputs[index - 1].focus();
+                                    digitInputs[index - 1].value = '';
+                                }
+                                /* If has value, allow default deletion */
+                            }
+                        });
+
+                        /* Keyboard navigation and shortcuts */
+                        input.addEventListener('keydown', (e) => {
+                            if (e.key === 'ArrowLeft' && index > 0) {
+                                e.preventDefault();
+                                digitInputs[index - 1].focus();
+                            } else if (e.key === 'ArrowRight' && index < 5) {
+                                e.preventDefault();
+                                digitInputs[index + 1].focus();
+                            } else if (e.key === 'a' && (e.ctrlKey || e.metaKey)) {
+                                /* Ctrl+A or Cmd+A - jump to first box */
+                                e.preventDefault();
+                                digitInputs[0].focus();
+                            }
+                        });
+
+                        /* Auto-select on focus for easy replacement */
+                        input.addEventListener('focus', () => {
+                            input.select();
+                        });
+                    });
+
+                    /* Focus first box */
+                    digitInputs[0].focus();
+                } else {
+                    /* Setup recovery code input with custom masking */
+                    const recoveryInput = document.getElementById('recoveryCode');
+                    let realValue = '';
+
+                    const updateDisplay = (cursorPos) => {
+                        let maskedDisplay;
+                        if (realValue.length <= 16) {
+                            maskedDisplay = '•'.repeat(realValue.length);
+                        } else {
+                            maskedDisplay = '•'.repeat(16) + realValue.slice(16);
+                        }
+                        recoveryInput.value = maskedDisplay;
+                        recoveryInput.setSelectionRange(cursorPos, cursorPos);
+                    };
+
+                    recoveryInput.addEventListener('beforeinput', (e) => {
+                        e.preventDefault();
+                        const start = e.target.selectionStart;
+                        const end = e.target.selectionEnd;
+
+                        if (e.inputType === 'insertText' || e.inputType === 'insertFromPaste') {
+                            /* Insert text (e.data for typing, e.dataTransfer for paste) */
+                            const text = e.data || (e.dataTransfer && e.dataTransfer.getData('text/plain')) || '';
+                            if (realValue.length + text.length - (end - start) <= 20) {
+                                realValue = realValue.slice(0, start) + text + realValue.slice(end);
+                                updateDisplay(start + text.length);
+                            }
+                        } else if (e.inputType === 'deleteContentBackward') {
+                            /* Backspace */
+                            if (start === end && start > 0) {
+                                realValue = realValue.slice(0, start - 1) + realValue.slice(start);
+                                updateDisplay(start - 1);
+                            } else if (start !== end) {
+                                realValue = realValue.slice(0, start) + realValue.slice(end);
+                                updateDisplay(start);
+                            }
+                        } else if (e.inputType === 'deleteContentForward') {
+                            /* Delete */
+                            if (start === end && start < realValue.length) {
+                                realValue = realValue.slice(0, start) + realValue.slice(start + 1);
+                                updateDisplay(start);
+                            } else if (start !== end) {
+                                realValue = realValue.slice(0, start) + realValue.slice(end);
+                                updateDisplay(start);
+                            }
+                        }
+                    });
+
+                    /* Store real value accessor for form submission */
+                    recoveryInput.getRealValue = () => realValue;
+
+                    recoveryInput.focus();
+                }
+            }
+
+            renderMfaForm();
+
+            const defaultMethodId = methods[0].id;
+
+            form.addEventListener('submit', async (e) => {
+                e.preventDefault();
+
+                /* Collect code from inputs */
+                let code;
+                if (useRecoveryCode) {
+                    const recoveryInput = document.getElementById('recoveryCode');
+                    code = recoveryInput.getRealValue ? recoveryInput.getRealValue() : recoveryInput.value.trim();
+                } else {
+                    /* Collect from 6 digit boxes */
+                    const digitInputs = document.querySelectorAll('.totp-digit');
+                    code = Array.from(digitInputs).map(input => input.value).join('');
+                }
+
+                /* Validate code length */
+                if (useRecoveryCode && code.length !== 20) {
+                    messageEl.textContent = 'Recovery code must be 20 characters.';
+                    return;
+                }
+                if (!useRecoveryCode && code.length !== 6) {
+                    messageEl.textContent = 'Please enter all 6 digits.';
+                    return;
+                }
+
+                const submitBtn = e.target.querySelector('button[type="submit"]');
+                submitBtn.disabled = true;
+
+                try {
+                    let res, data;
+                    if (useRecoveryCode) {
+                        /* Use recovery code endpoint */
+                        res = await fetch('/api/user/mfa/recover', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ recovery_code: code })
+                        });
+                        data = await res.json();
+                    } else {
+                        /* Use TOTP verification endpoint */
+                        const methodId = methods.length > 1
+                            ? document.getElementById('mfaMethod').value
+                            : defaultMethodId;
+                        res = await fetch('/api/user/mfa/verify', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ method_id: methodId, code })
+                        });
+                        data = await res.json();
+                    }
+
+                    if (res.ok && data.valid) {
+                        window.location.href = getReturnUrl();
+                    } else {
+                        submitBtn.disabled = false;
+                        messageEl.textContent = 'Invalid code, please try again.';
+                    }
+                } catch (err) {
+                    submitBtn.disabled = false;
+                    messageEl.textContent = 'Error: ' + err.message;
+                }
+            });
+        }
+    </script>
+</body>
+</html>

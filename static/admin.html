@@ -1,0 +1,2630 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self'; font-src 'self'; connect-src 'self'; form-action 'self'; manifest-src 'self'; base-uri 'self';">
+    <title>Management Console</title>
+    <link rel="stylesheet" href="/css/base.css">
+    <script src="/js/oauth-client.js"></script>
+    <link rel="icon" type="image/svg+xml" href="/favicon/favicon.svg">
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon/favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon/favicon-16x16.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="/favicon/apple-touch-icon.png">
+    <link rel="manifest" href="/favicon/site.webmanifest">
+    <style>
+        .digit-input-container {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            margin: 20px 0;
+        }
+        .digit-input-box {
+            width: 50px;
+            height: 60px;
+            font-size: 24px;
+            text-align: center;
+            padding: 0;
+            font-weight: 600;
+            caret-color: transparent;
+            background: #1a1a1a;
+            color: #fff;
+            border: 1px solid #666;
+            border-radius: 4px;
+        }
+        .digit-input-box::selection {
+            background: transparent;
+        }
+        .digit-input-box:focus {
+            outline: none;
+            box-shadow: 0 0 0 3px rgba(135, 206, 235, 0.4);
+        }
+        .duration-custom::-webkit-inner-spin-button,
+        .duration-custom::-webkit-outer-spin-button {
+            -webkit-appearance: none;
+            margin: 0;
+        }
+        .duration-custom {
+            -moz-appearance: textfield;
+        }
+    </style>
+</head>
+<body style="background: black;">
+    <!-- Client Picker Overlay (shown on first visit) -->
+    <div id="pickerOverlay" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; pointer-events: none;">
+        <div style="background: #1a1a1a; margin: 100px auto; padding: 40px; max-width: 600px; border-radius: 8px; border: 1px solid #666; pointer-events: auto;">
+            <div id="pickerContent">
+                <p>Loading...</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main Dashboard -->
+    <div id="dashboard" style="display: none; max-width: 960px;">
+        <!-- Subtle header -->
+        <div style="padding: 10px; background: #1a1a1a; font-size: 12px; color: silver; border: 1px solid #666; display: flex; justify-content: space-between; align-items: center;">
+            <div>
+                <div>User ID: <span id="userInfo">...</span></div>
+                <div>Connected via Client ID: <span id="clientInfo">...</span></div>
+            </div>
+            <button data-action="logout" style="background: #dc3545; color: white; border: none; padding: 5px 15px; border-radius: 4px; cursor: pointer;">Log Out</button>
+        </div>
+
+        <h1>Management Console</h1>
+
+        <!-- Tab bar (hidden for non-admin users) -->
+        <div id="tabBar" style="display: none; margin-bottom: 20px; border-bottom: 1px solid #666;">
+            <button data-action="switch-tab" data-tab="profile"
+                    id="tabProfile" style="padding: 10px 20px; background: none; color: white; border: none; border-bottom: 2px solid #007bff; cursor: pointer; font-size: 14px;">
+                Your Profile
+            </button>
+            <button data-action="switch-tab" data-tab="admin"
+                    id="tabAdmin" style="padding: 10px 20px; background: none; color: #999; border: none; border-bottom: 2px solid transparent; cursor: pointer; font-size: 14px;">
+                Organization Management
+            </button>
+        </div>
+
+        <!-- Profile Section -->
+        <div id="profileSection">
+            <h2 id="profileHeading">Your Profile</h2>
+            <div id="profileContent">
+                <p>Loading your profile...</p>
+            </div>
+
+            <h3>Email Addresses</h3>
+            <div id="emailsContent">
+                <p>Loading emails...</p>
+            </div>
+
+            <h3>Security</h3>
+            <div id="securityContent">
+                <button data-action="show-change-password">Change Password</button>
+                <button data-action="show-mfa-setup">Configure MFA</button>
+            </div>
+
+            <h3>OpenID Connect</h3>
+            <div>
+                <button data-action="fetch-userinfo">Get UserInfo</button>
+                <div id="userinfoResult" style="display: none; margin-top: 10px;"></div>
+            </div>
+        </div>
+
+        <!-- Admin Section (shown only if org_admin) -->
+        <div id="adminSection" style="display: none;">
+            <h2 id="adminHeading">Organization Management</h2>
+            <p>Organizations where you are an administrator:</p>
+            <div id="orgsContent">
+                <p>Loading organizations...</p>
+            </div>
+        </div>
+
+        <p style="margin-top: 40px;"><a href="/">← Home</a></p>
+    </div>
+
+    <script>
+        const HOST = window.location.origin;
+        const CALLBACK_URL = `${HOST}/callback`;
+        const API_URL = `${HOST}/api`;
+
+        /* Track current MFA setup modal */
+        let currentMFASetupClose = null;
+
+        /* OAuthClient instance (set during init) */
+        let oauthClient = null;
+
+        // ===== Utility Functions =====
+
+        function getClientId() {
+            const params = new URLSearchParams(window.location.search);
+            return params.get('client_id');
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function createOAuthClient(clientId) {
+            return new OAuthClient({
+                authUrl: HOST,
+                clientId: clientId,
+                redirectUri: CALLBACK_URL,
+                scope: 'openid'
+            });
+        }
+
+        /* Normalize UUID by stripping hyphens and validating */
+        function normalizeUUID(uuid) {
+            if (!uuid) return null;
+            /* Strip all hyphens */
+            const stripped = uuid.replace(/-/g, '');
+            /* Validate it's exactly 32 hex characters */
+            if (!/^[0-9a-fA-F]{32}$/.test(stripped)) {
+                return null;
+            }
+            return stripped.toLowerCase();
+        }
+
+        /* Format UUID with hyphens (8-4-4-4-12) */
+        function formatUUID(hex) {
+            if (!hex || hex.length !== 32) return hex;
+            return hex.slice(0,8) + '-' + hex.slice(8,12) + '-' +
+                   hex.slice(12,16) + '-' + hex.slice(16,20) + '-' + hex.slice(20);
+        }
+
+        /* Attach MFA TOTP confirmation handler to a form */
+        function attachMFAConfirmHandler(formId, methodId, closeModal) {
+            document.getElementById(formId).addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const submitBtn = e.target.querySelector('button[type="submit"]');
+                submitBtn.disabled = true;
+
+                /* Collect code from digit boxes */
+                const digitInputs = e.target.querySelectorAll('.digit-input-box');
+                const code = Array.from(digitInputs).map(input => input.value).join('');
+
+                /* Validate code length */
+                if (code.length !== 6) {
+                    submitBtn.disabled = false;
+                    showAlert('Please enter all 6 digits.');
+                    return;
+                }
+
+                try {
+                    const data = await apiPost('/user/mfa/totp/confirm', { method_id: methodId, code });
+                    closeModal();
+                    if (data.recovery_codes) {
+                        showMFARecoveryCodes(data.recovery_codes, 'MFA Enabled — Save Your Recovery Codes');
+                    } else {
+                        /* Reload profile and update UI */
+                        const profile = await loadProfile();
+                        if (profile) renderSecuritySection(profile);
+                    }
+                } catch (error) {
+                    submitBtn.disabled = false;
+                    showAlert('Failed to confirm MFA: ' + error.message);
+                }
+            });
+        }
+
+        /* Create a copy button with feedback animation */
+        function createCopyButton(textToCopy) {
+            const btn = document.createElement('button');
+            btn.textContent = 'copy';
+            btn.style.cssText = 'font-size: 11px; color: #87ceeb; background: transparent; border: 1px solid #444; padding: 2px 6px; border-radius: 3px; cursor: pointer; margin-left: 6px; user-select: none; transition: all 0.2s;';
+
+            /* Hover effect */
+            btn.onmouseenter = function() {
+                if (btn.textContent === 'copy') {
+                    btn.style.background = '#2a2a2a';
+                    btn.style.borderColor = '#87ceeb';
+                }
+            };
+            btn.onmouseleave = function() {
+                if (btn.textContent === 'copy') {
+                    btn.style.background = 'transparent';
+                    btn.style.borderColor = '#444';
+                }
+            };
+
+            /* Click handler */
+            btn.onclick = function() {
+                if (btn.disabled) return;
+
+                /* Copy to clipboard */
+                navigator.clipboard.writeText(textToCopy).then(() => {
+                    /* Feedback: change to "✓ copied!" */
+                    btn.textContent = '✓ copied!';
+                    btn.style.color = '#7fffd4';
+                    btn.style.borderColor = '#7fffd4';
+                    btn.disabled = true;
+                    btn.style.cursor = 'default';
+
+                    /* Revert after 3 seconds */
+                    setTimeout(() => {
+                        btn.textContent = 'copy';
+                        btn.style.color = '#87ceeb';
+                        btn.style.borderColor = '#444';
+                        btn.style.background = 'transparent';
+                        btn.disabled = false;
+                        btn.style.cursor = 'pointer';
+                    }, 3000);
+                }).catch(err => {
+                    console.error('Copy failed:', err);
+                    showAlert('Failed to copy to clipboard');
+                });
+            };
+
+            return btn;
+        }
+
+        /* Lazy load QR code library only when needed for MFA enrollment */
+        function ensureQRCodeLoaded() {
+            return new Promise((resolve, reject) => {
+                /* Already loaded? */
+                if (window.QRCode) {
+                    resolve();
+                    return;
+                }
+
+                /* Dynamically inject script tag */
+                const script = document.createElement('script');
+                script.src = '/library/qrcode.js';
+                script.onload = () => resolve();
+                script.onerror = () => reject(new Error('Failed to load QR code library'));
+                document.head.appendChild(script);
+            });
+        }
+
+        // ===== Event Delegation =====
+
+        document.addEventListener('click', function(e) {
+            const target = e.target.closest('[data-action]');
+            if (!target) return;
+
+            const action = target.dataset.action;
+
+            if (target.tagName === 'A') e.preventDefault();
+
+            switch (action) {
+                case 'logout': logout(); break;
+                case 'switch-tab': switchTab(target.dataset.tab); break;
+                case 'show-change-username': showChangeUsername(); break;
+                case 'show-change-password': showChangePassword(); break;
+                case 'show-mfa-setup': showMFASetup(); break;
+                case 'mfa-add-device': showMFAAddDevice(); break;
+                case 'mfa-delete-method': mfaDeleteMethod(target.dataset.id); break;
+                case 'mfa-resume-confirm': showMFAResumeConfirm(target.dataset.id); break;
+                case 'mfa-regenerate-codes': mfaRegenerateCodes(); break;
+                case 'toggle-mfa-require': toggleMfaRequire(); break;
+                case 'add-email': addEmail(); break;
+                case 'select-setup': selectSetup(target.dataset.clientId); break;
+                case 'navigate-org-list': navigateToOrgList(); break;
+                case 'navigate-to-org': navigateToOrg(target.dataset.id); break;
+                case 'navigate-to-rs': navigateToResourceServer(target.dataset.id); break;
+                case 'navigate-to-client': navigateToClient(target.dataset.id); break;
+                case 'edit-organization': editOrganization(target.dataset.id); break;
+                case 'edit-resource-server': editResourceServer(target.dataset.id); break;
+                case 'edit-client': editClient(target.dataset.id); break;
+                case 'create-resource-server': createResourceServer(target.dataset.orgId); break;
+                case 'create-client': createClient(target.dataset.orgId); break;
+                case 'create-rs-key': createResourceServerKey(target.dataset.rsId); break;
+                case 'create-client-key': createClientKey(target.dataset.clientId); break;
+                case 'revoke-rs-key': revokeResourceServerKey(target.dataset.id); break;
+                case 'revoke-client-key': revokeClientKey(target.dataset.id); break;
+                case 'add-redirect-uri': addRedirectURI(target.dataset.clientId); break;
+                case 'delete-redirect-uri': deleteRedirectURI(target.dataset.clientId, target.dataset.uri); break;
+                case 'link-client-to-rs': linkClientToRS(target.dataset.clientId); break;
+                case 'link-rs-to-client': linkRSToClient(target.dataset.rsId); break;
+                case 'unlink-client-from-rs': unlinkClientFromRS(target.dataset.clientId, target.dataset.rsId); break;
+                case 'close-modal': { const m = target.closest('.modal'); if (m && m._close) m._close(); else if (m) m.remove(); break; }
+                case 'fetch-userinfo': fetchUserInfo(); break;
+            }
+        });
+
+        document.addEventListener('change', function(e) {
+            const target = e.target.closest('[data-action]');
+            if (!target) return;
+            switch (target.dataset.action) {
+                case 'set-org-filter':
+                    orgMgmt.filter = target.dataset.filter;
+                    renderOrgManagement('adminSection');
+                    break;
+                case 'set-rs-filter':
+                    orgMgmt.rsFilter = target.dataset.filter;
+                    renderOrgManagement('adminSection');
+                    break;
+                case 'set-client-filter':
+                    orgMgmt.clientFilter = target.dataset.filter;
+                    renderOrgManagement('adminSection');
+                    break;
+            }
+        });
+
+        // ===== Picker =====
+
+        async function showPicker() {
+            const pickerContent = document.getElementById('pickerContent');
+            pickerContent.innerHTML = '<p>Loading...</p>';
+
+            try {
+                const response = await fetch(
+                    `/api/user/management-setups?callback_url=${encodeURIComponent(CALLBACK_URL)}&api_url=${encodeURIComponent(API_URL)}`,
+                    { credentials: 'include' }
+                );
+
+                if (response.status === 401) {
+                    // Not logged in - redirect to login page
+                    window.location.href = '/login?return=' + encodeURIComponent('/admin');
+                    return;
+                }
+
+                if (!response.ok) {
+                    document.getElementById('pickerOverlay').style.display = 'block';
+                    pickerContent.innerHTML = `<p>Error: HTTP ${response.status}</p>`;
+                    return;
+                }
+
+                const data = await response.json();
+
+                if (!data.setups || data.setups.length === 0) {
+                    document.getElementById('pickerOverlay').style.display = 'block';
+                    pickerContent.innerHTML = '<p>No management setups found. Contact your administrator.</p>';
+                    return;
+                }
+
+                /* Auto-select if only one client (no UI flash) */
+                if (data.setups.length === 1) {
+                    selectSetup(data.setups[0].client_id);
+                    return;
+                }
+
+                /* Multiple setups — now show the picker */
+                document.getElementById('pickerOverlay').style.display = 'block';
+                document.getElementById('dashboard').style.display = 'none';
+                let html = '<h2>Select Management Client</h2>';
+                html += '<p>Choose which management UI client to use for API access:</p>';
+                html += '<ul style="list-style: none; padding: 0;">';
+
+                data.setups.forEach(setup => {
+                    html += `
+                        <li style="padding: 15px; margin: 10px 0; border: 1px solid #ddd; border-radius: 4px;">
+                            <strong>${escapeHtml(setup.org_display_name)}</strong> <small>(${escapeHtml(setup.org_code_name)})</small><br>
+                            <small>Client: ${escapeHtml(setup.client_display_name)}</small><br>
+                            <button data-action="select-setup" data-client-id="${escapeHtml(setup.client_id)}" style="margin-top: 10px;">Connect</button>
+                        </li>
+                    `;
+                });
+
+                html += '</ul>';
+                html += '<p style="margin-top: 30px; text-align: center;"><a href="/">← Home</a></p>';
+                pickerContent.innerHTML = html;
+
+            } catch (err) {
+                pickerContent.innerHTML = '<p>Error: ' + escapeHtml(err.message) + '</p>';
+            }
+        }
+
+        window.selectSetup = function(clientId) {
+            window.location.href = `/admin?client_id=${clientId}`;
+        };
+
+        // ===== Dashboard Content =====
+
+        async function loadProfile() {
+            try {
+                const response = await fetch(`${API_URL}/user/profile`, {
+                    credentials: 'include'  // Include session cookie
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+
+                const profile = await response.json();
+
+                // Display profile (username may be empty for email-only accounts)
+                const username = profile.username || '(not set)';
+                const formattedUserId = formatUUID(profile.user_id);
+
+                const profileContent = document.getElementById('profileContent');
+                profileContent.innerHTML = `
+                    <p style="display: flex; align-items: center; justify-content: space-between;">
+                        <span><strong>Username:</strong> ${escapeHtml(username)}</span>
+                        <button data-action="show-change-username" style="color: #aaa; background: transparent; border: 1px solid #555; font-size: 12px; padding: 3px 12px; border-radius: 4px; cursor: pointer; transition: background 0.2s, color 0.2s;" onmouseover="this.style.background='#333';this.style.color='#fff'" onmouseout="this.style.background='transparent';this.style.color='#aaa'">Change Username</button>
+                    </p>
+                    <p style="display: flex; align-items: center;">
+                        <span><strong>User ID:</strong></span>
+                        <code style="margin-left: 8px; font-size: 12px;">${escapeHtml(formattedUserId)}</code>
+                        <span id="userIdCopyBtn"></span>
+                    </p>
+                `;
+
+                /* Add copy button */
+                document.getElementById('userIdCopyBtn').appendChild(createCopyButton(formattedUserId));
+
+                // Render security section with MFA status
+                renderSecuritySection(profile);
+
+                return profile;  // Return profile for use in header
+            } catch (error) {
+                console.error('Failed to load profile:', error);
+                document.getElementById('profileContent').innerHTML = `
+                    <p style="color: red;">Error loading profile: ${escapeHtml(error.message)}</p>
+                `;
+                return null;
+            }
+        }
+
+        function renderSecuritySection(profile) {
+            const mfaStatus = profile.has_mfa ? 'Enrolled' : 'Not enrolled';
+            const mfaColor = profile.has_mfa ? '#28a745' : '#999';
+            const requireStatus = profile.require_mfa ? 'Required' : 'Not required';
+            const requireColor = profile.require_mfa ? '#ffc107' : '#999';
+
+            let toggleButton = '';
+            if (profile.has_mfa) {
+                const toggleText = profile.require_mfa ? 'Disable MFA Requirement' : 'Enable MFA Requirement';
+                const toggleColor = profile.require_mfa ? '#6c757d' : '#28a745';
+                toggleButton = `
+                    <button data-action="toggle-mfa-require" style="background: ${toggleColor}; color: white; border: none; padding: 8px 14px; border-radius: 4px; cursor: pointer; margin-top: 10px;">${toggleText}</button>
+                `;
+            }
+
+            document.getElementById('securityContent').innerHTML = `
+                <div style="margin-bottom: 15px; padding: 12px; background: #1a1a1a; border: 1px solid #444; border-radius: 4px;">
+                    <div style="margin-bottom: 6px;"><strong>Multi-Factor Authentication:</strong> <span style="color: ${mfaColor};">${mfaStatus}</span></div>
+                    <div><strong>Enforcement:</strong> <span style="color: ${requireColor};">${requireStatus}</span></div>
+                    ${toggleButton}
+                </div>
+                <button data-action="show-change-password">Change Password</button>
+                <button data-action="show-mfa-setup" style="margin-left: 10px;">Configure MFA</button>
+            `;
+        }
+
+        async function fetchUserInfo() {
+            const el = document.getElementById('userinfoResult');
+            if (!oauthClient) {
+                el.style.display = 'block';
+                el.innerHTML = '<p style="color: red;">OAuth client not initialized</p>';
+                return;
+            }
+            el.style.display = 'block';
+            el.innerHTML = '<p>Fetching...</p>';
+            try {
+                const response = await oauthClient.fetchWithToken(`${HOST}/userinfo`);
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                const info = await response.json();
+                const ts = info.server_time ? new Date(info.server_time * 1000).toISOString().replace('T', ' ').replace(/\.\d+Z$/, '') : 'N/A';
+                el.innerHTML = `
+                    <div style="padding: 12px; background: #1a1a1a; border: 1px solid #444; border-radius: 4px; font-size: 13px; line-height: 1.8;">
+                        <div><strong>sub:</strong> <code>${escapeHtml(formatUUID(info.sub || ''))}</code></div>
+                        ${info.preferred_username ? `<div><strong>preferred_username:</strong> ${escapeHtml(info.preferred_username)}</div>` : ''}
+                        ${info.email ? `<div><strong>email:</strong> ${escapeHtml(info.email)}</div>` : ''}
+                        ${info.email !== undefined ? `<div><strong>email_verified:</strong> ${info.email_verified}</div>` : ''}
+                        <div><strong>server_time:</strong> ${escapeHtml(ts)}</div>
+                    </div>
+                `;
+            } catch (error) {
+                el.innerHTML = `<p style="color: red;">Error: ${escapeHtml(error.message)}</p>`;
+            }
+        }
+
+        async function loadEmails() {
+            try {
+                const response = await fetch(`${API_URL}/user/emails`, {
+                    credentials: 'include'  // Include session cookie
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+
+                const data = await response.json();
+
+                if (data.emails.length === 0) {
+                    document.getElementById('emailsContent').innerHTML = `
+                        <p>No email addresses configured.</p>
+                        <button data-action="add-email">Add Email Address</button>
+                    `;
+                } else {
+                    let html = '<ul>';
+                    data.emails.forEach(email => {
+                        const primary = email.is_primary ? ' <strong>(Primary)</strong>' : '';
+                        const verified = email.is_verified ? ' ✓ Verified' : ' <em>Unverified</em>';
+                        html += `<li>${escapeHtml(email.email_address)}${primary}${verified}</li>`;
+                    });
+                    html += '</ul>';
+                    html += '<button data-action="add-email">Add Email Address</button>';
+                    document.getElementById('emailsContent').innerHTML = html;
+                }
+            } catch (error) {
+                console.error('Failed to load emails:', error);
+                document.getElementById('emailsContent').innerHTML = `
+                    <p style="color: red;">Error loading emails: ${escapeHtml(error.message)}</p>
+                `;
+            }
+        }
+
+        function addEmail() {
+            showAlert('Email functionality is not yet implemented!');
+        }
+
+        // ===== Tab Management =====
+
+        let activeTab = 'profile';
+        let isOrgAdmin = false;
+
+        function switchTab(tab) {
+            activeTab = tab;
+            const profileSection = document.getElementById('profileSection');
+            const adminSection = document.getElementById('adminSection');
+            const profileHeading = document.getElementById('profileHeading');
+            const adminHeading = document.getElementById('adminHeading');
+            const tabProfile = document.getElementById('tabProfile');
+            const tabAdmin = document.getElementById('tabAdmin');
+
+            if (tab === 'profile') {
+                profileSection.style.display = 'block';
+                adminSection.style.display = 'none';
+                profileHeading.style.display = isOrgAdmin ? 'none' : 'block';
+                tabProfile.style.borderBottomColor = '#007bff';
+                tabProfile.style.color = 'white';
+                tabAdmin.style.borderBottomColor = 'transparent';
+                tabAdmin.style.color = '#999';
+            } else {
+                profileSection.style.display = 'none';
+                adminSection.style.display = 'block';
+                adminHeading.style.display = 'none';
+                tabProfile.style.borderBottomColor = 'transparent';
+                tabProfile.style.color = '#999';
+                tabAdmin.style.borderBottomColor = '#007bff';
+                tabAdmin.style.color = 'white';
+            }
+        }
+
+        // ===== Organization Management =====
+
+        // Navigation state
+        const orgMgmt = {
+            view: 'org-list',
+            orgId: null,
+            rsId: null,
+            clientId: null,
+            filter: 'active',       // org list: 'active', 'inactive', 'all'
+            rsFilter: 'active',     // resource server list
+            clientFilter: 'active', // client list
+        };
+
+        // API Helpers
+        async function apiGet(endpoint) {
+            const response = await fetch(`${API_URL}${endpoint}`, {
+                credentials: 'include'
+            });
+            if (!response.ok) {
+                const error = await response.json().catch(() => ({ error: 'Unknown error' }));
+                throw new Error(error.error || `HTTP ${response.status}`);
+            }
+            return response.json();
+        }
+
+        async function apiPost(endpoint, data) {
+            const response = await fetch(`${API_URL}${endpoint}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                body: JSON.stringify(data)
+            });
+            if (!response.ok) {
+                const error = await response.json().catch(() => ({ error: 'Unknown error' }));
+                throw new Error(error.error || `HTTP ${response.status}`);
+            }
+            return response.json();
+        }
+
+        async function apiPut(endpoint, data) {
+            const response = await fetch(`${API_URL}${endpoint}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                body: JSON.stringify(data)
+            });
+            if (!response.ok) {
+                const error = await response.json().catch(() => ({ error: 'Unknown error' }));
+                throw new Error(error.error || `HTTP ${response.status}`);
+            }
+            return response.json();
+        }
+
+        async function apiDelete(endpoint) {
+            const response = await fetch(`${API_URL}${endpoint}`, {
+                method: 'DELETE',
+                credentials: 'include'
+            });
+            if (!response.ok) {
+                const error = await response.json().catch(() => ({ error: 'Unknown error' }));
+                throw new Error(error.error || `HTTP ${response.status}`);
+            }
+            return response.json();
+        }
+
+        // Shared digit-input handler for 6-digit TOTP code entry
+        function setupDigitInputs(inputs) {
+            inputs.forEach((input, index) => {
+                input.addEventListener('paste', (e) => {
+                    e.preventDefault();
+                    const pastedText = e.clipboardData.getData('text');
+                    const digits = pastedText.replace(/\D/g, '').slice(0, 6);
+                    let currentIndex = index;
+                    for (let i = 0; i < digits.length && currentIndex < 6; i++, currentIndex++) {
+                        inputs[currentIndex].value = digits[i];
+                    }
+                    if (currentIndex < 6) inputs[currentIndex].focus();
+                    else inputs[5].focus();
+                });
+
+                input.addEventListener('beforeinput', (e) => {
+                    if (e.inputType === 'insertText') {
+                        e.preventDefault();
+                        const char = e.data;
+                        if (/^\d$/.test(char)) {
+                            input.value = char;
+                            if (index < 5) inputs[index + 1].focus();
+                        }
+                    } else if (e.inputType === 'insertFromPaste') {
+                        /* Handled by paste event above */
+                    } else if (e.inputType === 'deleteContentBackward') {
+                        if (input.value === '' && index > 0) {
+                            e.preventDefault();
+                            inputs[index - 1].focus();
+                            inputs[index - 1].value = '';
+                        }
+                    }
+                });
+
+                input.addEventListener('keydown', (e) => {
+                    if (e.key === 'ArrowLeft' && index > 0) {
+                        e.preventDefault();
+                        inputs[index - 1].focus();
+                    } else if (e.key === 'ArrowRight' && index < 5) {
+                        e.preventDefault();
+                        inputs[index + 1].focus();
+                    } else if (e.key === 'a' && (e.ctrlKey || e.metaKey)) {
+                        e.preventDefault();
+                        inputs[0].focus();
+                    }
+                });
+
+                input.addEventListener('focus', () => input.select());
+            });
+            inputs[0].focus();
+        }
+
+        // Modal helpers
+        function showModal(title, content) {
+            const modal = document.createElement('div');
+            modal.className = 'modal';
+            modal.style.cssText = 'position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; display: flex; align-items: center; justify-content: center;';
+
+            const box = document.createElement('div');
+            box.style.cssText = 'background: #1a1a1a; padding: 30px; max-width: 600px; width: 90%; border-radius: 8px; border: 1px solid #666; max-height: 80vh; overflow-y: auto;';
+
+            const titleHtml = title ? `<h3 style="margin-top: 0;">${escapeHtml(title)}</h3>` : '';
+            box.innerHTML = `${titleHtml}${content}`;
+
+            modal.appendChild(box);
+            document.body.appendChild(modal);
+
+            let closeCallback = null;
+
+            const close = () => {
+                if (modal.parentNode) {
+                    document.removeEventListener('keydown', onKeydown);
+                    modal.remove();
+                    if (closeCallback) closeCallback();
+                }
+            };
+
+            modal._close = close;
+
+            /* Escape closes the topmost modal */
+            const onKeydown = (e) => {
+                if (e.key === 'Escape') {
+                    const modals = document.querySelectorAll('.modal');
+                    if (modals.length && modals[modals.length - 1] === modal) {
+                        e.preventDefault();
+                        close();
+                    }
+                }
+            };
+            document.addEventListener('keydown', onKeydown);
+
+            /* Focus first focusable element, or the box itself as a trap */
+            requestAnimationFrame(() => {
+                const el = box.querySelector('input:not([type="hidden"]):not([readonly]), textarea, select, button');
+                if (el) el.focus();
+                else { box.tabIndex = -1; box.focus(); }
+            });
+
+            return {
+                modal,
+                close,
+                onClose: (cb) => { closeCallback = cb; }
+            };
+        }
+
+        function showAlert(message) {
+            return new Promise(resolve => {
+                const { modal, close, onClose } = showModal('', `
+                    <p style="margin: 0 0 20px; line-height: 1.5;">${escapeHtml(message)}</p>
+                    <div style="display: flex; justify-content: flex-end;">
+                        <button style="background: #007bff; color: white; border: none; padding: 10px 30px; border-radius: 4px; cursor: pointer;">OK</button>
+                    </div>
+                `);
+                onClose(resolve);
+                modal.querySelector('button').addEventListener('click', close);
+            });
+        }
+
+        function showConfirm(message) {
+            return new Promise(resolve => {
+                const { modal, close, onClose } = showModal('', `
+                    <p style="margin: 0 0 20px; line-height: 1.5;">${escapeHtml(message)}</p>
+                    <div style="display: flex; gap: 10px; justify-content: flex-end;">
+                        <button class="confirm-yes" style="background: #dc3545; color: white; border: none; padding: 10px 24px; border-radius: 4px; cursor: pointer;">Confirm</button>
+                        <button class="confirm-no" style="background: #6c757d; color: white; border: none; padding: 10px 24px; border-radius: 4px; cursor: pointer;">Cancel</button>
+                    </div>
+                `);
+                let confirmed = false;
+                onClose(() => resolve(confirmed));
+                modal.querySelector('.confirm-yes').addEventListener('click', () => { confirmed = true; close(); });
+                modal.querySelector('.confirm-no').addEventListener('click', close);
+            });
+        }
+
+        function formField(label, name, value = '', type = 'text', required = false, readonly = false) {
+            const req = required ? ' <span style="color: #dc3545;">*</span>' : '';
+            const ro = readonly ? ' readonly' : '';
+            const rq = required ? ' required' : '';
+            return `
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px;">${escapeHtml(label)}${req}</label>
+                    <input type="${type}" name="${name}" value="${escapeHtml(value)}"
+                           style="width: 100%; padding: 8px; background: #2a2a2a; border: 1px solid #666; color: white; border-radius: 4px;"${ro}${rq}>
+                </div>
+            `;
+        }
+
+        function formTextarea(label, name, value = '', required = false) {
+            const req = required ? ' <span style="color: #dc3545;">*</span>' : '';
+            return `
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px;">${escapeHtml(label)}${req}</label>
+                    <textarea name="${name}" rows="3"
+                              style="width: 100%; padding: 8px; background: #2a2a2a; border: 1px solid #666; color: white; border-radius: 4px;">${escapeHtml(value)}</textarea>
+                </div>
+            `;
+        }
+
+        function formCheckbox(label, name, checked = false) {
+            const chk = checked ? ' checked' : '';
+            return `
+                <div style="margin-bottom: 15px;">
+                    <label style="display: flex; align-items: center; cursor: pointer;">
+                        <input type="checkbox" name="${name}"${chk} style="margin-right: 8px;">
+                        ${escapeHtml(label)}
+                    </label>
+                </div>
+            `;
+        }
+
+        function formSelect(label, name, options, value = '', required = false) {
+            const req = required ? ' <span style="color: #dc3545;">*</span>' : '';
+            const opts = options.map(opt =>
+                `<option value="${escapeHtml(opt.value)}" ${opt.value === value ? 'selected' : ''}>${escapeHtml(opt.label)}</option>`
+            ).join('');
+            return `
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px;">${escapeHtml(label)}${req}</label>
+                    <select name="${name}" style="width: 100%; padding: 8px; background: #2a2a2a; border: 1px solid #666; color: white; border-radius: 4px;">
+                        ${opts}
+                    </select>
+                </div>
+            `;
+        }
+
+        /* Duration presets for seconds fields */
+        const DURATION_PRESETS = {
+            access_token: [
+                { value: 300, label: '5 minutes' },
+                { value: 900, label: '15 minutes' },
+                { value: 1800, label: '30 minutes' },
+                { value: 3600, label: '1 hour' },
+                { value: 7200, label: '2 hours' },
+            ],
+            refresh_token: [
+                { value: 86400, label: '1 day' },
+                { value: 604800, label: '7 days' },
+                { value: 2592000, label: '30 days' },
+                { value: 7776000, label: '90 days' },
+            ],
+            session: [
+                { value: -1, label: 'Unlimited' },
+                { value: 3600, label: '1 hour' },
+                { value: 28800, label: '8 hours' },
+                { value: 86400, label: '1 day' },
+                { value: 604800, label: '7 days' },
+                { value: 2592000, label: '30 days' },
+            ],
+            rotation: [
+                { value: -1, label: 'Unlimited' },
+                { value: 2592000, label: '30 days' },
+                { value: 7776000, label: '90 days' },
+                { value: 15552000, label: '180 days' },
+                { value: 31536000, label: '1 year' },
+            ],
+        };
+
+        function formatDuration(seconds) {
+            if (seconds == null || seconds < 0) return 'Unlimited';
+            const units = [[86400, 'day'], [3600, 'hour'], [60, 'minute'], [1, 'second']];
+            for (const [divisor, unit] of units) {
+                if (seconds >= divisor && seconds % divisor === 0) {
+                    const count = seconds / divisor;
+                    return count === 1 ? `1 ${unit}` : `${count} ${unit}s`;
+                }
+            }
+            return `${seconds} seconds`;
+        }
+
+        function formDuration(label, name, value, presets, required = false) {
+            const req = required ? ' <span style="color: #dc3545;">*</span>' : '';
+            const parsed = parseInt(value);
+            const numValue = isNaN(parsed) ? -1 : parsed;
+            const isPreset = presets.some(p => p.value === numValue);
+            const selectValue = isPreset ? numValue : 'custom';
+            const showCustom = !isPreset && numValue >= 0;
+            const opts = presets.map(p =>
+                `<option value="${p.value}" ${p.value === selectValue ? 'selected' : ''}>${escapeHtml(p.label)}</option>`
+            ).join('');
+            return `
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px;">${escapeHtml(label)}${req}</label>
+                    <div style="display: flex; gap: 8px; align-items: center;">
+                        <select data-duration-for="${name}" style="flex: 1; padding: 8px; background: #2a2a2a; border: 1px solid #666; color: white; border-radius: 4px;">
+                            ${opts}
+                            <option value="custom" ${selectValue === 'custom' ? 'selected' : ''}>Custom...</option>
+                        </select>
+                        <input type="number" name="${name}" value="${showCustom ? numValue : (isPreset ? numValue : '')}"
+                               class="duration-custom" placeholder="\u2014"
+                               style="width: 100px; padding: 8px; background: #2a2a2a; border: 1px solid #666; color: white; border-radius: 4px; display: ${showCustom ? 'block' : 'none'};">
+                        <span style="color: #999; font-size: 13px; display: ${showCustom ? 'inline' : 'none'};" data-duration-unit="${name}">seconds</span>
+                    </div>
+                </div>
+            `;
+        }
+
+        /* Delegated handler for duration preset selects */
+        document.addEventListener('change', (e) => {
+            const select = e.target.closest('[data-duration-for]');
+            if (!select) return;
+            const name = select.dataset.durationFor;
+            const wrapper = select.closest('div');
+            const input = wrapper.querySelector(`input[name="${name}"]`);
+            const unit = wrapper.querySelector(`[data-duration-unit="${name}"]`);
+            if (!input) return;
+            if (select.value === 'custom') {
+                input.style.display = 'block';
+                if (unit) unit.style.display = 'inline';
+                input.value = '';
+                input.focus();
+            } else {
+                input.value = select.value;
+                input.style.display = 'none';
+                if (unit) unit.style.display = 'none';
+            }
+        });
+
+        // Navigation
+        function navigateToOrgList() {
+            orgMgmt.view = 'org-list';
+            orgMgmt.orgId = null;
+            orgMgmt.rsId = null;
+            orgMgmt.clientId = null;
+            renderOrgManagement();
+        }
+
+        function navigateToOrg(orgId) {
+            orgMgmt.view = 'org-detail';
+            orgMgmt.orgId = orgId;
+            orgMgmt.rsId = null;
+            orgMgmt.clientId = null;
+            renderOrgManagement();
+        }
+
+        function navigateToResourceServer(rsId) {
+            orgMgmt.view = 'rs-detail';
+            orgMgmt.rsId = rsId;
+            orgMgmt.clientId = null;
+            renderOrgManagement();
+        }
+
+        function navigateToClient(clientId) {
+            orgMgmt.view = 'client-detail';
+            orgMgmt.clientId = clientId;
+            orgMgmt.rsId = null;
+            renderOrgManagement();
+        }
+
+        // Render functions
+        async function renderOrgManagement(scrollTarget) {
+            const content = document.getElementById('orgsContent');
+
+            try {
+                content.innerHTML = '<p>Loading...</p>';
+
+                if (orgMgmt.view === 'org-list') {
+                    await renderOrgList(content);
+                } else if (orgMgmt.view === 'org-detail') {
+                    await renderOrgDetail(content);
+                } else if (orgMgmt.view === 'rs-detail') {
+                    await renderResourceServerDetail(content);
+                } else if (orgMgmt.view === 'client-detail') {
+                    await renderClientDetail(content);
+                }
+
+                if (scrollTarget) {
+                    document.getElementById(scrollTarget)?.scrollIntoView({ behavior: 'instant' });
+                }
+            } catch (error) {
+                console.error('Render error:', error);
+                content.innerHTML = `
+                    <p style="color: #dc3545;">Error: ${escapeHtml(error.message)}</p>
+                    <button data-action="navigate-org-list" style="background: #007bff; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">Refresh</button>
+                `;
+            }
+        }
+
+        async function renderOrgList(container) {
+            // Fetch organizations
+            const isActiveParam = orgMgmt.filter === 'all' ? '' :
+                                  orgMgmt.filter === 'active' ? '&is_active=true' : '&is_active=false';
+            const data = await apiGet(`/admin/organizations?limit=100${isActiveParam}`);
+
+            let html = '';
+
+            // Filter controls
+            html += `
+                <div style="margin-bottom: 20px;">
+                    <label style="margin-right: 15px;">
+                        <input type="radio" name="orgFilter" value="active" ${orgMgmt.filter === 'active' ? 'checked' : ''} data-action="set-org-filter" data-filter="active">
+                        Active Only
+                    </label>
+                    <label style="margin-right: 15px;">
+                        <input type="radio" name="orgFilter" value="inactive" ${orgMgmt.filter === 'inactive' ? 'checked' : ''} data-action="set-org-filter" data-filter="inactive">
+                        Inactive Only
+                    </label>
+                    <label>
+                        <input type="radio" name="orgFilter" value="all" ${orgMgmt.filter === 'all' ? 'checked' : ''} data-action="set-org-filter" data-filter="all">
+                        All
+                    </label>
+                </div>
+            `;
+
+            if (data.organizations.length === 0) {
+                html += '<p>No organizations found.</p>';
+            } else {
+                data.organizations.forEach(org => {
+                    const statusBadge = org.is_active
+                        ? '<span style="color: #28a745;">● Active</span>'
+                        : '<span style="color: #6c757d;">● Inactive</span>';
+
+                    html += `
+                        <div style="border: 1px solid #666; border-radius: 4px; padding: 15px; margin-bottom: 10px;">
+                            <div style="display: flex; justify-content: space-between; align-items: start;">
+                                <div style="flex: 1;">
+                                    <h4 style="margin: 0 0 5px 0;">${escapeHtml(org.display_name)}</h4>
+                                    <div style="font-size: 13px; color: #999;">
+                                        Code Name: ${escapeHtml(org.code_name)} | ${statusBadge}
+                                    </div>
+                                    ${org.note ? `<div style="margin-top: 8px; font-size: 13px; color: #ccc;">${escapeHtml(org.note)}</div>` : ''}
+                                </div>
+                                <div style="margin-left: 15px;">
+                                    <button data-action="navigate-to-org" data-id="${org.id}"
+                                            style="background: #007bff; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">
+                                        View Details →
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                });
+            }
+
+            container.innerHTML = html;
+        }
+
+        async function renderOrgDetail(container) {
+            // Breadcrumb
+            let html = '<div style="margin-bottom: 20px; font-size: 14px; color: #999;">';
+            html += '<a href="#" data-action="navigate-org-list" style="color: #007bff;">← Organizations</a>';
+            html += '</div>';
+
+            // Fetch org details
+            const org = await apiGet(`/admin/organizations?id=${orgMgmt.orgId}`);
+
+            const statusBadge = org.is_active
+                ? '<span style="color: #28a745;">● Active</span>'
+                : '<span style="color: #6c757d;">● Inactive</span>';
+
+            // Org details
+            html += `
+                <div style="border: 1px solid #666; border-radius: 4px; padding: 20px; margin-bottom: 20px;">
+                    <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 15px;">
+                        <h3 style="margin: 0;">${escapeHtml(org.display_name)}</h3>
+                        <button data-action="edit-organization" data-id="${org.id}"
+                                style="background: #28a745; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">
+                            Edit
+                        </button>
+                    </div>
+                    <div style="font-size: 14px; line-height: 1.6;">
+                        <div><strong>Code Name:</strong> ${escapeHtml(org.code_name)}</div>
+                        <div><strong>Status:</strong> ${statusBadge}</div>
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <strong>Organization ID:</strong>
+                            <code style="font-size: 12px;">${escapeHtml(formatUUID(org.id))}</code>
+                            <span class="copy-btn-placeholder" data-copy-text="${escapeHtml(formatUUID(org.id))}"></span>
+                        </div>
+                        ${org.note ? `<div style="white-space: pre-line;"><strong>Note:</strong> ${escapeHtml(org.note)}</div>` : ''}
+                    </div>
+                </div>
+            `;
+
+            // Resource Servers section
+            html += '<h3 style="margin-top: 30px;">Resource Servers</h3>';
+            const rsActiveParam = orgMgmt.rsFilter === 'all' ? '' :
+                                  orgMgmt.rsFilter === 'active' ? '&is_active=true' : '&is_active=false';
+            const rsData = await apiGet(`/admin/resource-servers?organization_id=${orgMgmt.orgId}&limit=100${rsActiveParam}`);
+
+            html += `
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                    <button data-action="create-resource-server" data-org-id="${orgMgmt.orgId}" style="background: #007bff; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">+ Create Resource Server</button>
+                    <div style="font-size: 13px;">
+                        <label style="margin-right: 10px;"><input type="radio" name="rsFilter" value="active" ${orgMgmt.rsFilter === 'active' ? 'checked' : ''} data-action="set-rs-filter" data-filter="active"> Active</label>
+                        <label style="margin-right: 10px;"><input type="radio" name="rsFilter" value="inactive" ${orgMgmt.rsFilter === 'inactive' ? 'checked' : ''} data-action="set-rs-filter" data-filter="inactive"> Inactive</label>
+                        <label><input type="radio" name="rsFilter" value="all" ${orgMgmt.rsFilter === 'all' ? 'checked' : ''} data-action="set-rs-filter" data-filter="all"> All</label>
+                    </div>
+                </div>`;
+
+            if (rsData.resource_servers.length === 0) {
+                html += '<p style="color: #999;">No resource servers configured.</p>';
+            } else {
+                rsData.resource_servers.forEach(rs => {
+                    const statusBadge = rs.is_active
+                        ? '<span style="color: #28a745;">● Active</span>'
+                        : '<span style="color: #6c757d;">● Inactive</span>';
+
+                    html += `
+                        <div style="border: 1px solid #444; border-radius: 4px; padding: 12px; margin-bottom: 8px;">
+                            <div style="display: flex; justify-content: space-between; align-items: center;">
+                                <div>
+                                    <strong>${escapeHtml(rs.display_name)}</strong>
+                                    <span style="color: #999; font-size: 13px; margin-left: 10px;">${escapeHtml(rs.code_name)}</span>
+                                    <span style="margin-left: 10px;">${statusBadge}</span>
+                                </div>
+                                <button data-action="navigate-to-rs" data-id="${rs.id}"
+                                        style="background: #6c757d; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 13px;">
+                                    Details →
+                                </button>
+                            </div>
+                        </div>
+                    `;
+                });
+            }
+
+            // Clients section
+            html += '<h3 style="margin-top: 30px;">Clients</h3>';
+            const clientActiveParam = orgMgmt.clientFilter === 'all' ? '' :
+                                      orgMgmt.clientFilter === 'active' ? '&is_active=true' : '&is_active=false';
+            const clientData = await apiGet(`/admin/clients?organization_id=${orgMgmt.orgId}&limit=100${clientActiveParam}`);
+
+            html += `
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                    <button data-action="create-client" data-org-id="${orgMgmt.orgId}" style="background: #007bff; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">+ Create Client</button>
+                    <div style="font-size: 13px;">
+                        <label style="margin-right: 10px;"><input type="radio" name="clientFilter" value="active" ${orgMgmt.clientFilter === 'active' ? 'checked' : ''} data-action="set-client-filter" data-filter="active"> Active</label>
+                        <label style="margin-right: 10px;"><input type="radio" name="clientFilter" value="inactive" ${orgMgmt.clientFilter === 'inactive' ? 'checked' : ''} data-action="set-client-filter" data-filter="inactive"> Inactive</label>
+                        <label><input type="radio" name="clientFilter" value="all" ${orgMgmt.clientFilter === 'all' ? 'checked' : ''} data-action="set-client-filter" data-filter="all"> All</label>
+                    </div>
+                </div>`;
+
+            if (clientData.clients.length === 0) {
+                html += '<p style="color: #999;">No clients configured.</p>';
+            } else {
+                clientData.clients.forEach(client => {
+                    const statusBadge = client.is_active
+                        ? '<span style="color: #28a745;">● Active</span>'
+                        : '<span style="color: #6c757d;">● Inactive</span>';
+
+                    html += `
+                        <div style="border: 1px solid #444; border-radius: 4px; padding: 12px; margin-bottom: 8px;">
+                            <div style="display: flex; justify-content: space-between; align-items: center;">
+                                <div>
+                                    <strong>${escapeHtml(client.display_name)}</strong>
+                                    <span style="color: #999; font-size: 13px; margin-left: 10px;">${escapeHtml(client.code_name)}</span>
+                                    <span style="margin-left: 10px;">${statusBadge}</span>
+                                </div>
+                                <button data-action="navigate-to-client" data-id="${client.id}"
+                                        style="background: #6c757d; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 13px;">
+                                    Details →
+                                </button>
+                            </div>
+                        </div>
+                    `;
+                });
+            }
+
+            container.innerHTML = html;
+
+            /* Insert copy buttons for all key IDs */
+            container.querySelectorAll('.copy-btn-placeholder').forEach(placeholder => {
+                const textToCopy = placeholder.getAttribute('data-copy-text');
+                placeholder.appendChild(createCopyButton(textToCopy));
+            });
+        }
+
+        async function renderResourceServerDetail(container) {
+            const rs = await apiGet(`/admin/resource-servers?id=${orgMgmt.rsId}`);
+            const org = await apiGet(`/admin/organizations?id=${orgMgmt.orgId}`);
+
+            // Breadcrumb
+            let html = '<div style="margin-bottom: 20px; font-size: 14px; color: #999;">';
+            html += '<a href="#" data-action="navigate-org-list" style="color: #007bff;">Organizations</a> / ';
+            html += `<a href="#" data-action="navigate-to-org" data-id="${org.id}" style="color: #007bff;">${escapeHtml(org.display_name)}</a> / `;
+            html += `<span>Resource Server</span>`;
+            html += '</div>';
+
+            const statusBadge = rs.is_active
+                ? '<span style="color: #28a745;">● Active</span>'
+                : '<span style="color: #6c757d;">● Inactive</span>';
+
+            // RS details
+            html += `
+                <div style="border: 1px solid #666; border-radius: 4px; padding: 20px; margin-bottom: 20px;">
+                    <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 15px;">
+                        <h3 style="margin: 0;">${escapeHtml(rs.display_name)}</h3>
+                        <button data-action="edit-resource-server" data-id="${rs.id}"
+                                style="background: #28a745; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">
+                            Edit
+                        </button>
+                    </div>
+                    <div style="font-size: 14px; line-height: 1.6;">
+                        <div><strong>Code Name:</strong> ${escapeHtml(rs.code_name)}</div>
+                        <div><strong>Address:</strong> ${escapeHtml(rs.address)}</div>
+                        <div><strong>Status:</strong> ${statusBadge}</div>
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <strong>Resource Server ID:</strong>
+                            <code style="font-size: 12px;">${escapeHtml(formatUUID(rs.id))}</code>
+                            <span class="copy-btn-placeholder" data-copy-text="${escapeHtml(formatUUID(rs.id))}"></span>
+                        </div>
+                        ${rs.note ? `<div style="white-space: pre-line;"><strong>Note:</strong> ${escapeHtml(rs.note)}</div>` : ''}
+                    </div>
+                </div>
+            `;
+
+            // Resource Server Keys section
+            html += '<h3 style="margin-top: 30px;">Resource Server Keys</h3>';
+            const rsKeysData = await apiGet(`/admin/resource-server-keys?resource_server_id=${orgMgmt.rsId}&limit=100&is_active=1`);
+
+            html += `<button data-action="create-rs-key" data-rs-id="${orgMgmt.rsId}"
+                             style="margin-bottom: 15px; background: #007bff; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">
+                        + Generate Key
+                     </button>`;
+
+            if (rsKeysData.keys.length === 0) {
+                html += '<p style="color: #999;">No keys configured.</p>';
+            } else {
+                rsKeysData.keys.forEach(key => {
+                    const activeBadge = key.is_active
+                        ? '<span style="color: #28a745; font-size: 12px;">● Active</span>'
+                        : '<span style="color: #6c757d; font-size: 12px;">● Revoked</span>';
+                    const formattedKeyId = formatUUID(key.key_id);
+
+                    html += `
+                        <div style="border: 1px solid #444; border-radius: 4px; padding: 12px; margin-bottom: 8px;">
+                            <div style="display: flex; justify-content: space-between; align-items: center;">
+                                <div style="display: flex; align-items: center; gap: 8px;">
+                                    <code style="font-size: 12px;">${escapeHtml(formattedKeyId)}</code>
+                                    <span class="copy-btn-placeholder" data-copy-text="${escapeHtml(formattedKeyId)}"></span>
+                                    ${activeBadge}
+                                    <div style="font-size: 12px; color: #999; margin-top: 4px;">
+                                        Generated: ${new Date(key.generated_at).toLocaleString()}
+                                    </div>
+                                    ${key.note ? `<div style="font-size: 12px; color: #999;">${escapeHtml(key.note)}</div>` : ''}
+                                </div>
+                                ${key.is_active ? `
+                                    <button data-action="revoke-rs-key" data-id="${key.id}"
+                                            style="background: #dc3545; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 13px;">
+                                        Revoke
+                                    </button>
+                                ` : ''}
+                            </div>
+                        </div>
+                    `;
+                });
+            }
+
+            // Linked Clients section
+            html += '<h3 style="margin-top: 30px;">Linked Clients</h3>';
+            const linkData = await apiGet(`/admin/resource-server-clients?resource_server_id=${orgMgmt.rsId}&limit=100`);
+
+            html += `<button data-action="link-rs-to-client" data-rs-id="${orgMgmt.rsId}" style="margin-bottom: 15px; background: #007bff; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">+ Link Client</button>`;
+
+            if (linkData.links.length === 0) {
+                html += '<p style="color: #999;">No clients linked to this resource server.</p>';
+            } else {
+                linkData.links.forEach(link => {
+                    html += `
+                        <div style="border: 1px solid #444; border-radius: 4px; padding: 12px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center;">
+                            <div>
+                                <strong>${escapeHtml(link.client_display_name)}</strong>
+                                <span style="color: #999; font-size: 13px; margin-left: 10px;">${escapeHtml(link.client_code_name)}</span>
+                            </div>
+                            <div>
+                                <button data-action="navigate-to-client" data-id="${link.client_id}"
+                                        style="background: #6c757d; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 13px; margin-right: 8px;">
+                                    View Client
+                                </button>
+                                <button data-action="unlink-client-from-rs" data-client-id="${link.client_id}" data-rs-id="${orgMgmt.rsId}"
+                                        style="background: #dc3545; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 13px;">
+                                    Unlink
+                                </button>
+                            </div>
+                        </div>
+                    `;
+                });
+            }
+
+            container.innerHTML = html;
+
+            /* Insert copy buttons for all key IDs */
+            container.querySelectorAll('.copy-btn-placeholder').forEach(placeholder => {
+                const textToCopy = placeholder.getAttribute('data-copy-text');
+                placeholder.appendChild(createCopyButton(textToCopy));
+            });
+        }
+
+        async function renderClientDetail(container) {
+            const client = await apiGet(`/admin/clients?id=${orgMgmt.clientId}`);
+            const org = await apiGet(`/admin/organizations?id=${orgMgmt.orgId}`);
+
+            // Breadcrumb
+            let html = '<div style="margin-bottom: 20px; font-size: 14px; color: #999;">';
+            html += '<a href="#" data-action="navigate-org-list" style="color: #007bff;">Organizations</a> / ';
+            html += `<a href="#" data-action="navigate-to-org" data-id="${org.id}" style="color: #007bff;">${escapeHtml(org.display_name)}</a> / `;
+            html += `<span>Client</span>`;
+            html += '</div>';
+
+            const statusBadge = client.is_active
+                ? '<span style="color: #28a745;">● Active</span>'
+                : '<span style="color: #6c757d;">● Inactive</span>';
+
+            // Client details
+            html += `
+                <div style="border: 1px solid #666; border-radius: 4px; padding: 20px; margin-bottom: 20px;">
+                    <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 15px;">
+                        <h3 style="margin: 0;">${escapeHtml(client.display_name)}</h3>
+                        <button data-action="edit-client" data-id="${client.id}"
+                                style="background: #28a745; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">
+                            Edit
+                        </button>
+                    </div>
+                    <div style="font-size: 14px; line-height: 1.6;">
+                        <div><strong>Code Name:</strong> ${escapeHtml(client.code_name)}</div>
+                        <div><strong>Type:</strong> ${escapeHtml(client.client_type)}</div>
+                        <div><strong>Grant Type:</strong> ${escapeHtml(client.grant_type)}</div>
+                        <div><strong>Status:</strong> ${statusBadge}</div>
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <strong>Client ID:</strong>
+                            <code style="font-size: 12px;">${escapeHtml(formatUUID(client.id))}</code>
+                            <span class="copy-btn-placeholder" data-copy-text="${escapeHtml(formatUUID(client.id))}"></span>
+                        </div>
+                        <div><strong>Access Token TTL:</strong> ${formatDuration(client.access_token_ttl_seconds)}</div>
+                        ${client.grant_type === 'authorization_code' ? `
+                            ${client.issue_refresh_tokens ? `<div><strong>Refresh Token TTL:</strong> ${formatDuration(client.refresh_token_ttl_seconds)}</div>` : ''}
+                            <div><strong>Maximum Session Duration:</strong> ${formatDuration(client.maximum_session_seconds)}</div>
+                            <div><strong>Refresh Tokens:</strong> ${client.issue_refresh_tokens ? 'Yes' : 'No'}</div>
+                            <div><strong>Require MFA:</strong> ${client.require_mfa ? 'Yes' : 'No'}</div>
+                        ` : `
+                            <div><strong>Maximum Key Age:</strong> ${formatDuration(client.secret_rotation_seconds)}</div>
+                        `}
+                        ${client.note ? `<div style="white-space: pre-line;"><strong>Note:</strong> ${escapeHtml(client.note)}</div>` : ''}
+                    </div>
+                </div>
+            `;
+
+            // Client Keys section (only for confidential clients)
+            if (client.client_type === 'confidential') {
+                html += '<h3 style="margin-top: 30px;">Client Keys</h3>';
+                const clientKeysData = await apiGet(`/admin/client-keys?client_id=${orgMgmt.clientId}&limit=100&is_active=1`);
+
+                html += `<button data-action="create-client-key" data-client-id="${orgMgmt.clientId}"
+                                 style="margin-bottom: 15px; background: #007bff; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">
+                            + Generate Key
+                         </button>`;
+
+                if (clientKeysData.keys.length === 0) {
+                    html += '<p style="color: #999;">No keys configured.</p>';
+                } else {
+                    clientKeysData.keys.forEach(key => {
+                        const activeBadge = key.is_active
+                            ? '<span style="color: #28a745; font-size: 12px;">● Active</span>'
+                            : '<span style="color: #6c757d; font-size: 12px;">● Revoked</span>';
+                        const formattedKeyId = formatUUID(key.key_id);
+
+                        html += `
+                            <div style="border: 1px solid #444; border-radius: 4px; padding: 12px; margin-bottom: 8px;">
+                                <div style="display: flex; justify-content: space-between; align-items: center;">
+                                    <div style="display: flex; align-items: center; gap: 8px;">
+                                        <code style="font-size: 12px;">${escapeHtml(formattedKeyId)}</code>
+                                        <span class="copy-btn-placeholder" data-copy-text="${escapeHtml(formattedKeyId)}"></span>
+                                        ${activeBadge}
+                                        <div style="font-size: 12px; color: #999; margin-top: 4px;">
+                                            Generated: ${new Date(key.generated_at).toLocaleString()}
+                                        </div>
+                                        ${key.note ? `<div style="font-size: 12px; color: #999;">${escapeHtml(key.note)}</div>` : ''}
+                                    </div>
+                                    ${key.is_active ? `
+                                        <button data-action="revoke-client-key" data-id="${key.id}"
+                                                style="background: #dc3545; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 13px;">
+                                            Revoke
+                                        </button>
+                                    ` : ''}
+                                </div>
+                            </div>
+                        `;
+                    });
+                }
+            }
+
+            // Redirect URIs section (only for authorization_code clients)
+            if (client.grant_type === 'authorization_code') {
+                html += '<h3 style="margin-top: 30px;">Redirect URIs</h3>';
+                const uriData = await apiGet(`/admin/client-redirect-uris?client_id=${orgMgmt.clientId}&limit=100`);
+
+                html += `<button data-action="add-redirect-uri" data-client-id="${orgMgmt.clientId}" style="margin-bottom: 15px; background: #007bff; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">+ Add Redirect URI</button>`;
+
+                if (uriData.redirect_uris.length === 0) {
+                    html += '<p style="color: #999;">No redirect URIs configured.</p>';
+                } else {
+                    uriData.redirect_uris.forEach(uri => {
+                        html += `
+                            <div style="border: 1px solid #444; border-radius: 4px; padding: 12px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center;">
+                                <div>
+                                    <code>${escapeHtml(uri.redirect_uri)}</code>
+                                    ${uri.note ? `<div style="font-size: 12px; color: #999; margin-top: 4px;">${escapeHtml(uri.note)}</div>` : ''}
+                                </div>
+                                <button data-action="delete-redirect-uri" data-client-id="${orgMgmt.clientId}" data-uri="${encodeURIComponent(uri.redirect_uri)}"
+                                        style="background: #dc3545; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 13px;">
+                                    Delete
+                                </button>
+                            </div>
+                        `;
+                    });
+                }
+            }
+
+            // Linked Resource Servers section
+            html += '<h3 style="margin-top: 30px;">Linked Resource Servers</h3>';
+            const linkData = await apiGet(`/admin/client-resource-servers?client_id=${orgMgmt.clientId}&limit=100`);
+
+            html += `<button data-action="link-client-to-rs" data-client-id="${orgMgmt.clientId}" style="margin-bottom: 15px; background: #007bff; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">+ Link Resource Server</button>`;
+
+            if (linkData.links.length === 0) {
+                html += '<p style="color: #999;">No resource servers linked.</p>';
+            } else {
+                linkData.links.forEach(link => {
+                    html += `
+                        <div style="border: 1px solid #444; border-radius: 4px; padding: 12px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center;">
+                            <div>
+                                <strong>${escapeHtml(link.resource_server_display_name)}</strong>
+                                <span style="color: #999; font-size: 13px; margin-left: 10px;">${escapeHtml(link.resource_server_code_name)}</span>
+                            </div>
+                            <div>
+                                <button data-action="navigate-to-rs" data-id="${link.resource_server_id}"
+                                        style="background: #6c757d; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 13px; margin-right: 8px;">
+                                    View RS
+                                </button>
+                                <button data-action="unlink-client-from-rs" data-client-id="${orgMgmt.clientId}" data-rs-id="${link.resource_server_id}"
+                                        style="background: #dc3545; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 13px;">
+                                    Unlink
+                                </button>
+                            </div>
+                        </div>
+                    `;
+                });
+            }
+
+            container.innerHTML = html;
+
+            /* Insert copy buttons for all key IDs */
+            container.querySelectorAll('.copy-btn-placeholder').forEach(placeholder => {
+                const textToCopy = placeholder.getAttribute('data-copy-text');
+                placeholder.appendChild(createCopyButton(textToCopy));
+            });
+        }
+
+        // CRUD Operations
+        async function editOrganization(orgId) {
+            const org = await apiGet(`/admin/organizations?id=${orgId}`);
+
+            const { modal, close } = showModal('Edit Organization', `
+                <form id="editOrgForm">
+                    ${formField('Display Name', 'display_name', org.display_name, 'text', true)}
+                    ${formTextarea('Note', 'note', org.note || '')}
+                    ${formCheckbox('Active', 'is_active', org.is_active)}
+                    <div style="display: flex; gap: 10px; margin-top: 20px;">
+                        <button type="submit" style="flex: 1; background: #28a745; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Save</button>
+                        <button type="button" data-action="close-modal" style="flex: 1; background: #6c757d; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Cancel</button>
+                    </div>
+                </form>
+            `);
+
+
+            document.getElementById('editOrgForm').addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const formData = new FormData(e.target);
+
+                try {
+                    await apiPut(`/admin/organizations?id=${orgId}`, {
+                        display_name: formData.get('display_name'),
+                        note: formData.get('note'),
+                        is_active: formData.get('is_active') === 'on'
+                    });
+                    close();
+                    renderOrgManagement();
+                } catch (error) {
+                    showAlert('Error: ' + error.message);
+                }
+            });
+        }
+
+        async function createResourceServer(orgId) {
+            const { modal, close } = showModal('Create Resource Server', `
+                <form id="createRSForm">
+                    ${formField('Code Name', 'code_name', '', 'text', true)}
+                    ${formField('Display Name', 'display_name', '', 'text', true)}
+                    ${formField('Address', 'address', '', 'text', true)}
+                    ${formTextarea('Note', 'note', '')}
+                    <div style="display: flex; gap: 10px; margin-top: 20px;">
+                        <button type="submit" style="flex: 1; background: #007bff; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Create</button>
+                        <button type="button" data-action="close-modal" style="flex: 1; background: #6c757d; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Cancel</button>
+                    </div>
+                </form>
+            `);
+
+
+            document.getElementById('createRSForm').addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const formData = new FormData(e.target);
+
+                try {
+                    await apiPost('/admin/resource-servers', {
+                        organization_id: orgId,
+                        code_name: formData.get('code_name'),
+                        display_name: formData.get('display_name'),
+                        address: formData.get('address'),
+                        note: formData.get('note') || null
+                    });
+                    close();
+                    renderOrgManagement();
+                } catch (error) {
+                    showAlert('Error: ' + error.message);
+                }
+            });
+        }
+
+        async function editResourceServer(rsId) {
+            const rs = await apiGet(`/admin/resource-servers?id=${rsId}`);
+
+            const { modal, close } = showModal('Edit Resource Server', `
+                <form id="editRSForm">
+                    ${formField('Display Name', 'display_name', rs.display_name, 'text', true)}
+                    ${formField('Address', 'address', rs.address, 'text', true)}
+                    ${formTextarea('Note', 'note', rs.note || '')}
+                    ${formCheckbox('Active', 'is_active', rs.is_active)}
+                    <div style="display: flex; gap: 10px; margin-top: 20px;">
+                        <button type="submit" style="flex: 1; background: #28a745; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Save</button>
+                        <button type="button" data-action="close-modal" style="flex: 1; background: #6c757d; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Cancel</button>
+                    </div>
+                </form>
+            `);
+
+
+            document.getElementById('editRSForm').addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const formData = new FormData(e.target);
+
+                try {
+                    await apiPut(`/admin/resource-servers?id=${rsId}`, {
+                        display_name: formData.get('display_name'),
+                        address: formData.get('address'),
+                        note: formData.get('note'),
+                        is_active: formData.get('is_active') === 'on'
+                    });
+                    close();
+                    renderOrgManagement();
+                } catch (error) {
+                    showAlert('Error: ' + error.message);
+                }
+            });
+        }
+
+        async function createClient(orgId) {
+            const { modal, close } = showModal('Create Client', `
+                <form id="createClientForm">
+                    ${formField('Code Name', 'code_name', '', 'text', true)}
+                    ${formField('Display Name', 'display_name', '', 'text', true)}
+                    ${formSelect('Client Type', 'client_config', [
+                        { value: 'public', label: 'Public Client (Authorization Code Flow)' },
+                        { value: 'confidential', label: 'Confidential Client (Client Credentials Flow)' }
+                    ], 'public', true)}
+                    ${formDuration('Access Token TTL', 'access_token_ttl_seconds', 3600, DURATION_PRESETS.access_token, true)}
+                    <div id="authCodeFields">
+                        ${formCheckbox('Issue Refresh Tokens', 'issue_refresh_tokens', true)}
+                        ${formDuration('Refresh Token TTL', 'refresh_token_ttl_seconds', 2592000, DURATION_PRESETS.refresh_token)}
+                        ${formDuration('Maximum Session Duration', 'maximum_session_seconds', 604800, DURATION_PRESETS.session)}
+                        ${formCheckbox('Require MFA', 'require_mfa', false)}
+                    </div>
+                    <div id="confidentialFields" style="display: none;">
+                        ${formDuration('Maximum Key Age (Secret Rotation)', 'secret_rotation_seconds', 0, DURATION_PRESETS.rotation)}
+                    </div>
+                    ${formTextarea('Note', 'note', '')}
+                    <div style="display: flex; gap: 10px; margin-top: 20px;">
+                        <button type="submit" style="flex: 1; background: #007bff; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Create</button>
+                        <button type="button" data-action="close-modal" style="flex: 1; background: #6c757d; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Cancel</button>
+                    </div>
+                </form>
+            `);
+
+
+            // Toggle fields based on client type
+            const form = document.getElementById('createClientForm');
+            const clientConfig = form.querySelector('[name="client_config"]');
+            const authCodeFields = document.getElementById('authCodeFields');
+            const confidentialFields = document.getElementById('confidentialFields');
+
+            function toggleFields() {
+                const isPublic = clientConfig.value === 'public';
+                authCodeFields.style.display = isPublic ? 'block' : 'none';
+                confidentialFields.style.display = isPublic ? 'none' : 'block';
+            }
+
+            clientConfig.addEventListener('change', toggleFields);
+            toggleFields(); // Initial state
+
+            document.getElementById('createClientForm').addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const formData = new FormData(e.target);
+
+                try {
+                    const clientConfig = formData.get('client_config');
+                    const client_type = clientConfig;
+                    const grant_type = clientConfig === 'public' ? 'authorization_code' : 'client_credentials';
+
+                    const createData = {
+                        organization_id: orgId,
+                        code_name: formData.get('code_name'),
+                        display_name: formData.get('display_name'),
+                        client_type: client_type,
+                        grant_type: grant_type,
+                        access_token_ttl_seconds: parseInt(formData.get('access_token_ttl_seconds')),
+                        note: formData.get('note') || null
+                    };
+
+                    if (grant_type === 'authorization_code') {
+                        createData.issue_refresh_tokens = formData.get('issue_refresh_tokens') === 'on';
+                        createData.refresh_token_ttl_seconds = parseInt(formData.get('refresh_token_ttl_seconds')) || null;
+                        createData.maximum_session_seconds = parseInt(formData.get('maximum_session_seconds')) || null;
+                        createData.require_mfa = formData.get('require_mfa') === 'on';
+                    } else {
+                        createData.secret_rotation_seconds = parseInt(formData.get('secret_rotation_seconds')) || null;
+                    }
+
+                    await apiPost('/admin/clients', createData);
+                    close();
+                    renderOrgManagement();
+                } catch (error) {
+                    showAlert('Error: ' + error.message);
+                }
+            });
+        }
+
+        async function editClient(clientId) {
+            const client = await apiGet(`/admin/clients?id=${clientId}`);
+
+            const { modal, close } = showModal('Edit Client', `
+                <form id="editClientForm">
+                    ${formField('Display Name', 'display_name', client.display_name, 'text', true)}
+                    ${formDuration('Access Token TTL', 'access_token_ttl_seconds', client.access_token_ttl_seconds, DURATION_PRESETS.access_token, true)}
+                    ${client.grant_type === 'authorization_code' ? `
+                        ${formCheckbox('Issue Refresh Tokens', 'issue_refresh_tokens', client.issue_refresh_tokens)}
+                        ${formDuration('Refresh Token TTL', 'refresh_token_ttl_seconds', client.refresh_token_ttl_seconds, DURATION_PRESETS.refresh_token)}
+                        ${formDuration('Maximum Session Duration', 'maximum_session_seconds', client.maximum_session_seconds, DURATION_PRESETS.session)}
+                        ${formCheckbox('Require MFA', 'require_mfa', client.require_mfa)}
+                    ` : `
+                        ${formDuration('Maximum Key Age (Secret Rotation)', 'secret_rotation_seconds', client.secret_rotation_seconds, DURATION_PRESETS.rotation)}
+                    `}
+                    ${formTextarea('Note', 'note', client.note || '')}
+                    ${formCheckbox('Active', 'is_active', client.is_active)}
+                    <div style="display: flex; gap: 10px; margin-top: 20px;">
+                        <button type="submit" style="flex: 1; background: #28a745; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Save</button>
+                        <button type="button" data-action="close-modal" style="flex: 1; background: #6c757d; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Cancel</button>
+                    </div>
+                </form>
+            `);
+
+
+            document.getElementById('editClientForm').addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const formData = new FormData(e.target);
+
+                try {
+                    const updateData = {
+                        display_name: formData.get('display_name'),
+                        access_token_ttl_seconds: parseInt(formData.get('access_token_ttl_seconds')),
+                        note: formData.get('note'),
+                        is_active: formData.get('is_active') === 'on'
+                    };
+
+                    if (client.grant_type === 'authorization_code') {
+                        updateData.issue_refresh_tokens = formData.get('issue_refresh_tokens') === 'on';
+                        updateData.refresh_token_ttl_seconds = parseInt(formData.get('refresh_token_ttl_seconds')) || null;
+                        updateData.maximum_session_seconds = parseInt(formData.get('maximum_session_seconds'));
+                        updateData.require_mfa = formData.get('require_mfa') === 'on';
+                    } else {
+                        updateData.secret_rotation_seconds = parseInt(formData.get('secret_rotation_seconds'));
+                    }
+
+                    await apiPut(`/admin/clients?id=${clientId}`, updateData);
+                    close();
+                    renderOrgManagement();
+                } catch (error) {
+                    showAlert('Error: ' + error.message);
+                }
+            });
+        }
+
+        async function addRedirectURI(clientId) {
+            const { modal, close } = showModal('Add Redirect URI', `
+                <form id="addURIForm">
+                    <div class="form-group">
+                        <label>Redirect URI <span style="color: #dc3545;">*</span></label>
+                        <div style="display: flex; gap: 5px;">
+                            <select name="uri_scheme" style="width: 100px; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                                <option value="https://">https://</option>
+                                <option value="http://">http://</option>
+                            </select>
+                            <input type="text" name="uri_path" placeholder="localhost:3000/callback" required style="flex: 1; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                        </div>
+                        <small style="color: #6c757d; display: block; margin-top: 4px;">Select the scheme and enter the path.</small>
+                    </div>
+                    ${formTextarea('Note', 'note', '')}
+                    <div style="display: flex; gap: 10px; margin-top: 20px;">
+                        <button type="submit" style="flex: 1; background: #007bff; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Add</button>
+                        <button type="button" data-action="close-modal" style="flex: 1; background: #6c757d; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Cancel</button>
+                    </div>
+                </form>
+            `);
+
+
+            document.getElementById('addURIForm').addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const formData = new FormData(e.target);
+
+                try {
+                    // Combine scheme and path
+                    const scheme = formData.get('uri_scheme');
+                    const path = formData.get('uri_path');
+                    const redirect_uri = scheme + path;
+
+                    await apiPost('/admin/client-redirect-uris', {
+                        client_id: clientId,
+                        redirect_uri: redirect_uri,
+                        note: formData.get('note') || null
+                    });
+                    close();
+                    renderOrgManagement();
+                } catch (error) {
+                    showAlert('Error: ' + error.message);
+                }
+            });
+        }
+
+        async function deleteRedirectURI(clientId, redirectUri) {
+            // Decode since it comes encoded from the data attribute
+            const decodedUri = decodeURIComponent(redirectUri);
+            if (!(await showConfirm(`Delete redirect URI: ${decodedUri}?`))) return;
+
+            try {
+                await apiDelete(`/admin/client-redirect-uris?client_id=${clientId}&redirect_uri=${encodeURIComponent(decodedUri)}`);
+                renderOrgManagement();
+            } catch (error) {
+                showAlert('Error: ' + error.message);
+            }
+        }
+
+        async function linkClientToRS(clientId) {
+            const client = await apiGet(`/admin/clients?id=${clientId}`);
+            const rsData = await apiGet(`/admin/resource-servers?organization_id=${orgMgmt.orgId}&limit=100`);
+            const currentLinks = await apiGet(`/admin/client-resource-servers?client_id=${clientId}&limit=100`);
+
+            const linkedIds = new Set(currentLinks.links.map(l => l.resource_server_id));
+            const availableRS = rsData.resource_servers.filter(rs => !linkedIds.has(rs.id) && rs.is_active);
+
+            if (availableRS.length === 0) {
+                showAlert('No available resource servers to link.');
+                return;
+            }
+
+            const options = availableRS.map(rs => ({
+                value: rs.id,
+                label: `${rs.display_name} (${rs.code_name})`
+            }));
+
+            const { modal, close } = showModal('Link Resource Server', `
+                <form id="linkRSForm">
+                    ${formSelect('Resource Server', 'id', options, '', true)}
+                    <div style="display: flex; gap: 10px; margin-top: 20px;">
+                        <button type="submit" style="flex: 1; background: #007bff; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Link</button>
+                        <button type="button" data-action="close-modal" style="flex: 1; background: #6c757d; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Cancel</button>
+                    </div>
+                </form>
+            `);
+
+
+            document.getElementById('linkRSForm').addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const formData = new FormData(e.target);
+
+                try {
+                    await apiPost('/admin/client-resource-servers', {
+                        client_id: clientId,
+                        resource_server_id: formData.get('id')
+                    });
+                    close();
+                    renderOrgManagement();
+                } catch (error) {
+                    showAlert('Error: ' + error.message);
+                }
+            });
+        }
+
+        async function linkRSToClient(rsId) {
+            const clientData = await apiGet(`/admin/clients?organization_id=${orgMgmt.orgId}&limit=100`);
+            const currentLinks = await apiGet(`/admin/resource-server-clients?resource_server_id=${rsId}&limit=100`);
+
+            const linkedIds = new Set(currentLinks.links.map(l => l.client_id));
+            const availableClients = clientData.clients.filter(c => !linkedIds.has(c.id) && c.is_active);
+
+            if (availableClients.length === 0) {
+                showAlert('No available clients to link.');
+                return;
+            }
+
+            const options = availableClients.map(c => ({
+                value: c.id,
+                label: `${c.display_name} (${c.code_name})`
+            }));
+
+            const { modal, close } = showModal('Link Client', `
+                <form id="linkClientForm">
+                    ${formSelect('Client', 'id', options, '', true)}
+                    <div style="display: flex; gap: 10px; margin-top: 20px;">
+                        <button type="submit" style="flex: 1; background: #007bff; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Link</button>
+                        <button type="button" data-action="close-modal" style="flex: 1; background: #6c757d; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Cancel</button>
+                    </div>
+                </form>
+            `);
+
+            document.getElementById('linkClientForm').addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const formData = new FormData(e.target);
+
+                try {
+                    await apiPost('/admin/client-resource-servers', {
+                        client_id: formData.get('id'),
+                        resource_server_id: rsId
+                    });
+                    close();
+                    renderOrgManagement();
+                } catch (error) {
+                    showAlert('Error: ' + error.message);
+                }
+            });
+        }
+
+        async function unlinkClientFromRS(clientId, rsId) {
+            if (!(await showConfirm('Unlink this client and resource server?'))) return;
+
+            try {
+                await apiDelete(`/admin/client-resource-servers?client_id=${clientId}&resource_server_id=${rsId}`);
+                renderOrgManagement();
+            } catch (error) {
+                showAlert('Error: ' + error.message);
+            }
+        }
+
+        // Main load function
+        async function loadOrganizations() {
+            // Check if user is admin of any organizations
+            try {
+                const data = await apiGet('/admin/organizations?limit=1');
+                if (data.organizations.length > 0) {
+                    isOrgAdmin = true;
+                    document.getElementById('tabBar').style.display = 'block';
+                    document.getElementById('profileHeading').style.display = 'none';
+                    await renderOrgManagement();
+                    switchTab('profile');
+                }
+            } catch (error) {
+                console.error('Failed to check org admin status:', error);
+            }
+        }
+
+        function showChangeUsername() {
+            const { modal, close } = showModal('Change Username', `
+                <form id="changeUsernameForm">
+                    ${formField('New Username', 'new_username', '', 'text', true)}
+                    <div style="display: flex; gap: 10px; margin-top: 20px;">
+                        <button type="submit" style="flex: 1; background: #28a745; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Change Username</button>
+                        <button type="button" data-action="close-modal" style="flex: 1; background: #6c757d; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Cancel</button>
+                    </div>
+                </form>
+            `);
+
+
+            document.getElementById('changeUsernameForm').addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const formData = new FormData(e.target);
+                const newUsername = formData.get('new_username').trim();
+
+                if (!newUsername) {
+                    showAlert('Username cannot be empty');
+                    return;
+                }
+
+                close();
+                changeUsername(newUsername);
+            });
+        }
+
+        async function changeUsername(newUsername) {
+            try {
+                const response = await fetch(`${API_URL}/user/username`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include',
+                    body: JSON.stringify({ new_username: newUsername })
+                });
+
+                if (response.ok) {
+                    showAlert('Username changed successfully!');
+                    loadProfile();
+                } else {
+                    const error = await response.json();
+                    showAlert(`Failed to change username: ${error.error || 'Unknown error'}`);
+                }
+            } catch (error) {
+                console.error('Failed to change username:', error);
+                showAlert(`Error: ${error.message}`);
+            }
+        }
+
+        function showChangePassword() {
+            const { modal, close } = showModal('Change Password', `
+                <form id="changePasswordForm">
+                    ${formField('Current Password', 'current_password', '', 'password', true)}
+                    ${formField('New Password', 'new_password', '', 'password', true)}
+                    ${formField('Confirm New Password', 'confirm_password', '', 'password', true)}
+                    <div style="display: flex; gap: 10px; margin-top: 20px;">
+                        <button type="submit" style="flex: 1; background: #28a745; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Change Password</button>
+                        <button type="button" data-action="close-modal" style="flex: 1; background: #6c757d; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Cancel</button>
+                    </div>
+                </form>
+            `);
+
+
+            document.getElementById('changePasswordForm').addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const formData = new FormData(e.target);
+                const newPass = formData.get('new_password');
+                const confirmPass = formData.get('confirm_password');
+
+                if (newPass !== confirmPass) {
+                    showAlert('New passwords do not match!');
+                    return;
+                }
+
+                close();
+                changePassword(formData.get('current_password'), newPass);
+            });
+        }
+
+        async function changePassword(currentPassword, newPassword) {
+            try {
+                const response = await fetch(`${API_URL}/user/password`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include',
+                    body: JSON.stringify({
+                        current_password: currentPassword,
+                        new_password: newPassword
+                    })
+                });
+
+                if (response.ok) {
+                    showAlert('Password changed successfully!');
+                } else {
+                    const error = await response.json();
+                    showAlert(`Failed to change password: ${error.error || 'Unknown error'}`);
+                }
+            } catch (error) {
+                console.error('Failed to change password:', error);
+                showAlert(`Error: ${error.message}`);
+            }
+        }
+
+        async function showMFASetup() {
+            const { modal, close } = showModal('Multi-Factor Authentication', '<div id="mfaContent"><p style="color: #999;">Loading...</p></div>');
+            /* Wrap close function to also clear the tracker */
+            currentMFASetupClose = () => {
+                close();
+                currentMFASetupClose = null;
+            };
+            try {
+                const data = await apiGet('/user/mfa/methods');
+                renderMFAContent(data.methods);
+            } catch (error) {
+                document.getElementById('mfaContent').innerHTML =
+                    `<p style="color: #dc3545;">Failed to load MFA methods: ${escapeHtml(error.message)}</p>`;
+            }
+        }
+
+        function renderMFAContent(methods) {
+            const content = document.getElementById('mfaContent');
+            if (!content) return;
+
+            let html = '';
+
+            if (methods.length === 0) {
+                html += '<p style="color: #999; font-style: italic;">No authentication methods enrolled.</p>';
+            } else {
+                methods.forEach(m => {
+                    const statusColor = m.is_confirmed ? '#28a745' : '#ffc107';
+                    const statusText = m.is_confirmed ? 'Active' : 'Pending confirmation';
+                    const buttons = m.is_confirmed
+                        ? `<button data-action="mfa-delete-method" data-id="${escapeHtml(m.id)}" style="background: #dc3545; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 13px;">Remove</button>`
+                        : `<span style="display:flex;gap:6px;">
+                               <button data-action="mfa-resume-confirm" data-id="${escapeHtml(m.id)}" style="background: #28a745; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 13px;">Confirm</button>
+                               <button data-action="mfa-delete-method" data-id="${escapeHtml(m.id)}" style="background: #dc3545; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 13px;">Remove</button>
+                           </span>`;
+                    html += `
+                        <div style="border: 1px solid #444; border-radius: 4px; padding: 12px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center;">
+                            <div>
+                                <strong>${escapeHtml(m.display_name)}</strong>
+                                <span style="margin-left: 8px; font-size: 13px; color: #999;">${escapeHtml(m.type)}</span>
+                                <div style="font-size: 13px; margin-top: 4px; color: ${statusColor};">${statusText}</div>
+                            </div>
+                            ${buttons}
+                        </div>
+                    `;
+                });
+
+                const hasConfirmed = methods.some(m => m.is_confirmed);
+                if (hasConfirmed) {
+                    html += `
+                        <div style="border-top: 1px solid #444; padding-top: 15px; margin-top: 10px;">
+                            <strong>Recovery Codes</strong>
+                            <p style="font-size: 13px; color: #999; margin: 6px 0 10px 0;">Single-use backup codes for when you lose access to your authenticator.</p>
+                            <button data-action="mfa-regenerate-codes" style="background: #6c757d; color: white; border: none; padding: 8px 14px; border-radius: 4px; cursor: pointer; font-size: 13px;">Regenerate Recovery Codes</button>
+                        </div>
+                    `;
+                }
+            }
+
+            html += `
+                <div style="margin-top: 20px; border-top: 1px solid #444; padding-top: 15px; display: flex; gap: 10px;">
+                    <button data-action="mfa-add-device" style="background: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer;">+ Add Authenticator App</button>
+                    <button data-action="close-modal" style="background: #6c757d; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer;">Close</button>
+                </div>
+            `;
+
+            content.innerHTML = html;
+        }
+
+        async function showMFAAddDevice() {
+            /* Close the MFA setup modal if it's open */
+            if (currentMFASetupClose) {
+                currentMFASetupClose();
+                currentMFASetupClose = null;
+            }
+
+            /* Lazy load QR code library */
+            try {
+                await ensureQRCodeLoaded();
+            } catch (error) {
+                showAlert('Failed to load QR code library: ' + error.message);
+                return;
+            }
+
+            const { modal, close } = showModal('Add Authenticator App', `
+                <form id="mfaSetupForm">
+                    ${formField('Device Name', 'display_name', '', 'text', true)}
+                    <p style="font-size: 13px; color: #999; margin-top: -8px;">A recognizable name, e.g. "Auth App" or "Work Phone".</p>
+                    <div style="display: flex; gap: 10px; margin-top: 20px;">
+                        <button type="submit" style="flex: 1; background: #007bff; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Next →</button>
+                        <button type="button" data-action="close-modal" style="flex: 1; background: #6c757d; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Cancel</button>
+                    </div>
+                </form>
+            `);
+
+            document.getElementById('mfaSetupForm').addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const displayName = new FormData(e.target).get('display_name');
+                close();
+                try {
+                    const data = await apiPost('/user/mfa/totp/setup', { display_name: displayName });
+                    showMFAConfirm(data.method_id, data.secret, data.qr_url);
+                } catch (error) {
+                    showAlert('Failed to start MFA setup: ' + error.message);
+                }
+            });
+        }
+
+        function showMFAConfirm(methodId, secret, qrUrl) {
+            const { modal, close } = showModal('Scan QR Code', `
+                <p style="font-size: 14px; margin-bottom: 15px;">Open your authenticator app and scan the QR code below.</p>
+
+                <!-- QR Code Container -->
+                <div style="text-align: center; margin-bottom: 15px;">
+                    <div id="qrCodeContainer" style="display: inline-block; padding: 20px; background: #2a2a2a; border: 1px solid #444; border-radius: 8px;"></div>
+                    <div style="margin-top: 10px;">
+                        <button type="button" id="invertQRButton" style="background: #333; color: #ccc; border: 1px solid #555; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 12px;">Invert Colors</button>
+                    </div>
+                </div>
+
+                <!-- Manual Entry Fallback -->
+                <details style="margin-bottom: 20px;">
+                    <summary style="cursor: pointer; color: #87ceeb; font-size: 13px; margin-bottom: 6px;">Show manual entry secret</summary>
+                    <code style="display: block; background: #1a1a1a; border: 1px solid #444; padding: 10px; border-radius: 4px; letter-spacing: 2px; word-break: break-all; margin-top: 8px; font-size: 12px;">${escapeHtml(secret)}</code>
+                </details>
+
+                <form id="mfaConfirmForm">
+                    <label style="display: block; text-align: center; margin-bottom: 8px; font-size: 14px;">Enter 6-digit code from app</label>
+                    <div class="digit-input-container">
+                        <input type="text" class="digit-input-box" maxlength="1" inputmode="numeric" data-index="0" required>
+                        <input type="text" class="digit-input-box" maxlength="1" inputmode="numeric" data-index="1" required>
+                        <input type="text" class="digit-input-box" maxlength="1" inputmode="numeric" data-index="2" required>
+                        <input type="text" class="digit-input-box" maxlength="1" inputmode="numeric" data-index="3" required>
+                        <input type="text" class="digit-input-box" maxlength="1" inputmode="numeric" data-index="4" required>
+                        <input type="text" class="digit-input-box" maxlength="1" inputmode="numeric" data-index="5" required>
+                    </div>
+                    <div style="display: flex; gap: 10px; margin-top: 20px;">
+                        <button type="submit" style="flex: 1; background: #28a745; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Confirm</button>
+                        <button type="button" data-action="close-modal" style="flex: 1; background: #6c757d; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Cancel</button>
+                    </div>
+                </form>
+            `);
+
+            /* Render QR code (dark mode by default: white modules on transparent background) */
+            QRCode.render(qrUrl, document.getElementById('qrCodeContainer'), {
+                size: 240,
+                padding: 2,
+                darkColor: '#ffffff',
+                lightColor: '#2a2a2a',
+                ecLevel: 'H'
+            });
+
+            /* Color inversion toggle */
+            document.getElementById('invertQRButton').addEventListener('click', function() {
+                const svg = document.querySelector('#qrCodeContainer svg');
+                const bg = svg.querySelector('rect');
+                const path = svg.querySelector('path');
+                const tmp = bg.getAttribute('fill');
+                bg.setAttribute('fill', path.getAttribute('fill'));
+                path.setAttribute('fill', tmp);
+            });
+
+            /* Setup digit input handlers */
+            setupDigitInputs(document.querySelectorAll('#mfaConfirmForm .digit-input-box'));
+
+            /* Attach confirmation handler */
+            attachMFAConfirmHandler('mfaConfirmForm', methodId, close);
+        }
+
+        function showMFAResumeConfirm(methodId) {
+            const { modal, close } = showModal('Complete MFA Setup', `
+                <p style="font-size: 14px; margin-bottom: 20px;">Enter the 6-digit code from your authenticator app to finish registration.</p>
+                <form id="mfaResumeConfirmForm">
+                    <label style="display: block; text-align: center; margin-bottom: 8px; font-size: 14px;">Enter 6-digit code from app</label>
+                    <div class="digit-input-container">
+                        <input type="text" class="digit-input-box" maxlength="1" inputmode="numeric" data-index="0" required>
+                        <input type="text" class="digit-input-box" maxlength="1" inputmode="numeric" data-index="1" required>
+                        <input type="text" class="digit-input-box" maxlength="1" inputmode="numeric" data-index="2" required>
+                        <input type="text" class="digit-input-box" maxlength="1" inputmode="numeric" data-index="3" required>
+                        <input type="text" class="digit-input-box" maxlength="1" inputmode="numeric" data-index="4" required>
+                        <input type="text" class="digit-input-box" maxlength="1" inputmode="numeric" data-index="5" required>
+                    </div>
+                    <div style="display: flex; gap: 10px; margin-top: 20px;">
+                        <button type="submit" style="flex: 1; background: #28a745; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Confirm</button>
+                        <button type="button" data-action="close-modal" style="flex: 1; background: #6c757d; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Cancel</button>
+                    </div>
+                </form>
+            `);
+
+            /* Setup digit input handlers */
+            setupDigitInputs(document.querySelectorAll('#mfaResumeConfirmForm .digit-input-box'));
+
+            /* Attach confirmation handler */
+            attachMFAConfirmHandler('mfaResumeConfirmForm', methodId, close);
+        }
+
+        function showMFARecoveryCodes(codes, title) {
+            const codeList = codes.map(c =>
+                `<div style="font-family: monospace; padding: 4px 0; color: #7fffd4;">${escapeHtml(c)}</div>`
+            ).join('');
+            const { modal, close } = showModal(title || 'Recovery Codes', `
+                <p style="font-size: 14px; color: #daa520; margin-bottom: 15px;">Save these codes now. Each code works once and cannot be retrieved again.</p>
+                <div style="background: #1a1a1a; border: 1px solid #444; border-radius: 4px; padding: 15px; margin-bottom: 20px;">
+                    ${codeList}
+                </div>
+                <div style="display: flex; gap: 10px;">
+                    <button type="button" id="copyCodesBtn" style="flex: 1; background: #007bff; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Copy All</button>
+                    <button type="button" id="doneBtn" style="flex: 1; background: #28a745; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Done</button>
+                </div>
+            `);
+
+            document.getElementById('copyCodesBtn').addEventListener('click', () => {
+                navigator.clipboard.writeText(codes.join('\n'));
+                document.getElementById('copyCodesBtn').textContent = 'Copied!';
+                setTimeout(() => { document.getElementById('copyCodesBtn').textContent = 'Copy All'; }, 2000);
+            });
+
+            document.getElementById('doneBtn').addEventListener('click', async () => {
+                close();
+                /* Reload profile and update UI */
+                const profile = await loadProfile();
+                if (profile) renderSecuritySection(profile);
+            });
+        }
+
+        async function mfaDeleteMethod(methodId) {
+            /* Check current method count to show appropriate warning */
+            let confirmMessage = 'Remove this MFA method? You will need to re-enroll to use it again.';
+
+            try {
+                const currentData = await apiGet('/user/mfa/methods');
+                const confirmedMethods = currentData.methods.filter(m => m.is_confirmed);
+
+                if (confirmedMethods.length === 1) {
+                    /* This is the last confirmed method */
+                    confirmMessage = 'Remove this MFA method? This is your last method, so your recovery codes will also be deleted. You will need to re-enroll to use MFA again.';
+                }
+            } catch (error) {
+                console.error('Failed to check method count:', error);
+                /* Continue with default message */
+            }
+
+            if (!(await showConfirm(confirmMessage))) return;
+
+            try {
+                await apiDelete(`/user/mfa/methods?id=${methodId}`);
+                const data = await apiGet('/user/mfa/methods');
+                renderMFAContent(data.methods);
+                /* Reload profile to update Security section enrollment status */
+                const profile = await loadProfile();
+                if (profile) renderSecuritySection(profile);
+            } catch (error) {
+                showAlert('Failed to remove MFA method: ' + error.message);
+            }
+        }
+
+        async function mfaRegenerateCodes() {
+            if (!(await showConfirm('Regenerate recovery codes? Your existing codes will be invalidated immediately.'))) return;
+            try {
+                const data = await apiPost('/user/mfa/recovery-codes/regenerate', {});
+                showMFARecoveryCodes(data.recovery_codes, 'New Recovery Codes');
+            } catch (error) {
+                showAlert('Failed to regenerate recovery codes: ' + error.message);
+            }
+        }
+
+        async function toggleMfaRequire() {
+            try {
+                // Get current profile state
+                const response = await fetch(`${API_URL}/user/profile`, { credentials: 'include' });
+                if (!response.ok) throw new Error('Failed to get profile');
+                const profile = await response.json();
+
+                // Toggle
+                const newState = !profile.require_mfa;
+                const action = newState ? 'enable' : 'disable';
+
+                if (!(await showConfirm(`Are you sure you want to ${action} MFA enforcement for yourself?`))) return;
+
+                // Update via API
+                await apiPost('/user/mfa/require', { enabled: newState });
+
+                // Reload profile to refresh the security section
+                await loadProfile();
+            } catch (error) {
+                showAlert('Failed to update MFA requirement: ' + error.message);
+            }
+        }
+
+        async function logout() {
+            // Call server-side logout endpoint to close session and clear cookie
+            try {
+                await fetch(`${HOST}/logout`, {
+                    method: 'POST',
+                    credentials: 'include'
+                });
+            } catch (error) {
+                console.error('Logout error:', error);
+            }
+
+            // Clear ALL OAuth tokens from localStorage (all clients)
+            const keysToRemove = [];
+            for (let i = 0; i < localStorage.length; i++) {
+                const key = localStorage.key(i);
+                if (key.startsWith('tokens_') || key.startsWith('pkce_')) {
+                    keysToRemove.push(key);
+                }
+            }
+            keysToRemove.forEach(key => localStorage.removeItem(key));
+
+            window.location.href = '/login';
+        }
+
+        async function showDashboard(clientId) {
+            document.getElementById('pickerOverlay').style.display = 'none';
+            /* Normalize and format client ID */
+            const normalizedId = normalizeUUID(clientId);
+            document.getElementById('clientInfo').textContent = normalizedId ? formatUUID(normalizedId) : clientId;
+
+            // Load all dashboard content before showing
+            const profile = await loadProfile();
+            if (profile) {
+                document.getElementById('userInfo').textContent = formatUUID(profile.user_id);
+            }
+            await loadEmails();
+            await loadOrganizations();
+
+            // Show dashboard only after layout is fully determined
+            document.getElementById('dashboard').style.display = 'block';
+        }
+
+        // ===== Initialization =====
+
+        async function init() {
+            const clientId = getClientId();
+
+            if (!clientId) {
+                await showPicker();
+                return;
+            }
+
+            const client = createOAuthClient(clientId);
+            oauthClient = client;
+
+            // Try to resume session — auto-refresh if access token expired
+            try {
+                await client.startAutoRefresh();
+            } catch (e) {
+                // Refresh token exhausted — re-authorize
+                await client.authorize();
+                return;
+            }
+
+            if (client.tokensExpired()) {
+                await client.authorize();
+                return;
+            }
+
+            await showDashboard(clientId);
+        }
+
+        // ============================================================
+        // Resource Server Key Management
+        // ============================================================
+
+        async function createResourceServerKey(resourceServerId) {
+            const { modal, close } = showModal('Create Resource Server Key', `
+                <form id="createKeyForm">
+                    <div class="form-group">
+                        <label style="display: flex; align-items: center; gap: 8px;">
+                            <input type="radio" name="secret_mode" value="generate" checked>
+                            Generate secure secret
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 8px; margin-top: 8px;">
+                            <input type="radio" name="secret_mode" value="custom">
+                            Provide your own secret
+                        </label>
+                    </div>
+                    <div id="customSecretField" style="display: none; margin-top: 15px;">
+                        ${formField('Secret', 'secret', '', 'password')}
+                        <small style="color: #6c757d;">Enter your own secret (no validation applied)</small>
+                    </div>
+                    ${formTextarea('Note', 'note', '')}
+                    <div style="display: flex; gap: 10px; margin-top: 20px;">
+                        <button type="submit" style="flex: 1; background: #007bff; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Create Key</button>
+                        <button type="button" data-action="close-modal" style="flex: 1; background: #6c757d; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Cancel</button>
+                    </div>
+                </form>
+            `);
+
+
+            // Toggle custom secret field
+            const form = document.getElementById('createKeyForm');
+            const radios = form.querySelectorAll('input[name="secret_mode"]');
+            const customField = document.getElementById('customSecretField');
+
+            radios.forEach(radio => {
+                radio.addEventListener('change', () => {
+                    customField.style.display = radio.value === 'custom' ? 'block' : 'none';
+                });
+            });
+
+            form.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const formData = new FormData(e.target);
+
+                try {
+                    const payload = {
+                        resource_server_id: resourceServerId,
+                        note: formData.get('note') || null
+                    };
+
+                    // Include secret only if custom mode selected
+                    if (formData.get('secret_mode') === 'custom') {
+                        const customSecret = formData.get('secret');
+                        if (customSecret && customSecret.trim()) {
+                            payload.secret = customSecret;
+                        }
+                    }
+
+                    const response = await apiPost('/admin/resource-server-keys', payload);
+
+                    close();
+
+                    // Show secret if it was generated
+                    if (response.secret) {
+                        showSecretModal(response.key_id, response.secret, resourceServerId, 'resource_server_key');
+                    } else {
+                        renderOrgManagement();
+                    }
+                } catch (error) {
+                    showAlert('Error: ' + error.message);
+                }
+            });
+        }
+
+        async function revokeResourceServerKey(keyId) {
+            if (!(await showConfirm('Are you sure you want to revoke this key? This action cannot be undone.'))) return;
+
+            try {
+                await apiDelete(`/admin/resource-server-keys?id=${keyId}`);
+                renderOrgManagement();
+            } catch (error) {
+                showAlert('Error: ' + error.message);
+            }
+        }
+
+        // ============================================================
+        // Client Key Management
+        // ============================================================
+
+        async function createClientKey(clientId) {
+            const { modal, close } = showModal('Create Client Key', `
+                <form id="createClientKeyForm">
+                    <div class="form-group">
+                        <label style="display: flex; align-items: center; gap: 8px;">
+                            <input type="radio" name="secret_mode" value="generate" checked>
+                            Generate secure secret
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 8px; margin-top: 8px;">
+                            <input type="radio" name="secret_mode" value="custom">
+                            Provide your own secret
+                        </label>
+                    </div>
+                    <div id="customSecretFieldClient" style="display: none; margin-top: 15px;">
+                        ${formField('Secret', 'secret', '', 'password')}
+                        <small style="color: #6c757d;">Enter your own secret (no validation applied)</small>
+                    </div>
+                    ${formTextarea('Note', 'note', '')}
+                    <div style="display: flex; gap: 10px; margin-top: 20px;">
+                        <button type="submit" style="flex: 1; background: #007bff; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Create Key</button>
+                        <button type="button" data-action="close-modal" style="flex: 1; background: #6c757d; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Cancel</button>
+                    </div>
+                </form>
+            `);
+
+
+            // Toggle custom secret field
+            const form = document.getElementById('createClientKeyForm');
+            const radios = form.querySelectorAll('input[name="secret_mode"]');
+            const customField = document.getElementById('customSecretFieldClient');
+
+            radios.forEach(radio => {
+                radio.addEventListener('change', () => {
+                    customField.style.display = radio.value === 'custom' ? 'block' : 'none';
+                });
+            });
+
+            form.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const formData = new FormData(e.target);
+
+                try {
+                    const payload = {
+                        client_id: clientId,
+                        note: formData.get('note') || null
+                    };
+
+                    // Include secret only if custom mode selected
+                    if (formData.get('secret_mode') === 'custom') {
+                        const customSecret = formData.get('secret');
+                        if (customSecret && customSecret.trim()) {
+                            payload.secret = customSecret;
+                        }
+                    }
+
+                    const response = await apiPost('/admin/client-keys', payload);
+
+                    close();
+
+                    // Show secret if it was generated
+                    if (response.secret) {
+                        showSecretModal(response.key_id, response.secret, clientId, 'client_key');
+                    } else {
+                        renderOrgManagement();
+                    }
+                } catch (error) {
+                    showAlert('Error: ' + error.message);
+                }
+            });
+        }
+
+        async function revokeClientKey(keyId) {
+            if (!(await showConfirm('Are you sure you want to revoke this key? This action cannot be undone.'))) return;
+
+            try {
+                await apiDelete(`/admin/client-keys?id=${keyId}`);
+                renderOrgManagement();
+            } catch (error) {
+                showAlert('Error: ' + error.message);
+            }
+        }
+
+        // ============================================================
+        // Secret Display Modal
+        // ============================================================
+
+        function showSecretModal(keyId, secret, entityId, keyType) {
+            const formattedKeyId = formatUUID(keyId);
+            const formattedEntityId = formatUUID(entityId);
+
+            const { modal, close, onClose } = showModal('Save Your Secret', `
+                <div style="background: #2a2010; border: 1px solid #665520; border-radius: 4px; padding: 15px; margin-bottom: 15px; color: #daa520;">
+                    <strong>Warning:</strong> This secret will only be shown once and cannot be retrieved later!
+                </div>
+                <div class="form-group" style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: bold;">Key ID</label>
+                    <div style="display: flex; gap: 8px;">
+                        <input type="text" id="keyIdValue" value="${escapeHtml(formattedKeyId)}" readonly style="flex: 1; padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-family: monospace; font-size: 13px;">
+                        <button data-action="copy-key-id"
+                                style="background: #6c757d; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">
+                            Copy
+                        </button>
+                    </div>
+                </div>
+                <div class="form-group" style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 5px; font-weight: bold;">Secret</label>
+                    <div style="display: flex; gap: 8px;">
+                        <input type="text" id="secretValue" value="${escapeHtml(secret)}" readonly style="flex: 1; padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-family: monospace; font-size: 13px;">
+                        <button data-action="copy-secret"
+                                style="background: #28a745; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">
+                            Copy
+                        </button>
+                    </div>
+                </div>
+                <div style="display: flex; gap: 10px; margin-top: 20px;">
+                    <button data-action="download-json"
+                            style="flex: 1; background: #17a2b8; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">
+                        Download as JSON
+                    </button>
+                    <button data-action="close-secret-modal"
+                            style="flex: 1; background: #007bff; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">
+                        I've Saved My Secret
+                    </button>
+                </div>
+            `);
+
+
+            /* Copy Key ID button */
+            modal.querySelector('[data-action="copy-key-id"]').onclick = function(e) {
+                e.stopPropagation();
+                const btn = e.target;
+                navigator.clipboard.writeText(formattedKeyId).then(() => {
+                    const orig = btn.textContent;
+                    btn.textContent = '✓ Copied!';
+                    btn.style.background = '#7fffd4';
+                    setTimeout(() => {
+                        btn.textContent = orig;
+                        btn.style.background = '#6c757d';
+                    }, 2000);
+                });
+            };
+
+            /* Copy Secret button */
+            modal.querySelector('[data-action="copy-secret"]').onclick = function(e) {
+                e.stopPropagation();
+                const btn = e.target;
+                navigator.clipboard.writeText(secret).then(() => {
+                    const orig = btn.textContent;
+                    btn.textContent = '✓ Copied!';
+                    setTimeout(() => {
+                        btn.textContent = orig;
+                    }, 2000);
+                });
+            };
+
+            /* Download as JSON button */
+            modal.querySelector('[data-action="download-json"]').onclick = function(e) {
+                e.stopPropagation();
+                const timestamp = new Date().toISOString().replace('T', ' ').slice(0, -1);
+                const data = {
+                    key_id: formattedKeyId,
+                    secret: secret,
+                    type: keyType,
+                    generated_at: timestamp
+                };
+
+                /* Add entity-specific ID */
+                if (keyType === 'resource_server_key') {
+                    data.resource_server_id = formattedEntityId;
+                } else if (keyType === 'client_key') {
+                    data.client_id = formattedEntityId;
+                }
+
+                /* Create and download file */
+                const json = JSON.stringify(data, null, 2);
+                const blob = new Blob([json], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                const shortKeyId = keyId.substring(0, 8);
+                a.download = `${keyType.replace('_', '-')}-${shortKeyId}.json`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+            };
+
+            onClose(renderOrgManagement);
+
+            /* Close button */
+            modal.querySelector('[data-action="close-secret-modal"]').onclick = function(e) {
+                e.stopPropagation();
+                close();
+            };
+        }
+
+        init();
+    </script>
+</body>
+</html>

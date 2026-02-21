@@ -1,0 +1,104 @@
+# =============================================================================
+# docker-compose.yml — Self-hosted deployment with nginx + Let's Encrypt
+# =============================================================================
+#
+# Usage:
+#   1. Copy .env.example to .env and configure
+#   2. Generate nginx config:
+#      export DOMAIN=auth.yourdomain.com
+#      envsubst '${DOMAIN}' < nginx/conf.d/default.conf.template > nginx/conf.d/default.conf
+#   3. docker compose up -d
+#
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # auth-server
+  # ---------------------------------------------------------------------------
+  auth-server:
+    build:
+      context: ..
+      dockerfile: deployment/Dockerfile
+      args:
+        DB_BACKEND: "${DB_BACKEND:-sqlite}"
+    image: auth-server:latest
+    container_name: auth-server
+    restart: unless-stopped
+
+    environment:
+      - AUTH_DB_TYPE=${DB_BACKEND:-sqlite}
+      - AUTH_DB_HOST=${POSTGRES_HOST:-}
+      - AUTH_DB_PORT=${POSTGRES_PORT:-5432}
+      - AUTH_DB_NAME=${POSTGRES_DB:-}
+      - AUTH_DB_USER=${POSTGRES_USER:-}
+      - AUTH_DB_PASSWORD=${POSTGRES_PASSWORD:-}
+
+    volumes:
+      - ../auth.conf:/app/auth.conf:ro
+      - ../data:/app/data
+
+    networks:
+      - auth-network
+
+    # Not exposed directly — nginx handles external traffic
+    expose:
+      - "8080"
+
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # nginx — reverse proxy with TLS termination and rate limiting
+  # ---------------------------------------------------------------------------
+  nginx:
+    image: nginx:alpine
+    container_name: auth-nginx
+    restart: unless-stopped
+
+    ports:
+      - "80:80"
+      - "443:443"
+
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      - certbot-webroot:/var/www/certbot:ro
+
+    networks:
+      - auth-network
+
+    depends_on:
+      auth-server:
+        condition: service_healthy
+
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
+  # certbot — Let's Encrypt certificate management
+  # ---------------------------------------------------------------------------
+  certbot:
+    image: certbot/certbot:latest
+    container_name: auth-certbot
+
+    volumes:
+      - /etc/letsencrypt:/etc/letsencrypt
+      - certbot-webroot:/var/www/certbot
+
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot; sleep 12h & wait $${!}; done;'"
+
+networks:
+  auth-network:
+    driver: bridge
+
+volumes:
+  certbot-webroot:
+    driver: local

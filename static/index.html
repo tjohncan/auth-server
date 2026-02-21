@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self'; font-src 'self'; connect-src 'self'; form-action 'self'; manifest-src 'self'; base-uri 'self';">
+    <title>Auth Server</title>
+    <link rel="stylesheet" href="/css/base.css">
+    <link rel="icon" type="image/svg+xml" href="/favicon/favicon.svg">
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon/favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon/favicon-16x16.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="/favicon/apple-touch-icon.png">
+    <link rel="manifest" href="/favicon/site.webmanifest">
+    <style>
+        a.nav-item {
+            display: block;
+            width: fit-content;
+            min-width: 25vw;
+            margin-bottom: 16px;
+            padding: 12px 16px;
+            border-left: 2px solid #444;
+            text-decoration: none;
+            color: inherit;
+        }
+        a.nav-item:hover { border-left-color: #87ceeb; }
+        a.nav-item:visited { color: inherit; }
+        .nav-item .title {
+            display: block;
+            font-size: 16px;
+            color: #87ceeb;
+        }
+        a.nav-item:visited .title { color: #dda0dd; }
+        .nav-item .desc {
+            display: block;
+            margin: 4px 0 0;
+            color: #888;
+            font-size: 14px;
+        }
+        .endpoints {
+            margin-top: 40px;
+            padding-top: 16px;
+            border-top: 1px solid #333;
+            font-size: 13px;
+            color: #666;
+            line-height: 1.8;
+        }
+        .endpoints a { color: #666; text-decoration: none; }
+        .endpoints a:visited { color: #666; }
+        .endpoints a:hover { color: #87ceeb; }
+    </style>
+</head>
+<body>
+    <h1>Auth Server</h1>
+    <p>OAuth2 authentication server</p>
+
+    <a href="/login" class="nav-item">
+        <span class="title">Log In</span>
+        <span class="desc">Sign in with your account</span>
+    </a>
+
+    <a href="/admin" class="nav-item">
+        <span class="title">Management Console</span>
+        <span class="desc">Your profile, security settings, and organization administration</span>
+    </a>
+
+    <a href="/sandbox" class="nav-item">
+        <span class="title">Token Sandbox</span>
+        <span class="desc">Interactive testing for the OAuth2 token lifecycle</span>
+    </a>
+
+    <div class="endpoints">
+        <div>&middot; <a href="/.well-known/jwks.json">/.well-known/jwks.json</a></div>
+        <div>&middot; <a href="/health">/health</a></div>
+    </div>
+</body>
+</html>

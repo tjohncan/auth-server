@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self'; font-src 'self'; connect-src 'self'; form-action 'self'; manifest-src 'self'; base-uri 'self';">
+    <title>Authenticating...</title>
+    <link rel="stylesheet" href="/css/base.css">
+    <script src="/js/oauth-client.js"></script>
+    <link rel="icon" type="image/svg+xml" href="/favicon/favicon.svg">
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon/favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon/favicon-16x16.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="/favicon/apple-touch-icon.png">
+    <link rel="manifest" href="/favicon/site.webmanifest">
+</head>
+<body>
+    <h1>Authenticating...</h1>
+    <div id="status">Processing authorization code...</div>
+
+    <script>
+        async function handleCallback() {
+            const statusEl = document.getElementById('status');
+
+            // Get client_id from state parameter
+            // State format is "clientId.randomValue" (not base64-encoded JSON)
+            const params = new URLSearchParams(window.location.search);
+            const state = params.get('state');
+
+            if (!state) {
+                statusEl.textContent = 'Error: Missing state parameter';
+                return;
+            }
+
+            // Extract client_id from state (format: "clientId.randomValue")
+            const stateParts = state.split('.');
+            if (stateParts.length !== 2) {
+                statusEl.textContent = 'Error: Invalid state format';
+                return;
+            }
+            const clientId = stateParts[0];
+
+            // Create OAuth client instance
+            const client = new OAuthClient({
+                authUrl: window.location.origin,
+                clientId: clientId,
+                redirectUri: window.location.origin + '/callback',
+                scope: 'openid'
+            });
+
+            statusEl.textContent = 'Exchanging code for tokens...';
+
+            try {
+                await client.handleCallback();
+
+                statusEl.textContent = 'Success! Redirecting...';
+                window.location.href = `/admin?client_id=${clientId}`;
+            } catch (err) {
+                statusEl.innerHTML = '<p>Error: ' + err.message.replace(/</g, '&lt;') + '</p>' +
+                    '<p style="margin-top: 20px; color: #999;">If you need to update your profile or security settings, ' +
+                    'visit the <a href="/admin">Management Console</a>.</p>';
+            }
+        }
+
+        handleCallback();
+    </script>
+</body>
+</html>
