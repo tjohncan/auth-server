@@ -612,27 +612,9 @@ HttpResponse *mfa_set_require_handler(const HttpRequest *req, const RouteParams 
     }
 
     /* Parse "enabled" field from JSON */
-    const char *body = req->body;
     int enabled = 0;
-
-    /* Simple JSON parse: look for "enabled":true or "enabled":false */
-    const char *enabled_pos = strstr(body, "\"enabled\"");
-    if (enabled_pos) {
-        const char *colon = strchr(enabled_pos, ':');
-        if (colon) {
-            while (*colon && (*colon == ':' || *colon == ' ')) colon++;
-            if (strncmp(colon, "true", 4) == 0) {
-                enabled = 1;
-            } else if (strncmp(colon, "false", 5) == 0) {
-                enabled = 0;
-            } else {
-                return response_json_error(400, "enabled must be true or false");
-            }
-        } else {
-            return response_json_error(400, "enabled field malformed");
-        }
-    } else {
-        return response_json_error(400, "enabled field required");
+    if (json_get_bool(req->body, "enabled", &enabled) != 0) {
+        return response_json_error(400, "enabled field required (true or false)");
     }
 
     /* Validate: can only enable if user has confirmed methods */
