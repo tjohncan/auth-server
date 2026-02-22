@@ -3,26 +3,26 @@
 ## Architecture
 
 ```
-                         Internet
-                            |
-                       HTTPS / 443
-                            |
-                 ┌──────────▼──────────┐
-                 │   TLS Termination   │
-                 │   ex: nginx / ALB   │
-                 └──────────┬──────────┘
-                            |
-                       HTTP / 8080
-                            |
-                 ┌──────────▼──────────┐
-                 │    auth-server      │
-                 │    (C, HTTP/1.0)    │
-                 └──────────┬──────────┘
-                            |
-                 ┌──────────▼──────────┐
-                 │     Database        │
-                 │ SQLite / PostgreSQL │
-                 └─────────────────────┘
+            Internet
+               |
+          HTTPS / 443
+               |
+    ┌──────────▼──────────┐
+    │   TLS Termination   │
+    │   ex: nginx / ALB   │
+    └──────────┬──────────┘
+               |
+          HTTP / 8080
+               |
+    ┌──────────▼──────────┐
+    │    auth-server      │
+    │    (C, HTTP/1.0)    │
+    └──────────┬──────────┘
+               |
+    ┌──────────▼──────────┐
+    │     Database        │
+    │ SQLite / PostgreSQL │
+    └─────────────────────┘
 ```
 
 The auth server speaks HTTP/1.0 on port 8080. It does not handle TLS or rate limiting —
@@ -73,7 +73,8 @@ envsubst '${DOMAIN}' < nginx/conf.d/default.conf.template > nginx/conf.d/default
 
 ### 3. Obtain TLS certificate
 
-Get the initial certificate before starting nginx (standalone mode runs a temporary server on port 80):
+Get the initial certificate before starting nginx 
+(standalone mode runs a temporary server on port 80):
 
 ```bash
 docker run --rm -p 80:80 -v /etc/letsencrypt:/etc/letsencrypt certbot/certbot certonly \
