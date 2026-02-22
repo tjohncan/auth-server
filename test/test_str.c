@@ -88,6 +88,15 @@ void test_str_split(void) {
     free(parts);
 }
 
+void test_memmem_nocase(void) {
+    printf("\n=== Testing memmem_nocase ===\n\n");
+
+    const char *req = "POST /api HTTP/1.1\r\nHost: localhost\r\ntransfer-encOding: chunked\r\n\r\n";
+    void *pos = memmem_nocase(req, strlen(req), "\r\nTransfer-Encoding", 19);
+    assert(pos != NULL);
+    printf("Case-insensitive match for '\\r\\nTransfer-Encoding' found at offset %td\n", (char *)pos - req);
+}
+
 int main(void) {
     log_init(LOG_INFO);
     log_info("TESTING - String Utilities");
@@ -95,6 +104,7 @@ int main(void) {
     test_str_copy();
     test_str_dup();
     test_str_split();
+    test_memmem_nocase();
 
     printf("\n=== All tests complete ===\n");
 

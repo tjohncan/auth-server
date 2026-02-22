@@ -204,3 +204,29 @@ void str_to_lower(char *dest, size_t dest_size, const char *src) {
     }
     dest[i] = '\0';
 }
+
+
+/*******/
+
+void *memmem_nocase(const void *haystack, size_t haystack_len,
+                    const void *needle, size_t needle_len) {
+    if (needle_len == 0) return (void *)haystack;
+    if (needle_len > haystack_len) return NULL;
+
+    const unsigned char *h = (const unsigned char *)haystack;
+    const unsigned char *n = (const unsigned char *)needle;
+
+    size_t last_start = haystack_len - needle_len;
+    for (size_t i = 0; i <= last_start; i++) {
+        size_t j;
+        for (j = 0; j < needle_len; j++) {
+            unsigned char hc = h[i + j];
+            unsigned char nc = n[j];
+            if (hc >= 'A' && hc <= 'Z') hc += 32;
+            if (nc >= 'A' && nc <= 'Z') nc += 32;
+            if (hc != nc) break;
+        }
+        if (j == needle_len) return (void *)(h + i);
+    }
+    return NULL;
+}

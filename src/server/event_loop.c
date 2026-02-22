@@ -3,6 +3,7 @@
 
 #include "server/event_loop.h"
 #include "util/log.h"
+#include "util/str.h"
 #include "db/db_pool.h"
 
 #include <stdio.h>
@@ -538,7 +539,7 @@ static int handle_read(Connection *conn, size_t max_request_size) {
                  * it should reassemble chunks and forward with Content-Length.
                  * A direct request with Transfer-Encoding is either a misconfigured
                  * client or a request smuggling attempt. */
-                if (memmem(conn->read_buffer, header_end_offset,
+                if (memmem_nocase(conn->read_buffer, header_end_offset,
                            "\r\nTransfer-Encoding", 19) != NULL) {
                     log_warn("Rejecting request with Transfer-Encoding header from connection %lu",
                             conn->connection_id);

@@ -131,4 +131,26 @@ int str_url_decode(char *dst, size_t dst_size, const char *src);
  */
 void str_to_lower(char *dest, size_t dest_size, const char *src);
 
+/*
+ * memmem_nocase - Case-insensitive search for byte pattern in memory
+ *
+ * Searches for the first occurrence of needle in haystack, comparing
+ * alphabetic bytes (A-Z, a-z) case-insensitively. Non-alphabetic bytes
+ * (including \r, \n, and punctuation) are compared exactly.
+ *
+ * Parameters:
+ *   haystack      - Buffer to search in
+ *   haystack_len  - Length of haystack in bytes
+ *   needle        - Pattern to search for
+ *   needle_len    - Length of needle in bytes
+ *
+ * Returns: Pointer to first match within haystack, or NULL if not found
+ *
+ * Example:
+ *   // Finds "\r\ntransfer-encoding" regardless of casing
+ *   void *pos = memmem_nocase(buf, buf_len, "\r\nTransfer-Encoding", 19);
+ */
+void *memmem_nocase(const void *haystack, size_t haystack_len,
+                    const void *needle, size_t needle_len);
+
 #endif /* STR_H */
