@@ -998,7 +998,7 @@
 
             // Filter controls
             html += `
-                <div style="margin-bottom: 20px;">
+                <div style="margin-bottom: 20px; white-space: nowrap;">
                     <label style="margin-right: 15px;">
                         <input type="radio" name="orgFilter" value="active" ${orgMgmt.filter === 'active' ? 'checked' : ''} data-action="set-org-filter" data-filter="active">
                         Active Only
@@ -1019,8 +1019,8 @@
             } else {
                 data.organizations.forEach(org => {
                     const statusBadge = org.is_active
-                        ? '<span style="color: #28a745;">● Active</span>'
-                        : '<span style="color: #6c757d;">● Inactive</span>';
+                        ? '<span style="color: #28a745; white-space: nowrap;">● Active</span>'
+                        : '<span style="color: #6c757d; white-space: nowrap;">● Inactive</span>';
 
                     html += `
                         <div style="border: 1px solid #666; border-radius: 4px; padding: 15px; margin-bottom: 10px;">
@@ -1028,14 +1028,14 @@
                                 <div style="flex: 1;">
                                     <h4 style="margin: 0 0 5px 0;">${escapeHtml(org.display_name)}</h4>
                                     <div style="font-size: 13px; color: #999;">
-                                        Code Name: ${escapeHtml(org.code_name)} | ${statusBadge}
+                                        ${escapeHtml(org.code_name)} <span style="margin-left: 10px;">${statusBadge}</span>
                                     </div>
                                     ${org.note ? `<div style="margin-top: 8px; font-size: 13px; color: #ccc;">${escapeHtml(org.note)}</div>` : ''}
                                 </div>
                                 <div style="margin-left: 15px;">
                                     <button data-action="navigate-to-org" data-id="${org.id}"
-                                            style="background: #007bff; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">
-                                        View Details →
+                                            style="background: #6c757d; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">
+                                        Details →
                                     </button>
                                 </div>
                             </div>
@@ -1057,8 +1057,8 @@
             const org = await apiGet(`/admin/organizations?id=${orgMgmt.orgId}`);
 
             const statusBadge = org.is_active
-                ? '<span style="color: #28a745;">● Active</span>'
-                : '<span style="color: #6c757d;">● Inactive</span>';
+                ? '<span style="color: #28a745; white-space: nowrap;">● Active</span>'
+                : '<span style="color: #6c757d; white-space: nowrap;">● Inactive</span>';
 
             // Org details
             html += `
@@ -1091,7 +1091,7 @@
 
             html += `
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
-                    <button data-action="create-resource-server" data-org-id="${orgMgmt.orgId}" style="background: #007bff; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">+ Create Resource Server</button>
+                    <button data-action="create-resource-server" data-org-id="${orgMgmt.orgId}" style="background: #007bff; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; margin-right: 15px;">+ Create Resource Server</button>
                     <div style="font-size: 13px; white-space: nowrap;">
                         <label style="margin-right: 10px;"><input type="radio" name="rsFilter" value="active" ${orgMgmt.rsFilter === 'active' ? 'checked' : ''} data-action="set-rs-filter" data-filter="active"> Active</label>
                         <label style="margin-right: 10px;"><input type="radio" name="rsFilter" value="inactive" ${orgMgmt.rsFilter === 'inactive' ? 'checked' : ''} data-action="set-rs-filter" data-filter="inactive"> Inactive</label>
@@ -1104,8 +1104,8 @@
             } else {
                 rsData.resource_servers.forEach(rs => {
                     const statusBadge = rs.is_active
-                        ? '<span style="color: #28a745;">● Active</span>'
-                        : '<span style="color: #6c757d;">● Inactive</span>';
+                        ? '<span style="color: #28a745; white-space: nowrap;">● Active</span>'
+                        : '<span style="color: #6c757d; white-space: nowrap;">● Inactive</span>';
 
                     html += `
                         <div style="border: 1px solid #444; border-radius: 4px; padding: 12px; margin-bottom: 8px;">
@@ -1146,8 +1146,8 @@
             } else {
                 clientData.clients.forEach(client => {
                     const statusBadge = client.is_active
-                        ? '<span style="color: #28a745;">● Active</span>'
-                        : '<span style="color: #6c757d;">● Inactive</span>';
+                        ? '<span style="color: #28a745; white-space: nowrap;">● Active</span>'
+                        : '<span style="color: #6c757d; white-space: nowrap;">● Inactive</span>';
 
                     html += `
                         <div style="border: 1px solid #444; border-radius: 4px; padding: 12px; margin-bottom: 8px;">
@@ -1188,8 +1188,8 @@
             html += '</div>';
 
             const statusBadge = rs.is_active
-                ? '<span style="color: #28a745;">● Active</span>'
-                : '<span style="color: #6c757d;">● Inactive</span>';
+                ? '<span style="color: #28a745; white-space: nowrap;">● Active</span>'
+                : '<span style="color: #6c757d; white-space: nowrap;">● Inactive</span>';
 
             // RS details
             html += `
@@ -1229,7 +1229,7 @@
             } else {
                 rsKeysData.keys.forEach(key => {
                     const activeBadge = key.is_active
-                        ? '<span style="color: #28a745; font-size: 12px;">● Active</span>'
+                        ? '<span style="color: #28a745; font-size: 12px; white-space: nowrap;">● Active</span>'
                         : '<span style="color: #6c757d; font-size: 12px;">● Revoked</span>';
                     const formattedKeyId = formatUUID(key.key_id);
 
@@ -1309,8 +1309,8 @@
             html += '</div>';
 
             const statusBadge = client.is_active
-                ? '<span style="color: #28a745;">● Active</span>'
-                : '<span style="color: #6c757d;">● Inactive</span>';
+                ? '<span style="color: #28a745; white-space: nowrap;">● Active</span>'
+                : '<span style="color: #6c757d; white-space: nowrap;">● Inactive</span>';
 
             // Client details
             html += `
@@ -1361,7 +1361,7 @@
                 } else {
                     clientKeysData.keys.forEach(key => {
                         const activeBadge = key.is_active
-                            ? '<span style="color: #28a745; font-size: 12px;">● Active</span>'
+                            ? '<span style="color: #28a745; font-size: 12px; white-space: nowrap;">● Active</span>'
                             : '<span style="color: #6c757d; font-size: 12px;">● Revoked</span>';
                         const formattedKeyId = formatUUID(key.key_id);
 
