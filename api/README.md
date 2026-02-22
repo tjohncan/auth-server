@@ -651,7 +651,7 @@ Content-Type: application/json
 {"message": "Login successful"}
 ```
 
-**Success Response — user has MFA** (200 OK):
+**Success Response — user requires MFA** (200 OK):
 ```http
 HTTP/1.1 200 OK
 Set-Cookie: session=<token>; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=604800
@@ -883,7 +883,7 @@ OAuth2 authorization endpoint (RFC 6749 Section 3.1). Initiates authorization co
 - User must be authenticated (valid session cookie)
 - Client must be registered and active
 - redirect_uri must be registered for the client
-- MFA completed if required by client OR if user has any confirmed MFA methods
+- MFA completed if required by client OR if user opts to always require MFA (and has a confirmed MFA method)
 
 **Success Response** (302 Found):
 ```http

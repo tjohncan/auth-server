@@ -210,7 +210,7 @@ Users can authenticate via:
 2. **Passwordless** - One-time code sent to email
 3. **Both** - User choice at login time
 
-MFA requirements are enforced at authorization time (per-client policies), not at membership time.
+MFA requirements are enforced at authorization time depending on client's policy and user's preference.
 
 ### MFA Enrollment and Enforcement
 
