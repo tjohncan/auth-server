@@ -67,7 +67,7 @@
                 <div>User ID: <span id="userInfo">...</span></div>
                 <div>Connected via Client ID: <span id="clientInfo">...</span></div>
             </div>
-            <button data-action="logout" style="background: #dc3545; color: white; border: none; padding: 5px 15px; border-radius: 4px; cursor: pointer;">Log Out</button>
+            <button data-action="logout" style="background: #dc3545; color: white; border: none; padding: 5px 15px; border-radius: 4px; cursor: pointer; white-space: nowrap;">Log Out</button>
         </div>
 
         <h1>Management Console</h1>
@@ -1092,7 +1092,7 @@
             html += `
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
                     <button data-action="create-resource-server" data-org-id="${orgMgmt.orgId}" style="background: #007bff; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">+ Create Resource Server</button>
-                    <div style="font-size: 13px;">
+                    <div style="font-size: 13px; white-space: nowrap;">
                         <label style="margin-right: 10px;"><input type="radio" name="rsFilter" value="active" ${orgMgmt.rsFilter === 'active' ? 'checked' : ''} data-action="set-rs-filter" data-filter="active"> Active</label>
                         <label style="margin-right: 10px;"><input type="radio" name="rsFilter" value="inactive" ${orgMgmt.rsFilter === 'inactive' ? 'checked' : ''} data-action="set-rs-filter" data-filter="inactive"> Inactive</label>
                         <label><input type="radio" name="rsFilter" value="all" ${orgMgmt.rsFilter === 'all' ? 'checked' : ''} data-action="set-rs-filter" data-filter="all"> All</label>
@@ -1134,7 +1134,7 @@
             html += `
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
                     <button data-action="create-client" data-org-id="${orgMgmt.orgId}" style="background: #007bff; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">+ Create Client</button>
-                    <div style="font-size: 13px;">
+                    <div style="font-size: 13px; white-space: nowrap;">
                         <label style="margin-right: 10px;"><input type="radio" name="clientFilter" value="active" ${orgMgmt.clientFilter === 'active' ? 'checked' : ''} data-action="set-client-filter" data-filter="active"> Active</label>
                         <label style="margin-right: 10px;"><input type="radio" name="clientFilter" value="inactive" ${orgMgmt.clientFilter === 'inactive' ? 'checked' : ''} data-action="set-client-filter" data-filter="inactive"> Inactive</label>
                         <label><input type="radio" name="clientFilter" value="all" ${orgMgmt.clientFilter === 'all' ? 'checked' : ''} data-action="set-client-filter" data-filter="all"> All</label>
