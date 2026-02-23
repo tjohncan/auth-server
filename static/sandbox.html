@@ -208,7 +208,7 @@
 /* Helpers */
 function $(id) { return document.getElementById(id); }
 function val(id) { return $(id).value.trim(); }
-function esc(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+function esc(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
 
 /* State */
 const copyStore = {};
