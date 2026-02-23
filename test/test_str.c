@@ -97,6 +97,25 @@ void test_memmem_nocase(void) {
     printf("Case-insensitive match for '\\r\\nTransfer-Encoding' found at offset %td\n", (char *)pos - req);
 }
 
+void test_str_url_encode_decode(void) {
+    printf("\n=== Testing str_url_encode / str_url_decode ===\n\n");
+
+    char encoded[256];
+    char decoded[256];
+
+    /* Encode: reserved symbols become %XX, unreserved (A-Z a-z 0-9 - _ . ~) pass through */
+    const char *input = "a=1&b=2 c+d@e:f/g?h#i";
+    int enc_len = str_url_encode(encoded, sizeof(encoded), input);
+    assert(enc_len > 0);
+    printf("Encode '%s' -> '%s' (%d bytes)\n", input, encoded, enc_len);
+
+    /* Decode: round-trip back to original */
+    int dec_len = str_url_decode(decoded, sizeof(decoded), encoded);
+    assert(dec_len > 0);
+    assert(strcmp(decoded, input) == 0);
+    printf("Decode '%s' -> '%s' (%d bytes)\n", encoded, decoded, dec_len);
+}
+
 int main(void) {
     log_init(LOG_INFO);
     log_info("TESTING - String Utilities");
@@ -104,6 +123,7 @@ int main(void) {
     test_str_copy();
     test_str_dup();
     test_str_split();
+    test_str_url_encode_decode();
     test_memmem_nocase();
 
     printf("\n=== All tests complete ===\n");
