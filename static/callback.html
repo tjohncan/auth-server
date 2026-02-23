@@ -52,8 +52,11 @@
             try {
                 await client.handleCallback();
 
-                statusEl.textContent = 'Success! Redirecting...';
-                window.location.href = `/admin?client_id=${clientId}`;
+                const adminUrl = `/admin?client_id=${clientId}`;
+                window.location.href = adminUrl;
+                setTimeout(() => {
+                    statusEl.innerHTML = `<p><a href="${adminUrl}">Continue to Management Console</a></p>`;
+                }, 1000);
             } catch (err) {
                 statusEl.innerHTML = '<p>Error: ' + err.message.replace(/</g, '&lt;') + '</p>' +
                     '<p style="margin-top: 20px; color: #999;">If you need to update your profile or security settings, ' +

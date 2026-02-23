@@ -118,7 +118,7 @@
             </div>
         </div>
 
-        <p style="margin-top: 40px;"><a href="/">← Home</a></p>
+        <p id="homeLink" style="margin-top: 40px;"><a href="/">← Home</a></p>
     </div>
 
     <script>
@@ -962,9 +962,11 @@
         // Render functions
         async function renderOrgManagement(scrollTarget) {
             const content = document.getElementById('orgsContent');
+            const homeLink = document.getElementById('homeLink');
+
+            homeLink.style.display = 'none';
 
             try {
-                content.innerHTML = '<p>Loading...</p>';
 
                 if (orgMgmt.view === 'org-list') {
                     await renderOrgList(content);
@@ -986,6 +988,8 @@
                     <button data-action="navigate-org-list" style="background: #007bff; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">Refresh</button>
                 `;
             }
+
+            homeLink.style.display = '';
         }
 
         async function renderOrgList(container) {
