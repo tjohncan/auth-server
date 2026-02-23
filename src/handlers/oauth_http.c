@@ -302,10 +302,7 @@ HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params) {
         free(client_key_id_str);
 
         /* Get source IP and user agent for audit logging */
-        const char *source_ip = http_request_get_header(req, "X-Forwarded-For");
-        if (!source_ip) {
-            source_ip = http_request_get_header(req, "X-Real-IP");
-        }
+        const char *source_ip = http_request_get_client_ip(req, NULL);
         const char *user_agent = http_request_get_header(req, "User-Agent");
 
         oauth_token_response_t token_resp;
@@ -1022,10 +1019,7 @@ HttpResponse *revoke_handler(const HttpRequest *req, const RouteParams *params) 
     free(client_key_id_str);
 
     /* Get source IP and user agent for audit logging */
-    const char *source_ip = http_request_get_header(req, "X-Forwarded-For");
-    if (!source_ip) {
-        source_ip = http_request_get_header(req, "X-Real-IP");
-    }
+    const char *source_ip = http_request_get_client_ip(req, NULL);
     const char *user_agent = http_request_get_header(req, "User-Agent");
 
     /* Authenticate client */
@@ -1150,10 +1144,7 @@ HttpResponse *introspect_handler(const HttpRequest *req, const RouteParams *para
     free(resource_server_key_id_str);
 
     /* Get source IP and user agent for audit logging */
-    const char *source_ip = http_request_get_header(req, "X-Forwarded-For");
-    if (!source_ip) {
-        source_ip = http_request_get_header(req, "X-Real-IP");
-    }
+    const char *source_ip = http_request_get_client_ip(req, NULL);
     const char *user_agent = http_request_get_header(req, "User-Agent");
 
     /* Authenticate resource server */
