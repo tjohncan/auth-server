@@ -102,6 +102,11 @@ int encrypt_field(const char *plaintext, char *out_buf, size_t buf_size) {
     }
 
     size_t plaintext_len = strlen(plaintext);
+    if (plaintext_len > ENCRYPT_FIELD_MAX_LENGTH) {
+        log_error("Plaintext too long for encryption (%zu bytes, max %d)",
+                  plaintext_len, ENCRYPT_FIELD_MAX_LENGTH);
+        return -1;
+    }
 
     /* Generate random IV */
     unsigned char iv[GCM_IV_LENGTH];

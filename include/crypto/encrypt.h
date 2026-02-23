@@ -3,6 +3,9 @@
 
 #include <stddef.h>
 
+/* Maximum plaintext length accepted by encrypt_field (bytes) */
+#define ENCRYPT_FIELD_MAX_LENGTH 256
+
 /*
  * Field Encryption (AES-256-GCM)
  *
