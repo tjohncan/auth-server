@@ -1572,7 +1572,7 @@ int oauth_revoke_token_chain(db_handle_t *db,
     int access_count = 0;
 
     /* Begin transaction for atomicity */
-    if (db_execute_trusted(db, "BEGIN") != 0) {
+    if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
         log_error("Failed to begin transaction for token chain revocation");
         return -1;
     }

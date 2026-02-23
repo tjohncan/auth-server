@@ -107,6 +107,9 @@ static int sqlite_connect(db_handle_t *db, const char *path) {
         return -1;
     }
 
+    /* Wait up to 2.2 seconds if another thread holds the write lock */
+    sqlite3_busy_timeout(conn, 2200);
+
     db->connection = conn;
     log_info("Connected to SQLite database: %s", path);
     return 0;

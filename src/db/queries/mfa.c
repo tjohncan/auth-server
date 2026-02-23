@@ -77,7 +77,7 @@ int mfa_method_confirm(db_handle_t *db, const unsigned char *method_id) {
         return -1;
     }
 
-    if (db_execute_trusted(db, "BEGIN") != 0) {
+    if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
         log_error("Failed to begin transaction");
         return -1;
     }
@@ -315,7 +315,7 @@ int mfa_method_delete(db_handle_t *db, const unsigned char *method_id) {
         return -1;
     }
 
-    if (db_execute_trusted(db, "BEGIN") != 0) {
+    if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
         log_error("Failed to begin transaction");
         return -1;
     }
@@ -503,7 +503,7 @@ int recovery_code_set_create(db_handle_t *db,
 
     int hash_iterations = crypto_password_min_iterations();
 
-    if (db_execute_trusted(db, "BEGIN") != 0) {
+    if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
         log_error("Failed to begin transaction");
         return -1;
     }
@@ -703,7 +703,7 @@ int recovery_code_verify(db_handle_t *db,
     }
 
     /* Begin transaction (need to check and mark as used atomically) */
-    if (db_execute_trusted(db, "BEGIN") != 0) {
+    if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
         log_error("Failed to begin transaction");
         return -1;
     }

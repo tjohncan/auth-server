@@ -251,7 +251,7 @@ int user_create(db_handle_t *db, const char *username,
 
     /* Begin transaction if email provided (multi-table insert) */
     if (email) {
-        if (db_execute_trusted(db, "BEGIN") != 0) {
+        if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
             log_error("Failed to begin transaction");
             return -1;
         }
