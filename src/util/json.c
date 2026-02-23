@@ -24,6 +24,11 @@ void json_unescape(char *str) {
                 case 'f':  *write++ = '\f'; break;
                 case 'u': {
                     /* Decode \uXXXX: accept printable ASCII, skip everything else */
+                    if (!read[1] || !read[2] || !read[3] || !read[4]) {
+                        /* Truncated \uXXXX — advance to end of string */
+                        while (read[1]) read++;
+                        break;
+                    }
                     unsigned int cp = 0;
                     int i;
                     for (i = 0; i < 4; i++) {
