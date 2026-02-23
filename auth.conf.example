@@ -25,7 +25,7 @@ db_path = ./data/auth.db
 # db_password = CHANGE_ME
 # Schema owner role for SET ROLE during first-run initialization
 # If not set, falls back to db_user (SET ROLE becomes a no-op)
-# db_owner_role = auth_dbo
+db_owner_role = auth_dbo
 
 schema_dir = ./sql
 
