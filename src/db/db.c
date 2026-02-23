@@ -881,7 +881,8 @@ static int pg_bind_text(db_stmt_t *stmt, int index, const char *value, int len) 
     stmt->pg_param_bufs[idx] = NULL;
 
     if (len < 0) {
-        /* Null-terminated string, store pointer directly */
+        /* Null-terminated string, store pointer directly.
+         * Caller must keep the string alive until db_step(). */
         stmt->pg_param_values[idx] = (char *)value;
     } else {
         /* Explicit length: must copy and null-terminate */
