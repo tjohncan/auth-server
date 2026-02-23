@@ -251,7 +251,8 @@ const char *http_request_get_header(const HttpRequest *req, const char *name) {
 }
 
 const char *http_request_get_client_ip(const HttpRequest *req, const char *socket_ip) {
-    /* Check X-Real-IP first (single IP from trusted reverse proxy, cleaner) */
+    /* Check X-Real-IP first (single IP from trusted reverse proxy).
+     * This server must sit behind a trusted reverse proxy in any real deployment, for TLS. */
     const char *real_ip = http_request_get_header(req, "X-Real-IP");
     if (real_ip && real_ip[0] != '\0') {
         return real_ip;
