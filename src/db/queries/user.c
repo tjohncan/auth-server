@@ -488,7 +488,7 @@ int user_get_management_ui_setups(db_handle_t *db, long long user_account_pin,
         "  AND C.is_active = " BOOL_TRUE " "
         "  AND D.is_active = " BOOL_TRUE " "
         "  AND F.is_active = " BOOL_TRUE " "
-        "  AND lower(G.redirect_uri) = lower(" P"2) "
+        "  AND G.redirect_uri = " P"2 "
         "  AND lower(F.address) = lower(" P"3) "
         "ORDER BY C.code_name ASC, D.code_name ASC "
         "LIMIT " P"4 OFFSET " P"5";

@@ -224,7 +224,7 @@ create table security.client_redirect_uri (
 , constraint ck_redirect_uri_scheme check(lower(redirect_uri) like 'http://%' or lower(redirect_uri) like 'https://%')
 );
 
-create unique index uix_client_redirect_uri on security.client_redirect_uri (client_pin, lower(redirect_uri));
+create unique index uix_client_redirect_uri on security.client_redirect_uri (client_pin, redirect_uri);
 
 create table security.client_resource_server (
   pin bigint not null generated always as identity (start with 1 increment by 1)

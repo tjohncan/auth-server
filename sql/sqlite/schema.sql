@@ -229,7 +229,7 @@ create table client_redirect_uri (
 , updated_at text not null default (datetime('now'))
 
 , client_pin integer not null
-, redirect_uri text not null collate nocase
+, redirect_uri text not null
 , note text
 
 , constraint uix_client_redirect_uri unique(client_pin, redirect_uri)
