@@ -277,17 +277,22 @@ int crypto_totp_generate_qr_url(const char *secret, const char *username,
         return -1;
     }
 
-    /* URL-encode username (simple implementation for alphanumeric + common chars) */
+    /* URL-encode username and issuer for safe otpauth:// URI construction */
     char encoded_username[256];
+    char encoded_issuer[256];
     if (str_url_encode(encoded_username, sizeof(encoded_username), username) < 0) {
         log_error("Failed to URL-encode username for TOTP QR URL");
+        return -1;
+    }
+    if (str_url_encode(encoded_issuer, sizeof(encoded_issuer), issuer) < 0) {
+        log_error("Failed to URL-encode issuer for TOTP QR URL");
         return -1;
     }
 
     /* Format: otpauth://totp/Issuer:username?secret=SECRET&issuer=Issuer */
     int written = snprintf(out_url, url_size,
                           "otpauth://totp/%s:%s?secret=%s&issuer=%s",
-                          issuer, encoded_username, secret, issuer);
+                          encoded_issuer, encoded_username, secret, encoded_issuer);
 
     if (written < 0 || (size_t)written >= url_size) {
         log_error("TOTP QR URL buffer too small");
