@@ -181,7 +181,10 @@ int main(void) {
     jwt_set_clock_skew_seconds(config->jwt_clock_skew_seconds);
     log_info("JWT clock skew tolerance: %d seconds", config->jwt_clock_skew_seconds);
 
-    /* Initialize MFA secret encryption */
+    /* Initialize field encryption */
+    if (strcmp(config->encryption_key, "customize_me") == 0) {
+        log_warn("Using default encryption key — set encryption_key in auth.conf or AUTH_ENCRYPTION_KEY env");
+    }
     if (encrypt_init(config->encryption_key) != 0) {
         log_error("Failed to initialize MFA encryption");
         config_free(config);
