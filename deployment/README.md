@@ -52,9 +52,10 @@ docker exec auth-server wget -qO- \
   http://localhost:8080/api/admin/bootstrap
 ```
 
-## Self-Hosted Production (Docker Compose)
+## Single-Server Production (Docker Compose)
 
 This runs auth-server + nginx + certbot with automatic TLS via Let's Encrypt.
+For multi-server deployments, use a load balancer with managed certificates instead.
 
 ### 1. Configure
 
@@ -103,7 +104,8 @@ docker compose restart
 # Update (rebuild and restart)
 docker compose up -d --build
 
-# Manual certificate renewal
+# Certificate renewal is automatic (certbot renews every 12h, nginx reloads to pick up new certs).
+# To force a manual renewal:
 docker compose run --rm certbot renew
 docker compose exec nginx nginx -s reload
 ```
