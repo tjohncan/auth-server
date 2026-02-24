@@ -411,8 +411,10 @@ void http_response_set_header(HttpResponse *resp, const char *name, const char *
     /* Check if header already exists (replace it) */
     for (int i = 0; i < resp->header_count; i++) {
         if (strcasecmp(resp->headers[i].name, name) == 0) {
+            char *new_value = str_dup(value);
+            if (!new_value) return;  /* OOM - keep existing value */
             free(resp->headers[i].value);
-            resp->headers[i].value = str_dup(value);
+            resp->headers[i].value = new_value;
             return;
         }
     }
@@ -426,8 +428,15 @@ void http_response_set_header(HttpResponse *resp, const char *name, const char *
         resp->header_capacity = new_capacity;
     }
 
-    resp->headers[resp->header_count].name = str_dup(name);
-    resp->headers[resp->header_count].value = str_dup(value);
+    char *dup_name = str_dup(name);
+    char *dup_value = str_dup(value);
+    if (!dup_name || !dup_value) {
+        free(dup_name);
+        free(dup_value);
+        return;  /* OOM - skip header */
+    }
+    resp->headers[resp->header_count].name = dup_name;
+    resp->headers[resp->header_count].value = dup_value;
     resp->header_count++;
 }
 
