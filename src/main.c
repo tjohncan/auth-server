@@ -25,7 +25,7 @@
 
 /* Global shutdown flag for signal handling */
 static volatile sig_atomic_t shutdown_requested = 0;
-static EventLoopPool *global_pool = NULL;
+static volatile EventLoopPool *global_pool = NULL;
 static pthread_t cleaner_thread = 0;
 
 /* Global context for HTTP handlers */
@@ -43,7 +43,7 @@ static void signal_handler(int signum) {
 
     /* Stop workers by setting their running flags to false */
     if (global_pool) {
-        event_loop_pool_stop_signal_safe(global_pool);
+        event_loop_pool_stop_signal_safe((EventLoopPool *)global_pool);
     }
 }
 
