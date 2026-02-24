@@ -210,6 +210,11 @@ int main(void) {
     if (config->db_type == DB_TYPE_SQLITE) {
         connection_string = config->db_path;
     } else {
+        if (!config->db_host || !config->db_name || !config->db_user || !config->db_password) {
+            log_error("PostgreSQL requires db_host, db_name, db_user, and db_password");
+            config_free(config);
+            return 1;
+        }
         snprintf(pg_conn_str, sizeof(pg_conn_str),
                  "host=%s port=%d dbname=%s user=%s password=%s",
                  config->db_host, config->db_port, config->db_name,
