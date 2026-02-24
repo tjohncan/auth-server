@@ -30,7 +30,6 @@ void oauth_token_response_free(oauth_token_response_t *resp) {
     free(resp->access_token);
     free(resp->refresh_token);
     free(resp->scope);
-    free(resp->token_type);
     memset(resp, 0, sizeof(*resp));
 }
 
@@ -599,13 +598,7 @@ int oauth_exchange_authorization_code(db_handle_t *db,
     out_response->refresh_token = refresh_token;  /* May be NULL */
     out_response->expires_in = client.access_token_ttl_seconds;
 
-    out_response->token_type = str_dup("Bearer");
-    if (!out_response->token_type) {
-        free(access_token);
-        free(refresh_token);
-        log_error("Failed to allocate token_type");
-        return -1;
-    }
+    out_response->token_type = "Bearer";
 
     if (auth_claims.scope[0] != '\0') {
         out_response->scope = str_dup(auth_claims.scope);
@@ -840,13 +833,7 @@ int oauth_refresh_access_token(db_handle_t *db,
     out_response->refresh_token = new_refresh_token;
     out_response->expires_in = client.access_token_ttl_seconds;
 
-    out_response->token_type = str_dup("Bearer");
-    if (!out_response->token_type) {
-        free(access_token);
-        free(new_refresh_token);
-        log_error("Failed to allocate token_type");
-        return -1;
-    }
+    out_response->token_type = "Bearer";
 
     if (final_scope && final_scope[0] != '\0') {
         out_response->scope = str_dup(final_scope);
@@ -969,13 +956,7 @@ int oauth_client_credentials(db_handle_t *db,
     /* Step 7: Build response */
     out_response->access_token = access_token;
 
-    out_response->token_type = str_dup("Bearer");
-    if (!out_response->token_type) {
-        free(access_token);
-        log_error("Failed to allocate token_type");
-        return -1;
-    }
-
+    out_response->token_type = "Bearer";
     out_response->expires_in = client.access_token_ttl_seconds;
 
     if (scope && scope[0] != '\0') {

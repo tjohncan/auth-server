@@ -23,7 +23,7 @@ typedef struct {
     char *access_token;      /* Access token (JWT or opaque) - caller must free */
     char *refresh_token;     /* Refresh token (optional) - caller must free */
     int expires_in;          /* Access token TTL in seconds */
-    char *token_type;        /* "Bearer" */
+    const char *token_type;  /* "Bearer" (string literal, not heap-allocated) */
     char *scope;             /* Space-separated scopes (optional) - caller must free */
 } oauth_token_response_t;
 
