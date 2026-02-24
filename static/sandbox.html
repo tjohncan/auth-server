@@ -137,26 +137,6 @@
         <div id="intro-result" class="result"></div>
     </div>
 
-    <!-- Panel 3: Refresh Token Rotation -->
-    <div id="panel-refresh" class="panel">
-        <p class="desc">Exchange a refresh token for a new access token and refresh token. The old refresh token is invalidated (rotation). Refresh tokens are issued with <code>authorization_code</code> grants.</p>
-        <div class="field">
-            <label>Client ID <span class="req">*</span></label>
-            <input type="text" id="ref-client-id" placeholder="32-character hex UUID">
-        </div>
-        <div class="field">
-            <label>Refresh Token <span class="req">*</span></label>
-            <textarea id="ref-token" placeholder="Paste refresh token"></textarea>
-        </div>
-        <div class="field">
-            <label>Scope</label>
-            <input type="text" id="ref-scope" placeholder="Optional — downscope from original grant">
-        </div>
-        <div id="ref-error" class="field-error"></div>
-        <button class="run-btn" data-action="run-refresh">Refresh</button>
-        <div id="ref-result" class="result"></div>
-    </div>
-
     <!-- Panel 3: Token Revocation -->
     <div id="panel-revoke" class="panel">
         <p class="desc">Revoke an access token using client credentials. Per RFC 7009, the endpoint always returns <code>200 OK</code> regardless of whether the token was valid, already revoked, or the credentials were wrong — preventing information disclosure.</p>
@@ -182,7 +162,27 @@
         <div id="rev-result" class="result"></div>
     </div>
 
-    <!-- Panel 4: Refresh Token Rotation -->
+    <!-- Panel 4: Refresh Token -->
+    <div id="panel-refresh" class="panel">
+        <p class="desc">Exchange a refresh token for a new access token and refresh token. The old refresh token is invalidated (rotation). Refresh tokens are issued with <code>authorization_code</code> grants.</p>
+        <div class="field">
+            <label>Client ID <span class="req">*</span></label>
+            <input type="text" id="ref-client-id" placeholder="32-character hex UUID">
+        </div>
+        <div class="field">
+            <label>Refresh Token <span class="req">*</span></label>
+            <textarea id="ref-token" placeholder="Paste refresh token"></textarea>
+        </div>
+        <div class="field">
+            <label>Scope</label>
+            <input type="text" id="ref-scope" placeholder="Optional — downscope from original grant">
+        </div>
+        <div id="ref-error" class="field-error"></div>
+        <button class="run-btn" data-action="run-refresh">Refresh</button>
+        <div id="ref-result" class="result"></div>
+    </div>
+
+    <!-- Panel 5: Replay Detection -->
     <div id="panel-replay" class="panel">
         <p class="desc">Demonstrate refresh token replay detection. After rotating a token in the Refresh panel, the old token is automatically loaded here. The server detects the replay and revokes the entire token chain — including the new tokens from the rotation.</p>
         <div class="note warn">This is a destructive test. All tokens in the chain will be revoked.</div>
