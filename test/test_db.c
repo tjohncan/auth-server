@@ -43,19 +43,21 @@ int main(void) {
 
     /* Initialize schema */
     log_info("Initializing schema...");
-    result = db_init_schema(db, config->db_type, config->schema_dir);
-    if (result != 0) {
+    const char *owner_role = config->db_owner_role ? config->db_owner_role : config->db_user;
+    result = db_init_schema(db, config->db_type, config->schema_dir, owner_role);
+    if (result < 0) {
         log_error("Failed to initialize schema");
         db_disconnect(db);
         config_free(config);
         return 1;
     }
 
-    log_info("Schema initialized");
+    int fresh_schema = (result == 0);
+    log_info("Schema initialized (%s)", fresh_schema ? "created" : "already existed");
 
     /* Initialize history tables if enabled */
     if (config->enable_history_tables) {
-        result = db_init_history_tables(db, config->db_type);
+        result = db_init_history_tables(db, config->db_type, fresh_schema);
         if (result != 0) {
             log_error("Failed to initialize history tables");
             db_disconnect(db);
