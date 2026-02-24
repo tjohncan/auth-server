@@ -92,7 +92,7 @@ create table resource_server (
 , organization_pin integer not null
 , code_name text not null
 , display_name text not null
-, address text not null collate nocase
+, address text not null
 , note text
 
 , constraint uix_resource_server_id unique(id)

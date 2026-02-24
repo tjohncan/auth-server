@@ -1130,7 +1130,7 @@ int oauth_resolve_resource_server(db_handle_t *db, long long client_pin,
             "JOIN " TBL_ORGANIZATION " O ON O.pin = C.organization_pin "
             "WHERE C.pin = " P"1 "
             "AND C.is_active = " BOOL_TRUE " "
-            "AND lower(RS.address) = lower(" P"2) "
+            "AND RS.address = " P"2 "
             "AND RS.is_active = " BOOL_TRUE " "
             "AND O.is_active = " BOOL_TRUE " "
             "LIMIT 1";

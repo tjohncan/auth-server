@@ -127,7 +127,7 @@ create unique index uix_resource_server_org_code
   where is_active = true;
 
 create unique index uix_resource_server_org_address
-  on security.resource_server(organization_pin, lower(address))
+  on security.resource_server(organization_pin, address)
   where is_active = true;
 
 create table security.resource_server_key (
