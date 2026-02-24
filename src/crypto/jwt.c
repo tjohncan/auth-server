@@ -308,6 +308,10 @@ int jwt_decode(const char *token,
                               "%.*s.%.*s",
                               (int)header_len, token,
                               (int)payload_len, dot1 + 1);
+    if (signing_len < 0 || (size_t)signing_len >= sizeof(signing_input)) {
+        log_error("JWT signing input too large");
+        return -1;
+    }
 
     unsigned char computed_signature[HMAC_SHA256_LENGTH];
     if (crypto_hmac_sha256(secret, secret_len,
@@ -689,6 +693,10 @@ int jwt_decode_es256(const char *token,
                               "%.*s.%.*s",
                               (int)header_len, token,
                               (int)payload_len, dot1 + 1);
+    if (signing_len < 0 || (size_t)signing_len >= sizeof(signing_input)) {
+        log_error("JWT signing input too large");
+        return -1;
+    }
 
     /* Decode raw R||S signature (RFC 7518: always 64 bytes for P-256) */
     unsigned char raw_signature[64];
