@@ -456,6 +456,7 @@ static void* cleaner_thread_main(void *arg) {
     db_handle_t *db = NULL;
     if (db_connect(&db, config->db_type, config->connection_string) != 0) {
         log_error("Cleaner: failed to create database connection");
+        free((char *)config->connection_string);
         free(config);
         return NULL;
     }
@@ -475,6 +476,7 @@ static void* cleaner_thread_main(void *arg) {
     if (g_num_active_cleaners == 0) {
         log_warn("Cleaner: no tables to monitor, exiting");
         db_disconnect(db);
+        free((char *)config->connection_string);
         free(config);
         return NULL;
     }
@@ -541,6 +543,7 @@ static void* cleaner_thread_main(void *arg) {
 
     log_info("Cleaner: stopped (purged %d batches total)", total_purged);
     db_disconnect(db);
+    free((char *)config->connection_string);
     free(config);
     return NULL;
 }
@@ -566,6 +569,14 @@ int cleaner_start(cleaner_config_t *config, pthread_t *thread_out) {
         return -1;
     }
     memcpy(config_copy, config, sizeof(cleaner_config_t));
+
+    /* Own the connection string (caller's may be stack-allocated) */
+    config_copy->connection_string = str_dup(config->connection_string);
+    if (!config_copy->connection_string) {
+        log_error("Cleaner: failed to duplicate connection_string");
+        free(config_copy);
+        return -1;
+    }
 
     /* Start thread */
     if (pthread_create(thread_out, NULL, cleaner_thread_main, config_copy) != 0) {
