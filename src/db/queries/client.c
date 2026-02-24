@@ -234,7 +234,8 @@ int client_create(db_handle_t *db,
             "AND ok.pin = " P"14 "
             "AND ok.is_active = " BOOL_TRUE " "
             "AND existing_code.pin IS NULL "
-            "LIMIT 1";
+            "LIMIT 1 "
+            "RETURNING pin";
     } else {
         /* Session authentication - verify user is org admin */
         sql =
@@ -255,7 +256,8 @@ int client_create(db_handle_t *db,
             "AND oa.user_account_pin = " P"14 "
             "AND ua.is_active = " BOOL_TRUE " "
             "AND existing_code.pin IS NULL "
-            "LIMIT 1";
+            "LIMIT 1 "
+            "RETURNING pin";
     }
 
     db_stmt_t *stmt = NULL;
@@ -306,11 +308,13 @@ int client_create(db_handle_t *db,
         db_bind_int64(stmt, 14, user_account_pin);
     }
 
-    /* Execute */
+    /* Execute and verify a row was actually inserted */
     int rc = db_step(stmt);
-    db_finalize(stmt);
 
-    if (rc != DB_DONE) {
+    if (rc == DB_ROW) {
+        db_finalize(stmt);
+    } else {
+        db_finalize(stmt);
         log_error("Failed to insert client (unauthorized or constraint violation)");
         return -1;
     }
