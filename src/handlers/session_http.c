@@ -578,11 +578,11 @@ HttpResponse *logout_handler(const HttpRequest *req, const RouteParams *params) 
     HttpResponse *response = response_json_ok("{\"message\":\"Logged out successfully\"}");
 
     if (response) {
-        char cookie_header[256];
-        snprintf(cookie_header, sizeof(cookie_header),
+        char clear_cookie[256];
+        snprintf(clear_cookie, sizeof(clear_cookie),
                  "%s=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0",
                  SESSION_COOKIE_NAME);
-        http_response_set_header(response, "Set-Cookie", cookie_header);
+        http_response_set_header(response, "Set-Cookie", clear_cookie);
     }
 
     return response;
