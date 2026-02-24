@@ -1,12 +1,13 @@
 # Auth Server
 
-High-performance, high-security `OAuth2` authentication server written in `C`.
-Designed for deployment on `Linux` servers behind a reverse proxy or load balancer
+High-performance, high-security OAuth2 authentication server written in C. 
+Designed for deployment on Linux servers behind a reverse proxy or load balancer 
 to cover TLS termination and rate limiting.
 
-The database component is configurable as either `SQLite` or `PostgreSQL`. 
-Static front-end `html` and `js` documents 
-provide the "login" interface, session flow coordination, and multi-tenant setup/administration wizards.
+The database component is configurable as either SQLite or PostgreSQL. 
+Static front-end html and js documents 
+provide the "login" interface, session flow coordination, 
+and multi-tenant setup/administration wizards.
 
 ## Documentation
 
@@ -17,9 +18,11 @@ provide the "login" interface, session flow coordination, and multi-tenant setup
 
 ## Deployment
 
-The server speaks HTTP/1.0 on a configurable port. TLS termination and rate limiting
-are expected to be handled by the infrastructure layer in front of it — for example, `nginx` in self-hosted deployments,
-or a cloud load balancer and WAF for cloud deployments. This server focuses on authentication logic and not traffic management.
+The server speaks HTTP/1.0 on a configurable port. TLS termination and rate limiting 
+are expected to be handled by the infrastructure layer in front of it 
+(for example, nginx in single-server deployments, 
+or a load balancer and WAF in a horizontally-scaled cloud setup). 
+This server focuses on authentication logic.
 
 ## Core Design
 
@@ -228,13 +231,13 @@ Business logic for OAuth2 token operations.
 
 - **Files**: `oauth.c`, `oauth.h`
 - **Responsibility**: PKCE validation, token generation, transaction-wrapped token exchanges
-- **Used by**: Token endpoint, future introspection/revocation endpoints
+- **Used by**: Token endpoint, introspection/revocation endpoints
 - **Design**: All token operations wrapped in transactions for atomicity
 - **Security**: Replay attack detection via return codes (0=success, 1=replay, -1=error)
 
 Examples:
-- `oauth_exchange_authorization_code(db, client_id, code, redirect_uri, verifier, out_response)` - Exchange auth code for tokens
-- `oauth_refresh_access_token(db, client_id, refresh_token, scope, out_response)` - Rotate refresh token and issue new access token
+- `oauth_exchange_authorization_code(db, client_id, code, redirect_uri, verifier, resource, out_response)` - Exchange auth code for tokens
+- `oauth_refresh_access_token(db, client_id, refresh_token, scope, resource, out_response)` - Rotate refresh token and issue new access token
 
 ### 7. OAuth2 HTTP Handler Layer (`src/handlers/oauth_http.c`)
 HTTP endpoint for OAuth2 token operations.
@@ -242,7 +245,7 @@ HTTP endpoint for OAuth2 token operations.
 - **Files**: `oauth_http.c`
 - **Responsibility**: Form-urlencoded parsing, RFC 6749 compliant JSON responses
 - **Used by**: Router (called for POST /token)
-- **Design**: Supports grant_type: authorization_code, refresh_token
+- **Design**: Supports grant_type: authorization_code, refresh_token, client_credentials
 
 Examples:
 - `token_handler(req, params)` - POST /token
@@ -446,7 +449,7 @@ vendor/
 ## Performance Characteristics
 
 **Concurrency:**
-- Handles 10,000+ concurrent connections per core
+- Designed to handle high-concurrency load
 - Linear scaling with CPU cores
 - No context switching within event loop
 
