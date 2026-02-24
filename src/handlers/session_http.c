@@ -106,7 +106,10 @@ HttpResponse *login_handler(const HttpRequest *req, const RouteParams *params) {
     /* Check if user has MFA configured */
     mfa_method_t *mfa_methods = NULL;
     int mfa_count = 0;
-    mfa_method_list(db, user_pin, 1, &mfa_methods, &mfa_count);
+    if (mfa_method_list(db, user_pin, 1, &mfa_methods, &mfa_count) != 0) {
+        free(session_token);
+        return response_json_error(500, "Failed to retrieve MFA methods");
+    }
 
     /* Build JSON response body */
     char response_body[4096];
