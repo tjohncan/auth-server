@@ -18,6 +18,12 @@
     <div id="status">Processing authorization code...</div>
 
     <script>
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
+
         async function handleCallback() {
             const statusEl = document.getElementById('status');
 
@@ -55,10 +61,10 @@
                 const adminUrl = `/admin?client_id=${clientId}`;
                 window.location.href = adminUrl;
                 setTimeout(() => {
-                    statusEl.innerHTML = `<p><a href="${adminUrl}">Continue to Management Console</a></p>`;
+                    statusEl.innerHTML = `<p><a href="${escapeHtml(adminUrl)}">Continue to Management Console</a></p>`;
                 }, 1000);
             } catch (err) {
-                statusEl.innerHTML = '<p>Error: ' + err.message.replace(/</g, '&lt;') + '</p>' +
+                statusEl.innerHTML = '<p>Error: ' + escapeHtml(err.message) + '</p>' +
                     '<p style="margin-top: 20px; color: #999;">If you need to update your profile or security settings, ' +
                     'visit the <a href="/admin">Management Console</a>.</p>';
             }
