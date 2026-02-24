@@ -56,7 +56,6 @@ struct EventLoop {
  */
 struct EventLoopPool {
     EventLoopConfig config;       /* Configuration */
-    int listen_fd;                /* Shared listen socket (SO_REUSEPORT) */
     int num_workers;              /* Number of worker threads */
     pthread_t *worker_threads;    /* Array of worker thread handles */
     EventLoop **event_loops;      /* One EventLoop per worker */
