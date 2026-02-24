@@ -775,7 +775,7 @@ int organization_key_create(db_handle_t *db,
     db_bind_text(stmt, 3, hash_hex, -1);
     db_bind_text(stmt, 4, salt_hex, -1);
     db_bind_int(stmt, 5, iterations);
-    db_bind_text(stmt, 6, note ? note : "", -1);
+    db_bind_text(stmt, 6, note, -1);
 
     int rc = db_step(stmt);
     db_finalize(stmt);
