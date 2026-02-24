@@ -737,6 +737,23 @@ static void apply_env_overrides(config_t *config) {
             log_warn("Invalid AUTH_RETENTION_TOKENS_GRACE_DAYS: %s", env_value);
         }
     }
+
+    /* ENABLE_HISTORY_TABLES */
+    env_var_name = config->enable_history_tables_env ?
+                   config->enable_history_tables_env :
+                   "AUTH_ENABLE_HISTORY_TABLES";
+    env_value = getenv(env_var_name);
+    if (env_value) {
+        if (strcmp(env_value, "true") == 0 || strcmp(env_value, "1") == 0) {
+            config->enable_history_tables = 1;
+            log_info("Config override from %s: enabled", env_var_name);
+        } else if (strcmp(env_value, "false") == 0 || strcmp(env_value, "0") == 0) {
+            config->enable_history_tables = 0;
+            log_info("Config override from %s: disabled", env_var_name);
+        } else {
+            log_warn("Invalid %s value: %s", env_var_name, env_value);
+        }
+    }
 }
 
 config_t *config_load(const char *config_file) {
@@ -881,23 +898,6 @@ config_t *config_load(const char *config_file) {
 
     /* Apply environment variable overrides */
     apply_env_overrides(config);
-
-    /* Apply enable_history_tables environment override */
-    const char *history_env_var_name = config->enable_history_tables_env ?
-                                       config->enable_history_tables_env :
-                                       "AUTH_ENABLE_HISTORY_TABLES";
-    char *history_env = getenv(history_env_var_name);
-    if (history_env) {
-        if (strcmp(history_env, "true") == 0 || strcmp(history_env, "1") == 0) {
-            config->enable_history_tables = 1;
-            log_info("Config override from %s: enabled", history_env_var_name);
-        } else if (strcmp(history_env, "false") == 0 || strcmp(history_env, "0") == 0) {
-            config->enable_history_tables = 0;
-            log_info("Config override from %s: disabled", history_env_var_name);
-        } else {
-            log_warn("Invalid %s value: %s", history_env_var_name, history_env);
-        }
-    }
 
     /* Validate password hashing iterations */
     if (config->secret_hash_max_iterations < config->secret_hash_min_iterations) {
