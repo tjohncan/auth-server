@@ -1584,7 +1584,7 @@
                         ${formCheckbox('Require MFA', 'require_mfa', false)}
                     </div>
                     <div id="confidentialFields" style="display: none;">
-                        ${formDuration('Maximum Key Age (Secret Rotation)', 'secret_rotation_seconds', 0, DURATION_PRESETS.rotation)}
+                        ${formDuration('Maximum Key Age (Secret Rotation)', 'secret_rotation_seconds', -1, DURATION_PRESETS.rotation)}
                     </div>
                     ${formTextarea('Note', 'note', '')}
                     <div style="display: flex; gap: 10px; margin-top: 20px;">
