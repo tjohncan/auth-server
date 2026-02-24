@@ -42,12 +42,12 @@ int org_exists(db_handle_t *db, const char *code_name);
  * Note: Does NOT include created_at/updated_at (database artifacts only)
  */
 typedef struct {
-    unsigned char id[16];
-    long long pin;
-    char code_name[128];
-    char display_name[256];
-    char note[512];
-    int is_active;
+    unsigned char id[16];   /* Organization UUID */
+    long long pin;          /* Internal PIN (for backend lookups, not API) */
+    char code_name[128];    /* Unique code name */
+    char display_name[256]; /* Human-readable name */
+    char note[512];         /* Optional description */
+    int is_active;          /* 1 if active, 0 if inactive */
 } org_data_t;
 
 /*

@@ -2,6 +2,9 @@
 #define HANDLERS_ADMIN_H
 
 #include "db/db.h"
+#include "db/queries/org.h"
+#include "db/queries/resource_server.h"
+#include "db/queries/client.h"
 #include "util/config.h"
 
 /*
@@ -56,20 +59,8 @@ int admin_bootstrap(db_handle_t *db,
  * ORGANIZATION OPERATIONS
  * ========================================================================== */
 
-/*
- * Organization data structure for list/get operations
- *
- * Note: Does NOT include created_at/updated_at (database artifacts only)
- * Note: PIN included for internal use only (not exposed in JSON)
- */
-typedef struct {
-    unsigned char id[16];   /* Organization UUID */
-    long long pin;          /* Internal PIN (for backend lookups, not API) */
-    char code_name[128];    /* Unique code name */
-    char display_name[256]; /* Human-readable name */
-    char note[512];         /* Optional description */
-    int is_active;          /* 1 if active, 0 if inactive */
-} admin_organization_t;
+/* Admin type aliases for query-layer structs (single source of truth) */
+typedef org_data_t admin_organization_t;
 
 /*
  * Create organization
@@ -183,19 +174,7 @@ int admin_create_resource_server_bootstrap(db_handle_t *db,
                                             const char *address,
                                             const char *note);
 
-/*
- * Resource server data structure
- */
-typedef struct {
-    unsigned char id[16];
-    long long pin;
-    long long organization_pin;
-    char code_name[128];
-    char display_name[256];
-    char address[512];
-    char note[512];
-    int is_active;
-} admin_resource_server_t;
+typedef resource_server_data_t admin_resource_server_t;
 
 int admin_list_resource_servers(db_handle_t *db, long long user_account_pin,
                                  long long organization_key_pin,
@@ -310,27 +289,7 @@ int admin_link_client_resource_server_bootstrap(db_handle_t *db,
                                                 const unsigned char *client_id,
                                                 const char *resource_server_address);
 
-/*
- * Client data structure
- */
-typedef struct {
-    unsigned char id[16];
-    long long pin;
-    long long organization_pin;
-    char code_name[128];
-    char display_name[256];
-    char client_type[32];
-    char grant_type[32];
-    char note[512];
-    int require_mfa;
-    int access_token_ttl_seconds;
-    int issue_refresh_tokens;
-    int refresh_token_ttl_seconds;
-    int maximum_session_seconds;
-    int secret_rotation_seconds;
-    int is_universal;
-    int is_active;
-} admin_client_t;
+typedef client_data_t admin_client_t;
 
 int admin_list_clients(db_handle_t *db, long long user_account_pin,
                        long long organization_key_pin,
@@ -375,13 +334,7 @@ int admin_update_client(db_handle_t *db, long long user_account_pin,
                         const int *secret_rotation_seconds,
                         const int *is_active);
 
-/*
- * Client redirect URI data structure
- */
-typedef struct {
-    char redirect_uri[512];
-    char note[512];
-} admin_client_redirect_uri_t;
+typedef client_redirect_uri_data_t admin_client_redirect_uri_t;
 
 int admin_list_client_redirect_uris(db_handle_t *db, long long user_account_pin,
                                      long long organization_key_pin,
@@ -402,26 +355,8 @@ int admin_delete_client_redirect_uri(db_handle_t *db, long long user_account_pin
                                       const unsigned char *client_id,
                                       const char *redirect_uri);
 
-/*
- * Client-resource-server link data structure (for querying by client_id)
- * Returns resource server details only
- */
-typedef struct {
-    unsigned char resource_server_id[16];
-    char resource_server_code_name[128];
-    char resource_server_display_name[256];
-    char resource_server_address[512];
-} admin_client_resource_server_t;
-
-/*
- * Resource-server-client link data structure (for querying by resource_server_id)
- * Returns client details only
- */
-typedef struct {
-    unsigned char client_id[16];
-    char client_code_name[128];
-    char client_display_name[256];
-} admin_resource_server_client_t;
+typedef client_resource_server_data_t admin_client_resource_server_t;
+typedef resource_server_client_data_t admin_resource_server_client_t;
 
 int admin_list_client_resource_servers(db_handle_t *db, long long user_account_pin,
                                         long long organization_key_pin,
@@ -453,15 +388,7 @@ int admin_delete_client_resource_server_link(db_handle_t *db, long long user_acc
  * RESOURCE SERVER KEY OPERATIONS
  * ========================================================================== */
 
-/*
- * Resource Server Key data structure
- */
-typedef struct {
-    unsigned char id[16];        /* key_id */
-    int is_active;
-    char generated_at[32];
-    char note[256];
-} admin_resource_server_key_t;
+typedef resource_server_key_data_t admin_resource_server_key_t;
 
 int admin_create_resource_server_key(db_handle_t *db,
                                       long long user_account_pin,
@@ -490,15 +417,7 @@ int admin_revoke_resource_server_key(db_handle_t *db,
  * CLIENT KEY OPERATIONS
  * ========================================================================== */
 
-/*
- * Client Key data structure
- */
-typedef struct {
-    unsigned char id[16];        /* key_id */
-    int is_active;
-    char generated_at[32];
-    char note[256];
-} admin_client_key_t;
+typedef client_key_data_t admin_client_key_t;
 
 int admin_create_client_key(db_handle_t *db,
                              long long user_account_pin,
@@ -569,15 +488,7 @@ int admin_make_org_admin(db_handle_t *db,
  * ORGANIZATION KEY OPERATIONS
  * ========================================================================== */
 
-/*
- * Organization key data structure for admin layer
- */
-typedef struct {
-    unsigned char id[16];        /* key_id */
-    int is_active;
-    char generated_at[32];
-    char note[256];
-} admin_organization_key_t;
+typedef organization_key_data_t admin_organization_key_t;
 
 /*
  * List organization keys

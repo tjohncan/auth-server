@@ -172,8 +172,7 @@ int admin_list_organizations(db_handle_t *db, long long user_account_pin,
         return -1;
     }
 
-    /* org_data_t and admin_organization_t have identical layout */
-    *out_orgs = (admin_organization_t *)orgs;
+    *out_orgs = orgs;
     *out_count = count;
 
     return 0;
@@ -245,7 +244,7 @@ int admin_list_resource_servers(db_handle_t *db, long long user_account_pin,
         return -1;
     }
 
-    *out_servers = (admin_resource_server_t *)servers;
+    *out_servers = servers;
     *out_count = count;
 
     return 0;
@@ -314,7 +313,7 @@ int admin_list_clients(db_handle_t *db, long long user_account_pin,
         return -1;
     }
 
-    *out_clients = (admin_client_t *)clients;
+    *out_clients = clients;
     *out_count = count;
 
     return 0;
@@ -439,7 +438,7 @@ int admin_list_client_redirect_uris(db_handle_t *db, long long user_account_pin,
         return -1;
     }
 
-    *out_uris = (admin_client_redirect_uri_t *)uris;
+    *out_uris = uris;
     *out_count = count;
 
     return 0;
@@ -497,7 +496,7 @@ int admin_list_client_resource_servers(db_handle_t *db, long long user_account_p
         return -1;
     }
 
-    *out_links = (admin_client_resource_server_t *)links;
+    *out_links = links;
     *out_count = count;
 
     return 0;
@@ -522,7 +521,7 @@ int admin_list_resource_server_clients(db_handle_t *db, long long user_account_p
         return -1;
     }
 
-    *out_links = (admin_resource_server_client_t *)links;
+    *out_links = links;
     *out_count = count;
 
     return 0;
@@ -607,7 +606,7 @@ int admin_list_resource_server_keys(db_handle_t *db,
         return -1;
     }
 
-    *out_keys = (admin_resource_server_key_t *)keys;
+    *out_keys = keys;
     *out_count = count;
 
     return 0;
@@ -675,7 +674,7 @@ int admin_list_client_keys(db_handle_t *db,
         return -1;
     }
 
-    *out_keys = (admin_client_key_t *)keys;
+    *out_keys = keys;
     *out_count = count;
 
     return 0;
@@ -952,7 +951,7 @@ int admin_list_organization_keys(db_handle_t *db,
         return -1;
     }
 
-    *out_keys = (admin_organization_key_t *)keys;
+    *out_keys = keys;
     *out_count = count;
 
     return 0;
