@@ -98,7 +98,7 @@ static const char *find_json_key(const char *json, const char *key) {
                 strncmp(p + 1, key, key_len) == 0 && p[1 + key_len] == '"') {
                 /* Verify a colon follows (skip whitespace) */
                 const char *after = p + 1 + key_len + 1;
-                while (*after == ' ' || *after == '\t' || *after == '\n') after++;
+                while (*after == ' ' || *after == '\t' || *after == '\n' || *after == '\r') after++;
                 if (*after == ':') return p;
             }
             /* Skip past this string (whether it matched or not) */
@@ -147,7 +147,7 @@ char *json_get_string(const char *json, const char *key) {
 
     /* Skip whitespace after colon */
     const char *value_start = colon + 1;
-    while (*value_start == ' ' || *value_start == '\t' || *value_start == '\n') {
+    while (*value_start == ' ' || *value_start == '\t' || *value_start == '\n' || *value_start == '\r') {
         value_start++;
     }
 
@@ -211,7 +211,7 @@ int json_get_bool(const char *json, const char *key, int *out_value) {
 
     /* Skip whitespace after colon */
     const char *value_start = colon + 1;
-    while (*value_start == ' ' || *value_start == '\t' || *value_start == '\n') {
+    while (*value_start == ' ' || *value_start == '\t' || *value_start == '\n' || *value_start == '\r') {
         value_start++;
     }
 
