@@ -689,6 +689,12 @@ HttpResponse *authorize_handler(const HttpRequest *req, const RouteParams *param
         return resp;
     }
 
+    if (rc == -4) {
+        /* Client not found or redirect_uri not registered — do NOT redirect
+         * (RFC 6749 Section 4.1.2.1: must not redirect to unverified URI) */
+        return response_json_error(400, "Invalid client_id or redirect_uri");
+    }
+
     if (rc != 0) {
         /* Validation error - redirect with invalid_request */
         char location[2048];

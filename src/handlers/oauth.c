@@ -172,14 +172,14 @@ int oauth_authorize(db_handle_t *db,
     oauth_client_info_t client;
     if (oauth_client_lookup(db, client_id, &client) != 0) {
         log_error("Client not found or inactive");
-        return -1;
+        return -4;  /* Pre-trust: do NOT redirect to unverified URI */
     }
 
     /* Step 2: Validate redirect_uri is registered for client */
     int uri_valid = oauth_redirect_uri_validate(db, client.pin, redirect_uri);
     if (uri_valid != 1) {
         log_error("Redirect URI not registered for client");
-        return -1;
+        return -4;  /* Pre-trust: do NOT redirect to unverified URI */
     }
 
     /* Step 3: Validate session */
