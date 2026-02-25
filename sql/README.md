@@ -22,8 +22,8 @@ This schema supports:
 - `id` - UUID for external references (non-enumerable, network-safe)
 
 **Timestamps:**
-- `created_at` / `updated_at` - Technical audit fields (auto-managed by triggers)
-- `*_at` business fields - Used in application logic (e.g., `generated_at`, `issued_at`)
+- `created_at` - Uses column DEFAULT; omit from INSERT field lists
+- `updated_at` - Must be set explicitly in every UPDATE query
 
 **History Tables:**
 - Companion `history__*` tables track all UPDATEs and DELETEs
