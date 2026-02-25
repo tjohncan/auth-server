@@ -356,7 +356,7 @@
 
                 if (response.status === 401) {
                     // Not logged in - redirect to login page
-                    window.location.href = '/login?return=' + encodeURIComponent('/admin');
+                    window.location.replace('/login?return=' + encodeURIComponent('/admin'));
                     return;
                 }
 
@@ -407,7 +407,7 @@
         }
 
         window.selectSetup = function(clientId) {
-            window.location.href = `/admin?client_id=${clientId}`;
+            window.location.replace(`/admin?client_id=${clientId}`);
         };
 
         // ===== Dashboard Content =====
