@@ -59,7 +59,7 @@
                 await client.handleCallback();
 
                 const adminUrl = `/admin?client_id=${clientId}`;
-                window.location.href = adminUrl;
+                window.location.replace(adminUrl);
                 setTimeout(() => {
                     statusEl.innerHTML = `<p><a href="${escapeHtml(adminUrl)}">Continue to Management Console</a></p>`;
                 }, 1000);
