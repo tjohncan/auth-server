@@ -127,6 +127,11 @@ HttpResponse *login_handler(const HttpRequest *req, const RouteParams *params) {
             off += snprintf(response_body + off, sizeof(response_body) - off,
                             "%s{\"id\":\"%s\",\"type\":\"%s\",\"display_name\":\"%s\"}",
                             i > 0 ? "," : "", id_hex, type_esc, name_esc);
+            if (off >= (int)sizeof(response_body)) {
+                free(mfa_methods);
+                free(session_token);
+                return response_json_error(500, "Response too large");
+            }
         }
         snprintf(response_body + off, sizeof(response_body) - off, "]}");
     } else {
@@ -268,6 +273,10 @@ HttpResponse *management_setups_handler(const HttpRequest *req, const RouteParam
                            i > 0 ? "," : "",
                            org_code_esc, org_display_esc, client_id_hex,
                            client_code_esc, client_display_esc, rs_address_esc);
+        if (offset >= (int)sizeof(response_body)) {
+            free(setups);
+            return response_json_error(500, "Response too large");
+        }
     }
 
     snprintf(response_body + offset, sizeof(response_body) - offset, "]}");
@@ -402,6 +411,10 @@ HttpResponse *emails_handler(const HttpRequest *req, const RouteParams *params) 
                                 email_esc,
                                 emails[i].is_primary ? "true" : "false",
                                 emails[i].is_verified ? "true" : "false");
+        if (json_offset >= (int)sizeof(response_body)) {
+            free(emails);
+            return response_json_error(500, "Response too large");
+        }
     }
 
     snprintf(response_body + json_offset, sizeof(response_body) - json_offset,

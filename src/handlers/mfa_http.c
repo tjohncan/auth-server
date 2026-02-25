@@ -230,6 +230,11 @@ HttpResponse *mfa_totp_confirm_handler(const HttpRequest *req, const RouteParams
         for (int i = 0; i < recovery_count; i++) {
             offset += snprintf(response_body + offset, sizeof(response_body) - offset,
                                "%s\"%s\"", i > 0 ? "," : "", recovery_codes[i]);
+            if (offset >= (int)sizeof(response_body)) {
+                for (int j = 0; j < recovery_count; j++) free(recovery_codes[j]);
+                free(recovery_codes);
+                return response_json_error(500, "Response too large");
+            }
         }
 
         snprintf(response_body + offset, sizeof(response_body) - offset, "]}");
@@ -456,6 +461,10 @@ HttpResponse *mfa_list_methods_handler(const HttpRequest *req, const RouteParams
                            id_hex, type_esc, name_esc,
                            methods[i].is_confirmed ? "true" : "false",
                            confirmed_at_json);
+        if (offset >= (int)sizeof(response_body)) {
+            free(methods);
+            return response_json_error(500, "Response too large");
+        }
     }
 
     snprintf(response_body + offset, sizeof(response_body) - offset, "]}");
@@ -563,6 +572,11 @@ HttpResponse *mfa_regenerate_recovery_codes_handler(const HttpRequest *req,
     for (int i = 0; i < count; i++) {
         offset += snprintf(response_body + offset, sizeof(response_body) - offset,
                            "%s\"%s\"", i > 0 ? "," : "", codes[i]);
+        if (offset >= (int)sizeof(response_body)) {
+            for (int j = 0; j < count; j++) free(codes[j]);
+            free(codes);
+            return response_json_error(500, "Response too large");
+        }
     }
 
     snprintf(response_body + offset, sizeof(response_body) - offset, "]}");
