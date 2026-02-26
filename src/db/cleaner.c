@@ -399,11 +399,19 @@ static void cleaner_init(db_handle_t *db, cleaner_config_t *config) {
          config->retention_sessions_grace_days, 1},
         {TBL_ACCESS_TOKEN, "Access tokens", "id", "expected_expiry", NULL,
          config->retention_tokens_grace_days, 1},
-        {TBL_REFRESH_TOKEN, "Refresh tokens", "id", "expected_expiry", NULL,
+        {TBL_REFRESH_TOKEN, "Refresh tokens", "id", "expected_expiry",
+         " AND NOT EXISTS (SELECT 1 FROM " TBL_REFRESH_TOKEN " AS X "
+         " WHERE X.origin_refresh_token_id = " TBL_REFRESH_TOKEN ".id) "
+         " AND NOT EXISTS (SELECT 1 FROM " TBL_ACCESS_TOKEN
+         " WHERE refresh_token_id = " TBL_REFRESH_TOKEN ".id)",
          config->retention_tokens_grace_days, 1},
 
         /* Tier 3: Medium-volume short-lived tokens */
-        {TBL_AUTHORIZATION_CODE, "Authorization codes", "id", "expected_expiry", NULL,
+        {TBL_AUTHORIZATION_CODE, "Authorization codes", "id", "expected_expiry",
+         " AND NOT EXISTS (SELECT 1 FROM " TBL_REFRESH_TOKEN
+         " WHERE authorization_code_id = " TBL_AUTHORIZATION_CODE ".id) "
+         " AND NOT EXISTS (SELECT 1 FROM " TBL_ACCESS_TOKEN
+         " WHERE authorization_code_id = " TBL_AUTHORIZATION_CODE ".id)",
          RETENTION_AUTH_CODE_DAYS, 0},
         {TBL_PASSWORDLESS_LOGIN_TOKEN, "Passwordless login tokens", "id", "expected_expiry", NULL,
          RETENTION_PASSWORDLESS_TOKEN_DAYS, 0},
