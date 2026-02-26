@@ -581,6 +581,7 @@ int cleaner_start(cleaner_config_t *config, pthread_t *thread_out) {
     /* Start thread */
     if (pthread_create(thread_out, NULL, cleaner_thread_main, config_copy) != 0) {
         log_error("Cleaner: failed to create thread");
+        free((char *)config_copy->connection_string);
         free(config_copy);
         return -1;
     }
