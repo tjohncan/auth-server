@@ -950,7 +950,7 @@ int oauth_token_rotate_refresh(db_handle_t *db, const char *old_token,
         db_finalize(stmt);
 
         const char *check_sql =
-            "SELECT origin_refresh_token_id FROM " TBL_REFRESH_TOKEN " "
+            "SELECT coalesce(origin_refresh_token_id, id) as origin_refresh_token_id FROM " TBL_REFRESH_TOKEN " "
             "WHERE token = " P"1 AND is_exchanged = " BOOL_TRUE " "
             "LIMIT 1";
 
