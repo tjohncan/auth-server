@@ -67,7 +67,7 @@
                 <div>User ID: <span id="userInfo">...</span></div>
                 <div>Connected via Client ID: <span id="clientInfo">...</span></div>
             </div>
-            <button data-action="logout" style="background: #dc3545; color: white; border: none; padding: 5px 15px; border-radius: 4px; cursor: pointer; white-space: nowrap;">Log Out</button>
+            <button data-action="logout" style="background: #dc3545; color: white; border: none; padding: 5px 15px; border-radius: 4px; cursor: pointer; white-space: nowrap; margin-left: 15px;">Log Out</button>
         </div>
 
         <h1>Management Console</h1>
@@ -102,7 +102,7 @@
                 <button data-action="show-mfa-setup">Configure MFA</button>
             </div>
 
-            <h3>OpenID Connect</h3>
+            <h3 id="oidcHeading">OpenID Connect</h3>
             <div>
                 <button data-action="fetch-userinfo">Get UserInfo</button>
                 <div id="userinfoResult" style="display: none; margin-top: 10px;"></div>
@@ -118,6 +118,7 @@
             </div>
         </div>
 
+        <p id="upLink" style="display: none; margin-top: 40px;"></p>
         <p id="homeLink" style="margin-top: 40px;"><a href="/">← Home</a></p>
     </div>
 
@@ -511,6 +512,7 @@
             } catch (error) {
                 el.innerHTML = `<p style="color: red;">Error: ${escapeHtml(error.message)}</p>`;
             }
+            document.getElementById('oidcHeading')?.scrollIntoView({ behavior: 'instant' });
         }
 
         async function loadEmails() {
@@ -963,8 +965,10 @@
         async function renderOrgManagement(scrollTarget) {
             const content = document.getElementById('orgsContent');
             const homeLink = document.getElementById('homeLink');
+            const upLink = document.getElementById('upLink');
 
             homeLink.style.display = 'none';
+            upLink.style.display = 'none';
 
             try {
 
@@ -987,6 +991,18 @@
                     <p style="color: #dc3545;">Error: ${escapeHtml(error.message)}</p>
                     <button data-action="navigate-org-list" style="background: #007bff; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">Refresh</button>
                 `;
+            }
+
+            if (orgMgmt.view === 'org-detail') {
+                upLink.innerHTML = '<a href="#" data-action="navigate-org-list">⬑ Up One Level</a>';
+                upLink.style.display = '';
+                homeLink.style.marginTop = '10px';
+            } else if (orgMgmt.view === 'rs-detail' || orgMgmt.view === 'client-detail') {
+                upLink.innerHTML = `<a href="#" data-action="navigate-to-org" data-id="${orgMgmt.orgId}">⬑ Up One Level</a>`;
+                upLink.style.display = '';
+                homeLink.style.marginTop = '10px';
+            } else {
+                homeLink.style.marginTop = '40px';
             }
 
             homeLink.style.display = '';
@@ -1038,7 +1054,7 @@
                                 </div>
                                 <div style="margin-left: 15px;">
                                     <button data-action="navigate-to-org" data-id="${org.id}"
-                                            style="background: #6c757d; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">
+                                            style="background: #6c757d; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; white-space: nowrap;">
                                         Details →
                                     </button>
                                 </div>
@@ -1120,7 +1136,7 @@
                                     <span style="margin-left: 10px;">${statusBadge}</span>
                                 </div>
                                 <button data-action="navigate-to-rs" data-id="${rs.id}"
-                                        style="background: #6c757d; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 13px;">
+                                        style="background: #6c757d; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 13px; white-space: nowrap;">
                                     Details →
                                 </button>
                             </div>
@@ -1162,7 +1178,7 @@
                                     <span style="margin-left: 10px;">${statusBadge}</span>
                                 </div>
                                 <button data-action="navigate-to-client" data-id="${client.id}"
-                                        style="background: #6c757d; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 13px;">
+                                        style="background: #6c757d; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 13px; white-space: nowrap;">
                                     Details →
                                 </button>
                             </div>
@@ -1277,7 +1293,7 @@
                                 <strong>${escapeHtml(link.client_display_name)}</strong>
                                 <span style="color: #999; font-size: 13px; margin-left: 10px;">${escapeHtml(link.client_code_name)}</span>
                             </div>
-                            <div>
+                            <div style="white-space: nowrap;">
                                 <button data-action="navigate-to-client" data-id="${link.client_id}"
                                         style="background: #6c757d; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 13px; margin-right: 8px;">
                                     View Client
@@ -1437,7 +1453,7 @@
                                 <strong>${escapeHtml(link.resource_server_display_name)}</strong>
                                 <span style="color: #999; font-size: 13px; margin-left: 10px;">${escapeHtml(link.resource_server_code_name)}</span>
                             </div>
-                            <div>
+                            <div style="white-space: nowrap;">
                                 <button data-action="navigate-to-rs" data-id="${link.resource_server_id}"
                                         style="background: #6c757d; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 13px; margin-right: 8px;">
                                     View RS
@@ -2070,7 +2086,7 @@
                     ${formField('Device Name', 'display_name', '', 'text', true)}
                     <p style="font-size: 13px; color: #999; margin-top: -8px;">A recognizable name, e.g. "Auth App" or "Work Phone".</p>
                     <div style="display: flex; gap: 10px; margin-top: 20px;">
-                        <button type="submit" style="flex: 1; background: #007bff; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Next →</button>
+                        <button type="submit" style="flex: 1; background: #007bff; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer; white-space: nowrap;">Next →</button>
                         <button type="button" data-action="close-modal" style="flex: 1; background: #6c757d; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Cancel</button>
                     </div>
                 </form>
@@ -2187,7 +2203,7 @@
                     ${codeList}
                 </div>
                 <div style="display: flex; gap: 10px;">
-                    <button type="button" id="copyCodesBtn" style="flex: 1; background: #007bff; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Copy All</button>
+                    <button type="button" id="copyCodesBtn" style="flex: 1; background: #007bff; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer; white-space: nowrap;">Copy All</button>
                     <button type="button" id="doneBtn" style="flex: 1; background: #28a745; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Done</button>
                 </div>
             `);
