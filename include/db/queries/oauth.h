@@ -184,7 +184,8 @@ typedef struct {
  *
  * Atomically retrieves code data and marks as exchanged.
  * Critical for security: prevents authorization code replay attacks.
- * Should be called within a transaction that also creates tokens.
+ * Executes a single statement (UPDATE) without its own transaction.
+ * Caller must provide BEGIN_WRITE / COMMIT to also cover token creation.
  *
  * Parameters:
  *   db           - Database handle
@@ -267,7 +268,8 @@ typedef struct {
  *
  * Atomically consumes old refresh token and creates new one.
  * Critical for security: prevents refresh token replay attacks.
- * Should be called within transaction that also creates access token.
+ * Executes two statements (UPDATE + INSERT) without its own transaction.
+ * Caller must provide BEGIN_WRITE / COMMIT to also cover access token creation.
  *
  * Parameters:
  *   db           - Database handle
