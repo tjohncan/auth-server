@@ -425,6 +425,7 @@ int signing_key_get_or_rotate(db_handle_t *db, signing_key_type_t type,
         }
 
         if (insert_new_key(db, type, secret_or_priv, public_key) != 0) {
+            OPENSSL_cleanse(secret_or_priv, strlen(secret_or_priv));
             free(secret_or_priv);
             free(public_key);
             db_execute_trusted(db, "ROLLBACK");
@@ -434,11 +435,13 @@ int signing_key_get_or_rotate(db_handle_t *db, signing_key_type_t type,
         /* Commit and reload */
         if (db_execute_trusted(db, "COMMIT") != 0) {
             log_error("Failed to commit new key transaction");
+            OPENSSL_cleanse(secret_or_priv, strlen(secret_or_priv));
             free(secret_or_priv);
             free(public_key);
             return -1;
         }
 
+        OPENSSL_cleanse(secret_or_priv, strlen(secret_or_priv));
         free(secret_or_priv);
         free(public_key);
 
@@ -476,6 +479,7 @@ int signing_key_get_or_rotate(db_handle_t *db, signing_key_type_t type,
 
             if (rotate_key(db, type, new_secret_or_priv, NULL,
                           key->current_secret, NULL) != 0) {
+                OPENSSL_cleanse(new_secret_or_priv, strlen(new_secret_or_priv));
                 free(new_secret_or_priv);
                 signing_key_free(key);
                 db_execute_trusted(db, "ROLLBACK");
@@ -490,6 +494,7 @@ int signing_key_get_or_rotate(db_handle_t *db, signing_key_type_t type,
 
             if (rotate_key(db, type, new_secret_or_priv, new_public_key,
                           key->current_private_key, key->current_public_key) != 0) {
+                OPENSSL_cleanse(new_secret_or_priv, strlen(new_secret_or_priv));
                 free(new_secret_or_priv);
                 free(new_public_key);
                 signing_key_free(key);
@@ -501,12 +506,14 @@ int signing_key_get_or_rotate(db_handle_t *db, signing_key_type_t type,
         /* Commit rotation */
         if (db_execute_trusted(db, "COMMIT") != 0) {
             log_error("Failed to commit key rotation");
+            OPENSSL_cleanse(new_secret_or_priv, strlen(new_secret_or_priv));
             free(new_secret_or_priv);
             free(new_public_key);
             signing_key_free(key);
             return -1;
         }
 
+        OPENSSL_cleanse(new_secret_or_priv, strlen(new_secret_or_priv));
         free(new_secret_or_priv);
         free(new_public_key);
 
