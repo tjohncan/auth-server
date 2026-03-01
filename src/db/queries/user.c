@@ -839,7 +839,7 @@ int user_change_username(db_handle_t *db, long long user_account_pin,
     char error_msg[256];
     if (validate_username(new_username, error_msg, sizeof(error_msg)) != 0) {
         log_info("Username validation failed: %s", error_msg);
-        return -1;
+        return 0;
     }
 
     /* Check if username is already taken */
@@ -866,13 +866,18 @@ int user_change_username(db_handle_t *db, long long user_account_pin,
         return -1;
     }
 
-    /* Update username */
+    /* Update username (NOT EXISTS guards against TOCTOU race on uniqueness) */
     const char *update_sql =
         "UPDATE " TBL_USER_ACCOUNT " "
         "SET username = " P"1, "
         "username_hash = " P"2, "
         "updated_at = " NOW " "
-        "WHERE pin = " P"3 AND is_active = " BOOL_TRUE;
+        "WHERE pin = " P"3 AND is_active = " BOOL_TRUE " "
+        "AND NOT EXISTS ("
+            "SELECT 1 FROM " TBL_USER_ACCOUNT " "
+            "WHERE username_hash = " P"2 AND pin != " P"3 "
+        ") "
+        "RETURNING pin";
 
     db_stmt_t *stmt = NULL;
     if (db_prepare(db, &stmt, update_sql) != 0) {
@@ -887,15 +892,19 @@ int user_change_username(db_handle_t *db, long long user_account_pin,
     int rc = db_step(stmt);
     db_finalize(stmt);
 
-    if (rc != DB_DONE) {
-        log_error("Failed to update username");
-        return -1;
+    if (rc == DB_ROW) {
+        char user_id_hex[33];
+        bytes_to_hex(user_account_id, 16, user_id_hex, sizeof(user_id_hex));
+        log_info("Username changed for user_id=%s", user_id_hex);
+        return 1;  /* Success */
     }
 
-    char user_id_hex[33];
-    bytes_to_hex(user_account_id, 16, user_id_hex, sizeof(user_id_hex));
-    log_info("Username changed for user_id=%s", user_id_hex);
-    return 1;  /* Success */
+    if (rc == DB_DONE) {
+        return 0;  /* Username taken or user not active */
+    }
+
+    log_error("Failed to update username");
+    return -1;
 }
 
 int user_get_userinfo_by_id(db_handle_t *db, const unsigned char *user_id,
