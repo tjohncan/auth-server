@@ -1,6 +1,14 @@
 #include "util/data.h"
 #include <string.h>
-#include <stdio.h>
+
+static const char hex_table[] = "0123456789abcdef";
+
+static int hex_nibble(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
 
 int bytes_to_hex(const unsigned char *bytes, size_t len, char *out, size_t out_size) {
     /* Check buffer is large enough for hex output + null terminator */
@@ -9,7 +17,8 @@ int bytes_to_hex(const unsigned char *bytes, size_t len, char *out, size_t out_s
     }
 
     for (size_t i = 0; i < len; i++) {
-        snprintf(out + (i * 2), out_size - (i * 2), "%02x", bytes[i]);
+        out[i * 2]     = hex_table[bytes[i] >> 4];
+        out[i * 2 + 1] = hex_table[bytes[i] & 0x0F];
     }
     out[len * 2] = '\0';
     return 0;
@@ -39,11 +48,12 @@ int hex_to_bytes(const char *hex, unsigned char *bytes, size_t byte_len) {
 
     /* Parse the stripped hex string */
     for (size_t i = 0; i < byte_len; i++) {
-        unsigned int byte_val;
-        if (sscanf(stripped + (i * 2), "%2x", &byte_val) != 1) {
+        int hi = hex_nibble(stripped[i * 2]);
+        int lo = hex_nibble(stripped[i * 2 + 1]);
+        if (hi < 0 || lo < 0) {
             return -1;  /* Invalid hex character */
         }
-        bytes[i] = (unsigned char)byte_val;
+        bytes[i] = (unsigned char)((hi << 4) | lo);
     }
 
     return 0;

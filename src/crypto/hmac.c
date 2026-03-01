@@ -1,10 +1,10 @@
 #include "crypto/hmac.h"
+#include "util/data.h"
 #include "util/log.h"
 #include <openssl/evp.h>
 #include <openssl/params.h>
 #include <openssl/crypto.h>
 #include <string.h>
-#include <stdio.h>
 
 /*
  * Compute HMAC using EVP_MAC API (OpenSSL 3.0+)
@@ -109,10 +109,7 @@ int crypto_hmac_sha256_hex(const unsigned char *key, size_t key_len,
     }
 
     /* Convert to hex string */
-    for (size_t i = 0; i < HMAC_SHA256_LENGTH; i++) {
-        snprintf(out_hmac_hex + (i * 2), 3, "%02x", hmac_binary[i]);
-    }
-    out_hmac_hex[HMAC_SHA256_LENGTH * 2] = '\0';
+    bytes_to_hex(hmac_binary, HMAC_SHA256_LENGTH, out_hmac_hex, hmac_hex_len);
 
     return 0;
 }
