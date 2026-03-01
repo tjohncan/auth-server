@@ -149,23 +149,13 @@ static int schema_exists(db_handle_t *db, db_type_t type) {
 static int enable_sqlite_optimizations(db_handle_t *db) {
     log_info("Enabling SQLite optimizations");
 
-    /* Enable WAL mode for concurrent access */
+    /* Enable WAL mode for concurrent access (persistent per-file) */
     if (db_execute_trusted(db, "PRAGMA journal_mode = WAL;") != 0) {
         log_error("Failed to enable WAL mode");
         return -1;
     }
 
-    /* Set synchronous to NORMAL (good balance of safety and speed) */
-    if (db_execute_trusted(db, "PRAGMA synchronous = NORMAL;") != 0) {
-        log_error("Failed to set synchronous mode");
-        return -1;
-    }
-
-    /* Enable foreign keys */
-    if (db_execute_trusted(db, "PRAGMA foreign_keys = ON;") != 0) {
-        log_error("Failed to enable foreign keys");
-        return -1;
-    }
+    /* foreign_keys and synchronous are set per-connection in db_connect() */
 
     /* Enable incremental vacuum (must be set on empty database before tables) */
     if (db_execute_trusted(db, "PRAGMA auto_vacuum = INCREMENTAL;") != 0) {

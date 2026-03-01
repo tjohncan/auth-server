@@ -1349,6 +1349,16 @@ int db_connect(db_handle_t **db, db_type_t type, const char *connection_string) 
         return -1;
     }
 
+    /* Apply per-connection SQLite pragmas.
+     * foreign_keys defaults to OFF and synchronous defaults to FULL;
+     * both are per-connection settings that do not persist. */
+#ifdef DB_BACKEND_SQLITE
+    if (type == DB_TYPE_SQLITE) {
+        db_execute_trusted(handle, "PRAGMA foreign_keys = ON;");
+        db_execute_trusted(handle, "PRAGMA synchronous = NORMAL;");
+    }
+#endif
+
     *db = handle;
     return 0;
 }

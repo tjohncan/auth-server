@@ -469,14 +469,8 @@ static void* cleaner_thread_main(void *arg) {
         return NULL;
     }
 
-    /* Apply SQLite pragmas (same as worker connections) */
-#ifdef DB_BACKEND_SQLITE
-    if (config->db_type == DB_TYPE_SQLITE) {
-        db_execute_trusted(db, "PRAGMA journal_mode = WAL;");
-        db_execute_trusted(db, "PRAGMA synchronous = NORMAL;");
-        db_execute_trusted(db, "PRAGMA foreign_keys = ON;");
-    }
-#endif
+    /* Per-connection pragmas (foreign_keys, synchronous) are set in db_connect().
+     * WAL mode is persistent per-file, set once during schema init. */
 
     /* Build dynamic table list */
     cleaner_init(db, config);
