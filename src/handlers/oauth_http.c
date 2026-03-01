@@ -389,47 +389,30 @@ static int build_error_redirect(const char *redirect_uri,
     /* Check if redirect_uri already has query params */
     char separator = strchr(out_location, '?') ? '&' : '?';
 
-    /* Add error */
+    /* URL-encode all query parameters per RFC 3986 */
+    char encoded_error[128];
+    str_url_encode(encoded_error, sizeof(encoded_error), error);
     offset += snprintf(out_location + offset, location_len - offset,
-                       "%cerror=%s", separator, error);
-
+                       "%cerror=%s", separator, encoded_error);
     if (offset < 0 || (size_t)offset >= location_len) {
         return -1;
     }
 
-    /* Add error_description if provided */
     if (description) {
-        /* Percent-encode description per RFC 3986 */
         char encoded_desc[768];
-        const char *src = description;
-        char *dst = encoded_desc;
-        char *dst_end = encoded_desc + sizeof(encoded_desc) - 4;
-        while (*src && dst < dst_end) {
-            unsigned char c = (unsigned char)*src;
-            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-                (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
-                *dst++ = c;
-            } else {
-                snprintf(dst, 4, "%%%02X", c);
-                dst += 3;
-            }
-            src++;
-        }
-        *dst = '\0';
-
+        str_url_encode(encoded_desc, sizeof(encoded_desc), description);
         offset += snprintf(out_location + offset, location_len - offset,
                            "&error_description=%s", encoded_desc);
-
         if (offset < 0 || (size_t)offset >= location_len) {
             return -1;
         }
     }
 
-    /* Add state if provided */
     if (state) {
+        char encoded_state[512];
+        str_url_encode(encoded_state, sizeof(encoded_state), state);
         offset += snprintf(out_location + offset, location_len - offset,
-                           "&state=%s", state);
-
+                           "&state=%s", encoded_state);
         if (offset < 0 || (size_t)offset >= location_len) {
             return -1;
         }
