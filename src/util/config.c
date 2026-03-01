@@ -165,6 +165,22 @@ static void set_config_value(config_t *config, const char *key, const char *valu
         } else {
             config->workers = workers;
         }
+    } else if (strcmp(key, "server_host_env") == 0) {
+        new_value = str_dup(value);
+        if (new_value) {
+            free(config->server_host_env);
+            config->server_host_env = new_value;
+        } else {
+            log_error("Failed to allocate memory for server_host_env");
+        }
+    } else if (strcmp(key, "server_port_env") == 0) {
+        new_value = str_dup(value);
+        if (new_value) {
+            free(config->server_port_env);
+            config->server_port_env = new_value;
+        } else {
+            log_error("Failed to allocate memory for server_port_env");
+        }
     }
     /* Database settings */
     else if (strcmp(key, "db_type") == 0) {
@@ -297,14 +313,6 @@ static void set_config_value(config_t *config, const char *key, const char *valu
             config->db_owner_role_env = new_value;
         } else {
             log_error("Failed to allocate memory for db_owner_role_env");
-        }
-    } else if (strcmp(key, "enable_history_tables_env") == 0) {
-        new_value = str_dup(value);
-        if (new_value) {
-            free(config->enable_history_tables_env);
-            config->enable_history_tables_env = new_value;
-        } else {
-            log_error("Failed to allocate memory for enable_history_tables_env");
         }
     }
     /* Paths */
@@ -500,6 +508,34 @@ static void set_config_value(config_t *config, const char *key, const char *valu
 static void apply_env_overrides(config_t *config) {
     char *env_value;
     const char *env_var_name;
+
+    /* SERVER_HOST */
+    env_var_name = config->server_host_env ? config->server_host_env : "AUTH_SERVER_HOST";
+    env_value = getenv(env_var_name);
+    if (env_value) {
+        char *new_value = str_dup(env_value);
+        if (new_value) {
+            free(config->host);
+            config->host = new_value;
+            log_info("Config override from %s", env_var_name);
+        } else {
+            log_error("Failed to allocate memory for %s override", env_var_name);
+        }
+    }
+
+    /* SERVER_PORT */
+    env_var_name = config->server_port_env ? config->server_port_env : "AUTH_SERVER_PORT";
+    env_value = getenv(env_var_name);
+    if (env_value) {
+        int port = 0;
+        parse_int(env_value, &port);
+        if (port > 0 && port <= 65535) {
+            config->port = port;
+            log_info("Config override from %s: %d", env_var_name, port);
+        } else {
+            log_warn("Invalid port in %s: %s", env_var_name, env_value);
+        }
+    }
 
     /* DB_TYPE: Use custom env var name if specified, else default AUTH_DB_TYPE */
     env_var_name = config->db_type_env ? config->db_type_env : "AUTH_DB_TYPE";
@@ -743,19 +779,14 @@ static void apply_env_overrides(config_t *config) {
     }
 
     /* ENABLE_HISTORY_TABLES */
-    env_var_name = config->enable_history_tables_env ?
-                   config->enable_history_tables_env :
-                   "AUTH_ENABLE_HISTORY_TABLES";
-    env_value = getenv(env_var_name);
+    env_value = getenv("AUTH_ENABLE_HISTORY_TABLES");
     if (env_value) {
         if (strcmp(env_value, "true") == 0 || strcmp(env_value, "1") == 0) {
             config->enable_history_tables = 1;
-            log_info("Config override from %s: enabled", env_var_name);
+            log_info("Config override from AUTH_ENABLE_HISTORY_TABLES: enabled");
         } else if (strcmp(env_value, "false") == 0 || strcmp(env_value, "0") == 0) {
             config->enable_history_tables = 0;
-            log_info("Config override from %s: disabled", env_var_name);
-        } else {
-            log_warn("Invalid %s value: %s", env_var_name, env_value);
+            log_info("Config override from AUTH_ENABLE_HISTORY_TABLES: disabled");
         }
     }
 }
@@ -802,8 +833,9 @@ config_t *config_load(const char *config_file) {
     config->db_user_env = NULL;
     config->db_password_env = NULL;
     config->db_owner_role_env = NULL;
-    config->enable_history_tables_env = NULL;
     config->encryption_key_env = NULL;
+    config->server_host_env = NULL;
+    config->server_port_env = NULL;
 
     /* Encryption default */
     config->encryption_key = str_dup("customize_me");
@@ -943,9 +975,10 @@ void config_free(config_t *config) {
     free(config->db_user_env);
     free(config->db_password_env);
     free(config->db_owner_role_env);
-    free(config->enable_history_tables_env);
     free(config->encryption_key_env);
     free(config->log_level_env);
+    free(config->server_host_env);
+    free(config->server_port_env);
 
     free(config->encryption_key);
 

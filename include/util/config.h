@@ -83,8 +83,9 @@ typedef struct {
     char *db_user_env;     /* ENV var name for db_user */
     char *db_password_env; /* ENV var name for db_password */
     char *db_owner_role_env; /* ENV var name for db_owner_role */
-    char *enable_history_tables_env; /* ENV var name for enable_history_tables */
     char *encryption_key_env;       /* ENV var name for encryption_key */
+    char *server_host_env;  /* ENV var name for server_host */
+    char *server_port_env;  /* ENV var name for server_port */
 } config_t;
 
 /*
