@@ -631,8 +631,6 @@ create table client_key_usage (
 , authenticated_at text not null
 , source_ip text
 , user_agent text
-
-, constraint fk_client_key_usage_client_key foreign key(client_key_pin) references client_key(pin)
 );
 
 create table resource_server_key_usage (
@@ -640,8 +638,6 @@ create table resource_server_key_usage (
 , authenticated_at text not null
 , source_ip text
 , user_agent text
-
-, constraint fk_resource_server_key_usage_resource_server_key foreign key(resource_server_key_pin) references resource_server_key(pin)
 );
 
 create table organization_key_usage (
@@ -650,8 +646,6 @@ create table organization_key_usage (
 , source_ip text
 , user_agent text
 , operation text
-
-, constraint fk_organization_key_usage_organization_key foreign key(organization_key_pin) references organization_key(pin)
 );
 
 create table user_mfa_usage (
@@ -662,7 +656,6 @@ create table user_mfa_usage (
 , user_agent text
 
 , constraint ck_user_mfa_usage_success check(success in (0, 1))
-, constraint fk_user_mfa_usage_user_mfa foreign key(user_mfa_pin) references user_mfa(pin)
 );
 
 -- ============================================================================

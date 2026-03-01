@@ -646,8 +646,6 @@ create table logging.client_key_usage (
 , authenticated_at timestamp not null
 , source_ip text
 , user_agent text
-
-, constraint fk_client_key_usage_client_key foreign key (client_key_pin) references security.client_key(pin)
 );
 
 create table logging.organization_key_usage (
@@ -656,8 +654,6 @@ create table logging.organization_key_usage (
 , source_ip text
 , user_agent text
 , operation text
-
-, constraint fk_organization_key_usage_organization_key foreign key (organization_key_pin) references security.organization_key(pin)
 );
 
 create table logging.resource_server_key_usage (
@@ -665,8 +661,6 @@ create table logging.resource_server_key_usage (
 , authenticated_at timestamp not null
 , source_ip text
 , user_agent text
-
-, constraint fk_resource_server_key_usage_resource_server_key foreign key (resource_server_key_pin) references security.resource_server_key(pin)
 );
 
 create table logging.user_mfa_usage (
@@ -675,8 +669,6 @@ create table logging.user_mfa_usage (
 , success boolean not null
 , source_ip text
 , user_agent text
-
-, constraint fk_user_mfa_usage_user_mfa foreign key (user_mfa_pin) references security.user_mfa(pin)
 );
 
 -- ============================================================================
