@@ -102,6 +102,7 @@ Append-only security event tracking.
 
 **Tables:**
 - `client_key_usage` - Confidential client authentication attempts
+- `resource_server_key_usage` - Resource server authentication attempts
 - `organization_key_usage` - Admin operations tracking
 - `user_mfa_usage` - MFA submission attempts (success/failure)
 

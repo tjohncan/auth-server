@@ -967,7 +967,7 @@ JSON Web Key Set endpoint (RFC 7517). Returns public keys for verifying OAuth2 a
 
 **Caching**:
 ```http
-Cache-Control: max-age=3600, public
+Cache-Control: max-age=1800, public
 ```
 
 **Example**:

@@ -825,7 +825,7 @@ static int ec_public_key_to_jwk(const char *pem_public_key,
  *
  * Response:
  *   200 OK
- *   Cache-Control: max-age=3600
+ *   Cache-Control: max-age=1800
  *   {
  *     "keys": [
  *       {

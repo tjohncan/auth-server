@@ -37,7 +37,7 @@
  * Response (success):
  *   200 OK
  *   Set-Cookie: session=<token>; HttpOnly; Secure; SameSite=Strict; Max-Age=604800
- *   {"message":"Login successful","user_pin":123}
+ *   {"message":"Login successful"}
  *
  * Response (failure):
  *   401 Unauthorized
