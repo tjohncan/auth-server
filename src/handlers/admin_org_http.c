@@ -17,6 +17,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <openssl/crypto.h>
 
 /* ============================================================================
  * Authentication Helpers (Dual Auth: Session Cookie OR Organization Key)
@@ -1414,7 +1415,9 @@ HttpResponse *admin_create_resource_server_key_handler(const HttpRequest *req, c
     char *user_secret = json_get_string(req->body, "secret");
 
     if (!rs_id_str) {
-        free(note); free(user_secret);
+        free(note);
+        if (user_secret) OPENSSL_cleanse(user_secret, strlen(user_secret));
+        free(user_secret);
         return response_json_error(400, "resource_server_id required");
     }
 
@@ -1430,7 +1433,9 @@ HttpResponse *admin_create_resource_server_key_handler(const HttpRequest *req, c
     } else {
         /* Generate mode */
         if (crypto_random_token(generated_secret, sizeof(generated_secret), 32) < 0) {
-            free(rs_id_str); free(note); free(user_secret);
+            free(rs_id_str); free(note);
+            if (user_secret) OPENSSL_cleanse(user_secret, strlen(user_secret));
+            free(user_secret);
             return response_json_error(500, "Failed to generate secret");
         }
         secret_to_use = generated_secret;
@@ -1439,7 +1444,9 @@ HttpResponse *admin_create_resource_server_key_handler(const HttpRequest *req, c
 
     unsigned char rs_id[16], key_id[16];
     if (hex_to_bytes(rs_id_str, rs_id, 16) != 0) {
-        free(rs_id_str); free(note); free(user_secret);
+        free(rs_id_str); free(note);
+        if (user_secret) OPENSSL_cleanse(user_secret, strlen(user_secret));
+        free(user_secret);
         return response_json_error(400, "Invalid resource_server_id format");
     }
     free(rs_id_str);
@@ -1447,9 +1454,12 @@ HttpResponse *admin_create_resource_server_key_handler(const HttpRequest *req, c
     int result = admin_create_resource_server_key(db, ctx.user_account_pin, ctx.organization_key_pin,
                                                    rs_id, secret_to_use, note, key_id);
 
-    free(note); free(user_secret);
+    free(note);
+    if (user_secret) OPENSSL_cleanse(user_secret, strlen(user_secret));
+    free(user_secret);
 
     if (result != 0) {
+        OPENSSL_cleanse(generated_secret, sizeof(generated_secret));
         return response_json_error(409, "Key creation failed");
     }
 
@@ -1471,6 +1481,7 @@ HttpResponse *admin_create_resource_server_key_handler(const HttpRequest *req, c
                  key_id_hex, key_id_hex);
     }
 
+    OPENSSL_cleanse(generated_secret, sizeof(generated_secret));
     return response_json_ok(response_body);
 }
 
@@ -1660,7 +1671,9 @@ HttpResponse *admin_create_client_key_handler(const HttpRequest *req, const Rout
     char *user_secret = json_get_string(req->body, "secret");
 
     if (!client_id_str) {
-        free(note); free(user_secret);
+        free(note);
+        if (user_secret) OPENSSL_cleanse(user_secret, strlen(user_secret));
+        free(user_secret);
         return response_json_error(400, "client_id required");
     }
 
@@ -1676,7 +1689,9 @@ HttpResponse *admin_create_client_key_handler(const HttpRequest *req, const Rout
     } else {
         /* Generate mode */
         if (crypto_random_token(generated_secret, sizeof(generated_secret), 32) < 0) {
-            free(client_id_str); free(note); free(user_secret);
+            free(client_id_str); free(note);
+            if (user_secret) OPENSSL_cleanse(user_secret, strlen(user_secret));
+            free(user_secret);
             return response_json_error(500, "Failed to generate secret");
         }
         secret_to_use = generated_secret;
@@ -1685,7 +1700,9 @@ HttpResponse *admin_create_client_key_handler(const HttpRequest *req, const Rout
 
     unsigned char client_id[16], key_id[16];
     if (hex_to_bytes(client_id_str, client_id, 16) != 0) {
-        free(client_id_str); free(note); free(user_secret);
+        free(client_id_str); free(note);
+        if (user_secret) OPENSSL_cleanse(user_secret, strlen(user_secret));
+        free(user_secret);
         return response_json_error(400, "Invalid client_id format");
     }
     free(client_id_str);
@@ -1693,9 +1710,12 @@ HttpResponse *admin_create_client_key_handler(const HttpRequest *req, const Rout
     int result = admin_create_client_key(db, ctx.user_account_pin, ctx.organization_key_pin,
                                           client_id, secret_to_use, note, key_id);
 
-    free(note); free(user_secret);
+    free(note);
+    if (user_secret) OPENSSL_cleanse(user_secret, strlen(user_secret));
+    free(user_secret);
 
     if (result != 0) {
+        OPENSSL_cleanse(generated_secret, sizeof(generated_secret));
         return response_json_error(409, "Key creation failed (client must be confidential)");
     }
 
@@ -1717,6 +1737,7 @@ HttpResponse *admin_create_client_key_handler(const HttpRequest *req, const Rout
                  key_id_hex, key_id_hex);
     }
 
+    OPENSSL_cleanse(generated_secret, sizeof(generated_secret));
     return response_json_ok(response_body);
 }
 

@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <time.h>
+#include <openssl/crypto.h>
 #include <openssl/evp.h>
 
 /* Token sizes (before base64url encoding) */
@@ -279,6 +280,7 @@ int oauth_authorize(db_handle_t *db,
     );
 
     if (secret_len <= 0) {
+        OPENSSL_cleanse(secret_bytes, sizeof(secret_bytes));
         signing_key_free(auth_signing_key);
         log_error("Failed to decode signing secret");
         return -1;
@@ -289,6 +291,7 @@ int oauth_authorize(db_handle_t *db,
     /* Step 9: Encode JWT authorization code */
     char *code_jwt = malloc(JWT_MAX_TOKEN_LENGTH);
     if (!code_jwt) {
+        OPENSSL_cleanse(secret_bytes, sizeof(secret_bytes));
         log_error("Failed to allocate memory for JWT");
         return -1;
     }
@@ -297,10 +300,14 @@ int oauth_authorize(db_handle_t *db,
                                  secret_bytes,
                                  secret_len,
                                  code_jwt, JWT_MAX_TOKEN_LENGTH) != 0) {
+        OPENSSL_cleanse(secret_bytes, sizeof(secret_bytes));
         free(code_jwt);
         log_error("Failed to encode authorization code JWT");
         return -1;
     }
+
+    /* Secret no longer needed */
+    OPENSSL_cleanse(secret_bytes, sizeof(secret_bytes));
 
     /* Step 10: Create DB record (for replay detection) */
     unsigned char auth_code_id[16];

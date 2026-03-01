@@ -17,6 +17,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <openssl/crypto.h>
 
 /* ============================================================================
  * Authentication Helpers
@@ -111,6 +112,7 @@ HttpResponse *admin_bootstrap_handler(const HttpRequest *req, const RouteParams 
         free(org_code_name);
         free(org_display_name);
         free(username);
+        if (password) OPENSSL_cleanse(password, strlen(password));
         free(password);
         return response_json_error(400, "username and password are required");
     }
@@ -122,6 +124,7 @@ HttpResponse *admin_bootstrap_handler(const HttpRequest *req, const RouteParams 
         free(org_code_name);
         free(org_display_name);
         free(username);
+        OPENSSL_cleanse(password, strlen(password));
         free(password);
         return response_json_error(400, validation_error);
     }
@@ -130,6 +133,7 @@ HttpResponse *admin_bootstrap_handler(const HttpRequest *req, const RouteParams 
         free(org_code_name);
         free(org_display_name);
         free(username);
+        OPENSSL_cleanse(password, strlen(password));
         free(password);
         return response_json_error(400, validation_error);
     }
@@ -143,6 +147,7 @@ HttpResponse *admin_bootstrap_handler(const HttpRequest *req, const RouteParams 
         free(org_code_name);
         free(org_display_name);
         free(username);
+        OPENSSL_cleanse(password, strlen(password));
         free(password);
         return response_json_error(500, "Failed to check organization existence");
     } else if (org_ex == 1) {
@@ -153,6 +158,7 @@ HttpResponse *admin_bootstrap_handler(const HttpRequest *req, const RouteParams 
         free(org_code_name);
         free(org_display_name);
         free(username);
+        OPENSSL_cleanse(password, strlen(password));
         free(password);
         return response_json_error(409, error_msg);
     }
@@ -163,6 +169,7 @@ HttpResponse *admin_bootstrap_handler(const HttpRequest *req, const RouteParams 
         free(org_code_name);
         free(org_display_name);
         free(username);
+        OPENSSL_cleanse(password, strlen(password));
         free(password);
         return response_json_error(500, "Failed to check username existence");
     } else if (user_ex == 1) {
@@ -173,6 +180,7 @@ HttpResponse *admin_bootstrap_handler(const HttpRequest *req, const RouteParams 
         free(org_code_name);
         free(org_display_name);
         free(username);
+        OPENSSL_cleanse(password, strlen(password));
         free(password);
         return response_json_error(409, error_msg);
     }
@@ -201,6 +209,7 @@ HttpResponse *admin_bootstrap_handler(const HttpRequest *req, const RouteParams 
     free(org_code_name);
     free(org_display_name);
     free(username);
+    OPENSSL_cleanse(password, strlen(password));
     free(password);
 
     return resp;
@@ -315,13 +324,13 @@ HttpResponse *admin_create_user_handler(const HttpRequest *req, const RouteParam
     if (!password) {
         free(username);
         free(email);
-        free(password);
         return response_json_error(400, "password is required");
     }
 
     if (!username && !email) {
         free(username);
         free(email);
+        OPENSSL_cleanse(password, strlen(password));
         free(password);
         return response_json_error(400, "At least one of username or email is required");
     }
@@ -332,6 +341,7 @@ HttpResponse *admin_create_user_handler(const HttpRequest *req, const RouteParam
     if (username && validate_username(username, validation_error, sizeof(validation_error)) != 0) {
         free(username);
         free(email);
+        OPENSSL_cleanse(password, strlen(password));
         free(password);
         return response_json_error(400, validation_error);
     }
@@ -339,6 +349,7 @@ HttpResponse *admin_create_user_handler(const HttpRequest *req, const RouteParam
     if (email && validate_email(email, validation_error, sizeof(validation_error)) != 0) {
         free(username);
         free(email);
+        OPENSSL_cleanse(password, strlen(password));
         free(password);
         return response_json_error(400, validation_error);
     }
@@ -377,6 +388,7 @@ HttpResponse *admin_create_user_handler(const HttpRequest *req, const RouteParam
     /* Clean up */
     free(username);
     free(email);
+    OPENSSL_cleanse(password, strlen(password));
     free(password);
 
     return resp;
@@ -577,6 +589,7 @@ HttpResponse *admin_create_organization_key_handler(const HttpRequest *req, cons
     /* Validate required fields */
     if (!org_code_name) {
         free(org_code_name);
+        if (user_secret) OPENSSL_cleanse(user_secret, strlen(user_secret));
         free(user_secret);
         free(note);
         return response_json_error(400, "organization_code_name is required");
@@ -595,6 +608,7 @@ HttpResponse *admin_create_organization_key_handler(const HttpRequest *req, cons
         /* Generate secure 32-byte base64url token */
         if (crypto_random_token(generated_secret, sizeof(generated_secret), 32) < 0) {
             free(org_code_name);
+            if (user_secret) OPENSSL_cleanse(user_secret, strlen(user_secret));
             free(user_secret);
             free(note);
             return response_json_error(500, "Failed to generate secret");
@@ -607,7 +621,9 @@ HttpResponse *admin_create_organization_key_handler(const HttpRequest *req, cons
     unsigned char key_id[16];
     if (organization_key_create(db, org_code_name, secret_to_use, note, key_id) != 0) {
         free(org_code_name);
+        if (user_secret) OPENSSL_cleanse(user_secret, strlen(user_secret));
         free(user_secret);
+        OPENSSL_cleanse(generated_secret, sizeof(generated_secret));
         free(note);
         return response_json_error(500, "Failed to create organization key");
     }
@@ -640,7 +656,9 @@ HttpResponse *admin_create_organization_key_handler(const HttpRequest *req, cons
     }
 
     free(org_code_name);
+    if (user_secret) OPENSSL_cleanse(user_secret, strlen(user_secret));
     free(user_secret);
+    OPENSSL_cleanse(generated_secret, sizeof(generated_secret));
     free(note);
 
     return response_json_ok(response_body);

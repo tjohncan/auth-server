@@ -13,6 +13,7 @@
 #include "util/log.h"
 #include "util/str.h"
 #include "util/json.h"
+#include <openssl/crypto.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -65,6 +66,7 @@ HttpResponse *login_handler(const HttpRequest *req, const RouteParams *params) {
 
     if (!username || !password) {
         free(username);
+        if (password) OPENSSL_cleanse(password, strlen(password));
         free(password);
         return response_json_error(400, "username and password required");
     }
@@ -83,6 +85,7 @@ HttpResponse *login_handler(const HttpRequest *req, const RouteParams *params) {
     );
 
     free(username);
+    OPENSSL_cleanse(password, strlen(password));
     free(password);
 
     if (rc != 0) {
@@ -472,6 +475,8 @@ HttpResponse *change_password_handler(const HttpRequest *req, const RouteParams 
     char *new_password = json_get_string(req->body, "new_password");
 
     if (!current_password || !new_password) {
+        if (current_password) OPENSSL_cleanse(current_password, strlen(current_password));
+        if (new_password) OPENSSL_cleanse(new_password, strlen(new_password));
         free(current_password);
         free(new_password);
         return response_json_error(400, "current_password and new_password required");
@@ -481,6 +486,8 @@ HttpResponse *change_password_handler(const HttpRequest *req, const RouteParams 
     int result = user_change_password(db, session.user_account_pin, session.user_account_id,
                                       current_password, new_password);
 
+    OPENSSL_cleanse(current_password, strlen(current_password));
+    OPENSSL_cleanse(new_password, strlen(new_password));
     free(current_password);
     free(new_password);
 

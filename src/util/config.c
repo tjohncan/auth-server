@@ -222,6 +222,7 @@ static void set_config_value(config_t *config, const char *key, const char *valu
     } else if (strcmp(key, "db_password") == 0) {
         new_value = str_dup(value);
         if (new_value) {
+            if (config->db_password) OPENSSL_cleanse(config->db_password, strlen(config->db_password));
             free(config->db_password);
             config->db_password = new_value;
         } else {
@@ -462,6 +463,7 @@ static void set_config_value(config_t *config, const char *key, const char *valu
     else if (strcmp(key, "encryption_key") == 0) {
         new_value = str_dup(value);
         if (new_value) {
+            if (config->encryption_key) OPENSSL_cleanse(config->encryption_key, strlen(config->encryption_key));
             free(config->encryption_key);
             config->encryption_key = new_value;
         } else {
@@ -574,6 +576,7 @@ static void apply_env_overrides(config_t *config) {
     if (env_value) {
         char *new_value = str_dup(env_value);
         if (new_value) {
+            if (config->db_password) OPENSSL_cleanse(config->db_password, strlen(config->db_password));
             free(config->db_password);
             config->db_password = new_value;
             log_info("Config override from %s: [REDACTED]", env_var_name);
@@ -606,6 +609,7 @@ static void apply_env_overrides(config_t *config) {
     if (env_value) {
         char *new_value = str_dup(env_value);
         if (new_value) {
+            if (config->encryption_key) OPENSSL_cleanse(config->encryption_key, strlen(config->encryption_key));
             free(config->encryption_key);
             config->encryption_key = new_value;
             log_info("Config override from %s: [REDACTED]", env_var_name);

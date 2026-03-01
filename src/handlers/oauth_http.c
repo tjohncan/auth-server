@@ -19,6 +19,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <openssl/crypto.h>
 #include <openssl/pem.h>
 #include <openssl/bn.h>
 #include <openssl/evp.h>
@@ -283,6 +284,7 @@ HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params) {
         if (!client_key_id_str || !client_secret) {
             free(grant_type);
             free(client_key_id_str);
+            if (client_secret) OPENSSL_cleanse(client_secret, strlen(client_secret));
             free(client_secret);
             free(scope);
             free(resource);
@@ -294,6 +296,7 @@ HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params) {
         if (hex_to_bytes(client_key_id_str, client_key_id, 16) != 0) {
             free(grant_type);
             free(client_key_id_str);
+            OPENSSL_cleanse(client_secret, strlen(client_secret));
             free(client_secret);
             free(scope);
             free(resource);
@@ -310,6 +313,7 @@ HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params) {
                                            scope, resource, source_ip, user_agent,
                                            &token_resp);
 
+        OPENSSL_cleanse(client_secret, strlen(client_secret));
         free(client_secret);
         free(scope);
         free(resource);
@@ -979,6 +983,7 @@ HttpResponse *revoke_handler(const HttpRequest *req, const RouteParams *params) 
         free(token);
         free(client_id_str);
         free(client_key_id_str);
+        if (client_secret) OPENSSL_cleanse(client_secret, strlen(client_secret));
         free(client_secret);
         free(token_type_hint);
         return response_json_error(400, "token, client_id, client_key_id, and client_secret required");
@@ -990,6 +995,7 @@ HttpResponse *revoke_handler(const HttpRequest *req, const RouteParams *params) 
         free(token);
         free(client_id_str);
         free(client_key_id_str);
+        OPENSSL_cleanse(client_secret, strlen(client_secret));
         free(client_secret);
         free(token_type_hint);
         return response_json_error(400, "Invalid client_id format");
@@ -1001,6 +1007,7 @@ HttpResponse *revoke_handler(const HttpRequest *req, const RouteParams *params) 
     if (hex_to_bytes(client_key_id_str, client_key_id, 16) != 0) {
         free(token);
         free(client_key_id_str);
+        OPENSSL_cleanse(client_secret, strlen(client_secret));
         free(client_secret);
         free(token_type_hint);
         return response_json_error(400, "Invalid client_key_id format");
@@ -1017,6 +1024,7 @@ HttpResponse *revoke_handler(const HttpRequest *req, const RouteParams *params) 
                                                          client_secret, source_ip, user_agent,
                                                          &client_pin);
 
+    OPENSSL_cleanse(client_secret, strlen(client_secret));
     free(client_secret);
 
     if (auth_result != 1) {
@@ -1104,6 +1112,7 @@ HttpResponse *introspect_handler(const HttpRequest *req, const RouteParams *para
         free(token);
         free(resource_server_id_str);
         free(resource_server_key_id_str);
+        if (resource_server_secret) OPENSSL_cleanse(resource_server_secret, strlen(resource_server_secret));
         free(resource_server_secret);
         free(token_type_hint);
         return response_json_error(400, "token, resource_server_id, resource_server_key_id, and resource_server_secret required");
@@ -1115,6 +1124,7 @@ HttpResponse *introspect_handler(const HttpRequest *req, const RouteParams *para
         free(token);
         free(resource_server_id_str);
         free(resource_server_key_id_str);
+        OPENSSL_cleanse(resource_server_secret, strlen(resource_server_secret));
         free(resource_server_secret);
         free(token_type_hint);
         return response_json_error(400, "Invalid resource_server_id format");
@@ -1126,6 +1136,7 @@ HttpResponse *introspect_handler(const HttpRequest *req, const RouteParams *para
     if (hex_to_bytes(resource_server_key_id_str, resource_server_key_id, 16) != 0) {
         free(token);
         free(resource_server_key_id_str);
+        OPENSSL_cleanse(resource_server_secret, strlen(resource_server_secret));
         free(resource_server_secret);
         free(token_type_hint);
         return response_json_error(400, "Invalid resource_server_key_id format");
@@ -1144,6 +1155,7 @@ HttpResponse *introspect_handler(const HttpRequest *req, const RouteParams *para
                                                                   source_ip, user_agent,
                                                                   &resource_server_pin);
 
+    OPENSSL_cleanse(resource_server_secret, strlen(resource_server_secret));
     free(resource_server_secret);
 
     if (auth_result != 1) {

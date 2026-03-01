@@ -4,6 +4,7 @@
 #include "util/log.h"
 #include "util/data.h"
 #include "util/str.h"
+#include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
 #include <openssl/bio.h>
@@ -953,6 +954,7 @@ static int jwt_decode_auth_request_with_secret(const char *token,
     int secret_len = crypto_base64url_decode(secret_b64, strlen(secret_b64),
                                               secret, sizeof(secret));
     if (secret_len <= 0) {
+        OPENSSL_cleanse(secret, sizeof(secret));
         log_error("Failed to decode secret for auth request JWT");
         return -1;
     }
@@ -964,6 +966,7 @@ static int jwt_decode_auth_request_with_secret(const char *token,
     char *header_b64 = token_copy;
     char *payload_b64 = strchr(header_b64, '.');
     if (!payload_b64) {
+        OPENSSL_cleanse(secret, sizeof(secret));
         log_error("Malformed JWT (missing first dot)");
         return -1;
     }
@@ -972,6 +975,7 @@ static int jwt_decode_auth_request_with_secret(const char *token,
 
     char *signature_b64 = strchr(payload_b64, '.');
     if (!signature_b64) {
+        OPENSSL_cleanse(secret, sizeof(secret));
         log_error("Malformed JWT (missing second dot)");
         return -1;
     }
@@ -984,6 +988,7 @@ static int jwt_decode_auth_request_with_secret(const char *token,
                                   header_b64, payload_b64);
 
     if (to_verify_len < 0 || (size_t)to_verify_len >= sizeof(to_verify)) {
+        OPENSSL_cleanse(secret, sizeof(secret));
         log_error("JWT verification data buffer too small");
         return -1;
     }
@@ -993,9 +998,13 @@ static int jwt_decode_auth_request_with_secret(const char *token,
     if (crypto_hmac_sha256(secret, secret_len,
                            (const unsigned char *)to_verify, to_verify_len,
                            expected_signature, sizeof(expected_signature)) != 0) {
+        OPENSSL_cleanse(secret, sizeof(secret));
         log_error("Failed to compute HMAC for JWT verification");
         return -1;
     }
+
+    /* Secret no longer needed */
+    OPENSSL_cleanse(secret, sizeof(secret));
 
     /* Decode provided signature */
     unsigned char provided_signature[32];
