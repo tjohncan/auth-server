@@ -179,7 +179,7 @@ HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params) {
         if (rc == 1) {
             /* Replay attack detected - token chain revoked automatically */
             free(grant_type);
-            return response_json_error(400, "Authorization code has already been used");
+            return response_json_error(400, "Invalid authorization code");
         } else if (rc != 0) {
             free(grant_type);
             return response_json_error(400, "Invalid authorization code");
@@ -238,7 +238,7 @@ HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params) {
         if (rc == 1) {
             /* Replay attack detected - token chain revoked automatically */
             free(grant_type);
-            return response_json_error(400, "Refresh token has already been used");
+            return response_json_error(400, "Invalid refresh token");
         } else if (rc != 0) {
             free(grant_type);
             return response_json_error(400, "Invalid refresh token");

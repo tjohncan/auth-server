@@ -1623,15 +1623,20 @@ int oauth_revoke_token_chain(db_handle_t *db,
 
     /* Revoke entire chain: gen 1 (id = origin) + gen 2+ (origin_refresh_token_id = origin) */
 
-    /* Step 1: Revoke access tokens via subquery */
+    /* Step 1: Revoke access tokens (including initial token from code exchange) */
     const char *access_sql =
         "UPDATE " TBL_ACCESS_TOKEN " "
         "SET is_revoked = " BOOL_TRUE ", "
         "revoked_at = " NOW ", "
         "updated_at = " NOW " "
-        "WHERE refresh_token_id IN ("
-            "SELECT id FROM " TBL_REFRESH_TOKEN " "
-            "WHERE id = " P"1" " OR origin_refresh_token_id = " P"1"
+        "WHERE ("
+            "refresh_token_id IN ("
+                "SELECT id FROM " TBL_REFRESH_TOKEN " "
+                "WHERE id = " P"1" " OR origin_refresh_token_id = " P"1"
+            ") OR authorization_code_id = ("
+                "SELECT authorization_code_id FROM " TBL_REFRESH_TOKEN " "
+                "WHERE id = " P"1" " LIMIT 1"
+            ")"
         ") AND is_revoked = " BOOL_FALSE " "
         "RETURNING id";
 
