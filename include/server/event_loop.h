@@ -173,13 +173,6 @@ void event_loop_pool_destroy(EventLoopPool *pool);
 EventLoop *event_loop_create(void);
 
 /*
- * event_loop_add_connection - Add a new connection to the event loop
- *
- * Registers the socket with epoll, sets non-blocking mode.
- */
-int event_loop_add_connection(EventLoop *loop, int fd, const char *remote_ip);
-
-/*
  * event_loop_run - Run the event loop (blocks until stopped)
  *
  * Calls epoll_wait in a loop, handling events as they arrive.
