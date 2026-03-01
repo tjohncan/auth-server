@@ -109,7 +109,8 @@ HttpResponse *static_file_handler(const HttpRequest *req, const RouteParams *par
 
     /* Set Content-Type based on file extension */
     const char *mime_type = get_mime_type(file_path);
-    http_response_set(resp, mime_type, content);
+    http_response_set_header(resp, "Content-Type", mime_type);
+    http_response_set_body(resp, content, bytes_read);
 
     /* Add caching headers for static assets (1 hour) */
     http_response_set_header(resp, "Cache-Control", "public, max-age=3600");
