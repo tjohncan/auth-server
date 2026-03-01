@@ -185,7 +185,7 @@ int json_get_int(const char *json, const char *key, int *out_value) {
 
     /* Skip whitespace after colon */
     const char *value_start = colon + 1;
-    while (*value_start == ' ' || *value_start == '\t' || *value_start == '\n') {
+    while (*value_start == ' ' || *value_start == '\t' || *value_start == '\n' || *value_start == '\r') {
         value_start++;
     }
 
