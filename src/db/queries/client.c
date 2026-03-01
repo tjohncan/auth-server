@@ -812,7 +812,7 @@ int client_update(db_handle_t *db, const unsigned char *client_id,
             "AND NOT EXISTS ("
                 "SELECT 1 FROM " TBL_CLIENT " other "
                 "WHERE other.organization_pin = " TBL_CLIENT ".organization_pin "
-                "AND lower(other.code_name) = lower(" TBL_CLIENT ".code_name) "
+                "AND other.code_name = " TBL_CLIENT ".code_name "
                 "AND other.is_active = " BOOL_TRUE " "
                 "AND other.id != " TBL_CLIENT ".id"
             ") ");
