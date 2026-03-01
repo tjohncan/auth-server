@@ -14,6 +14,9 @@
 #define HMAC_SHA256_LENGTH     32
 #define HMAC_SHA256_HEX_LENGTH 65  /* 32 bytes * 2 + null terminator */
 
+/* SHA-1 produces 20-byte (160-bit) output */
+#define HMAC_SHA1_LENGTH       20
+
 /*
  * Compute HMAC-SHA256 (binary output)
  *
@@ -85,5 +88,24 @@ int crypto_hmac_sha256_hex(const unsigned char *key, size_t key_len,
  *   }
  */
 int crypto_hmac_compare(const unsigned char *hmac1, const unsigned char *hmac2, size_t len);
+
+/*
+ * Compute HMAC-SHA1 (binary output)
+ *
+ * Used for TOTP (RFC 6238) where the standard requires HMAC-SHA1.
+ *
+ * Parameters:
+ *   key      - Secret key
+ *   key_len  - Length of key in bytes
+ *   data     - Data to authenticate
+ *   data_len - Length of data in bytes
+ *   out_hmac - Output buffer (must be >= HMAC_SHA1_LENGTH bytes)
+ *   hmac_len - Size of output buffer
+ *
+ * Returns: 0 on success, negative on error
+ */
+int crypto_hmac_sha1(const unsigned char *key, size_t key_len,
+                     const unsigned char *data, size_t data_len,
+                     unsigned char *out_hmac, size_t hmac_len);
 
 #endif /* CRYPTO_HMAC_H */

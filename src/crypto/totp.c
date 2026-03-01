@@ -3,8 +3,6 @@
 #include "crypto/random.h"
 #include "util/log.h"
 #include "util/str.h"
-#include <openssl/hmac.h>
-#include <openssl/evp.h>
 #include <openssl/crypto.h>
 #include <string.h>
 #include <stdio.h>
@@ -12,9 +10,6 @@
 
 /* Base32 alphabet (RFC 4648) */
 static const char base32_alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-
-/* HMAC-SHA1 produces 20-byte (160-bit) output */
-#define HMAC_SHA1_LENGTH 20
 
 /* ============================================================================
  * Base32 Encoding (RFC 4648)
@@ -159,10 +154,8 @@ static int totp_generate_code_internal(const unsigned char *secret, size_t secre
 
     /* Compute HMAC-SHA1(secret, counter) */
     unsigned char hmac[HMAC_SHA1_LENGTH];
-    unsigned int hmac_len = 0;
-
-    if (HMAC(EVP_sha1(), secret, (int)secret_len, counter_bytes, sizeof(counter_bytes),
-             hmac, &hmac_len) == NULL || hmac_len != HMAC_SHA1_LENGTH) {
+    if (crypto_hmac_sha1(secret, secret_len, counter_bytes, sizeof(counter_bytes),
+                         hmac, sizeof(hmac)) != 0) {
         log_error("HMAC-SHA1 computation failed for TOTP");
         return -1;
     }
