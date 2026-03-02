@@ -994,11 +994,11 @@
             }
 
             if (orgMgmt.view === 'org-detail') {
-                upLink.innerHTML = '<a href="#" data-action="navigate-org-list">⬑ Up One Level</a>';
+                upLink.innerHTML = '<a href="#" data-action="navigate-org-list" style="color: #dda1dd;">⬑ Up One Level</a>';
                 upLink.style.display = '';
                 homeLink.style.marginTop = '10px';
             } else if (orgMgmt.view === 'rs-detail' || orgMgmt.view === 'client-detail') {
-                upLink.innerHTML = `<a href="#" data-action="navigate-to-org" data-id="${orgMgmt.orgId}">⬑ Up One Level</a>`;
+                upLink.innerHTML = `<a href="#" data-action="navigate-to-org" data-id="${orgMgmt.orgId}" style="color: #dda1dd;">⬑ Up One Level</a>`;
                 upLink.style.display = '';
                 homeLink.style.marginTop = '10px';
             } else {
@@ -1070,7 +1070,7 @@
         async function renderOrgDetail(container) {
             // Breadcrumb
             let html = '<div style="margin-bottom: 20px; font-size: 14px; color: #999;">';
-            html += '<a href="#" data-action="navigate-org-list" style="color: #007bff;">← Organizations</a>';
+            html += '<a href="#" data-action="navigate-org-list" style="color: #dda0dd;">← Organizations</a>';
             html += '</div>';
 
             // Fetch org details
@@ -1202,8 +1202,8 @@
 
             // Breadcrumb
             let html = '<div style="margin-bottom: 20px; font-size: 14px; color: #999;">';
-            html += '<a href="#" data-action="navigate-org-list" style="color: #007bff;">Organizations</a> / ';
-            html += `<a href="#" data-action="navigate-to-org" data-id="${org.id}" style="color: #007bff;">${escapeHtml(org.display_name)}</a> / `;
+            html += '<a href="#" data-action="navigate-org-list" style="color: #dda0dd;">Organizations</a> / ';
+            html += `<a href="#" data-action="navigate-to-org" data-id="${org.id}" style="color: #dda0dd;">${escapeHtml(org.display_name)}</a> / `;
             html += `<span>Resource Server</span>`;
             html += '</div>';
 
@@ -1323,8 +1323,8 @@
 
             // Breadcrumb
             let html = '<div style="margin-bottom: 20px; font-size: 14px; color: #999;">';
-            html += '<a href="#" data-action="navigate-org-list" style="color: #007bff;">Organizations</a> / ';
-            html += `<a href="#" data-action="navigate-to-org" data-id="${org.id}" style="color: #007bff;">${escapeHtml(org.display_name)}</a> / `;
+            html += '<a href="#" data-action="navigate-org-list" style="color: #dda0dd;">Organizations</a> / ';
+            html += `<a href="#" data-action="navigate-to-org" data-id="${org.id}" style="color: #dda0dd;">${escapeHtml(org.display_name)}</a> / `;
             html += `<span>Client</span>`;
             html += '</div>';
 

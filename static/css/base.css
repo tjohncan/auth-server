@@ -14,7 +14,7 @@ a {
 }
 
 a:visited {
-    color: #dda0dd; /* plum */
+    color: #87ceeb; /* match unvisited */
 }
 
 a:hover {
