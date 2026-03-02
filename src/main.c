@@ -212,6 +212,7 @@ int main(void) {
     } else {
         if (!config->db_host || !config->db_name || !config->db_user || !config->db_password) {
             log_error("PostgreSQL requires db_host, db_name, db_user, and db_password");
+            encrypt_cleanup();
             config_free(config);
             return 1;
         }
@@ -224,6 +225,7 @@ int main(void) {
 
     if (db_pool_init(num_workers, config->db_type, connection_string) != 0) {
         log_error("Failed to initialize database pool");
+        encrypt_cleanup();
         config_free(config);
         return 1;
     }
@@ -234,6 +236,7 @@ int main(void) {
     if (!setup_db) {
         log_error("Failed to get setup database connection");
         db_pool_shutdown();
+        encrypt_cleanup();
         config_free(config);
         return 1;
     }
@@ -243,6 +246,7 @@ int main(void) {
     if (schema_rc < 0) {
         log_error("Failed to initialize schema");
         db_pool_shutdown();
+        encrypt_cleanup();
         config_free(config);
         return 1;
     }
@@ -252,6 +256,7 @@ int main(void) {
         if (db_init_history_tables(setup_db, config->db_type, schema_rc == 0) != 0) {
             log_error("Failed to initialize history tables");
             db_pool_shutdown();
+            encrypt_cleanup();
             config_free(config);
             return 1;
         }
@@ -266,6 +271,7 @@ int main(void) {
     if (cleaner_start(&cleaner_cfg, &cleaner_thread) != 0) {
         log_error("Failed to start cleaner thread");
         db_pool_shutdown();
+        encrypt_cleanup();
         config_free(config);
         return 1;
     }
@@ -279,6 +285,7 @@ int main(void) {
     if (!router) {
         log_error("Failed to create router");
         db_pool_shutdown();
+        encrypt_cleanup();
         config_free(config);
         return 1;
     }
@@ -366,6 +373,7 @@ int main(void) {
         log_error("Failed to create event loop pool");
         router_destroy(router);
         db_pool_shutdown();
+        encrypt_cleanup();
         config_free(config);
         return 1;
     }
