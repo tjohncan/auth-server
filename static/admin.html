@@ -1261,13 +1261,13 @@
                                     <span class="copy-btn-placeholder" data-copy-text="${escapeHtml(formattedKeyId)}"></span>
                                     ${activeBadge}
                                     <div style="font-size: 12px; color: #999; margin-top: 4px;">
-                                        Generated: ${new Date(key.generated_at).toLocaleString()}
+                                        Generated: ${key.generated_at.slice(0, 19).replace('T', ' ')}
                                     </div>
                                     ${key.note ? `<div style="font-size: 12px; color: #999;">${escapeHtml(key.note)}</div>` : ''}
                                 </div>
                                 ${key.is_active ? `
                                     <button data-action="revoke-rs-key" data-id="${key.id}"
-                                            style="background: #dc3545; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 13px;">
+                                            style="background: #dc3545; color: white; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 13px; margin-left: 7px;">
                                         Revoke
                                     </button>
                                 ` : ''}
@@ -1393,13 +1393,13 @@
                                         <span class="copy-btn-placeholder" data-copy-text="${escapeHtml(formattedKeyId)}"></span>
                                         ${activeBadge}
                                         <div style="font-size: 12px; color: #999; margin-top: 4px;">
-                                            Generated: ${new Date(key.generated_at).toLocaleString()}
+                                            Generated: ${key.generated_at.slice(0, 19).replace('T', ' ')}
                                         </div>
                                         ${key.note ? `<div style="font-size: 12px; color: #999;">${escapeHtml(key.note)}</div>` : ''}
                                     </div>
                                     ${key.is_active ? `
                                         <button data-action="revoke-client-key" data-id="${key.id}"
-                                                style="background: #dc3545; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 13px;">
+                                                style="background: #dc3545; color: white; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 13px; margin-left: 7px;">
                                             Revoke
                                         </button>
                                     ` : ''}
