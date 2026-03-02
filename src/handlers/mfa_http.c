@@ -323,6 +323,8 @@ HttpResponse *mfa_verify_handler(const HttpRequest *req, const RouteParams *para
             }
         }
         return response_json_ok("{\"valid\":true}");
+    } else if (result == -2) {
+        return response_json_error(429, "Too many attempts, try again soon!");
     } else if (result == 0) {
         return response_json_ok("{\"valid\":false}");
     } else {

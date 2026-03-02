@@ -67,6 +67,7 @@
  * UNIX_TS(expr) converts a datetime expression to Unix epoch seconds.
  * INTERVAL_SECONDS(expr) creates a relative time offset from now.
  * DAYS_AGO(n) creates a timestamp N days in the past (for cleanup queries).
+ * SECONDS_AGO(n) creates a timestamp N seconds in the past (for rate limiting, etc.).
  *   Note: n must be a string literal or char array, not an integer.
  *   Example: DAYS_AGO("90") or with snprintf: sprintf(buf, "%d", days); DAYS_AGO(buf)
  */
@@ -76,6 +77,7 @@
     #define UNIX_TS(expr) "strftime('%s', " expr ")"
     #define INTERVAL_SECONDS(expr) "datetime('now', '+' || " expr " || ' seconds')"
     #define DAYS_AGO(n) "datetime('now', '-" n " days')"
+    #define SECONDS_AGO(n) "datetime('now', '-" n " seconds')"
 #endif
 
 #ifdef DB_BACKEND_POSTGRESQL
@@ -83,6 +85,7 @@
     #define UNIX_TS(expr) "EXTRACT(EPOCH FROM " expr ")"
     #define INTERVAL_SECONDS(expr) "(NOW() + (" expr " || ' seconds')::interval)"
     #define DAYS_AGO(n) "(NOW() - INTERVAL '" n " days')"
+    #define SECONDS_AGO(n) "(NOW() - INTERVAL '" n " seconds')"
 #endif
 
 /* ============================================================================

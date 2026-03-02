@@ -154,7 +154,14 @@ int mfa_method_get_by_id(db_handle_t *db,
 
     const char *sql =
         "SELECT id, pin, user_account_pin, mfa_method, display_name, secret, "
-        "       is_confirmed, confirmed_at "
+        "       is_confirmed, confirmed_at, "
+        "       EXISTS ("
+        "           SELECT 1 FROM " TBL_USER_MFA_USAGE " "
+        "           WHERE user_mfa_pin = " TBL_USER_MFA ".pin "
+        "           AND success = " BOOL_FALSE " "
+        "           AND submitted_at > " SECONDS_AGO("60") " "
+        "           LIMIT 1 OFFSET 4"
+        "       ) AS is_rate_limited "
         "FROM " TBL_USER_MFA " "
         "WHERE id = " P"1 "
         "LIMIT 1";
@@ -194,6 +201,8 @@ int mfa_method_get_by_id(db_handle_t *db,
         } else {
             out_method->confirmed_at[0] = '\0';
         }
+
+        out_method->is_rate_limited = db_column_int(stmt, 8);
 
         db_finalize(stmt);
         return 0;

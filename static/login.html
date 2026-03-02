@@ -458,7 +458,7 @@
                         window.location.href = getReturnUrl();
                     } else {
                         submitBtn.disabled = false;
-                        messageEl.textContent = 'Invalid code, please try again.';
+                        messageEl.textContent = data.error || 'Invalid code, please try again.';
                     }
                 } catch (err) {
                     submitBtn.disabled = false;

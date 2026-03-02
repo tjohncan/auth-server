@@ -17,6 +17,7 @@ typedef struct {
     char secret[256];               /* Base32-encoded for TOTP, phone number for SMS */
     int is_confirmed;
     char confirmed_at[32];
+    int is_rate_limited;
 } mfa_method_t;
 
 /* ============================================================================

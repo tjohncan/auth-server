@@ -712,6 +712,9 @@ create index idx_organization_key_usage_authenticated_at
 create index idx_user_mfa_usage_submitted_at
   on logging.user_mfa_usage(submitted_at);
 
+create index idx_user_mfa_usage_rate_limit
+  on logging.user_mfa_usage(user_mfa_pin, success, submitted_at);
+
 -- Composite indexes for purging with business logic filters
 -- (Leading with equality condition for better selectivity when deleting old rows)
 create index idx_user_mfa_cleanup

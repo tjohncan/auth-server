@@ -219,6 +219,11 @@ int mfa_verify(db_handle_t *db,
         return 0;  /* Treat as invalid */
     }
 
+    if (method.is_rate_limited) {
+        log_info("MFA rate limited (too many failed attempts)");
+        return -2;
+    }
+
     /* Decrypt secret from database */
     char decrypted_secret[TOTP_SECRET_BASE32_LEN + 1];
     if (decrypt_field(method.secret, decrypted_secret, sizeof(decrypted_secret)) != 0) {
