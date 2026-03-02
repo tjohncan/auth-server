@@ -25,7 +25,7 @@
 
 /* Global shutdown flag for signal handling */
 static volatile sig_atomic_t shutdown_requested = 0;
-static volatile EventLoopPool *global_pool = NULL;
+static EventLoopPool * volatile global_pool = NULL;
 static pthread_t cleaner_thread = 0;
 
 /* Global context for HTTP handlers */
