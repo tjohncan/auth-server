@@ -86,6 +86,10 @@ typedef struct {
     char *encryption_key_env;       /* ENV var name for encryption_key */
     char *server_host_env;  /* ENV var name for server_host */
     char *server_port_env;  /* ENV var name for server_port */
+    char *mothership_url_env; /* ENV var name for mothership_url */
+
+    /* Branding */
+    char *mothership_url;  /* Optional parent/brand URL shown on index page */
 } config_t;
 
 /*

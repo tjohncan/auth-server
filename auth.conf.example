@@ -33,6 +33,13 @@ schema_dir = ./sql
 # History tables track changes to tables with 'pin' primary keys in lookup/security schemas
 enable_history_tables = true
 
+# Encryption
+# Passphrase used to derive keys for encrypting sensitive data at rest
+# Protects usernames, emails, MFA secrets, and other PII against database compromise
+# IMPORTANT: Customize this in production! Use encryption_key_env to load from environment
+encryption_key = customize_me
+# encryption_key_env = MY_ENCRYPTION_KEY
+
 # Password hashing (argon2id or pbkdf2-sha256)
 secret_hashing_algorithm = argon2id
 secret_hash_min_iterations = 4
@@ -70,9 +77,6 @@ retention_history_days = 90
 retention_sessions_grace_days = 8
 retention_tokens_grace_days = 8
 
-# Encryption
-# Passphrase used to derive keys for encrypting sensitive data at rest
-# Protects usernames, emails, MFA secrets, and other PII against database compromise
-# IMPORTANT: Customize this in production! Use encryption_key_env to load from environment
-encryption_key = customize_me
-# encryption_key_env = MY_ENCRYPTION_KEY
+# Mothership (optional parent/brand link on index page)
+# mothership_url = https://{your}.{sponsor}
+# mothership_url_env = AUTH_MOTHERSHIP_URL

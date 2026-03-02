@@ -181,6 +181,22 @@ static void set_config_value(config_t *config, const char *key, const char *valu
         } else {
             log_error("Failed to allocate memory for server_port_env");
         }
+    } else if (strcmp(key, "mothership_url") == 0) {
+        new_value = str_dup(value);
+        if (new_value) {
+            free(config->mothership_url);
+            config->mothership_url = new_value;
+        } else {
+            log_error("Failed to allocate memory for mothership_url");
+        }
+    } else if (strcmp(key, "mothership_url_env") == 0) {
+        new_value = str_dup(value);
+        if (new_value) {
+            free(config->mothership_url_env);
+            config->mothership_url_env = new_value;
+        } else {
+            log_error("Failed to allocate memory for mothership_url_env");
+        }
     }
     /* Database settings */
     else if (strcmp(key, "db_type") == 0) {
@@ -654,6 +670,20 @@ static void apply_env_overrides(config_t *config) {
         }
     }
 
+    /* MOTHERSHIP_URL */
+    env_var_name = config->mothership_url_env ? config->mothership_url_env : "AUTH_MOTHERSHIP_URL";
+    env_value = getenv(env_var_name);
+    if (env_value) {
+        char *new_value = str_dup(env_value);
+        if (new_value) {
+            free(config->mothership_url);
+            config->mothership_url = new_value;
+            log_info("Config override from %s", env_var_name);
+        } else {
+            log_error("Failed to allocate memory for %s override", env_var_name);
+        }
+    }
+
     /* LOG_LEVEL */
     env_var_name = config->log_level_env ? config->log_level_env : "AUTH_LOG_LEVEL";
     env_value = getenv(env_var_name);
@@ -836,6 +866,8 @@ config_t *config_load(const char *config_file) {
     config->encryption_key_env = NULL;
     config->server_host_env = NULL;
     config->server_port_env = NULL;
+    config->mothership_url_env = NULL;
+    config->mothership_url = NULL;
 
     /* Encryption default */
     config->encryption_key = str_dup("customize_me");
@@ -979,6 +1011,8 @@ void config_free(config_t *config) {
     free(config->log_level_env);
     free(config->server_host_env);
     free(config->server_port_env);
+    free(config->mothership_url_env);
+    free(config->mothership_url);
 
     free(config->encryption_key);
 

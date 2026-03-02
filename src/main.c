@@ -352,7 +352,7 @@ int main(void) {
     router_add(router, HTTP_GET, "/userinfo", userinfo_handler);
 
     /* Register static files from ./static/ directory */
-    register_static_files(router);
+    register_static_files(router, config);
 
     /* Configure event loop (use resolved num_workers) */
     EventLoopConfig event_config = {
@@ -404,6 +404,7 @@ int main(void) {
         log_info("Cleaner thread stopped");
     }
 
+    static_files_cleanup();
     db_pool_shutdown();
     encrypt_cleanup();
     config_free(config);

@@ -3,6 +3,7 @@
 
 #include "server/http.h"
 #include "server/router.h"
+#include "util/config.h"
 
 /*
  * Handler function declarations
@@ -289,6 +290,9 @@ HttpResponse *index_handler(const HttpRequest *req, const RouteParams *params);
 HttpResponse *static_file_handler(const HttpRequest *req, const RouteParams *params);
 
 /* Register all static files from ./static/ directory as routes */
-void register_static_files(Router *router);
+void register_static_files(Router *router, const config_t *config);
+
+/* Free all cached static file buffers */
+void static_files_cleanup(void);
 
 #endif /* HANDLERS_H */

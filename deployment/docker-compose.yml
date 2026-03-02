@@ -26,6 +26,8 @@ services:
     restart: unless-stopped
 
     environment:
+      - AUTH_MOTHERSHIP_URL=${AFFILIATE:-}
+
       - AUTH_DB_TYPE=${DB_BACKEND:-sqlite}
       - AUTH_DB_HOST=${POSTGRES_HOST:-}
       - AUTH_DB_PORT=${POSTGRES_PORT:-5432}
