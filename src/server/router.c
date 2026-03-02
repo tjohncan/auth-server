@@ -33,30 +33,56 @@
  * ============================================================================ */
 
 /*
- * Route - Single route entry
+ * Route - Single route entry (exact-match, stored in hash table)
  */
 typedef struct {
     HttpMethod method;        /* HTTP method (GET, POST, etc.) */
-    char *path_pattern;       /* Original pattern (e.g., "/users/:id") */
-    char **segments;          /* Split by '/' for fast matching */
+    char *path_pattern;       /* Original path (e.g., "/health") */
+    char **segments;          /* Split by '/' */
     int segment_count;        /* Number of segments */
     RouteHandler handler;     /* Handler function */
 } Route;
 
 /*
- * RouteList - Linked list for hash table chaining
+ * RouteNode - Linked list for hash table chaining
  */
 typedef struct RouteNode {
     Route route;
     struct RouteNode *next;
 } RouteNode;
 
+#if ROUTER_USE_PATH_PARAMS
 /*
- * Router - Hash table of routes
+ * ParamRoute - Parameterized route entry (stored in separate list)
+ *
+ * Parameterized routes bypass the hash table entirely. At dispatch time,
+ * candidates are filtered by segment count and literal segment equality,
+ * then disambiguated by literal position vectors.
+ */
+typedef struct {
+    HttpMethod method;
+    char *path_pattern;       /* Original pattern e.g. "/users/:id" */
+    char **segments;          /* Split segments */
+    int segment_count;
+    int literal_count;        /* Number of non-param segments */
+    int *literal_mask;        /* 1=literal, 0=param, per segment */
+    RouteHandler handler;
+} ParamRoute;
+
+#define PARAM_ROUTES_INITIAL_CAPACITY 8
+#endif
+
+/*
+ * Router - Hash table of routes with optional parameterized route list
  */
 struct Router {
     RouteNode *buckets[HASH_TABLE_SIZE];  /* Hash table buckets */
     int route_count;                       /* Total routes registered */
+#if ROUTER_USE_PATH_PARAMS
+    ParamRoute *param_routes;              /* Parameterized routes (separate from hash table) */
+    int param_route_count;
+    int param_route_capacity;
+#endif
 };
 
 /*
@@ -99,29 +125,15 @@ static char **split_path(const char *path, int *out_count) {
 }
 
 /*
- * hash_path - FNV-1a hash function
- *
- * For path params, normalizes ":param" → "$" before hashing so:
- *   "/users/:id" and "/users/:email" hash to same value (caught as duplicate)
- *   "/users/123" hashes differently (lookup uses normalized version)
+ * hash_path - FNV-1a hash for exact-match route lookup
  */
 static uint32_t hash_path(const char *path) {
     uint32_t hash = 2166136261u;  /* FNV offset basis */
     const char *p = path;
 
     while (*p) {
-#if ROUTER_USE_PATH_PARAMS
-        if (*p == ':') {
-            /* Normalize :param to $ */
-            hash ^= (uint8_t)'$';
-            hash *= 16777619;  /* FNV prime */
-            /* Skip to next / or end */
-            while (*p && *p != '/') p++;
-            continue;
-        }
-#endif
         hash ^= (uint8_t)*p++;
-        hash *= 16777619;
+        hash *= 16777619;  /* FNV prime */
     }
 
     return hash % HASH_TABLE_SIZE;
@@ -154,19 +166,44 @@ static bool is_param_segment(const char *segment) {
 }
 
 /*
- * extract_param_name - Get parameter name from segment
- *
- * Example: ":id" → "id"
+ * extract_param_name - Get parameter name from ":name" segment
  */
 static const char *extract_param_name(const char *segment) {
     if (is_param_segment(segment)) {
-        return segment + 1;  /* Skip the ':' */
+        return segment + 1;
     }
     return NULL;
 }
-#endif /* ROUTER_USE_PATH_PARAMS */
 
-#if ROUTER_USE_PATH_PARAMS
+/*
+ * path_has_params - Check if path contains parameterized segments ("/:...")
+ */
+static bool path_has_params(const char *path) {
+    return strstr(path, "/:") != NULL;
+}
+
+/*
+ * paths_match_normalized - Check if two parameterized paths have identical
+ *                          $-normalized forms (same literal structure)
+ *
+ * "/users/:id" and "/users/:email" → true  (both normalize to "/users/$")
+ * "/users/:id" and "/posts/:id"   → false
+ */
+static bool paths_match_normalized(const char *a, const char *b) {
+    while (*a && *b) {
+        if (*a != *b) return false;
+        if (*a == '/' && *(a+1) == ':' && *(b+1) == ':') {
+            a++; b++;
+            while (*a && *a != '/') a++;
+            while (*b && *b != '/') b++;
+            continue;
+        }
+        a++;
+        b++;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
 /*
  * route_params_create - Create empty params struct
  */
@@ -179,7 +216,7 @@ static RouteParams *route_params_create(void) {
 }
 
 /*
- * route_params_destroy - Free params struct
+ * route_params_destroy - Free params struct and all contained strings
  */
 static void route_params_destroy(RouteParams *params) {
     if (!params) return;
@@ -192,7 +229,7 @@ static void route_params_destroy(RouteParams *params) {
 }
 
 /*
- * route_params_add - Add a parameter
+ * route_params_add - Add a named parameter
  */
 static void route_params_add(RouteParams *params, const char *name, const char *value) {
     if (!params || params->count >= MAX_ROUTE_PARAMS) return;
@@ -208,77 +245,16 @@ static void route_params_add(RouteParams *params, const char *name, const char *
  * ============================================================================ */
 
 /*
- * route_matches - Check if route matches request path
+ * route_matches - Check if exact-match route matches request path
  *
- * Returns: RouteParams if match, NULL if no match
+ * Parameterized routes are matched separately via the param_routes list.
  */
 static RouteParams *route_matches(const Route *route, const char *path) {
-#if ROUTER_USE_PATH_PARAMS
-    /* Split request path */
-    int path_segment_count;
-    char **path_segments = split_path(path, &path_segment_count);
-
-    /* Segment count must match exactly */
-    if (path_segment_count != route->segment_count) {
-        if (path_segments) {
-            for (int i = 0; i < path_segment_count; i++) {
-                free(path_segments[i]);
-            }
-            free(path_segments);
-        }
-        return NULL;
-    }
-
-    /* Create params struct for extracted parameters */
-    RouteParams *params = route_params_create();
-    if (!params) {
-        if (path_segments) {
-            for (int i = 0; i < path_segment_count; i++) {
-                free(path_segments[i]);
-            }
-            free(path_segments);
-        }
-        return NULL;
-    }
-
-    /* Match each segment */
-    for (int i = 0; i < route->segment_count; i++) {
-        const char *route_seg = route->segments[i];
-        const char *path_seg = path_segments[i];
-
-        if (is_param_segment(route_seg)) {
-            /* This is a parameter - extract it */
-            const char *param_name = extract_param_name(route_seg);
-            route_params_add(params, param_name, path_seg);
-        } else {
-            /* Exact match required */
-            if (strcmp(route_seg, path_seg) != 0) {
-                /* No match */
-                route_params_destroy(params);
-                for (int j = 0; j < path_segment_count; j++) {
-                    free(path_segments[j]);
-                }
-                free(path_segments);
-                return NULL;
-            }
-        }
-    }
-
-    /* Match! */
-    for (int i = 0; i < path_segment_count; i++) {
-        free(path_segments[i]);
-    }
-    free(path_segments);
-
-    return params;
-#else
-    /* Exact string matching only */
     static const RouteParams matched = {0};
     if (strcmp(route->path_pattern, path) == 0) {
         return (RouteParams *)&matched;
     }
     return NULL;
-#endif
 }
 
 /* ============================================================================
@@ -298,13 +274,19 @@ Router *router_create(void) {
     }
     router->route_count = 0;
 
+#if ROUTER_USE_PATH_PARAMS
+    router->param_routes = NULL;
+    router->param_route_count = 0;
+    router->param_route_capacity = 0;
+#endif
+
     return router;
 }
 
 void router_destroy(Router *router) {
     if (!router) return;
 
-    /* Free all buckets */
+    /* Free all hash table buckets */
     for (int i = 0; i < HASH_TABLE_SIZE; i++) {
         RouteNode *node = router->buckets[i];
         while (node) {
@@ -312,7 +294,6 @@ void router_destroy(Router *router) {
 
             free(node->route.path_pattern);
 
-            /* Free segments */
             for (int j = 0; j < node->route.segment_count; j++) {
                 free(node->route.segments[j]);
             }
@@ -323,6 +304,18 @@ void router_destroy(Router *router) {
         }
     }
 
+#if ROUTER_USE_PATH_PARAMS
+    for (int i = 0; i < router->param_route_count; i++) {
+        free(router->param_routes[i].path_pattern);
+        for (int j = 0; j < router->param_routes[i].segment_count; j++) {
+            free(router->param_routes[i].segments[j]);
+        }
+        free(router->param_routes[i].segments);
+        free(router->param_routes[i].literal_mask);
+    }
+    free(router->param_routes);
+#endif
+
     free(router);
 }
 
@@ -331,6 +324,60 @@ void router_add(Router *router, HttpMethod method, const char *path, RouteHandle
         log_error("Invalid router_add parameters");
         return;
     }
+
+#if ROUTER_USE_PATH_PARAMS
+    /* Parameterized routes go into a separate list, not the hash table */
+    if (path_has_params(path)) {
+        /* Reject duplicate normalized forms (same method + same literal structure) */
+        for (int i = 0; i < router->param_route_count; i++) {
+            if (router->param_routes[i].method == method &&
+                paths_match_normalized(router->param_routes[i].path_pattern, path)) {
+                log_error("Duplicate parameterized route: %s %s (conflicts with %s)",
+                         method_to_string(method), path,
+                         router->param_routes[i].path_pattern);
+                return;
+            }
+        }
+
+        /* Grow array if needed */
+        if (router->param_route_count >= router->param_route_capacity) {
+            int new_cap = router->param_route_capacity
+                        ? router->param_route_capacity * 2
+                        : PARAM_ROUTES_INITIAL_CAPACITY;
+            ParamRoute *grown = realloc(router->param_routes, new_cap * sizeof(ParamRoute));
+            if (!grown) {
+                log_error("Failed to allocate param route");
+                return;
+            }
+            router->param_routes = grown;
+            router->param_route_capacity = new_cap;
+        }
+
+        ParamRoute *pr = &router->param_routes[router->param_route_count];
+        pr->method = method;
+        pr->path_pattern = str_dup(path);
+        pr->handler = handler;
+        pr->segments = split_path(path, &pr->segment_count);
+
+        /* Pre-compute literal mask and count for dispatch disambiguation */
+        pr->literal_mask = malloc(pr->segment_count * sizeof(int));
+        pr->literal_count = 0;
+        for (int i = 0; i < pr->segment_count; i++) {
+            if (is_param_segment(pr->segments[i])) {
+                pr->literal_mask[i] = 0;
+            } else {
+                pr->literal_mask[i] = 1;
+                pr->literal_count++;
+            }
+        }
+
+        router->param_route_count++;
+        router->route_count++;
+
+        log_info("  %-7s %s (parameterized)", method_to_string(method), path);
+        return;
+    }
+#endif
 
     /* Hash the path */
     uint32_t bucket_idx = hash_path(path);
@@ -374,27 +421,19 @@ HttpResponse *router_dispatch(Router *router, const HttpRequest *req) {
 
     log_debug("Dispatching: %s %s", req->method_str, req->path);
 
-    /* Hash the request path to find bucket */
+    /* Step 1: Exact hash match */
     uint32_t bucket_idx = hash_path(req->path);
     RouteNode *node = router->buckets[bucket_idx];
 
-    /* Search bucket for matching route */
     while (node) {
         Route *route = &node->route;
 
-        /* Check method */
         if (route->method == req->method) {
-            /* Check path pattern */
             RouteParams *params = route_matches(route, req->path);
             if (params) {
-                /* Match! Call handler */
                 log_debug("Matched route: %s", route->path_pattern);
 
                 HttpResponse *resp = route->handler(req, params);
-
-#if ROUTER_USE_PATH_PARAMS
-                route_params_destroy(params);
-#endif
 
                 if (!resp) {
                     log_error("Handler returned NULL for %s %s", req->method_str, req->path);
@@ -408,7 +447,110 @@ HttpResponse *router_dispatch(Router *router, const HttpRequest *req) {
         node = node->next;
     }
 
-    /* No route matched - 404 */
+#if ROUTER_USE_PATH_PARAMS
+    /*
+     * Step 2: Parameterized route matching (fallback after exact hash miss)
+     *
+     * Algorithm:
+     *   1. Split request path into segments
+     *   2. Filter to POSSIBLY VALID candidates:
+     *      - Same HTTP method
+     *      - Same segment count
+     *      - All literal segments equal the corresponding request segments
+     *   3. Among candidates, pick the winner by literal position vector:
+     *      - Prefer higher literal_count (more specific route)
+     *      - Break ties by leftmost literal positions (lexicographic comparison)
+     *   4. Extract params from the single winner
+     *
+     * The winner is guaranteed unique: routes with identical $-normalized
+     * forms are rejected at registration, so literal position vectors are
+     * always distinct among same-segment-count candidates.
+     */
+    if (router->param_route_count > 0) {
+        int req_seg_count;
+        char **req_segments = split_path(req->path, &req_seg_count);
+
+        int best = -1;
+        int best_literal_count = -1;
+
+        for (int i = 0; i < router->param_route_count; i++) {
+            ParamRoute *pr = &router->param_routes[i];
+
+            if (pr->method != req->method) continue;
+            if (pr->segment_count != req_seg_count) continue;
+
+            /* All literal segments must match the request */
+            bool valid = true;
+            for (int s = 0; s < pr->segment_count; s++) {
+                if (pr->literal_mask[s] &&
+                    strcmp(pr->segments[s], req_segments[s]) != 0) {
+                    valid = false;
+                    break;
+                }
+            }
+            if (!valid) continue;
+
+            /* Candidate is POSSIBLY VALID — check if it beats current best */
+            if (pr->literal_count > best_literal_count) {
+                best = i;
+                best_literal_count = pr->literal_count;
+            } else if (pr->literal_count == best_literal_count && best >= 0) {
+                /* Tie-break: compare literal position vectors left to right
+                 * Prefer the route with a literal segment in an earlier position */
+                ParamRoute *prev = &router->param_routes[best];
+                for (int s = 0; s < pr->segment_count; s++) {
+                    if (pr->literal_mask[s] > prev->literal_mask[s]) {
+                        best = i;
+                        break;
+                    } else if (pr->literal_mask[s] < prev->literal_mask[s]) {
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (best >= 0) {
+            /* Winner found — extract params and dispatch */
+            ParamRoute *pr = &router->param_routes[best];
+            RouteParams *params = route_params_create();
+
+            if (params) {
+                for (int s = 0; s < pr->segment_count; s++) {
+                    if (!pr->literal_mask[s]) {
+                        route_params_add(params,
+                                        extract_param_name(pr->segments[s]),
+                                        req_segments[s]);
+                    }
+                }
+            }
+
+            for (int s = 0; s < req_seg_count; s++) {
+                free(req_segments[s]);
+            }
+            free(req_segments);
+
+            log_debug("Matched parameterized route: %s", pr->path_pattern);
+            HttpResponse *resp = pr->handler(req, params);
+            route_params_destroy(params);
+
+            if (!resp) {
+                log_error("Handler returned NULL for %s %s", req->method_str, req->path);
+                return response_json_error(500, "Internal Server Error");
+            }
+            return resp;
+        }
+
+        /* No parameterized match — clean up and fall through to 404 */
+        if (req_segments) {
+            for (int s = 0; s < req_seg_count; s++) {
+                free(req_segments[s]);
+            }
+            free(req_segments);
+        }
+    }
+#endif
+
+    /* No route matched */
     log_debug("No route matched for %s %s", req->method_str, req->path);
     return response_json_error(404, "Not Found");
 }
