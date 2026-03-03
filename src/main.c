@@ -21,10 +21,12 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <signal.h>
+#include <stdbool.h>
 #include <sys/types.h>
 
 static EventLoopPool * volatile global_pool = NULL;
-static pthread_t cleaner_thread = 0;
+static pthread_t cleaner_thread;
+static bool cleaner_started = false;
 
 /* Global context for HTTP handlers */
 const config_t *g_config = NULL;
@@ -272,6 +274,7 @@ int main(void) {
         config_free(config);
         return 1;
     }
+    cleaner_started = true;
 
     /* Set global context for HTTP handlers */
     g_config = config;
@@ -395,7 +398,7 @@ int main(void) {
     router_destroy(router);
 
     /* Stop cleaner thread (if it was started) */
-    if (cleaner_thread) {
+    if (cleaner_started) {
         cleaner_request_stop();
         pthread_join(cleaner_thread, NULL);
         log_info("Cleaner thread stopped");
