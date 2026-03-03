@@ -9,6 +9,8 @@
 --   - ../README.md (schema documentation and design notes)
 -- ============================================================================
 
+begin;
+
 -- ============================================================================
 -- KEYS - Cryptographic signing keys
 -- ============================================================================
@@ -712,3 +714,5 @@ create index idx_recovery_code_cleanup
 
 create index idx_recovery_code_set_cleanup
   on recovery_code_set(is_active, revoked_at);
+
+commit;
