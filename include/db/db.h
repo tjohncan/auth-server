@@ -150,7 +150,7 @@ int db_prepare(db_handle_t *db, db_stmt_t **stmt, const char *sql);
  * Parameters:
  *   stmt  - Prepared statement
  *   index - Parameter index (1-based: ?1, ?2, ...)
- *   value - String value (copied internally)
+ *   value - String value (should remain valid until db_step())
  *   len   - Length of string, or -1 to use strlen()
  *
  * Returns: 0 on success, negative on error
