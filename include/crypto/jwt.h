@@ -192,7 +192,7 @@ typedef struct {
     /* Metadata */
     time_t iat;                                 /* Issued at (unix timestamp) */
     time_t exp;                                 /* Expiration time (unix timestamp) */
-    char nonce[32];                             /* Random nonce to prevent reuse */
+    char nonce[33];                             /* Random string to prevent reuse (32 chars + null) */
 } auth_request_claims_t;
 
 /*
