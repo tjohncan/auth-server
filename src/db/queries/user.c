@@ -386,25 +386,28 @@ int user_verify_password(db_handle_t *db, const char *username,
 
     long long pin = db_column_int64(stmt, 0);
     const unsigned char *id = db_column_blob(stmt, 1);
-    const char *salt = (const char *)db_column_text(stmt, 2);
+    const char *salt_ptr = (const char *)db_column_text(stmt, 2);
     int iterations = db_column_int(stmt, 3);
-    const char *hash = (const char *)db_column_text(stmt, 4);
+    const char *hash_ptr = (const char *)db_column_text(stmt, 4);
 
-    if (!id || !salt || !hash) {
+    if (!id || !salt_ptr || !hash_ptr) {
         log_error("NULL fields in user_account");
         db_finalize(stmt);
         return -1;
     }
 
-    /* Copy id before finalizing statement */
+    /* Copy column data before finalize — pointers are invalid after */
     unsigned char user_id[16];
     memcpy(user_id, id, 16);
+    char salt[256], hash[256];
+    snprintf(salt, sizeof(salt), "%s", salt_ptr);
+    snprintf(hash, sizeof(hash), "%s", hash_ptr);
+
+    db_finalize(stmt);
 
     /* Verify password using crypto module */
     int valid = crypto_password_verify(password, strlen(password),
                                        salt, iterations, hash);
-
-    db_finalize(stmt);
 
     /* If password valid, return pin and id if requested */
     if (valid == 1) {
@@ -759,21 +762,26 @@ int user_change_password(db_handle_t *db, long long user_account_pin,
         return -1;
     }
 
-    const char *salt = (const char *)db_column_text(verify_stmt, 0);
+    const char *salt_ptr = (const char *)db_column_text(verify_stmt, 0);
     int iterations = db_column_int(verify_stmt, 1);
-    const char *hash = (const char *)db_column_text(verify_stmt, 2);
+    const char *hash_ptr = (const char *)db_column_text(verify_stmt, 2);
 
-    if (!salt || !hash) {
+    if (!salt_ptr || !hash_ptr) {
         log_error("NULL password fields in user_account");
         db_finalize(verify_stmt);
         return -1;
     }
 
+    /* Copy column data before finalize — pointers are invalid after */
+    char salt[256], hash[256];
+    snprintf(salt, sizeof(salt), "%s", salt_ptr);
+    snprintf(hash, sizeof(hash), "%s", hash_ptr);
+
+    db_finalize(verify_stmt);
+
     /* Step 2: Verify current password */
     int valid = crypto_password_verify(current_password, strlen(current_password),
                                        salt, iterations, hash);
-
-    db_finalize(verify_stmt);
 
     if (valid != 1) {
         log_info("Current password verification failed for password change");

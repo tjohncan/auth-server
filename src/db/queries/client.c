@@ -2030,21 +2030,26 @@ int client_key_verify(db_handle_t *db,
     }
 
     /* Extract stored hash parameters */
-    const char *salt = (const char *)db_column_text(stmt, 0);
+    const char *salt_ptr = (const char *)db_column_text(stmt, 0);
     int iterations = db_column_int(stmt, 1);
-    const char *hash = (const char *)db_column_text(stmt, 2);
+    const char *hash_ptr = (const char *)db_column_text(stmt, 2);
     long long client_pin = db_column_int64(stmt, 3);
 
-    if (!salt || !hash) {
+    if (!salt_ptr || !hash_ptr) {
         log_error("NULL hash fields in client_key");
         db_finalize(stmt);
         return -1;
     }
 
-    /* Verify secret using timing-safe comparison */
-    int valid = crypto_password_verify(secret, strlen(secret), salt, iterations, hash);
+    /* Copy column data before finalize — pointers are invalid after */
+    char salt[256], hash[256];
+    snprintf(salt, sizeof(salt), "%s", salt_ptr);
+    snprintf(hash, sizeof(hash), "%s", hash_ptr);
 
     db_finalize(stmt);
+
+    /* Verify secret using timing-safe comparison */
+    int valid = crypto_password_verify(secret, strlen(secret), salt, iterations, hash);
 
     /* If valid, return client pin if requested */
     if (valid == 1) {

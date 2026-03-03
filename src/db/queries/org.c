@@ -976,15 +976,26 @@ int organization_key_verify(db_handle_t *db,
 
     long long key_pin = db_column_int64(stmt, 0);
     long long org_pin = db_column_int64(stmt, 1);
-    const char *stored_hash = db_column_text(stmt, 2);
-    const char *salt = db_column_text(stmt, 3);
+    const char *hash_ptr = db_column_text(stmt, 2);
+    const char *salt_ptr = db_column_text(stmt, 3);
     int iterations = db_column_int(stmt, 4);
+
+    if (!salt_ptr || !hash_ptr) {
+        log_error("NULL hash fields in organization_key");
+        db_finalize(stmt);
+        return -1;
+    }
+
+    /* Copy column data before finalize — pointers are invalid after */
+    char salt[256], hash[256];
+    snprintf(salt, sizeof(salt), "%s", salt_ptr);
+    snprintf(hash, sizeof(hash), "%s", hash_ptr);
+
+    db_finalize(stmt);
 
     /* Verify password using timing-safe comparison */
     int valid = crypto_password_verify(secret, strlen(secret),
-                                       salt, iterations, stored_hash);
-
-    db_finalize(stmt);
+                                       salt, iterations, hash);
 
     if (valid != 1) {
         log_error("Organization key secret verification failed");
