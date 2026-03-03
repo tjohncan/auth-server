@@ -23,8 +23,6 @@
 #include <signal.h>
 #include <sys/types.h>
 
-/* Global shutdown flag for signal handling */
-static volatile sig_atomic_t shutdown_requested = 0;
 static EventLoopPool * volatile global_pool = NULL;
 static pthread_t cleaner_thread = 0;
 
@@ -39,7 +37,6 @@ const config_t *g_config = NULL;
  */
 static void signal_handler(int signum) {
     (void)signum;
-    shutdown_requested = 1;
 
     /* Stop workers by setting their running flags to false */
     if (global_pool) {
