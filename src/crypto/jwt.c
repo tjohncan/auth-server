@@ -436,6 +436,39 @@ static EVP_PKEY *load_public_key_pem(const char *pem_string) {
 }
 
 /*
+ * Thread-local cache for parsed ES256 public keys.
+ * Avoids re-parsing PEM text on every token verification.
+ * Each worker thread independently caches current and prior keys;
+ * cache auto-invalidates when the PEM text changes (key rotation).
+ */
+#define ES256_PEM_CACHE_SIZE 512
+
+typedef struct {
+    char pem[ES256_PEM_CACHE_SIZE];
+    EVP_PKEY *pkey;
+} es256_key_cache_t;
+
+static _Thread_local es256_key_cache_t es256_cache[2];  /* [0]=current, [1]=prior */
+
+static EVP_PKEY *get_cached_public_key(const char *pem_string, int slot) {
+    es256_key_cache_t *entry = &es256_cache[slot];
+
+    if (entry->pkey && strcmp(entry->pem, pem_string) == 0)
+        return entry->pkey;
+
+    /* Cache miss — parse and replace */
+    EVP_PKEY *pkey = load_public_key_pem(pem_string);
+    if (!pkey) return NULL;
+
+    if (entry->pkey)
+        EVP_PKEY_free(entry->pkey);
+
+    str_copy(entry->pem, sizeof(entry->pem), pem_string);
+    entry->pkey = pkey;
+    return pkey;
+}
+
+/*
  * Sign data with ECDSA private key
  * Returns signature length on success, -1 on error
  */
@@ -717,27 +750,25 @@ int jwt_decode_es256(const char *token,
         return -1;
     }
 
-    /* Try current public key first */
-    EVP_PKEY *pkey = load_public_key_pem(current_public_pem);
+    /* Try current public key first (cached per worker thread) */
+    EVP_PKEY *pkey = get_cached_public_key(current_public_pem, 0);
     if (!pkey) {
         return -1;
     }
 
     int valid = ecdsa_verify(pkey, (unsigned char *)signing_input, signing_len,
                             der_signature, der_sig_len);
-    EVP_PKEY_free(pkey);
 
     /* If current key fails and prior key exists, try prior key */
     if (valid != 1 && prior_public_pem) {
         log_debug("Current ES256 public key failed, trying prior key");
-        pkey = load_public_key_pem(prior_public_pem);
+        pkey = get_cached_public_key(prior_public_pem, 1);
         if (!pkey) {
             return -1;
         }
 
         valid = ecdsa_verify(pkey, (unsigned char *)signing_input, signing_len,
                             der_signature, der_sig_len);
-        EVP_PKEY_free(pkey);
     }
 
     if (valid != 1) {
