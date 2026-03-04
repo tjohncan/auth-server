@@ -137,5 +137,81 @@ int validate_code_name(const char *code_name, char *error_msg, size_t error_len)
         return -1;
     }
 
+    /* Check length limit */
+    if (len > 100) {
+        if (error_msg && error_len > 0) {
+            snprintf(error_msg, error_len, "Code name cannot exceed 100 characters");
+        }
+        return -1;
+    }
+
     return 0;  /* Valid */
+}
+
+int validate_display_name(const char *display_name, char *error_msg, size_t error_len) {
+    if (!display_name) {
+        if (error_msg && error_len > 0) {
+            snprintf(error_msg, error_len, "Display name is NULL");
+        }
+        return -1;
+    }
+
+    if (display_name[0] == '\0') {
+        if (error_msg && error_len > 0) {
+            snprintf(error_msg, error_len, "Display name cannot be empty");
+        }
+        return -1;
+    }
+
+    if (strlen(display_name) > 200) {
+        if (error_msg && error_len > 0) {
+            snprintf(error_msg, error_len, "Display name cannot exceed 200 characters");
+        }
+        return -1;
+    }
+
+    return 0;
+}
+
+int validate_note(const char *note, char *error_msg, size_t error_len) {
+    if (!note) {
+        return 0;  /* NULL is allowed */
+    }
+
+    if (strlen(note) > 2000) {
+        if (error_msg && error_len > 0) {
+            snprintf(error_msg, error_len, "Note cannot exceed 2000 characters");
+        }
+        return -1;
+    }
+
+    return 0;
+}
+
+int validate_url_field(const char *url, const char *field_name,
+                       char *error_msg, size_t error_len) {
+    const char *name = field_name ? field_name : "URL";
+
+    if (!url) {
+        if (error_msg && error_len > 0) {
+            snprintf(error_msg, error_len, "%s is required", name);
+        }
+        return -1;
+    }
+
+    if (url[0] == '\0') {
+        if (error_msg && error_len > 0) {
+            snprintf(error_msg, error_len, "%s cannot be empty", name);
+        }
+        return -1;
+    }
+
+    if (strlen(url) > 2000) {
+        if (error_msg && error_len > 0) {
+            snprintf(error_msg, error_len, "%s cannot exceed 2000 characters", name);
+        }
+        return -1;
+    }
+
+    return 0;
 }

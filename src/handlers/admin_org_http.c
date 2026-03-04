@@ -14,6 +14,7 @@
 #include "util/str.h"
 #include "util/data.h"
 #include "util/json.h"
+#include "util/validation.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -313,6 +314,21 @@ HttpResponse *admin_update_organization_handler(const HttpRequest *req, const Ro
         is_active = &is_active_val;
     }
 
+    /* Validate input formats */
+    char validation_error[256];
+
+    if (display_name && validate_display_name(display_name, validation_error, sizeof(validation_error)) != 0) {
+        free(display_name);
+        free(note);
+        return response_json_error(400, validation_error);
+    }
+
+    if (validate_note(note, validation_error, sizeof(validation_error)) != 0) {
+        free(display_name);
+        free(note);
+        return response_json_error(400, validation_error);
+    }
+
     /* At least one field must be provided */
     if (!display_name && !note && !is_active) {
         free(display_name);
@@ -539,6 +555,29 @@ HttpResponse *admin_create_resource_server_handler(const HttpRequest *req, const
         return response_json_error(400, "organization_id, code_name, display_name, and address are required");
     }
 
+    /* Validate input formats */
+    char validation_error[256];
+
+    if (validate_code_name(code_name, validation_error, sizeof(validation_error)) != 0) {
+        free(org_id_str); free(code_name); free(display_name); free(address); free(note);
+        return response_json_error(400, validation_error);
+    }
+
+    if (validate_display_name(display_name, validation_error, sizeof(validation_error)) != 0) {
+        free(org_id_str); free(code_name); free(display_name); free(address); free(note);
+        return response_json_error(400, validation_error);
+    }
+
+    if (validate_url_field(address, "Address", validation_error, sizeof(validation_error)) != 0) {
+        free(org_id_str); free(code_name); free(display_name); free(address); free(note);
+        return response_json_error(400, validation_error);
+    }
+
+    if (validate_note(note, validation_error, sizeof(validation_error)) != 0) {
+        free(org_id_str); free(code_name); free(display_name); free(address); free(note);
+        return response_json_error(400, validation_error);
+    }
+
     unsigned char org_id[16];
     if (hex_to_bytes(org_id_str, org_id, 16) != 0) {
         free(org_id_str); free(code_name); free(display_name); free(address); free(note);
@@ -624,6 +663,24 @@ HttpResponse *admin_update_resource_server_handler(const HttpRequest *req, const
     int *is_active = NULL;
     if (json_get_bool(req->body, "is_active", &is_active_val) == 0) {
         is_active = &is_active_val;
+    }
+
+    /* Validate input formats */
+    char validation_error[256];
+
+    if (display_name && validate_display_name(display_name, validation_error, sizeof(validation_error)) != 0) {
+        free(display_name); free(address); free(note);
+        return response_json_error(400, validation_error);
+    }
+
+    if (address && validate_url_field(address, "Address", validation_error, sizeof(validation_error)) != 0) {
+        free(display_name); free(address); free(note);
+        return response_json_error(400, validation_error);
+    }
+
+    if (validate_note(note, validation_error, sizeof(validation_error)) != 0) {
+        free(display_name); free(address); free(note);
+        return response_json_error(400, validation_error);
     }
 
     if (!display_name && !address && !note && !is_active) {
@@ -827,6 +884,27 @@ HttpResponse *admin_create_client_handler(const HttpRequest *req, const RoutePar
         return response_json_error(400, "Missing required fields");
     }
 
+    /* Validate input formats */
+    char validation_error[256];
+
+    if (validate_code_name(code_name, validation_error, sizeof(validation_error)) != 0) {
+        free(org_id_str); free(code_name); free(display_name);
+        free(client_type); free(grant_type); free(note);
+        return response_json_error(400, validation_error);
+    }
+
+    if (validate_display_name(display_name, validation_error, sizeof(validation_error)) != 0) {
+        free(org_id_str); free(code_name); free(display_name);
+        free(client_type); free(grant_type); free(note);
+        return response_json_error(400, validation_error);
+    }
+
+    if (validate_note(note, validation_error, sizeof(validation_error)) != 0) {
+        free(org_id_str); free(code_name); free(display_name);
+        free(client_type); free(grant_type); free(note);
+        return response_json_error(400, validation_error);
+    }
+
     /* Optional fields - default to 0/false if not provided */
     json_get_bool(req->body, "require_mfa", &require_mfa);
     json_get_bool(req->body, "issue_refresh_tokens", &issue_refresh);
@@ -922,6 +1000,19 @@ HttpResponse *admin_update_client_handler(const HttpRequest *req, const RoutePar
     if (json_get_int(req->body, "maximum_session_seconds", &max_session_val) == 0) max_session = &max_session_val;
     if (json_get_int(req->body, "secret_rotation_seconds", &secret_rotation_val) == 0) secret_rotation = &secret_rotation_val;
     if (json_get_bool(req->body, "is_active", &is_active_val) == 0) is_active = &is_active_val;
+
+    /* Validate input formats */
+    char validation_error[256];
+
+    if (display_name && validate_display_name(display_name, validation_error, sizeof(validation_error)) != 0) {
+        free(display_name); free(note);
+        return response_json_error(400, validation_error);
+    }
+
+    if (validate_note(note, validation_error, sizeof(validation_error)) != 0) {
+        free(display_name); free(note);
+        return response_json_error(400, validation_error);
+    }
 
     if (!display_name && !note && !require_mfa && !access_ttl && !issue_refresh &&
         !refresh_ttl && !max_session && !secret_rotation && !is_active) {
@@ -1044,6 +1135,19 @@ HttpResponse *admin_create_client_redirect_uri_handler(const HttpRequest *req, c
     if (!client_id_str || !redirect_uri) {
         free(client_id_str); free(redirect_uri); free(note);
         return response_json_error(400, "client_id and redirect_uri required");
+    }
+
+    /* Validate input formats */
+    char validation_error[256];
+
+    if (validate_url_field(redirect_uri, "Redirect URI", validation_error, sizeof(validation_error)) != 0) {
+        free(client_id_str); free(redirect_uri); free(note);
+        return response_json_error(400, validation_error);
+    }
+
+    if (validate_note(note, validation_error, sizeof(validation_error)) != 0) {
+        free(client_id_str); free(redirect_uri); free(note);
+        return response_json_error(400, validation_error);
     }
 
     unsigned char client_id[16];
@@ -1414,6 +1518,16 @@ HttpResponse *admin_create_resource_server_key_handler(const HttpRequest *req, c
     char *note = json_get_string(req->body, "note");
     char *user_secret = json_get_string(req->body, "secret");
 
+    /* Validate input formats */
+    char validation_error[256];
+
+    if (validate_note(note, validation_error, sizeof(validation_error)) != 0) {
+        free(rs_id_str); free(note);
+        if (user_secret) OPENSSL_cleanse(user_secret, strlen(user_secret));
+        free(user_secret);
+        return response_json_error(400, validation_error);
+    }
+
     if (!rs_id_str) {
         free(note);
         if (user_secret) OPENSSL_cleanse(user_secret, strlen(user_secret));
@@ -1669,6 +1783,16 @@ HttpResponse *admin_create_client_key_handler(const HttpRequest *req, const Rout
     char *client_id_str = json_get_string(req->body, "client_id");
     char *note = json_get_string(req->body, "note");
     char *user_secret = json_get_string(req->body, "secret");
+
+    /* Validate input formats */
+    char validation_error[256];
+
+    if (validate_note(note, validation_error, sizeof(validation_error)) != 0) {
+        free(client_id_str); free(note);
+        if (user_secret) OPENSSL_cleanse(user_secret, strlen(user_secret));
+        free(user_secret);
+        return response_json_error(400, validation_error);
+    }
 
     if (!client_id_str) {
         free(note);

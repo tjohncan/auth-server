@@ -129,6 +129,15 @@ HttpResponse *admin_bootstrap_handler(const HttpRequest *req, const RouteParams 
         return response_json_error(400, validation_error);
     }
 
+    if (validate_display_name(org_display_name, validation_error, sizeof(validation_error)) != 0) {
+        free(org_code_name);
+        free(org_display_name);
+        free(username);
+        OPENSSL_cleanse(password, strlen(password));
+        free(password);
+        return response_json_error(400, validation_error);
+    }
+
     if (validate_username(username, validation_error, sizeof(validation_error)) != 0) {
         free(org_code_name);
         free(org_display_name);
@@ -256,6 +265,20 @@ HttpResponse *admin_create_organization_handler(const HttpRequest *req, const Ro
     char validation_error[256];
 
     if (validate_code_name(code_name, validation_error, sizeof(validation_error)) != 0) {
+        free(code_name);
+        free(display_name);
+        free(note);
+        return response_json_error(400, validation_error);
+    }
+
+    if (validate_display_name(display_name, validation_error, sizeof(validation_error)) != 0) {
+        free(code_name);
+        free(display_name);
+        free(note);
+        return response_json_error(400, validation_error);
+    }
+
+    if (validate_note(note, validation_error, sizeof(validation_error)) != 0) {
         free(code_name);
         free(display_name);
         free(note);
@@ -593,6 +616,17 @@ HttpResponse *admin_create_organization_key_handler(const HttpRequest *req, cons
         free(user_secret);
         free(note);
         return response_json_error(400, "organization_code_name is required");
+    }
+
+    /* Validate input formats */
+    char validation_error[256];
+
+    if (validate_note(note, validation_error, sizeof(validation_error)) != 0) {
+        free(org_code_name);
+        if (user_secret) OPENSSL_cleanse(user_secret, strlen(user_secret));
+        free(user_secret);
+        free(note);
+        return response_json_error(400, validation_error);
     }
 
     /* Dual-mode secret provisioning */

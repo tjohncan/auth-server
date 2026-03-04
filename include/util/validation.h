@@ -48,6 +48,7 @@ int validate_email(const char *email, char *error_msg, size_t error_len);
  * Rules:
  *   - Not empty string
  *   - No leading or trailing whitespace
+ *   - Length <= 100 characters
  *
  * Parameters:
  *   code_name  - Code name to validate
@@ -59,5 +60,39 @@ int validate_email(const char *email, char *error_msg, size_t error_len);
  *   -1 on failure (invalid code_name, error_msg populated)
  */
 int validate_code_name(const char *code_name, char *error_msg, size_t error_len);
+
+/*
+ * validate_display_name - Validate display_name format
+ *
+ * Rules:
+ *   - Not empty string
+ *   - Length <= 200 characters
+ */
+int validate_display_name(const char *display_name, char *error_msg, size_t error_len);
+
+/*
+ * validate_note - Validate note format
+ *
+ * Rules:
+ *   - NULL is allowed (returns 0)
+ *   - If non-NULL, length <= 2000 characters
+ */
+int validate_note(const char *note, char *error_msg, size_t error_len);
+
+/*
+ * validate_url_field - Validate URL field (address, redirect_uri)
+ *
+ * Rules:
+ *   - Not empty string
+ *   - Length <= 2000 characters
+ *
+ * Parameters:
+ *   url        - URL to validate
+ *   field_name - Field name for error messages (e.g., "Address", "Redirect URI")
+ *   error_msg  - Output buffer for error message
+ *   error_len  - Size of error_msg buffer
+ */
+int validate_url_field(const char *url, const char *field_name,
+                       char *error_msg, size_t error_len);
 
 #endif /* VALIDATION_H */

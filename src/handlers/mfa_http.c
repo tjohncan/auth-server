@@ -13,6 +13,7 @@
 #include "util/data.h"
 #include "util/log.h"
 #include "util/json.h"
+#include "util/validation.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -89,6 +90,12 @@ HttpResponse *mfa_totp_setup_handler(const HttpRequest *req, const RouteParams *
     char *display_name = json_get_string(req->body, "display_name");
     if (!display_name) {
         return response_json_error(400, "display_name required");
+    }
+
+    char validation_error[256];
+    if (validate_display_name(display_name, validation_error, sizeof(validation_error)) != 0) {
+        free(display_name);
+        return response_json_error(400, validation_error);
     }
 
     /* Get username for authenticator label */

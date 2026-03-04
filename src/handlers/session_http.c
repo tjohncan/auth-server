@@ -13,6 +13,7 @@
 #include "util/log.h"
 #include "util/str.h"
 #include "util/json.h"
+#include "util/validation.h"
 #include <openssl/crypto.h>
 #include <string.h>
 #include <stdio.h>
@@ -548,6 +549,12 @@ HttpResponse *change_username_handler(const HttpRequest *req, const RouteParams 
     char *new_username = json_get_string(req->body, "new_username");
     if (!new_username) {
         return response_json_error(400, "new_username required");
+    }
+
+    char validation_error[256];
+    if (validate_username(new_username, validation_error, sizeof(validation_error)) != 0) {
+        free(new_username);
+        return response_json_error(400, validation_error);
     }
 
     /* Change username */
