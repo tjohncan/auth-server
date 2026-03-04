@@ -61,6 +61,9 @@ create table organization (
 , constraint uix_organization_id unique(id)
 , constraint uix_organization_code_name unique(code_name)
 , constraint ck_organization_is_active check(is_active in (0, 1))
+, constraint ck_organization_code_name_len check(length(code_name) <= 100)
+, constraint ck_organization_display_name_len check(length(display_name) <= 200)
+, constraint ck_organization_note_len check(length(note) <= 2000)
 );
 
 create table organization_key (
@@ -79,6 +82,7 @@ create table organization_key (
 
 , constraint uix_organization_key_id unique(id)
 , constraint ck_organization_key_is_active check(is_active in (0, 1))
+, constraint ck_organization_key_note_len check(length(note) <= 2000)
 , constraint fk_organization_key_organization foreign key(organization_pin) references organization(pin)
 );
 
@@ -98,6 +102,10 @@ create table resource_server (
 , constraint uix_resource_server_id unique(id)
 , constraint uix_resource_server_org_pin unique(organization_pin, pin)
 , constraint ck_resource_server_is_active check(is_active in (0, 1))
+, constraint ck_resource_server_code_name_len check(length(code_name) <= 100)
+, constraint ck_resource_server_display_name_len check(length(display_name) <= 200)
+, constraint ck_resource_server_address_len check(length(address) <= 2000)
+, constraint ck_resource_server_note_len check(length(note) <= 2000)
 , constraint fk_resource_server_organization foreign key(organization_pin) references organization(pin)
 );
 
@@ -125,6 +133,7 @@ create table resource_server_key (
 
 , constraint uix_resource_server_key_id unique(id)
 , constraint ck_resource_server_key_is_active check(is_active in (0, 1))
+, constraint ck_resource_server_key_note_len check(length(note) <= 2000)
 , constraint fk_resource_server_key_resource_server foreign key(resource_server_pin) references resource_server(pin)
 );
 
@@ -166,6 +175,9 @@ create table client (
 , constraint ck_client_secret_rotation check(secret_rotation_seconds is null or secret_rotation_seconds >= 0)
 , constraint ck_client_is_universal check(is_universal in (0, 1))
 , constraint ck_client_universal_must_be_public check(is_universal = 0 or (is_universal = 1 and client_type = 'public'))
+, constraint ck_client_code_name_len check(length(code_name) <= 100)
+, constraint ck_client_display_name_len check(length(display_name) <= 200)
+, constraint ck_client_note_len check(length(note) <= 2000)
 , constraint fk_client_organization foreign key(organization_pin) references organization(pin)
 );
 
@@ -220,6 +232,7 @@ create table client_key (
 
 , constraint uix_client_key_id unique(id)
 , constraint ck_client_key_is_active check(is_active in (0, 1))
+, constraint ck_client_key_note_len check(length(note) <= 2000)
 , constraint fk_client_key_client foreign key(client_pin) references client(pin)
 );
 
@@ -235,6 +248,8 @@ create table client_redirect_uri (
 , constraint uix_client_redirect_uri unique(client_pin, redirect_uri)
 , constraint fk_client_redirect_uri_client foreign key(client_pin) references client(pin)
 , constraint ck_redirect_uri_scheme check(lower(redirect_uri) like 'http://%' or lower(redirect_uri) like 'https://%')
+, constraint ck_client_redirect_uri_len check(length(redirect_uri) <= 2000)
+, constraint ck_client_redirect_uri_note_len check(length(note) <= 2000)
 );
 
 create table client_resource_server (
@@ -328,6 +343,7 @@ create table user_mfa (
 
 , constraint uix_user_mfa_id unique(id)
 , constraint ck_user_mfa_is_confirmed check(is_confirmed in (0, 1))
+, constraint ck_user_mfa_display_name_len check(length(display_name) <= 200)
 , constraint fk_user_mfa_user_account foreign key(user_account_pin) references user_account(pin)
 );
 
@@ -492,6 +508,7 @@ create table refresh_token (
 , constraint ck_refresh_token_generation check(generation >= 1)
 , constraint ck_refresh_token_is_exchanged check(is_exchanged in (0, 1))
 , constraint ck_refresh_token_is_revoked check(is_revoked in (0, 1))
+, constraint ck_refresh_token_scopes_len check(length(scopes) <= 2000)
 , constraint fk_refresh_token_client foreign key(client_pin) references client(pin)
 , constraint fk_refresh_token_user_account foreign key(user_account_pin) references user_account(pin)
 , constraint fk_refresh_token_authorization_code foreign key(authorization_code_id) references authorization_code(id)
@@ -518,6 +535,7 @@ create table access_token (
 , constraint pk_access_token primary key(id)
 , constraint uix_access_token_token unique(token)
 , constraint ck_access_token_is_revoked check(is_revoked in (0, 1))
+, constraint ck_access_token_scopes_len check(length(scopes) <= 2000)
 , constraint fk_access_token_resource_server foreign key(resource_server_pin) references resource_server(pin)
 , constraint fk_access_token_client foreign key(client_pin) references client(pin)
 , constraint fk_access_token_user_account foreign key(user_account_pin) references user_account(pin)

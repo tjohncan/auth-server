@@ -82,6 +82,9 @@ create table security.organization (
 , constraint pk_organization primary key (pin)
 , constraint uix_organization_id unique (id)
 , constraint uix_organization_code_name unique (code_name)
+, constraint ck_organization_code_name_len check(length(code_name) <= 100)
+, constraint ck_organization_display_name_len check(length(display_name) <= 200)
+, constraint ck_organization_note_len check(length(note) <= 2000)
 );
 
 create table security.organization_key (
@@ -100,6 +103,7 @@ create table security.organization_key (
 
 , constraint pk_organization_key primary key (pin)
 , constraint uix_organization_key_id unique (id)
+, constraint ck_organization_key_note_len check(length(note) <= 2000)
 , constraint fk_organization_key_organization foreign key (organization_pin) references security.organization(pin)
 );
 
@@ -119,6 +123,10 @@ create table security.resource_server (
 , constraint pk_resource_server primary key (pin)
 , constraint uix_resource_server_id unique (id)
 , constraint uix_resource_server_org_pin unique (organization_pin, pin)
+, constraint ck_resource_server_code_name_len check(length(code_name) <= 100)
+, constraint ck_resource_server_display_name_len check(length(display_name) <= 200)
+, constraint ck_resource_server_address_len check(length(address) <= 2000)
+, constraint ck_resource_server_note_len check(length(note) <= 2000)
 , constraint fk_resource_server_organization foreign key (organization_pin) references security.organization(pin)
 );
 
@@ -146,6 +154,7 @@ create table security.resource_server_key (
 
 , constraint pk_resource_server_key primary key (pin)
 , constraint uix_resource_server_key_id unique (id)
+, constraint ck_resource_server_key_note_len check(length(note) <= 2000)
 , constraint fk_resource_server_key_resource_server foreign key (resource_server_pin) references security.resource_server(pin)
 );
 
@@ -185,6 +194,9 @@ create table security.client (
 , constraint ck_maximum_session check(maximum_session_seconds is null or maximum_session_seconds >= 0)
 , constraint ck_secret_rotation check(secret_rotation_seconds is null or secret_rotation_seconds >= 0)
 , constraint ck_client_universal_must_be_public check(is_universal = false or (is_universal = true and client_type = 'public'))
+, constraint ck_client_code_name_len check(length(code_name) <= 100)
+, constraint ck_client_display_name_len check(length(display_name) <= 200)
+, constraint ck_client_note_len check(length(note) <= 2000)
 );
 
 create unique index uix_client_org_code
@@ -207,6 +219,7 @@ create table security.client_key (
 
 , constraint pk_client_key primary key (pin)
 , constraint uix_client_key_id unique (id)
+, constraint ck_client_key_note_len check(length(note) <= 2000)
 , constraint fk_client_key_client foreign key (client_pin) references security.client(pin)
 );
 
@@ -222,6 +235,8 @@ create table security.client_redirect_uri (
 , constraint pk_client_redirect_uri primary key (pin)
 , constraint fk_client_redirect_uri_client foreign key (client_pin) references security.client(pin)
 , constraint ck_redirect_uri_scheme check(lower(redirect_uri) like 'http://%' or lower(redirect_uri) like 'https://%')
+, constraint ck_client_redirect_uri_len check(length(redirect_uri) <= 2000)
+, constraint ck_client_redirect_uri_note_len check(length(note) <= 2000)
 );
 
 create unique index uix_client_redirect_uri on security.client_redirect_uri (client_pin, redirect_uri);
@@ -316,6 +331,7 @@ create table security.user_mfa (
 
 , constraint pk_user_mfa primary key (pin)
 , constraint uix_user_mfa_id unique (id)
+, constraint ck_user_mfa_display_name_len check(length(display_name) <= 200)
 , constraint fk_user_mfa_user_account foreign key (user_account_pin) references security.user_account(pin)
 );
 
@@ -461,6 +477,7 @@ create table session.refresh_token (
 , constraint pk_refresh_token primary key (id)
 , constraint uix_refresh_token_token unique (token)
 , constraint ck_refresh_token_generation check(generation >= 1)
+, constraint ck_refresh_token_scopes_len check(length(scopes) <= 2000)
 , constraint fk_refresh_token_client foreign key (client_pin) references security.client(pin)
 , constraint fk_refresh_token_user_account foreign key (user_account_pin) references security.user_account(pin)
 , constraint fk_refresh_token_authorization_code foreign key (authorization_code_id) references session.authorization_code(id)
@@ -486,6 +503,7 @@ create table session.access_token (
 
 , constraint pk_access_token primary key (id)
 , constraint uix_access_token_token unique (token)
+, constraint ck_access_token_scopes_len check(length(scopes) <= 2000)
 , constraint fk_access_token_resource_server foreign key (resource_server_pin) references security.resource_server(pin)
 , constraint fk_access_token_client foreign key (client_pin) references security.client(pin)
 , constraint fk_access_token_user_account foreign key (user_account_pin) references security.user_account(pin)
