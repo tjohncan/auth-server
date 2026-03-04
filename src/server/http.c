@@ -1,4 +1,5 @@
 #include "server/http.h"
+#include "util/json.h"
 #include "util/str.h"
 #include <string.h>
 #include <strings.h>  /* for strcasecmp */
@@ -456,6 +457,16 @@ void http_response_set_body(HttpResponse *resp, const char *body, size_t length)
     }
 }
 
+void http_response_set_body_owned(HttpResponse *resp, char *body, size_t length) {
+    free(resp->body);
+    resp->body = body;
+    resp->body_length = length;
+
+    char content_length[32];
+    snprintf(content_length, sizeof(content_length), "%zu", length);
+    http_response_set_header(resp, "Content-Length", content_length);
+}
+
 void http_response_set_body_str(HttpResponse *resp, const char *body) {
     http_response_set_body(resp, body, strlen(body));
 }
@@ -463,6 +474,33 @@ void http_response_set_body_str(HttpResponse *resp, const char *body) {
 void http_response_set(HttpResponse *resp, const char *content_type, const char *body) {
     http_response_set_header(resp, "Content-Type", content_type);
     http_response_set_body_str(resp, body);
+}
+
+HttpResponse *jsonbuf_to_response(JsonBuf *jb, int status_code) {
+    if (!jb) return NULL;
+
+    if (jb->error) {
+        jsonbuf_free(jb);
+        HttpResponse *resp = http_response_new(500);
+        if (resp) {
+            http_response_set(resp, "application/json; charset=utf-8",
+                             "{\"error\":\"Response buffer overflow\"}");
+        }
+        return resp;
+    }
+
+    HttpResponse *resp = http_response_new(status_code);
+    if (!resp) {
+        jsonbuf_free(jb);
+        return NULL;
+    }
+
+    http_response_set_header(resp, "Content-Type", "application/json; charset=utf-8");
+    http_response_set_body_owned(resp, jb->buf, jb->len);
+
+    /* Free the struct only — buf ownership transferred */
+    free(jb);
+    return resp;
 }
 
 char *http_response_serialize(const HttpResponse *resp, size_t *out_length) {

@@ -187,32 +187,23 @@ HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params) {
         }
 
         /* Build JSON response */
-        char json[2048];
-        int json_len = snprintf(json, sizeof(json),
-            "{\"access_token\":\"%s\",\"token_type\":\"%s\",\"expires_in\":%d",
+        JsonBuf *jb = jsonbuf_new(2048);
+        jsonbuf_appendf(jb, "{\"access_token\":\"%s\",\"token_type\":\"%s\",\"expires_in\":%d",
             token_resp.access_token, token_resp.token_type, token_resp.expires_in);
 
         if (token_resp.refresh_token) {
-            json_len += snprintf(json + json_len, sizeof(json) - json_len,
-                ",\"refresh_token\":\"%s\"", token_resp.refresh_token);
+            jsonbuf_appendf(jb, ",\"refresh_token\":\"%s\"", token_resp.refresh_token);
         }
 
         if (token_resp.scope) {
-            char escaped_scope[512];
-            json_escape(escaped_scope, sizeof(escaped_scope), token_resp.scope);
-            json_len += snprintf(json + json_len, sizeof(json) - json_len,
-                ",\"scope\":\"%s\"", escaped_scope);
+            jsonbuf_appendf(jb, ",\"scope\":\"");
+            jsonbuf_append_escaped(jb, token_resp.scope);
+            jsonbuf_appendf(jb, "\"");
         }
 
-        json_len += snprintf(json + json_len, sizeof(json) - json_len, "}");
+        jsonbuf_appendf(jb, "}");
 
-        if (json_len >= (int)sizeof(json)) {
-            oauth_token_response_free(&token_resp);
-            free(grant_type);
-            return response_json_error(500, "Internal server error");
-        }
-
-        resp = response_json_ok(json);
+        resp = jsonbuf_to_response(jb, 200);
         oauth_token_response_free(&token_resp);
 
     } else if (strcmp(grant_type, "refresh_token") == 0) {
@@ -246,32 +237,23 @@ HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params) {
         }
 
         /* Build JSON response */
-        char json[2048];
-        int json_len = snprintf(json, sizeof(json),
-            "{\"access_token\":\"%s\",\"token_type\":\"%s\",\"expires_in\":%d",
+        JsonBuf *jb = jsonbuf_new(2048);
+        jsonbuf_appendf(jb, "{\"access_token\":\"%s\",\"token_type\":\"%s\",\"expires_in\":%d",
             token_resp.access_token, token_resp.token_type, token_resp.expires_in);
 
         if (token_resp.refresh_token) {
-            json_len += snprintf(json + json_len, sizeof(json) - json_len,
-                ",\"refresh_token\":\"%s\"", token_resp.refresh_token);
+            jsonbuf_appendf(jb, ",\"refresh_token\":\"%s\"", token_resp.refresh_token);
         }
 
         if (token_resp.scope) {
-            char escaped_scope[512];
-            json_escape(escaped_scope, sizeof(escaped_scope), token_resp.scope);
-            json_len += snprintf(json + json_len, sizeof(json) - json_len,
-                ",\"scope\":\"%s\"", escaped_scope);
+            jsonbuf_appendf(jb, ",\"scope\":\"");
+            jsonbuf_append_escaped(jb, token_resp.scope);
+            jsonbuf_appendf(jb, "\"");
         }
 
-        json_len += snprintf(json + json_len, sizeof(json) - json_len, "}");
+        jsonbuf_appendf(jb, "}");
 
-        if (json_len >= (int)sizeof(json)) {
-            oauth_token_response_free(&token_resp);
-            free(grant_type);
-            return response_json_error(500, "Internal server error");
-        }
-
-        resp = response_json_ok(json);
+        resp = jsonbuf_to_response(jb, 200);
         oauth_token_response_free(&token_resp);
 
     } else if (strcmp(grant_type, "client_credentials") == 0) {
@@ -324,27 +306,19 @@ HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params) {
         }
 
         /* Build JSON response */
-        char json[2048];
-        int json_len = snprintf(json, sizeof(json),
-            "{\"access_token\":\"%s\",\"token_type\":\"%s\",\"expires_in\":%d",
+        JsonBuf *jb = jsonbuf_new(2048);
+        jsonbuf_appendf(jb, "{\"access_token\":\"%s\",\"token_type\":\"%s\",\"expires_in\":%d",
             token_resp.access_token, token_resp.token_type, token_resp.expires_in);
 
         if (token_resp.scope) {
-            char escaped_scope[512];
-            json_escape(escaped_scope, sizeof(escaped_scope), token_resp.scope);
-            json_len += snprintf(json + json_len, sizeof(json) - json_len,
-                ",\"scope\":\"%s\"", escaped_scope);
+            jsonbuf_appendf(jb, ",\"scope\":\"");
+            jsonbuf_append_escaped(jb, token_resp.scope);
+            jsonbuf_appendf(jb, "\"");
         }
 
-        json_len += snprintf(json + json_len, sizeof(json) - json_len, "}");
+        jsonbuf_appendf(jb, "}");
 
-        if (json_len >= (int)sizeof(json)) {
-            oauth_token_response_free(&token_resp);
-            free(grant_type);
-            return response_json_error(500, "Internal server error");
-        }
-
-        resp = response_json_ok(json);
+        resp = jsonbuf_to_response(jb, 200);
         oauth_token_response_free(&token_resp);
 
     } else {
@@ -1192,58 +1166,48 @@ HttpResponse *introspect_handler(const HttpRequest *req, const RouteParams *para
     }
 
     /* Build JSON response */
-    char json[2048];
-    int json_len;
-
     if (!active) {
-        json_len = snprintf(json, sizeof(json), "{\"active\":false}");
-    } else {
-        /* Format UUIDs as hex strings */
-        char client_id_hex[33];
-        char aud_hex[33];
-        bytes_to_hex(client_id, 16, client_id_hex, sizeof(client_id_hex));
-        bytes_to_hex(token_resource_server_id, 16, aud_hex, sizeof(aud_hex));
-
-        json_len = snprintf(json, sizeof(json),
-            "{\"active\":true,\"token_type\":\"Bearer\",\"client_id\":\"%s\",\"aud\":\"%s\"",
-            client_id_hex, aud_hex);
-
-        if (scope) {
-            char escaped_scope[512];
-            json_escape(escaped_scope, sizeof(escaped_scope), scope);
-            json_len += snprintf(json + json_len, sizeof(json) - json_len,
-                ",\"scope\":\"%s\"", escaped_scope);
-        }
-
-        /* Check if user_id is non-zero (present for authorization_code, absent for client_credentials) */
-        static const unsigned char zero_id[16] = {0};
-        if (memcmp(user_id, zero_id, 16) != 0) {
-            char user_id_hex[33];
-            bytes_to_hex(user_id, 16, user_id_hex, sizeof(user_id_hex));
-            json_len += snprintf(json + json_len, sizeof(json) - json_len,
-                ",\"sub\":\"%s\"", user_id_hex);
-        }
-
-        if (expires_at > 0) {
-            json_len += snprintf(json + json_len, sizeof(json) - json_len,
-                ",\"exp\":%lld", expires_at);
-        }
-
-        if (issued_at > 0) {
-            json_len += snprintf(json + json_len, sizeof(json) - json_len,
-                ",\"iat\":%lld", issued_at);
-        }
-
-        json_len += snprintf(json + json_len, sizeof(json) - json_len, "}");
+        free(scope);
+        return response_json_ok("{\"active\":false}");
     }
+
+    /* Format UUIDs as hex strings */
+    char client_id_hex[33];
+    char aud_hex[33];
+    bytes_to_hex(client_id, 16, client_id_hex, sizeof(client_id_hex));
+    bytes_to_hex(token_resource_server_id, 16, aud_hex, sizeof(aud_hex));
+
+    JsonBuf *jb = jsonbuf_new(2048);
+    jsonbuf_appendf(jb, "{\"active\":true,\"token_type\":\"Bearer\",\"client_id\":\"%s\",\"aud\":\"%s\"",
+        client_id_hex, aud_hex);
+
+    if (scope) {
+        jsonbuf_appendf(jb, ",\"scope\":\"");
+        jsonbuf_append_escaped(jb, scope);
+        jsonbuf_appendf(jb, "\"");
+    }
+
+    /* Check if user_id is non-zero (present for authorization_code, absent for client_credentials) */
+    static const unsigned char zero_id[16] = {0};
+    if (memcmp(user_id, zero_id, 16) != 0) {
+        char user_id_hex[33];
+        bytes_to_hex(user_id, 16, user_id_hex, sizeof(user_id_hex));
+        jsonbuf_appendf(jb, ",\"sub\":\"%s\"", user_id_hex);
+    }
+
+    if (expires_at > 0) {
+        jsonbuf_appendf(jb, ",\"exp\":%lld", expires_at);
+    }
+
+    if (issued_at > 0) {
+        jsonbuf_appendf(jb, ",\"iat\":%lld", issued_at);
+    }
+
+    jsonbuf_appendf(jb, "}");
 
     free(scope);
 
-    if (json_len >= (int)sizeof(json)) {
-        return response_json_error(500, "Internal server error");
-    }
-
-    return response_json_ok(json);
+    return jsonbuf_to_response(jb, 200);
 }
 
 /* ============================================================================
@@ -1324,33 +1288,23 @@ HttpResponse *userinfo_handler(const HttpRequest *req, const RouteParams *params
     }
 
     /* Build JSON response */
-    char json[1024];
-    char escaped_username[512];
-    char escaped_email[512];
-
-    json_escape(escaped_username, sizeof(escaped_username), info.username);
-    json_escape(escaped_email, sizeof(escaped_email), info.email);
-
-    int len = snprintf(json, sizeof(json),
-        "{\"sub\":\"%s\"", claims.sub);
+    JsonBuf *jb = jsonbuf_new(2048);
+    jsonbuf_appendf(jb, "{\"sub\":\"%s\"", claims.sub);
 
     if (info.username[0] != '\0') {
-        len += snprintf(json + len, sizeof(json) - len,
-            ",\"preferred_username\":\"%s\"", escaped_username);
+        jsonbuf_appendf(jb, ",\"preferred_username\":\"");
+        jsonbuf_append_escaped(jb, info.username);
+        jsonbuf_appendf(jb, "\"");
     }
 
     if (info.email[0] != '\0') {
-        len += snprintf(json + len, sizeof(json) - len,
-            ",\"email\":\"%s\",\"email_verified\":%s",
-            escaped_email, info.email_verified ? "true" : "false");
+        jsonbuf_appendf(jb, ",\"email\":\"");
+        jsonbuf_append_escaped(jb, info.email);
+        jsonbuf_appendf(jb, "\",\"email_verified\":%s",
+            info.email_verified ? "true" : "false");
     }
 
-    len += snprintf(json + len, sizeof(json) - len,
-        ",\"server_time\":%lld}", (long long)time(NULL));
+    jsonbuf_appendf(jb, ",\"server_time\":%lld}", (long long)time(NULL));
 
-    if (len >= (int)sizeof(json)) {
-        return response_json_error(500, "Internal server error");
-    }
-
-    return response_json_ok(json);
+    return jsonbuf_to_response(jb, 200);
 }

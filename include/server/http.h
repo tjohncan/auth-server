@@ -2,6 +2,7 @@
 #define HTTP_H
 
 #include <stddef.h>
+#include "util/json.h"
 
 /*
  * HTTP Parser and Response Builder
@@ -169,6 +170,14 @@ void http_response_set_header(HttpResponse *resp, const char *name, const char *
 void http_response_set_body(HttpResponse *resp, const char *body, size_t length);
 
 /*
+ * http_response_set_body_owned - Set response body (takes ownership, no copy)
+ *
+ * Like set_body but assigns body pointer directly instead of malloc+memcpy.
+ * The body will be freed by http_response_free(). Caller must NOT free it.
+ */
+void http_response_set_body_owned(HttpResponse *resp, char *body, size_t length);
+
+/*
  * http_response_set_body_str - Set response body from null-terminated string
  */
 void http_response_set_body_str(HttpResponse *resp, const char *body);
@@ -194,5 +203,16 @@ void http_response_set(HttpResponse *resp, const char *content_type, const char 
  * Returns: Pointer to serialized bytes, or NULL if malloc fails
  */
 char *http_response_serialize(const HttpResponse *resp, size_t *out_length);
+
+/*
+ * jsonbuf_to_response - Convert JsonBuf to HTTP response (ownership transfer)
+ *
+ * Creates an HttpResponse with the buffer as body. The buffer is transferred
+ * (not copied) to the response. The JsonBuf struct is freed. Caller must NOT
+ * use jb after this call.
+ *
+ * If jb->error is set, frees the buffer and returns a 500 error response.
+ */
+HttpResponse *jsonbuf_to_response(JsonBuf *jb, int status_code);
 
 #endif /* HTTP_H */

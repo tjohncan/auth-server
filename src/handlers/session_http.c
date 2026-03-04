@@ -116,42 +116,35 @@ HttpResponse *login_handler(const HttpRequest *req, const RouteParams *params) {
     }
 
     /* Build JSON response body */
-    char response_body[4096];
+    HttpResponse *resp;
     if (profile.require_mfa && mfa_count > 0) {
-        int off = snprintf(response_body, sizeof(response_body),
-                           "{\"message\":\"Login successful\","
-                           "\"mfa_required\":true,\"mfa_methods\":[");
+        JsonBuf *jb = jsonbuf_new(2048 + mfa_count * 256);
+        jsonbuf_appendf(jb, "{\"message\":\"Login successful\","
+                        "\"mfa_required\":true,\"mfa_methods\":[");
         for (int i = 0; i < mfa_count; i++) {
             char id_hex[33];
             bytes_to_hex(mfa_methods[i].id, 16, id_hex, sizeof(id_hex));
-            char type_esc[32];
-            char name_esc[256];
-            json_escape(type_esc, sizeof(type_esc), mfa_methods[i].mfa_method);
-            json_escape(name_esc, sizeof(name_esc), mfa_methods[i].display_name);
-            off += snprintf(response_body + off, sizeof(response_body) - off,
-                            "%s{\"id\":\"%s\",\"type\":\"%s\",\"display_name\":\"%s\"}",
-                            i > 0 ? "," : "", id_hex, type_esc, name_esc);
-            if (off >= (int)sizeof(response_body)) {
-                free(mfa_methods);
-                free(session_token);
-                return response_json_error(500, "Response too large");
-            }
+            jsonbuf_appendf(jb, "%s{\"id\":\"%s\",\"type\":\"",
+                            i > 0 ? "," : "", id_hex);
+            jsonbuf_append_escaped(jb, mfa_methods[i].mfa_method);
+            jsonbuf_appendf(jb, "\",\"display_name\":\"");
+            jsonbuf_append_escaped(jb, mfa_methods[i].display_name);
+            jsonbuf_appendf(jb, "\"}");
         }
-        snprintf(response_body + off, sizeof(response_body) - off, "]}");
+        jsonbuf_appendf(jb, "]}");
+        free(mfa_methods);
+        resp = jsonbuf_to_response(jb, 200);
     } else {
-        snprintf(response_body, sizeof(response_body), "{\"message\":\"Login successful\"}");
+        free(mfa_methods);
+        resp = response_json_ok("{\"message\":\"Login successful\"}");
     }
-    free(mfa_methods);
 
-    /* Create response */
-    HttpResponse *resp = http_response_new(200);
     if (!resp) {
         free(session_token);
         log_error("Failed to create HTTP response");
         return response_json_error(500, "Internal server error");
     }
 
-    http_response_set(resp, CONTENT_TYPE_JSON, response_body);
     http_response_set_header(resp, "Set-Cookie", cookie_header);
 
     free(session_token);
@@ -250,44 +243,31 @@ HttpResponse *management_setups_handler(const HttpRequest *req, const RouteParam
     }
 
     /* Build JSON response */
-    char response_body[8192];
-    int offset = snprintf(response_body, sizeof(response_body), "{\"setups\":[");
+    JsonBuf *jb = jsonbuf_new(4096 + count * 512);
+    jsonbuf_appendf(jb, "{\"setups\":[");
 
     for (int i = 0; i < count; i++) {
-        /* Convert client_id to hex */
         char client_id_hex[33];
-        for (int j = 0; j < 16; j++) {
-            snprintf(client_id_hex + j * 2, 3, "%02x", setups[i].client_id[j]);
-        }
+        bytes_to_hex(setups[i].client_id, 16, client_id_hex, sizeof(client_id_hex));
 
-        /* Escape strings for JSON */
-        char org_code_esc[128], org_display_esc[512], client_code_esc[128];
-        char client_display_esc[512], rs_address_esc[512];
-
-        json_escape(org_code_esc, sizeof(org_code_esc), setups[i].org_code_name);
-        json_escape(org_display_esc, sizeof(org_display_esc), setups[i].org_display_name);
-        json_escape(client_code_esc, sizeof(client_code_esc), setups[i].client_code_name);
-        json_escape(client_display_esc, sizeof(client_display_esc), setups[i].client_display_name);
-        json_escape(rs_address_esc, sizeof(rs_address_esc), setups[i].resource_server_address);
-
-        offset += snprintf(response_body + offset, sizeof(response_body) - offset,
-                           "%s{\"org_code_name\":\"%s\",\"org_display_name\":\"%s\","
-                           "\"client_id\":\"%s\",\"client_code_name\":\"%s\","
-                           "\"client_display_name\":\"%s\",\"resource_server_address\":\"%s\"}",
-                           i > 0 ? "," : "",
-                           org_code_esc, org_display_esc, client_id_hex,
-                           client_code_esc, client_display_esc, rs_address_esc);
-        if (offset >= (int)sizeof(response_body)) {
-            free(setups);
-            return response_json_error(500, "Response too large");
-        }
+        jsonbuf_appendf(jb, "%s{\"org_code_name\":\"", i > 0 ? "," : "");
+        jsonbuf_append_escaped(jb, setups[i].org_code_name);
+        jsonbuf_appendf(jb, "\",\"org_display_name\":\"");
+        jsonbuf_append_escaped(jb, setups[i].org_display_name);
+        jsonbuf_appendf(jb, "\",\"client_id\":\"%s\",\"client_code_name\":\"", client_id_hex);
+        jsonbuf_append_escaped(jb, setups[i].client_code_name);
+        jsonbuf_appendf(jb, "\",\"client_display_name\":\"");
+        jsonbuf_append_escaped(jb, setups[i].client_display_name);
+        jsonbuf_appendf(jb, "\",\"resource_server_address\":\"");
+        jsonbuf_append_escaped(jb, setups[i].resource_server_address);
+        jsonbuf_appendf(jb, "\"}");
     }
 
-    snprintf(response_body + offset, sizeof(response_body) - offset, "]}");
+    jsonbuf_appendf(jb, "]}");
 
     free(setups);
 
-    return response_json_ok(response_body);
+    return jsonbuf_to_response(jb, 200);
 }
 
 /*
@@ -337,20 +317,15 @@ HttpResponse *profile_handler(const HttpRequest *req, const RouteParams *params)
         snprintf(user_id_hex + i * 2, 3, "%02x", profile.user_id[i]);
     }
 
-    /* Escape username for JSON */
-    char username_esc[512];
-    json_escape(username_esc, sizeof(username_esc), profile.username);
-
     /* Build JSON response */
-    char response_body[1024];
-    snprintf(response_body, sizeof(response_body),
-             "{\"user_id\":\"%s\",\"username\":\"%s\","
-             "\"has_mfa\":%s,\"require_mfa\":%s}",
-             user_id_hex, username_esc,
-             profile.has_mfa ? "true" : "false",
-             profile.require_mfa ? "true" : "false");
+    JsonBuf *jb = jsonbuf_new(2048);
+    jsonbuf_appendf(jb, "{\"user_id\":\"%s\",\"username\":\"", user_id_hex);
+    jsonbuf_append_escaped(jb, profile.username);
+    jsonbuf_appendf(jb, "\",\"has_mfa\":%s,\"require_mfa\":%s}",
+                    profile.has_mfa ? "true" : "false",
+                    profile.require_mfa ? "true" : "false");
 
-    return response_json_ok(response_body);
+    return jsonbuf_to_response(jb, 200);
 }
 
 /*
@@ -400,34 +375,23 @@ HttpResponse *emails_handler(const HttpRequest *req, const RouteParams *params) 
     }
 
     /* Build JSON response with pagination metadata */
-    char response_body[4096];
-    int json_offset = snprintf(response_body, sizeof(response_body),
-                               "{\"emails\":[");
+    JsonBuf *jb = jsonbuf_new(4096 + count * 256);
+    jsonbuf_appendf(jb, "{\"emails\":[");
 
     for (int i = 0; i < count; i++) {
-        /* Escape email address for JSON */
-        char email_esc[512];
-        json_escape(email_esc, sizeof(email_esc), emails[i].email_address);
-
-        json_offset += snprintf(response_body + json_offset, sizeof(response_body) - json_offset,
-                                "%s{\"email_address\":\"%s\",\"is_primary\":%s,\"is_verified\":%s}",
-                                i > 0 ? "," : "",
-                                email_esc,
-                                emails[i].is_primary ? "true" : "false",
-                                emails[i].is_verified ? "true" : "false");
-        if (json_offset >= (int)sizeof(response_body)) {
-            free(emails);
-            return response_json_error(500, "Response too large");
-        }
+        jsonbuf_appendf(jb, "%s{\"email_address\":\"", i > 0 ? "," : "");
+        jsonbuf_append_escaped(jb, emails[i].email_address);
+        jsonbuf_appendf(jb, "\",\"is_primary\":%s,\"is_verified\":%s}",
+                        emails[i].is_primary ? "true" : "false",
+                        emails[i].is_verified ? "true" : "false");
     }
 
-    snprintf(response_body + json_offset, sizeof(response_body) - json_offset,
-             "],\"pagination\":{\"limit\":%d,\"offset\":%d,\"count\":%d,\"total\":%d}}",
-             limit, offset, count, total_count);
+    jsonbuf_appendf(jb, "],\"pagination\":{\"limit\":%d,\"offset\":%d,\"count\":%d,\"total\":%d}}",
+                    limit, offset, count, total_count);
 
     free(emails);
 
-    return response_json_ok(response_body);
+    return jsonbuf_to_response(jb, 200);
 }
 
 /*

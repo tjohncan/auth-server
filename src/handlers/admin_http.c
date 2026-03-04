@@ -48,27 +48,6 @@ static int is_localhost(const HttpRequest *req) {
 }
 
 /* ============================================================================
- * JSON Response Builders
- * ========================================================================== */
-
-/*
- * response_json_object - Build JSON response with multiple fields
- */
-static HttpResponse *response_json_object(int status_code, const char *fields) {
-    HttpResponse *resp = http_response_new(status_code);
-    if (!resp) return NULL;
-
-    char json[2048];
-    int json_len = snprintf(json, sizeof(json), "{%s}", fields);
-    if (json_len >= (int)sizeof(json)) {
-        http_response_free(resp);
-        return response_json_error(500, "Internal server error");
-    }
-    http_response_set(resp, CONTENT_TYPE_JSON, json);
-    return resp;
-}
-
-/* ============================================================================
  * POST /api/admin/bootstrap
  * ========================================================================== */
 
@@ -203,15 +182,11 @@ HttpResponse *admin_bootstrap_handler(const HttpRequest *req, const RouteParams 
     if (result != 0) {
         resp = response_json_error(500, "Bootstrap failed");
     } else {
-        char escaped_org_code_name[256];
-        json_escape(escaped_org_code_name, sizeof(escaped_org_code_name), org_code_name);
-
-        char fields[1024];
-        snprintf(fields, sizeof(fields),
-                 "\"message\":\"Bootstrap successful\","
-                 "\"organization_code_name\":\"%s\"",
-                 escaped_org_code_name);
-        resp = response_json_object(200, fields);
+        JsonBuf *jb = jsonbuf_new(2048);
+        jsonbuf_appendf(jb, "{\"message\":\"Bootstrap successful\",\"organization_code_name\":\"");
+        jsonbuf_append_escaped(jb, org_code_name);
+        jsonbuf_appendf(jb, "\"}");
+        resp = jsonbuf_to_response(jb, 200);
     }
 
     /* Clean up */
@@ -291,17 +266,13 @@ HttpResponse *admin_create_organization_handler(const HttpRequest *req, const Ro
     /* Build response */
     HttpResponse *resp;
     if (result == 0) {
-        char escaped_code_name[256];
-        char escaped_display_name[512];
-        json_escape(escaped_code_name, sizeof(escaped_code_name), code_name);
-        json_escape(escaped_display_name, sizeof(escaped_display_name), display_name);
-
-        char fields[1024];
-        snprintf(fields, sizeof(fields),
-                 "\"code_name\":\"%s\","
-                 "\"display_name\":\"%s\"",
-                 escaped_code_name, escaped_display_name);
-        resp = response_json_object(200, fields);
+        JsonBuf *jb = jsonbuf_new(2048);
+        jsonbuf_appendf(jb, "{\"code_name\":\"");
+        jsonbuf_append_escaped(jb, code_name);
+        jsonbuf_appendf(jb, "\",\"display_name\":\"");
+        jsonbuf_append_escaped(jb, display_name);
+        jsonbuf_appendf(jb, "\"}");
+        resp = jsonbuf_to_response(jb, 200);
     } else {
         resp = response_json_error(409, "Organization already exists or creation failed");
     }
@@ -387,23 +358,22 @@ HttpResponse *admin_create_user_handler(const HttpRequest *req, const RouteParam
         char user_id_hex[33];
         bytes_to_hex(user_id, 16, user_id_hex, sizeof(user_id_hex));
 
-        char fields[1024];
-        int offset = snprintf(fields, sizeof(fields), "\"user_id\":\"%s\"", user_id_hex);
+        JsonBuf *jb = jsonbuf_new(2048);
+        jsonbuf_appendf(jb, "{\"user_id\":\"%s\"", user_id_hex);
 
         if (username) {
-            char escaped_username[256];
-            json_escape(escaped_username, sizeof(escaped_username), username);
-            offset += snprintf(fields + offset, sizeof(fields) - offset,
-                             ",\"username\":\"%s\"", escaped_username);
+            jsonbuf_appendf(jb, ",\"username\":\"");
+            jsonbuf_append_escaped(jb, username);
+            jsonbuf_appendf(jb, "\"");
         }
         if (email) {
-            char escaped_email[512];
-            json_escape(escaped_email, sizeof(escaped_email), email);
-            snprintf(fields + offset, sizeof(fields) - offset,
-                    ",\"email\":\"%s\"", escaped_email);
+            jsonbuf_appendf(jb, ",\"email\":\"");
+            jsonbuf_append_escaped(jb, email);
+            jsonbuf_appendf(jb, "\"");
         }
 
-        resp = response_json_object(200, fields);
+        jsonbuf_appendf(jb, "}");
+        resp = jsonbuf_to_response(jb, 200);
     } else {
         resp = response_json_error(409, "User already exists or creation failed");
     }
@@ -484,17 +454,13 @@ HttpResponse *admin_make_org_admin_handler(const HttpRequest *req, const RoutePa
         char user_id_hex[33];
         bytes_to_hex(user_id, 16, user_id_hex, sizeof(user_id_hex));
 
-        char escaped_username[256];
-        char escaped_org_code_name[256];
-        json_escape(escaped_username, sizeof(escaped_username), username);
-        json_escape(escaped_org_code_name, sizeof(escaped_org_code_name), org_code_name);
-
-        char fields[1024];
-        snprintf(fields, sizeof(fields),
-                 "\"user_id\":\"%s\","
-                 "\"message\":\"User '%s' is now an admin of organization '%s'\"",
-                 user_id_hex, escaped_username, escaped_org_code_name);
-        resp = response_json_object(200, fields);
+        JsonBuf *jb = jsonbuf_new(2048);
+        jsonbuf_appendf(jb, "{\"user_id\":\"%s\",\"message\":\"User '", user_id_hex);
+        jsonbuf_append_escaped(jb, username);
+        jsonbuf_appendf(jb, "' is now an admin of organization '");
+        jsonbuf_append_escaped(jb, org_code_name);
+        jsonbuf_appendf(jb, "'\"}");
+        resp = jsonbuf_to_response(jb, 200);
     } else {
         resp = response_json_error(404, "Organization not found or operation failed");
     }
@@ -545,39 +511,30 @@ HttpResponse *admin_list_all_organizations_handler(const HttpRequest *req, const
     }
 
     /* Build JSON array response */
-    char response_body[16384];
-    int pos = snprintf(response_body, sizeof(response_body), "{\"organizations\":[");
+    JsonBuf *jb = jsonbuf_new(4096 + count * 512);
+    jsonbuf_appendf(jb, "{\"organizations\":[");
 
     for (int i = 0; i < count; i++) {
         char org_id_hex[33];
         bytes_to_hex(orgs[i].id, 16, org_id_hex, sizeof(org_id_hex));
 
-        char escaped_code_name[256];
-        char escaped_display_name[512];
-        char escaped_note[1024];
-        json_escape(escaped_code_name, sizeof(escaped_code_name), orgs[i].code_name);
-        json_escape(escaped_display_name, sizeof(escaped_display_name), orgs[i].display_name);
-        json_escape(escaped_note, sizeof(escaped_note), orgs[i].note);
-
-        pos += snprintf(response_body + pos, sizeof(response_body) - pos,
-                       "%s{\"id\":\"%s\",\"code_name\":\"%s\",\"display_name\":\"%s\","
-                       "\"note\":\"%s\",\"is_active\":%s}",
-                       i > 0 ? "," : "",
-                       org_id_hex, escaped_code_name, escaped_display_name,
-                       escaped_note, orgs[i].is_active ? "true" : "false");
-        if (pos >= (int)sizeof(response_body)) {
-            free(orgs);
-            return response_json_error(500, "Response too large");
-        }
+        jsonbuf_appendf(jb, "%s{\"id\":\"%s\",\"code_name\":\"",
+                        i > 0 ? "," : "", org_id_hex);
+        jsonbuf_append_escaped(jb, orgs[i].code_name);
+        jsonbuf_appendf(jb, "\",\"display_name\":\"");
+        jsonbuf_append_escaped(jb, orgs[i].display_name);
+        jsonbuf_appendf(jb, "\",\"note\":\"");
+        jsonbuf_append_escaped(jb, orgs[i].note);
+        jsonbuf_appendf(jb, "\",\"is_active\":%s}",
+                        orgs[i].is_active ? "true" : "false");
     }
 
-    snprintf(response_body + pos, sizeof(response_body) - pos,
-             "],\"pagination\":{\"limit\":%d,\"offset\":%d,\"count\":%d,\"total\":%d}}",
-             limit, offset, count, total);
+    jsonbuf_appendf(jb, "],\"pagination\":{\"limit\":%d,\"offset\":%d,\"count\":%d,\"total\":%d}}",
+                    limit, offset, count, total);
 
     free(orgs);
 
-    return response_json_ok(response_body);
+    return jsonbuf_to_response(jb, 200);
 }
 
 /* ============================================================================
@@ -666,28 +623,22 @@ HttpResponse *admin_create_organization_key_handler(const HttpRequest *req, cons
     char key_id_hex[33];
     bytes_to_hex(key_id, 16, key_id_hex, sizeof(key_id_hex));
 
-    char escaped_note[512] = "";
-    if (note) {
-        json_escape(escaped_note, sizeof(escaped_note), note);
-    }
-
-    char response_body[4096];
-    int pos = snprintf(response_body, sizeof(response_body),
-                      "{\"key_id\":\"%s\"", key_id_hex);
+    JsonBuf *jb = jsonbuf_new(2048);
+    jsonbuf_appendf(jb, "{\"key_id\":\"%s\"", key_id_hex);
 
     /* Include secret only if generated (show once) */
     if (is_generated) {
-        pos += snprintf(response_body + pos, sizeof(response_body) - pos,
-                       ",\"secret\":\"%s\",\"warning\":\"Save the secret now - it cannot be retrieved later!\"",
-                       generated_secret);
+        jsonbuf_appendf(jb, ",\"secret\":\"%s\",\"warning\":\"Save the secret now - it cannot be retrieved later!\"",
+                        generated_secret);
     }
 
     if (note) {
-        snprintf(response_body + pos, sizeof(response_body) - pos,
-                ",\"note\":\"%s\"}", escaped_note);
-    } else {
-        snprintf(response_body + pos, sizeof(response_body) - pos, "}");
+        jsonbuf_appendf(jb, ",\"note\":\"");
+        jsonbuf_append_escaped(jb, note);
+        jsonbuf_appendf(jb, "\"");
     }
+
+    jsonbuf_appendf(jb, "}");
 
     free(org_code_name);
     if (user_secret) OPENSSL_cleanse(user_secret, strlen(user_secret));
@@ -695,7 +646,7 @@ HttpResponse *admin_create_organization_key_handler(const HttpRequest *req, cons
     OPENSSL_cleanse(generated_secret, sizeof(generated_secret));
     free(note);
 
-    return response_json_ok(response_body);
+    return jsonbuf_to_response(jb, 200);
 }
 
 /* ============================================================================
@@ -781,36 +732,28 @@ HttpResponse *admin_list_organization_keys_handler(const HttpRequest *req, const
     free(org_code_name_param);
 
     /* Build JSON response */
-    char response_body[16384];
-    int pos = snprintf(response_body, sizeof(response_body), "{\"keys\":[");
+    JsonBuf *jb = jsonbuf_new(4096 + count * 512);
+    jsonbuf_appendf(jb, "{\"keys\":[");
 
     for (int i = 0; i < count; i++) {
         char key_id_hex[33];
         bytes_to_hex(keys[i].id, 16, key_id_hex, sizeof(key_id_hex));
 
-        char escaped_note[512];
-        json_escape(escaped_note, sizeof(escaped_note), keys[i].note);
-
-        pos += snprintf(response_body + pos, sizeof(response_body) - pos,
-                       "%s{\"key_id\":\"%s\",\"is_active\":%s,\"generated_at\":\"%s\",\"note\":\"%s\"}",
-                       i > 0 ? "," : "",
-                       key_id_hex,
-                       keys[i].is_active ? "true" : "false",
-                       keys[i].generated_at,
-                       escaped_note);
-        if (pos >= (int)sizeof(response_body)) {
-            free(keys);
-            return response_json_error(500, "Response too large");
-        }
+        jsonbuf_appendf(jb, "%s{\"key_id\":\"%s\",\"is_active\":%s,\"generated_at\":\"%s\",\"note\":\"",
+                        i > 0 ? "," : "",
+                        key_id_hex,
+                        keys[i].is_active ? "true" : "false",
+                        keys[i].generated_at);
+        jsonbuf_append_escaped(jb, keys[i].note);
+        jsonbuf_appendf(jb, "\"}");
     }
 
-    snprintf(response_body + pos, sizeof(response_body) - pos,
-             "],\"pagination\":{\"limit\":%d,\"offset\":%d,\"count\":%d,\"total\":%d}}",
-             limit, offset, count, total);
+    jsonbuf_appendf(jb, "],\"pagination\":{\"limit\":%d,\"offset\":%d,\"count\":%d,\"total\":%d}}",
+                    limit, offset, count, total);
 
     free(keys);
 
-    return response_json_ok(response_body);
+    return jsonbuf_to_response(jb, 200);
 }
 
 /* ============================================================================

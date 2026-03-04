@@ -7,7 +7,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdbool.h>
 
 /*
  * Common response helpers for handlers
@@ -15,82 +14,6 @@
  * These provide application-specific shortcuts (assuming JSON responses)
  * while keeping the HTTP layer generic.
  */
-
-/*
- * json_escape - Escape string for JSON output
- *
- * Escapes: " \ and control characters (0x00-0x1F) per RFC 8259
- * Returns: Number of bytes written (excluding null terminator)
- */
-
-/* Lookup table: maps byte → escape sequence + length */
-typedef struct {
-    const char *seq;
-    unsigned char len;
-} EscapeEntry;
-
-static const EscapeEntry JSON_ESCAPE_TABLE[256] = {
-    [0x00] = {"\\u0000", 6}, [0x01] = {"\\u0001", 6}, [0x02] = {"\\u0002", 6},
-    [0x03] = {"\\u0003", 6}, [0x04] = {"\\u0004", 6}, [0x05] = {"\\u0005", 6},
-    [0x06] = {"\\u0006", 6}, [0x07] = {"\\u0007", 6}, [0x08] = {"\\b", 2},
-    [0x09] = {"\\t", 2},     [0x0A] = {"\\n", 2},     [0x0B] = {"\\u000b", 6},
-    [0x0C] = {"\\f", 2},     [0x0D] = {"\\r", 2},     [0x0E] = {"\\u000e", 6},
-    [0x0F] = {"\\u000f", 6}, [0x10] = {"\\u0010", 6}, [0x11] = {"\\u0011", 6},
-    [0x12] = {"\\u0012", 6}, [0x13] = {"\\u0013", 6}, [0x14] = {"\\u0014", 6},
-    [0x15] = {"\\u0015", 6}, [0x16] = {"\\u0016", 6}, [0x17] = {"\\u0017", 6},
-    [0x18] = {"\\u0018", 6}, [0x19] = {"\\u0019", 6}, [0x1A] = {"\\u001a", 6},
-    [0x1B] = {"\\u001b", 6}, [0x1C] = {"\\u001c", 6}, [0x1D] = {"\\u001d", 6},
-    [0x1E] = {"\\u001e", 6}, [0x1F] = {"\\u001f", 6},
-    ['"']  = {"\\\"", 2},
-    ['\\'] = {"\\\\", 2},
-};
-
-size_t json_escape(char *dst, size_t dst_size, const char *src) {
-    if (dst_size == 0) return 0;
-
-    const unsigned char *p = (const unsigned char *)src;
-    size_t src_len = strlen(src);
-
-    /* Check if escaping needed */
-    bool needs_escape = false;
-    for (size_t i = 0; i < src_len; i++) {
-        if (JSON_ESCAPE_TABLE[p[i]].seq != NULL) {
-            needs_escape = true;
-            break;
-        }
-    }
-
-    if (!needs_escape) {
-        /* No escaping - direct copy */
-        if (src_len + 1 <= dst_size) {
-            memcpy(dst, src, src_len + 1);
-            return src_len;
-        }
-        memcpy(dst, src, dst_size - 1);
-        dst[dst_size - 1] = '\0';
-        return dst_size - 1;
-    }
-
-    /* Escape using lookup table */
-    size_t written = 0;
-    dst_size--;
-
-    while (*p && written < dst_size) {
-        const EscapeEntry *entry = &JSON_ESCAPE_TABLE[*p];
-
-        if (entry->seq) {
-            if (written + entry->len > dst_size) break;
-            memcpy(dst + written, entry->seq, entry->len);
-            written += entry->len;
-        } else {
-            dst[written++] = *p;
-        }
-        p++;
-    }
-
-    dst[written] = '\0';
-    return written;
-}
 
 HttpResponse *require_content_type(const HttpRequest *req, const char *expected) {
     const char *ct = http_request_get_header(req, "Content-Type");

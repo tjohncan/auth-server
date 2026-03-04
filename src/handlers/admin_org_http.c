@@ -183,21 +183,16 @@ HttpResponse *admin_get_organizations_handler(const HttpRequest *req, const Rout
         char org_id_hex[33];
         bytes_to_hex(org.id, 16, org_id_hex, sizeof(org_id_hex));
 
-        char escaped_code_name[256];
-        char escaped_display_name[512];
-        char escaped_note[1024];
-        json_escape(escaped_code_name, sizeof(escaped_code_name), org.code_name);
-        json_escape(escaped_display_name, sizeof(escaped_display_name), org.display_name);
-        json_escape(escaped_note, sizeof(escaped_note), org.note);
+        JsonBuf *jb = jsonbuf_new(2048);
+        jsonbuf_appendf(jb, "{\"id\":\"%s\",\"code_name\":\"", org_id_hex);
+        jsonbuf_append_escaped(jb, org.code_name);
+        jsonbuf_appendf(jb, "\",\"display_name\":\"");
+        jsonbuf_append_escaped(jb, org.display_name);
+        jsonbuf_appendf(jb, "\",\"note\":\"");
+        jsonbuf_append_escaped(jb, org.note);
+        jsonbuf_appendf(jb, "\",\"is_active\":%s}", org.is_active ? "true" : "false");
 
-        char response_body[4096];
-        snprintf(response_body, sizeof(response_body),
-                 "{\"id\":\"%s\",\"code_name\":\"%s\",\"display_name\":\"%s\","
-                 "\"note\":\"%s\",\"is_active\":%s}",
-                 org_id_hex, escaped_code_name, escaped_display_name,
-                 escaped_note, org.is_active ? "true" : "false");
-
-        return response_json_ok(response_body);
+        return jsonbuf_to_response(jb, 200);
     }
 
     /* LIST MODE */
@@ -220,38 +215,29 @@ HttpResponse *admin_get_organizations_handler(const HttpRequest *req, const Rout
     }
 
     /* Build JSON array response */
-    char response_body[16384];
-    int pos = snprintf(response_body, sizeof(response_body), "{\"organizations\":[");
+    JsonBuf *jb = jsonbuf_new(4096 + count * 512);
+    jsonbuf_appendf(jb, "{\"organizations\":[");
 
     for (int i = 0; i < count; i++) {
         char org_id_hex[33];
         bytes_to_hex(orgs[i].id, 16, org_id_hex, sizeof(org_id_hex));
 
-        char escaped_code_name[256];
-        char escaped_display_name[512];
-        char escaped_note[1024];
-        json_escape(escaped_code_name, sizeof(escaped_code_name), orgs[i].code_name);
-        json_escape(escaped_display_name, sizeof(escaped_display_name), orgs[i].display_name);
-        json_escape(escaped_note, sizeof(escaped_note), orgs[i].note);
-
-        pos += snprintf(response_body + pos, sizeof(response_body) - pos,
-                       "%s{\"id\":\"%s\",\"code_name\":\"%s\",\"display_name\":\"%s\","
-                       "\"note\":\"%s\",\"is_active\":%s}",
-                       i > 0 ? "," : "",
-                       org_id_hex, escaped_code_name, escaped_display_name,
-                       escaped_note, orgs[i].is_active ? "true" : "false");
-        if (pos >= (int)sizeof(response_body)) {
-            free(orgs);
-            return response_json_error(500, "Response too large");
-        }
+        jsonbuf_appendf(jb, "%s{\"id\":\"%s\",\"code_name\":\"",
+                        i > 0 ? "," : "", org_id_hex);
+        jsonbuf_append_escaped(jb, orgs[i].code_name);
+        jsonbuf_appendf(jb, "\",\"display_name\":\"");
+        jsonbuf_append_escaped(jb, orgs[i].display_name);
+        jsonbuf_appendf(jb, "\",\"note\":\"");
+        jsonbuf_append_escaped(jb, orgs[i].note);
+        jsonbuf_appendf(jb, "\",\"is_active\":%s}",
+                        orgs[i].is_active ? "true" : "false");
     }
 
-    snprintf(response_body + pos, sizeof(response_body) - pos,
-             "],\"pagination\":{\"limit\":%d,\"offset\":%d,\"count\":%d,\"total\":%d}}",
-             limit, offset, count, total);
+    jsonbuf_appendf(jb, "],\"pagination\":{\"limit\":%d,\"offset\":%d,\"count\":%d,\"total\":%d}}",
+                    limit, offset, count, total);
 
     free(orgs);
-    return response_json_ok(response_body);
+    return jsonbuf_to_response(jb, 200);
 }
 
 /*
@@ -356,21 +342,16 @@ HttpResponse *admin_update_organization_handler(const HttpRequest *req, const Ro
     char org_id_hex[33];
     bytes_to_hex(org.id, 16, org_id_hex, sizeof(org_id_hex));
 
-    char escaped_code_name[256];
-    char escaped_display_name[512];
-    char escaped_note[1024];
-    json_escape(escaped_code_name, sizeof(escaped_code_name), org.code_name);
-    json_escape(escaped_display_name, sizeof(escaped_display_name), org.display_name);
-    json_escape(escaped_note, sizeof(escaped_note), org.note);
+    JsonBuf *jb = jsonbuf_new(2048);
+    jsonbuf_appendf(jb, "{\"id\":\"%s\",\"code_name\":\"", org_id_hex);
+    jsonbuf_append_escaped(jb, org.code_name);
+    jsonbuf_appendf(jb, "\",\"display_name\":\"");
+    jsonbuf_append_escaped(jb, org.display_name);
+    jsonbuf_appendf(jb, "\",\"note\":\"");
+    jsonbuf_append_escaped(jb, org.note);
+    jsonbuf_appendf(jb, "\",\"is_active\":%s}", org.is_active ? "true" : "false");
 
-    char response_body[4096];
-    snprintf(response_body, sizeof(response_body),
-             "{\"id\":\"%s\",\"code_name\":\"%s\",\"display_name\":\"%s\","
-             "\"note\":\"%s\",\"is_active\":%s}",
-             org_id_hex, escaped_code_name, escaped_display_name,
-             escaped_note, org.is_active ? "true" : "false");
-
-    return response_json_ok(response_body);
+    return jsonbuf_to_response(jb, 200);
 }
 
 /* ============================================================================
@@ -430,21 +411,18 @@ HttpResponse *admin_get_resource_servers_handler(const HttpRequest *req, const R
         char server_id_hex[33];
         bytes_to_hex(server.id, 16, server_id_hex, sizeof(server_id_hex));
 
-        char escaped_code_name[256], escaped_display_name[512];
-        char escaped_address[1024], escaped_note[1024];
-        json_escape(escaped_code_name, sizeof(escaped_code_name), server.code_name);
-        json_escape(escaped_display_name, sizeof(escaped_display_name), server.display_name);
-        json_escape(escaped_address, sizeof(escaped_address), server.address);
-        json_escape(escaped_note, sizeof(escaped_note), server.note);
+        JsonBuf *jb = jsonbuf_new(2048);
+        jsonbuf_appendf(jb, "{\"id\":\"%s\",\"code_name\":\"", server_id_hex);
+        jsonbuf_append_escaped(jb, server.code_name);
+        jsonbuf_appendf(jb, "\",\"display_name\":\"");
+        jsonbuf_append_escaped(jb, server.display_name);
+        jsonbuf_appendf(jb, "\",\"address\":\"");
+        jsonbuf_append_escaped(jb, server.address);
+        jsonbuf_appendf(jb, "\",\"note\":\"");
+        jsonbuf_append_escaped(jb, server.note);
+        jsonbuf_appendf(jb, "\",\"is_active\":%s}", server.is_active ? "true" : "false");
 
-        char response_body[4096];
-        snprintf(response_body, sizeof(response_body),
-                 "{\"id\":\"%s\",\"code_name\":\"%s\",\"display_name\":\"%s\","
-                 "\"address\":\"%s\",\"note\":\"%s\",\"is_active\":%s}",
-                 server_id_hex, escaped_code_name, escaped_display_name,
-                 escaped_address, escaped_note, server.is_active ? "true" : "false");
-
-        return response_json_ok(response_body);
+        return jsonbuf_to_response(jb, 200);
     }
 
     /* LIST MODE - requires organization_id */
@@ -480,37 +458,31 @@ HttpResponse *admin_get_resource_servers_handler(const HttpRequest *req, const R
         return response_json_error(500, "Failed to list resource servers");
     }
 
-    char response_body[16384];
-    int pos = snprintf(response_body, sizeof(response_body), "{\"resource_servers\":[");
+    JsonBuf *jb = jsonbuf_new(4096 + count * 512);
+    jsonbuf_appendf(jb, "{\"resource_servers\":[");
 
     for (int i = 0; i < count; i++) {
         char server_id_hex[33];
         bytes_to_hex(servers[i].id, 16, server_id_hex, sizeof(server_id_hex));
 
-        char escaped_code_name[256], escaped_display_name[512];
-        char escaped_address[1024], escaped_note[1024];
-        json_escape(escaped_code_name, sizeof(escaped_code_name), servers[i].code_name);
-        json_escape(escaped_display_name, sizeof(escaped_display_name), servers[i].display_name);
-        json_escape(escaped_address, sizeof(escaped_address), servers[i].address);
-        json_escape(escaped_note, sizeof(escaped_note), servers[i].note);
-
-        pos += snprintf(response_body + pos, sizeof(response_body) - pos,
-                       "%s{\"id\":\"%s\",\"code_name\":\"%s\",\"display_name\":\"%s\","
-                       "\"address\":\"%s\",\"note\":\"%s\",\"is_active\":%s}",
-                       i > 0 ? "," : "", server_id_hex, escaped_code_name, escaped_display_name,
-                       escaped_address, escaped_note, servers[i].is_active ? "true" : "false");
-        if (pos >= (int)sizeof(response_body)) {
-            free(servers);
-            return response_json_error(500, "Response too large");
-        }
+        jsonbuf_appendf(jb, "%s{\"id\":\"%s\",\"code_name\":\"",
+                        i > 0 ? "," : "", server_id_hex);
+        jsonbuf_append_escaped(jb, servers[i].code_name);
+        jsonbuf_appendf(jb, "\",\"display_name\":\"");
+        jsonbuf_append_escaped(jb, servers[i].display_name);
+        jsonbuf_appendf(jb, "\",\"address\":\"");
+        jsonbuf_append_escaped(jb, servers[i].address);
+        jsonbuf_appendf(jb, "\",\"note\":\"");
+        jsonbuf_append_escaped(jb, servers[i].note);
+        jsonbuf_appendf(jb, "\",\"is_active\":%s}",
+                        servers[i].is_active ? "true" : "false");
     }
 
-    snprintf(response_body + pos, sizeof(response_body) - pos,
-             "],\"pagination\":{\"limit\":%d,\"offset\":%d,\"count\":%d,\"total\":%d}}",
-             limit, offset, count, total);
+    jsonbuf_appendf(jb, "],\"pagination\":{\"limit\":%d,\"offset\":%d,\"count\":%d,\"total\":%d}}",
+                    limit, offset, count, total);
 
     free(servers);
-    return response_json_ok(response_body);
+    return jsonbuf_to_response(jb, 200);
 }
 
 /*
@@ -598,12 +570,10 @@ HttpResponse *admin_create_resource_server_handler(const HttpRequest *req, const
     char server_id_hex[33];
     bytes_to_hex(server_id, 16, server_id_hex, sizeof(server_id_hex));
 
-    char response_body[256];
-    snprintf(response_body, sizeof(response_body),
-             "{\"id\":\"%s\",\"message\":\"Resource server created successfully\"}",
-             server_id_hex);
+    JsonBuf *jb = jsonbuf_new(256);
+    jsonbuf_appendf(jb, "{\"id\":\"%s\",\"message\":\"Resource server created successfully\"}", server_id_hex);
 
-    return response_json_ok(response_body);
+    return jsonbuf_to_response(jb, 200);
 }
 
 /*
@@ -744,28 +714,27 @@ HttpResponse *admin_get_clients_handler(const HttpRequest *req, const RouteParam
         char client_id_hex[33];
         bytes_to_hex(client.id, 16, client_id_hex, sizeof(client_id_hex));
 
-        char esc_code[256], esc_display[512], esc_type[64], esc_grant[64], esc_note[1024];
-        json_escape(esc_code, sizeof(esc_code), client.code_name);
-        json_escape(esc_display, sizeof(esc_display), client.display_name);
-        json_escape(esc_type, sizeof(esc_type), client.client_type);
-        json_escape(esc_grant, sizeof(esc_grant), client.grant_type);
-        json_escape(esc_note, sizeof(esc_note), client.note);
+        JsonBuf *jb = jsonbuf_new(2048);
+        jsonbuf_appendf(jb, "{\"id\":\"%s\",\"code_name\":\"", client_id_hex);
+        jsonbuf_append_escaped(jb, client.code_name);
+        jsonbuf_appendf(jb, "\",\"display_name\":\"");
+        jsonbuf_append_escaped(jb, client.display_name);
+        jsonbuf_appendf(jb, "\",\"client_type\":\"");
+        jsonbuf_append_escaped(jb, client.client_type);
+        jsonbuf_appendf(jb, "\",\"grant_type\":\"");
+        jsonbuf_append_escaped(jb, client.grant_type);
+        jsonbuf_appendf(jb, "\",\"note\":\"");
+        jsonbuf_append_escaped(jb, client.note);
+        jsonbuf_appendf(jb, "\",\"require_mfa\":%s,\"access_token_ttl_seconds\":%d,"
+                        "\"issue_refresh_tokens\":%s,\"refresh_token_ttl_seconds\":%d,"
+                        "\"maximum_session_seconds\":%d,\"secret_rotation_seconds\":%d,"
+                        "\"is_active\":%s}",
+                        client.require_mfa ? "true" : "false", client.access_token_ttl_seconds,
+                        client.issue_refresh_tokens ? "true" : "false", client.refresh_token_ttl_seconds,
+                        client.maximum_session_seconds, client.secret_rotation_seconds,
+                        client.is_active ? "true" : "false");
 
-        char response[4096];
-        snprintf(response, sizeof(response),
-                 "{\"id\":\"%s\",\"code_name\":\"%s\",\"display_name\":\"%s\","
-                 "\"client_type\":\"%s\",\"grant_type\":\"%s\",\"note\":\"%s\","
-                 "\"require_mfa\":%s,\"access_token_ttl_seconds\":%d,"
-                 "\"issue_refresh_tokens\":%s,\"refresh_token_ttl_seconds\":%d,"
-                 "\"maximum_session_seconds\":%d,\"secret_rotation_seconds\":%d,"
-                 "\"is_active\":%s}",
-                 client_id_hex, esc_code, esc_display, esc_type, esc_grant, esc_note,
-                 client.require_mfa ? "true" : "false", client.access_token_ttl_seconds,
-                 client.issue_refresh_tokens ? "true" : "false", client.refresh_token_ttl_seconds,
-                 client.maximum_session_seconds, client.secret_rotation_seconds,
-                 client.is_active ? "true" : "false");
-
-        return response_json_ok(response);
+        return jsonbuf_to_response(jb, 200);
     }
 
     /* LIST MODE */
@@ -801,45 +770,39 @@ HttpResponse *admin_get_clients_handler(const HttpRequest *req, const RouteParam
         return response_json_error(500, "Failed to list clients");
     }
 
-    char response[32768];
-    int pos = snprintf(response, sizeof(response), "{\"clients\":[");
+    JsonBuf *jb = jsonbuf_new(4096 + count * 512);
+    jsonbuf_appendf(jb, "{\"clients\":[");
 
     for (int i = 0; i < count; i++) {
         char client_id_hex[33];
         bytes_to_hex(clients[i].id, 16, client_id_hex, sizeof(client_id_hex));
 
-        char esc_code[256], esc_display[512], esc_type[64], esc_grant[64], esc_note[1024];
-        json_escape(esc_code, sizeof(esc_code), clients[i].code_name);
-        json_escape(esc_display, sizeof(esc_display), clients[i].display_name);
-        json_escape(esc_type, sizeof(esc_type), clients[i].client_type);
-        json_escape(esc_grant, sizeof(esc_grant), clients[i].grant_type);
-        json_escape(esc_note, sizeof(esc_note), clients[i].note);
-
-        pos += snprintf(response + pos, sizeof(response) - pos,
-                       "%s{\"id\":\"%s\",\"code_name\":\"%s\",\"display_name\":\"%s\","
-                       "\"client_type\":\"%s\",\"grant_type\":\"%s\",\"note\":\"%s\","
-                       "\"require_mfa\":%s,\"access_token_ttl_seconds\":%d,"
-                       "\"issue_refresh_tokens\":%s,\"refresh_token_ttl_seconds\":%d,"
-                       "\"maximum_session_seconds\":%d,\"secret_rotation_seconds\":%d,"
-                       "\"is_active\":%s}",
-                       i > 0 ? "," : "", client_id_hex, esc_code, esc_display,
-                       esc_type, esc_grant, esc_note,
-                       clients[i].require_mfa ? "true" : "false", clients[i].access_token_ttl_seconds,
-                       clients[i].issue_refresh_tokens ? "true" : "false", clients[i].refresh_token_ttl_seconds,
-                       clients[i].maximum_session_seconds, clients[i].secret_rotation_seconds,
-                       clients[i].is_active ? "true" : "false");
-        if (pos >= (int)sizeof(response)) {
-            free(clients);
-            return response_json_error(500, "Response too large");
-        }
+        jsonbuf_appendf(jb, "%s{\"id\":\"%s\",\"code_name\":\"",
+                        i > 0 ? "," : "", client_id_hex);
+        jsonbuf_append_escaped(jb, clients[i].code_name);
+        jsonbuf_appendf(jb, "\",\"display_name\":\"");
+        jsonbuf_append_escaped(jb, clients[i].display_name);
+        jsonbuf_appendf(jb, "\",\"client_type\":\"");
+        jsonbuf_append_escaped(jb, clients[i].client_type);
+        jsonbuf_appendf(jb, "\",\"grant_type\":\"");
+        jsonbuf_append_escaped(jb, clients[i].grant_type);
+        jsonbuf_appendf(jb, "\",\"note\":\"");
+        jsonbuf_append_escaped(jb, clients[i].note);
+        jsonbuf_appendf(jb, "\",\"require_mfa\":%s,\"access_token_ttl_seconds\":%d,"
+                        "\"issue_refresh_tokens\":%s,\"refresh_token_ttl_seconds\":%d,"
+                        "\"maximum_session_seconds\":%d,\"secret_rotation_seconds\":%d,"
+                        "\"is_active\":%s}",
+                        clients[i].require_mfa ? "true" : "false", clients[i].access_token_ttl_seconds,
+                        clients[i].issue_refresh_tokens ? "true" : "false", clients[i].refresh_token_ttl_seconds,
+                        clients[i].maximum_session_seconds, clients[i].secret_rotation_seconds,
+                        clients[i].is_active ? "true" : "false");
     }
 
-    snprintf(response + pos, sizeof(response) - pos,
-             "],\"pagination\":{\"limit\":%d,\"offset\":%d,\"count\":%d,\"total\":%d}}",
-             limit, offset, count, total);
+    jsonbuf_appendf(jb, "],\"pagination\":{\"limit\":%d,\"offset\":%d,\"count\":%d,\"total\":%d}}",
+                    limit, offset, count, total);
 
     free(clients);
-    return response_json_ok(response);
+    return jsonbuf_to_response(jb, 200);
 }
 
 /*
@@ -934,12 +897,10 @@ HttpResponse *admin_create_client_handler(const HttpRequest *req, const RoutePar
     char client_id_hex[33];
     bytes_to_hex(client_id, 16, client_id_hex, sizeof(client_id_hex));
 
-    char response[256];
-    snprintf(response, sizeof(response),
-             "{\"id\":\"%s\",\"message\":\"Client created successfully\"}",
-             client_id_hex);
+    JsonBuf *jb = jsonbuf_new(256);
+    jsonbuf_appendf(jb, "{\"id\":\"%s\",\"message\":\"Client created successfully\"}", client_id_hex);
 
-    return response_json_ok(response);
+    return jsonbuf_to_response(jb, 200);
 }
 
 /*
@@ -1080,29 +1041,22 @@ HttpResponse *admin_get_client_redirect_uris_handler(const HttpRequest *req, con
         return response_json_error(500, "Failed to list redirect URIs");
     }
 
-    char response[16384];
-    int pos = snprintf(response, sizeof(response), "{\"redirect_uris\":[");
+    JsonBuf *jb = jsonbuf_new(4096 + count * 512);
+    jsonbuf_appendf(jb, "{\"redirect_uris\":[");
 
     for (int i = 0; i < count; i++) {
-        char esc_uri[1024], esc_note[1024];
-        json_escape(esc_uri, sizeof(esc_uri), uris[i].redirect_uri);
-        json_escape(esc_note, sizeof(esc_note), uris[i].note);
-
-        pos += snprintf(response + pos, sizeof(response) - pos,
-                       "%s{\"redirect_uri\":\"%s\",\"note\":\"%s\"}",
-                       i > 0 ? "," : "", esc_uri, esc_note);
-        if (pos >= (int)sizeof(response)) {
-            free(uris);
-            return response_json_error(500, "Response too large");
-        }
+        jsonbuf_appendf(jb, "%s{\"redirect_uri\":\"", i > 0 ? "," : "");
+        jsonbuf_append_escaped(jb, uris[i].redirect_uri);
+        jsonbuf_appendf(jb, "\",\"note\":\"");
+        jsonbuf_append_escaped(jb, uris[i].note);
+        jsonbuf_appendf(jb, "\"}");
     }
 
-    snprintf(response + pos, sizeof(response) - pos,
-             "],\"pagination\":{\"limit\":%d,\"offset\":%d,\"count\":%d,\"total\":%d}}",
-             limit, offset, count, total);
+    jsonbuf_appendf(jb, "],\"pagination\":{\"limit\":%d,\"offset\":%d,\"count\":%d,\"total\":%d}}",
+                    limit, offset, count, total);
 
     free(uris);
-    return response_json_ok(response);
+    return jsonbuf_to_response(jb, 200);
 }
 
 /*
@@ -1274,37 +1228,28 @@ HttpResponse *admin_get_client_resource_servers_handler(const HttpRequest *req, 
         return response_json_error(500, "Failed to list resource servers");
     }
 
-    char response[16384];
-    int pos = snprintf(response, sizeof(response), "{\"links\":[");
+    JsonBuf *jb = jsonbuf_new(4096 + count * 512);
+    jsonbuf_appendf(jb, "{\"links\":[");
 
     for (int i = 0; i < count; i++) {
         char server_id_hex[33];
         bytes_to_hex(links[i].resource_server_id, 16, server_id_hex, sizeof(server_id_hex));
 
-        char esc_server_code[256], esc_server_display[512], esc_address[1024];
-        json_escape(esc_server_code, sizeof(esc_server_code), links[i].resource_server_code_name);
-        json_escape(esc_server_display, sizeof(esc_server_display), links[i].resource_server_display_name);
-        json_escape(esc_address, sizeof(esc_address), links[i].resource_server_address);
-
-        pos += snprintf(response + pos, sizeof(response) - pos,
-                       "%s{\"resource_server_id\":\"%s\","
-                       "\"resource_server_code_name\":\"%s\","
-                       "\"resource_server_display_name\":\"%s\","
-                       "\"resource_server_address\":\"%s\"}",
-                       i > 0 ? "," : "", server_id_hex,
-                       esc_server_code, esc_server_display, esc_address);
-        if (pos >= (int)sizeof(response)) {
-            free(links);
-            return response_json_error(500, "Response too large");
-        }
+        jsonbuf_appendf(jb, "%s{\"resource_server_id\":\"%s\",\"resource_server_code_name\":\"",
+                        i > 0 ? "," : "", server_id_hex);
+        jsonbuf_append_escaped(jb, links[i].resource_server_code_name);
+        jsonbuf_appendf(jb, "\",\"resource_server_display_name\":\"");
+        jsonbuf_append_escaped(jb, links[i].resource_server_display_name);
+        jsonbuf_appendf(jb, "\",\"resource_server_address\":\"");
+        jsonbuf_append_escaped(jb, links[i].resource_server_address);
+        jsonbuf_appendf(jb, "\"}");
     }
 
-    snprintf(response + pos, sizeof(response) - pos,
-             "],\"pagination\":{\"limit\":%d,\"offset\":%d,\"count\":%d,\"total\":%d}}",
-             limit, offset, count, total);
+    jsonbuf_appendf(jb, "],\"pagination\":{\"limit\":%d,\"offset\":%d,\"count\":%d,\"total\":%d}}",
+                    limit, offset, count, total);
 
     free(links);
-    return response_json_ok(response);
+    return jsonbuf_to_response(jb, 200);
 }
 
 /*
@@ -1350,35 +1295,26 @@ HttpResponse *admin_get_resource_server_clients_handler(const HttpRequest *req, 
         return response_json_error(500, "Failed to list clients");
     }
 
-    char response[16384];
-    int pos = snprintf(response, sizeof(response), "{\"links\":[");
+    JsonBuf *jb = jsonbuf_new(4096 + count * 512);
+    jsonbuf_appendf(jb, "{\"links\":[");
 
     for (int i = 0; i < count; i++) {
         char client_id_hex[33];
         bytes_to_hex(links[i].client_id, 16, client_id_hex, sizeof(client_id_hex));
 
-        char esc_client_code[256], esc_client_display[512];
-        json_escape(esc_client_code, sizeof(esc_client_code), links[i].client_code_name);
-        json_escape(esc_client_display, sizeof(esc_client_display), links[i].client_display_name);
-
-        pos += snprintf(response + pos, sizeof(response) - pos,
-                       "%s{\"client_id\":\"%s\","
-                       "\"client_code_name\":\"%s\","
-                       "\"client_display_name\":\"%s\"}",
-                       i > 0 ? "," : "", client_id_hex,
-                       esc_client_code, esc_client_display);
-        if (pos >= (int)sizeof(response)) {
-            free(links);
-            return response_json_error(500, "Response too large");
-        }
+        jsonbuf_appendf(jb, "%s{\"client_id\":\"%s\",\"client_code_name\":\"",
+                        i > 0 ? "," : "", client_id_hex);
+        jsonbuf_append_escaped(jb, links[i].client_code_name);
+        jsonbuf_appendf(jb, "\",\"client_display_name\":\"");
+        jsonbuf_append_escaped(jb, links[i].client_display_name);
+        jsonbuf_appendf(jb, "\"}");
     }
 
-    snprintf(response + pos, sizeof(response) - pos,
-             "],\"pagination\":{\"limit\":%d,\"offset\":%d,\"count\":%d,\"total\":%d}}",
-             limit, offset, count, total);
+    jsonbuf_appendf(jb, "],\"pagination\":{\"limit\":%d,\"offset\":%d,\"count\":%d,\"total\":%d}}",
+                    limit, offset, count, total);
 
     free(links);
-    return response_json_ok(response);
+    return jsonbuf_to_response(jb, 200);
 }
 
 /*
@@ -1580,23 +1516,18 @@ HttpResponse *admin_create_resource_server_key_handler(const HttpRequest *req, c
     char key_id_hex[33];
     bytes_to_hex(key_id, 16, key_id_hex, sizeof(key_id_hex));
 
-    char response_body[1024];
+    JsonBuf *jb = jsonbuf_new(2048);
+    jsonbuf_appendf(jb, "{\"id\":\"%s\",\"key_id\":\"%s\"", key_id_hex, key_id_hex);
     if (is_generated) {
-        /* Include secret in response */
-        snprintf(response_body, sizeof(response_body),
-                 "{\"id\":\"%s\",\"key_id\":\"%s\",\"secret\":\"%s\","
-                 "\"message\":\"Save the secret now - it cannot be retrieved later!\"}",
-                 key_id_hex, key_id_hex, generated_secret);
+        jsonbuf_appendf(jb, ",\"secret\":\"%s\",\"message\":\"Save the secret now - it cannot be retrieved later!\"",
+                        generated_secret);
     } else {
-        /* Don't include secret (user already has it) */
-        snprintf(response_body, sizeof(response_body),
-                 "{\"id\":\"%s\",\"key_id\":\"%s\","
-                 "\"message\":\"Key created successfully\"}",
-                 key_id_hex, key_id_hex);
+        jsonbuf_appendf(jb, ",\"message\":\"Key created successfully\"");
     }
+    jsonbuf_appendf(jb, "}");
 
     OPENSSL_cleanse(generated_secret, sizeof(generated_secret));
-    return response_json_ok(response_body);
+    return jsonbuf_to_response(jb, 200);
 }
 
 /*
@@ -1659,40 +1590,29 @@ HttpResponse *admin_get_resource_server_keys_handler(const HttpRequest *req, con
     }
 
     /* Build JSON array */
-    char *response_body = malloc(4096 + (count * 1024));
-    if (!response_body) {
-        free(keys);
-        return response_json_error(500, "Memory allocation failed");
-    }
-
-    int pos = snprintf(response_body, 4096, "{\"keys\":[");
+    JsonBuf *jb = jsonbuf_new(4096 + count * 512);
+    jsonbuf_appendf(jb, "{\"keys\":[");
 
     for (int i = 0; i < count; i++) {
         char key_id_hex[33];
         bytes_to_hex(keys[i].id, 16, key_id_hex, sizeof(key_id_hex));
 
-        char escaped_note[1024], escaped_generated_at[64];
-        json_escape(escaped_note, sizeof(escaped_note), keys[i].note);
-        json_escape(escaped_generated_at, sizeof(escaped_generated_at), keys[i].generated_at);
-
-        pos += snprintf(response_body + pos, 4096 + (count * 1024) - pos,
-                       "%s{\"id\":\"%s\",\"key_id\":\"%s\",\"is_active\":%s,"
-                       "\"generated_at\":\"%s\",\"note\":\"%s\"}",
-                       i > 0 ? "," : "",
-                       key_id_hex, key_id_hex,
-                       keys[i].is_active ? "true" : "false",
-                       escaped_generated_at, escaped_note);
+        jsonbuf_appendf(jb, "%s{\"id\":\"%s\",\"key_id\":\"%s\",\"is_active\":%s,\"generated_at\":\"",
+                        i > 0 ? "," : "",
+                        key_id_hex, key_id_hex,
+                        keys[i].is_active ? "true" : "false");
+        jsonbuf_append_escaped(jb, keys[i].generated_at);
+        jsonbuf_appendf(jb, "\",\"note\":\"");
+        jsonbuf_append_escaped(jb, keys[i].note);
+        jsonbuf_appendf(jb, "\"}");
     }
 
-    snprintf(response_body + pos, 4096 + (count * 1024) - pos,
-             "],\"pagination\":{\"limit\":%d,\"offset\":%d,\"count\":%d,\"total\":%d}}",
-             limit, offset, count, total);
+    jsonbuf_appendf(jb, "],\"pagination\":{\"limit\":%d,\"offset\":%d,\"count\":%d,\"total\":%d}}",
+                    limit, offset, count, total);
 
     free(keys);
 
-    HttpResponse *resp = response_json_ok(response_body);
-    free(response_body);
-    return resp;
+    return jsonbuf_to_response(jb, 200);
 }
 
 /*
@@ -1846,23 +1766,18 @@ HttpResponse *admin_create_client_key_handler(const HttpRequest *req, const Rout
     char key_id_hex[33];
     bytes_to_hex(key_id, 16, key_id_hex, sizeof(key_id_hex));
 
-    char response_body[1024];
+    JsonBuf *jb = jsonbuf_new(2048);
+    jsonbuf_appendf(jb, "{\"id\":\"%s\",\"key_id\":\"%s\"", key_id_hex, key_id_hex);
     if (is_generated) {
-        /* Include secret in response */
-        snprintf(response_body, sizeof(response_body),
-                 "{\"id\":\"%s\",\"key_id\":\"%s\",\"secret\":\"%s\","
-                 "\"message\":\"Save the secret now - it cannot be retrieved later!\"}",
-                 key_id_hex, key_id_hex, generated_secret);
+        jsonbuf_appendf(jb, ",\"secret\":\"%s\",\"message\":\"Save the secret now - it cannot be retrieved later!\"",
+                        generated_secret);
     } else {
-        /* Don't include secret (user already has it) */
-        snprintf(response_body, sizeof(response_body),
-                 "{\"id\":\"%s\",\"key_id\":\"%s\","
-                 "\"message\":\"Key created successfully\"}",
-                 key_id_hex, key_id_hex);
+        jsonbuf_appendf(jb, ",\"message\":\"Key created successfully\"");
     }
+    jsonbuf_appendf(jb, "}");
 
     OPENSSL_cleanse(generated_secret, sizeof(generated_secret));
-    return response_json_ok(response_body);
+    return jsonbuf_to_response(jb, 200);
 }
 
 /*
@@ -1925,40 +1840,29 @@ HttpResponse *admin_get_client_keys_handler(const HttpRequest *req, const RouteP
     }
 
     /* Build JSON array */
-    char *response_body = malloc(4096 + (count * 1024));
-    if (!response_body) {
-        free(keys);
-        return response_json_error(500, "Memory allocation failed");
-    }
-
-    int pos = snprintf(response_body, 4096, "{\"keys\":[");
+    JsonBuf *jb = jsonbuf_new(4096 + count * 512);
+    jsonbuf_appendf(jb, "{\"keys\":[");
 
     for (int i = 0; i < count; i++) {
         char key_id_hex[33];
         bytes_to_hex(keys[i].id, 16, key_id_hex, sizeof(key_id_hex));
 
-        char escaped_note[1024], escaped_generated_at[64];
-        json_escape(escaped_note, sizeof(escaped_note), keys[i].note);
-        json_escape(escaped_generated_at, sizeof(escaped_generated_at), keys[i].generated_at);
-
-        pos += snprintf(response_body + pos, 4096 + (count * 1024) - pos,
-                       "%s{\"id\":\"%s\",\"key_id\":\"%s\",\"is_active\":%s,"
-                       "\"generated_at\":\"%s\",\"note\":\"%s\"}",
-                       i > 0 ? "," : "",
-                       key_id_hex, key_id_hex,
-                       keys[i].is_active ? "true" : "false",
-                       escaped_generated_at, escaped_note);
+        jsonbuf_appendf(jb, "%s{\"id\":\"%s\",\"key_id\":\"%s\",\"is_active\":%s,\"generated_at\":\"",
+                        i > 0 ? "," : "",
+                        key_id_hex, key_id_hex,
+                        keys[i].is_active ? "true" : "false");
+        jsonbuf_append_escaped(jb, keys[i].generated_at);
+        jsonbuf_appendf(jb, "\",\"note\":\"");
+        jsonbuf_append_escaped(jb, keys[i].note);
+        jsonbuf_appendf(jb, "\"}");
     }
 
-    snprintf(response_body + pos, 4096 + (count * 1024) - pos,
-             "],\"pagination\":{\"limit\":%d,\"offset\":%d,\"count\":%d,\"total\":%d}}",
-             limit, offset, count, total);
+    jsonbuf_appendf(jb, "],\"pagination\":{\"limit\":%d,\"offset\":%d,\"count\":%d,\"total\":%d}}",
+                    limit, offset, count, total);
 
     free(keys);
 
-    HttpResponse *resp = response_json_ok(response_body);
-    free(response_body);
-    return resp;
+    return jsonbuf_to_response(jb, 200);
 }
 
 /*

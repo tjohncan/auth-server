@@ -2,6 +2,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <stdarg.h>
+#include <stdbool.h>
 #include <limits.h>
 
 void json_unescape(char *str) {
@@ -235,4 +237,182 @@ int json_get_bool(const char *json, const char *key, int *out_value) {
     #undef IS_JSON_DELIM
 
     return -1;  /* Not a valid boolean */
+}
+
+/* ============================================================================
+ * json_escape - Escape string for JSON output
+ *
+ * Escapes: " \ and control characters (0x00-0x1F) per RFC 8259
+ * Returns: Number of bytes written (excluding null terminator)
+ * ============================================================================ */
+
+/* Lookup table: maps byte -> escape sequence + length */
+typedef struct {
+    const char *seq;
+    unsigned char len;
+} EscapeEntry;
+
+static const EscapeEntry JSON_ESCAPE_TABLE[256] = {
+    [0x00] = {"\\u0000", 6}, [0x01] = {"\\u0001", 6}, [0x02] = {"\\u0002", 6},
+    [0x03] = {"\\u0003", 6}, [0x04] = {"\\u0004", 6}, [0x05] = {"\\u0005", 6},
+    [0x06] = {"\\u0006", 6}, [0x07] = {"\\u0007", 6}, [0x08] = {"\\b", 2},
+    [0x09] = {"\\t", 2},     [0x0A] = {"\\n", 2},     [0x0B] = {"\\u000b", 6},
+    [0x0C] = {"\\f", 2},     [0x0D] = {"\\r", 2},     [0x0E] = {"\\u000e", 6},
+    [0x0F] = {"\\u000f", 6}, [0x10] = {"\\u0010", 6}, [0x11] = {"\\u0011", 6},
+    [0x12] = {"\\u0012", 6}, [0x13] = {"\\u0013", 6}, [0x14] = {"\\u0014", 6},
+    [0x15] = {"\\u0015", 6}, [0x16] = {"\\u0016", 6}, [0x17] = {"\\u0017", 6},
+    [0x18] = {"\\u0018", 6}, [0x19] = {"\\u0019", 6}, [0x1A] = {"\\u001a", 6},
+    [0x1B] = {"\\u001b", 6}, [0x1C] = {"\\u001c", 6}, [0x1D] = {"\\u001d", 6},
+    [0x1E] = {"\\u001e", 6}, [0x1F] = {"\\u001f", 6},
+    ['"']  = {"\\\"", 2},
+    ['\\'] = {"\\\\", 2},
+};
+
+size_t json_escape(char *dst, size_t dst_size, const char *src) {
+    if (dst_size == 0) return 0;
+
+    const unsigned char *p = (const unsigned char *)src;
+    size_t src_len = strlen(src);
+
+    /* Check if escaping needed */
+    bool needs_escape = false;
+    for (size_t i = 0; i < src_len; i++) {
+        if (JSON_ESCAPE_TABLE[p[i]].seq != NULL) {
+            needs_escape = true;
+            break;
+        }
+    }
+
+    if (!needs_escape) {
+        /* No escaping - direct copy */
+        if (src_len + 1 <= dst_size) {
+            memcpy(dst, src, src_len + 1);
+            return src_len;
+        }
+        memcpy(dst, src, dst_size - 1);
+        dst[dst_size - 1] = '\0';
+        return dst_size - 1;
+    }
+
+    /* Escape using lookup table */
+    size_t written = 0;
+    dst_size--;
+
+    while (*p && written < dst_size) {
+        const EscapeEntry *entry = &JSON_ESCAPE_TABLE[*p];
+
+        if (entry->seq) {
+            if (written + entry->len > dst_size) break;
+            memcpy(dst + written, entry->seq, entry->len);
+            written += entry->len;
+        } else {
+            dst[written++] = *p;
+        }
+        p++;
+    }
+
+    dst[written] = '\0';
+    return written;
+}
+
+/* ============================================================================
+ * JsonBuf - Dynamic JSON response builder
+ * ============================================================================ */
+
+static void jsonbuf_grow(JsonBuf *jb, size_t needed) {
+    if (jb->error) return;
+
+    size_t new_cap = jb->cap;
+    while (new_cap < needed) {
+        if (new_cap > JSONBUF_MAX_CAP / 2) {
+            jb->error = 1;
+            return;
+        }
+        new_cap *= 2;
+    }
+
+    if (new_cap > JSONBUF_MAX_CAP) {
+        jb->error = 1;
+        return;
+    }
+
+    char *new_buf = realloc(jb->buf, new_cap);
+    if (!new_buf) {
+        jb->error = 1;
+        return;
+    }
+
+    jb->buf = new_buf;
+    jb->cap = new_cap;
+}
+
+JsonBuf *jsonbuf_new(size_t initial_cap) {
+    if (initial_cap < 256) initial_cap = 256;
+    if (initial_cap > JSONBUF_MAX_CAP) initial_cap = JSONBUF_MAX_CAP;
+
+    JsonBuf *jb = malloc(sizeof(JsonBuf));
+    if (!jb) return NULL;
+
+    jb->buf = malloc(initial_cap);
+    if (!jb->buf) {
+        free(jb);
+        return NULL;
+    }
+
+    jb->cap = initial_cap;
+    jb->len = 0;
+    jb->buf[0] = '\0';
+    jb->error = 0;
+    return jb;
+}
+
+void jsonbuf_appendf(JsonBuf *jb, const char *fmt, ...) {
+    if (!jb || jb->error) return;
+
+    va_list ap;
+    va_start(ap, fmt);
+    size_t avail = jb->cap - jb->len;
+    int n = vsnprintf(jb->buf + jb->len, avail, fmt, ap);
+    va_end(ap);
+
+    if (n < 0) {
+        jb->error = 1;
+        return;
+    }
+
+    if ((size_t)n >= avail) {
+        /* Grow and retry */
+        jsonbuf_grow(jb, jb->len + (size_t)n + 1);
+        if (jb->error) return;
+
+        va_start(ap, fmt);
+        vsnprintf(jb->buf + jb->len, jb->cap - jb->len, fmt, ap);
+        va_end(ap);
+    }
+
+    jb->len += (size_t)n;
+}
+
+void jsonbuf_append_escaped(JsonBuf *jb, const char *src) {
+    if (!jb || jb->error || !src) return;
+
+    size_t src_len = strlen(src);
+    /* Worst case: every char becomes \uXXXX (6x) */
+    size_t max_escaped = src_len * 6 + 1;
+    size_t needed = jb->len + max_escaped;
+
+    if (needed > jb->cap) {
+        jsonbuf_grow(jb, needed);
+        if (jb->error) return;
+    }
+
+    /* Write escaped content directly into buffer */
+    size_t written = json_escape(jb->buf + jb->len, jb->cap - jb->len, src);
+    jb->len += written;
+}
+
+void jsonbuf_free(JsonBuf *jb) {
+    if (!jb) return;
+    free(jb->buf);
+    free(jb);
 }

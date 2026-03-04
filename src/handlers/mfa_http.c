@@ -129,19 +129,15 @@ HttpResponse *mfa_totp_setup_handler(const HttpRequest *req, const RouteParams *
     char method_id_hex[33];
     bytes_to_hex(method_id, 16, method_id_hex, sizeof(method_id_hex));
 
-    /* Escape values for JSON */
-    char secret_esc[128];
-    char qr_url_esc[2048];
-    json_escape(secret_esc, sizeof(secret_esc), secret);
-    json_escape(qr_url_esc, sizeof(qr_url_esc), qr_url);
-
     /* Build response */
-    char response_body[2560];
-    snprintf(response_body, sizeof(response_body),
-             "{\"method_id\":\"%s\",\"secret\":\"%s\",\"qr_url\":\"%s\"}",
-             method_id_hex, secret_esc, qr_url_esc);
+    JsonBuf *jb = jsonbuf_new(4096);
+    jsonbuf_appendf(jb, "{\"method_id\":\"%s\",\"secret\":\"", method_id_hex);
+    jsonbuf_append_escaped(jb, secret);
+    jsonbuf_appendf(jb, "\",\"qr_url\":\"");
+    jsonbuf_append_escaped(jb, qr_url);
+    jsonbuf_appendf(jb, "\"}");
 
-    return response_json_ok(response_body);
+    return jsonbuf_to_response(jb, 200);
 }
 
 /* ============================================================================
@@ -227,33 +223,23 @@ HttpResponse *mfa_totp_confirm_handler(const HttpRequest *req, const RouteParams
     }
 
     /* Build response */
-    char response_body[1024];
-
     if (recovery_codes && recovery_count > 0) {
-        /* Include recovery codes */
-        int offset = snprintf(response_body, sizeof(response_body),
-                              "{\"message\":\"MFA method confirmed\",\"recovery_codes\":[");
+        JsonBuf *jb = jsonbuf_new(2048);
+        jsonbuf_appendf(jb, "{\"message\":\"MFA method confirmed\",\"recovery_codes\":[");
 
         for (int i = 0; i < recovery_count; i++) {
-            offset += snprintf(response_body + offset, sizeof(response_body) - offset,
-                               "%s\"%s\"", i > 0 ? "," : "", recovery_codes[i]);
-            if (offset >= (int)sizeof(response_body)) {
-                for (int j = 0; j < recovery_count; j++) free(recovery_codes[j]);
-                free(recovery_codes);
-                return response_json_error(500, "Response too large");
-            }
+            jsonbuf_appendf(jb, "%s\"%s\"", i > 0 ? "," : "", recovery_codes[i]);
         }
 
-        snprintf(response_body + offset, sizeof(response_body) - offset, "]}");
+        jsonbuf_appendf(jb, "]}");
 
         for (int i = 0; i < recovery_count; i++) free(recovery_codes[i]);
         free(recovery_codes);
-    } else {
-        snprintf(response_body, sizeof(response_body),
-                 "{\"message\":\"MFA method confirmed\"}");
-    }
 
-    return response_json_ok(response_body);
+        return jsonbuf_to_response(jb, 200);
+    } else {
+        return response_json_ok("{\"message\":\"MFA method confirmed\"}");
+    }
 }
 
 /* ============================================================================
@@ -441,46 +427,37 @@ HttpResponse *mfa_list_methods_handler(const HttpRequest *req, const RouteParams
     }
 
     /* Build JSON response */
-    char response_body[4096];
-    int offset = snprintf(response_body, sizeof(response_body), "{\"methods\":[");
+    JsonBuf *jb = jsonbuf_new(4096 + count * 256);
+    jsonbuf_appendf(jb, "{\"methods\":[");
 
     for (int i = 0; i < count; i++) {
         char id_hex[33];
         bytes_to_hex(methods[i].id, 16, id_hex, sizeof(id_hex));
 
-        char type_esc[32];
-        char name_esc[512];
-        json_escape(type_esc, sizeof(type_esc), methods[i].mfa_method);
-        json_escape(name_esc, sizeof(name_esc), methods[i].display_name);
+        jsonbuf_appendf(jb, "%s{\"id\":\"%s\",\"type\":\"",
+                        i > 0 ? "," : "", id_hex);
+        jsonbuf_append_escaped(jb, methods[i].mfa_method);
+        jsonbuf_appendf(jb, "\",\"display_name\":\"");
+        jsonbuf_append_escaped(jb, methods[i].display_name);
+        jsonbuf_appendf(jb, "\",\"is_confirmed\":%s,\"confirmed_at\":",
+                        methods[i].is_confirmed ? "true" : "false");
 
-        /* Build confirmed_at as quoted string or null */
-        char confirmed_at_json[68];
         if (methods[i].confirmed_at[0] != '\0') {
-            char confirmed_at_esc[64];
-            json_escape(confirmed_at_esc, sizeof(confirmed_at_esc), methods[i].confirmed_at);
-            snprintf(confirmed_at_json, sizeof(confirmed_at_json), "\"%s\"", confirmed_at_esc);
+            jsonbuf_appendf(jb, "\"");
+            jsonbuf_append_escaped(jb, methods[i].confirmed_at);
+            jsonbuf_appendf(jb, "\"");
         } else {
-            strcpy(confirmed_at_json, "null");
+            jsonbuf_appendf(jb, "null");
         }
 
-        offset += snprintf(response_body + offset, sizeof(response_body) - offset,
-                           "%s{\"id\":\"%s\",\"type\":\"%s\",\"display_name\":\"%s\","
-                           "\"is_confirmed\":%s,\"confirmed_at\":%s}",
-                           i > 0 ? "," : "",
-                           id_hex, type_esc, name_esc,
-                           methods[i].is_confirmed ? "true" : "false",
-                           confirmed_at_json);
-        if (offset >= (int)sizeof(response_body)) {
-            free(methods);
-            return response_json_error(500, "Response too large");
-        }
+        jsonbuf_appendf(jb, "}");
     }
 
-    snprintf(response_body + offset, sizeof(response_body) - offset, "]}");
+    jsonbuf_appendf(jb, "]}");
 
     free(methods);
 
-    return response_json_ok(response_body);
+    return jsonbuf_to_response(jb, 200);
 }
 
 /* ============================================================================
@@ -575,25 +552,19 @@ HttpResponse *mfa_regenerate_recovery_codes_handler(const HttpRequest *req,
     }
 
     /* Build response */
-    char response_body[1024];
-    int offset = snprintf(response_body, sizeof(response_body), "{\"recovery_codes\":[");
+    JsonBuf *jb = jsonbuf_new(2048);
+    jsonbuf_appendf(jb, "{\"recovery_codes\":[");
 
     for (int i = 0; i < count; i++) {
-        offset += snprintf(response_body + offset, sizeof(response_body) - offset,
-                           "%s\"%s\"", i > 0 ? "," : "", codes[i]);
-        if (offset >= (int)sizeof(response_body)) {
-            for (int j = 0; j < count; j++) free(codes[j]);
-            free(codes);
-            return response_json_error(500, "Response too large");
-        }
+        jsonbuf_appendf(jb, "%s\"%s\"", i > 0 ? "," : "", codes[i]);
     }
 
-    snprintf(response_body + offset, sizeof(response_body) - offset, "]}");
+    jsonbuf_appendf(jb, "]}");
 
     for (int i = 0; i < count; i++) free(codes[i]);
     free(codes);
 
-    return response_json_ok(response_body);
+    return jsonbuf_to_response(jb, 200);
 }
 
 /* ============================================================================

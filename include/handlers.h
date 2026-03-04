@@ -4,6 +4,7 @@
 #include "server/http.h"
 #include "server/router.h"
 #include "util/config.h"
+#include "util/json.h"
 
 /*
  * Handler function declarations
@@ -42,21 +43,6 @@ HttpResponse *response_json_ok(const char *json);
 
 /* Create error response with JSON error format: {"error":"message"} */
 HttpResponse *response_json_error(int status_code, const char *message);
-
-/*
- * Escape string for JSON output
- *
- * Escapes: " \ and control characters (0x00-0x1F) per RFC 8259.
- * Use this for ALL user-supplied values in JSON responses.
- *
- * Parameters:
- *   dst      - Destination buffer
- *   dst_size - Size of destination buffer
- *   src      - Source string to escape
- *
- * Returns: Number of bytes written (excluding null terminator)
- */
-size_t json_escape(char *dst, size_t dst_size, const char *src);
 
 /*
  * Parse query string parameter
