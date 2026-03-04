@@ -47,6 +47,9 @@
         .duration-custom {
             -moz-appearance: textfield;
         }
+        h3, h4, div, span, strong {
+            overflow-wrap: break-word;
+        }
     </style>
 </head>
 <body style="background: black;">
@@ -787,26 +790,28 @@
             });
         }
 
-        function formField(label, name, value = '', type = 'text', required = false, readonly = false) {
+        function formField(label, name, value = '', type = 'text', required = false, readonly = false, maxlength = 0) {
             const req = required ? ' <span style="color: #dc3545;">*</span>' : '';
             const ro = readonly ? ' readonly' : '';
             const rq = required ? ' required' : '';
+            const ml = maxlength > 0 ? ` maxlength="${maxlength}"` : '';
             return `
                 <div style="margin-bottom: 15px;">
                     <label style="display: block; margin-bottom: 5px;">${escapeHtml(label)}${req}</label>
                     <input type="${type}" name="${name}" value="${escapeHtml(value)}"
-                           style="width: 100%; padding: 8px; background: #2a2a2a; border: 1px solid #666; color: white; border-radius: 4px;"${ro}${rq}>
+                           style="width: 100%; padding: 8px; background: #2a2a2a; border: 1px solid #666; color: white; border-radius: 4px;"${ro}${rq}${ml}>
                 </div>
             `;
         }
 
-        function formTextarea(label, name, value = '', required = false) {
+        function formTextarea(label, name, value = '', required = false, maxlength = 0) {
             const req = required ? ' <span style="color: #dc3545;">*</span>' : '';
+            const ml = maxlength > 0 ? ` maxlength="${maxlength}"` : '';
             return `
                 <div style="margin-bottom: 15px;">
                     <label style="display: block; margin-bottom: 5px;">${escapeHtml(label)}${req}</label>
                     <textarea name="${name}" rows="3"
-                              style="width: 100%; padding: 8px; background: #2a2a2a; border: 1px solid #666; color: white; border-radius: 4px;">${escapeHtml(value)}</textarea>
+                              style="width: 100%; padding: 8px; background: #2a2a2a; border: 1px solid #666; color: white; border-radius: 4px;"${ml}>${escapeHtml(value)}</textarea>
                 </div>
             `;
         }
@@ -1045,7 +1050,7 @@
                     html += `
                         <div style="border: 1px solid #666; border-radius: 4px; padding: 15px; margin-bottom: 10px;">
                             <div style="display: flex; justify-content: space-between; align-items: start;">
-                                <div style="flex: 1;">
+                                <div style="flex: 1; min-width: 0;">
                                     <h4 style="margin: 0 0 5px 0;">${escapeHtml(org.display_name)}</h4>
                                     <div style="font-size: 13px; color: #999;">
                                         ${escapeHtml(org.code_name)} <span style="margin-left: 10px;">${statusBadge}</span>
@@ -1084,7 +1089,7 @@
             html += `
                 <div style="border: 1px solid #666; border-radius: 4px; padding: 20px; margin-bottom: 20px;">
                     <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 15px;">
-                        <h3 style="margin: 0;">${escapeHtml(org.display_name)}</h3>
+                        <h3 style="margin: 0; min-width: 0;">${escapeHtml(org.display_name)}</h3>
                         <button data-action="edit-organization" data-id="${org.id}"
                                 style="background: #28a745; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">
                             Edit
@@ -1130,7 +1135,7 @@
                     html += `
                         <div style="border: 1px solid #444; border-radius: 4px; padding: 12px; margin-bottom: 8px;">
                             <div style="display: flex; justify-content: space-between; align-items: center;">
-                                <div>
+                                <div style="min-width: 0;">
                                     <strong>${escapeHtml(rs.display_name)}</strong>
                                     <span style="color: #999; font-size: 13px; margin-left: 10px;">${escapeHtml(rs.code_name)}</span>
                                     <span style="margin-left: 10px;">${statusBadge}</span>
@@ -1172,7 +1177,7 @@
                     html += `
                         <div style="border: 1px solid #444; border-radius: 4px; padding: 12px; margin-bottom: 8px;">
                             <div style="display: flex; justify-content: space-between; align-items: center;">
-                                <div>
+                                <div style="min-width: 0;">
                                     <strong>${escapeHtml(client.display_name)}</strong>
                                     <span style="color: #999; font-size: 13px; margin-left: 10px;">${escapeHtml(client.code_name)}</span>
                                     <span style="margin-left: 10px;">${statusBadge}</span>
@@ -1215,7 +1220,7 @@
             html += `
                 <div style="border: 1px solid #666; border-radius: 4px; padding: 20px; margin-bottom: 20px;">
                     <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 15px;">
-                        <h3 style="margin: 0;">${escapeHtml(rs.display_name)}</h3>
+                        <h3 style="margin: 0; min-width: 0;">${escapeHtml(rs.display_name)}</h3>
                         <button data-action="edit-resource-server" data-id="${rs.id}"
                                 style="background: #28a745; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">
                             Edit
@@ -1289,7 +1294,7 @@
                 linkData.links.forEach(link => {
                     html += `
                         <div style="border: 1px solid #444; border-radius: 4px; padding: 12px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center;">
-                            <div>
+                            <div style="min-width: 0;">
                                 <strong>${escapeHtml(link.client_display_name)}</strong>
                                 <span style="color: #999; font-size: 13px; margin-left: 10px;">${escapeHtml(link.client_code_name)}</span>
                             </div>
@@ -1336,7 +1341,7 @@
             html += `
                 <div style="border: 1px solid #666; border-radius: 4px; padding: 20px; margin-bottom: 20px;">
                     <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 15px;">
-                        <h3 style="margin: 0;">${escapeHtml(client.display_name)}</h3>
+                        <h3 style="margin: 0; min-width: 0;">${escapeHtml(client.display_name)}</h3>
                         <button data-action="edit-client" data-id="${client.id}"
                                 style="background: #28a745; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">
                             Edit
@@ -1423,7 +1428,7 @@
                     uriData.redirect_uris.forEach(uri => {
                         html += `
                             <div style="border: 1px solid #444; border-radius: 4px; padding: 12px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center;">
-                                <div>
+                                <div style="min-width: 0;">
                                     <code>${escapeHtml(uri.redirect_uri)}</code>
                                     ${uri.note ? `<div style="font-size: 12px; color: #999; margin-top: 4px;">${escapeHtml(uri.note)}</div>` : ''}
                                 </div>
@@ -1449,7 +1454,7 @@
                 linkData.links.forEach(link => {
                     html += `
                         <div style="border: 1px solid #444; border-radius: 4px; padding: 12px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center;">
-                            <div>
+                            <div style="min-width: 0;">
                                 <strong>${escapeHtml(link.resource_server_display_name)}</strong>
                                 <span style="color: #999; font-size: 13px; margin-left: 10px;">${escapeHtml(link.resource_server_code_name)}</span>
                             </div>
@@ -1483,8 +1488,8 @@
 
             const { modal, close } = showModal('Edit Organization', `
                 <form id="editOrgForm">
-                    ${formField('Display Name', 'display_name', org.display_name, 'text', true)}
-                    ${formTextarea('Note', 'note', org.note || '')}
+                    ${formField('Display Name', 'display_name', org.display_name, 'text', true, false, 200)}
+                    ${formTextarea('Note', 'note', org.note || '', false, 2000)}
                     ${formCheckbox('Active', 'is_active', org.is_active)}
                     <div style="display: flex; gap: 10px; margin-top: 20px;">
                         <button type="submit" style="flex: 1; background: #28a745; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Save</button>
@@ -1515,10 +1520,10 @@
         async function createResourceServer(orgId) {
             const { modal, close } = showModal('Create Resource Server', `
                 <form id="createRSForm">
-                    ${formField('Code Name', 'code_name', '', 'text', true)}
-                    ${formField('Display Name', 'display_name', '', 'text', true)}
-                    ${formField('Address', 'address', '', 'text', true)}
-                    ${formTextarea('Note', 'note', '')}
+                    ${formField('Code Name', 'code_name', '', 'text', true, false, 100)}
+                    ${formField('Display Name', 'display_name', '', 'text', true, false, 200)}
+                    ${formField('Address', 'address', '', 'text', true, false, 2000)}
+                    ${formTextarea('Note', 'note', '', false, 2000)}
                     <div style="display: flex; gap: 10px; margin-top: 20px;">
                         <button type="submit" style="flex: 1; background: #007bff; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Create</button>
                         <button type="button" data-action="close-modal" style="flex: 1; background: #6c757d; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Cancel</button>
@@ -1552,9 +1557,9 @@
 
             const { modal, close } = showModal('Edit Resource Server', `
                 <form id="editRSForm">
-                    ${formField('Display Name', 'display_name', rs.display_name, 'text', true)}
-                    ${formField('Address', 'address', rs.address, 'text', true)}
-                    ${formTextarea('Note', 'note', rs.note || '')}
+                    ${formField('Display Name', 'display_name', rs.display_name, 'text', true, false, 200)}
+                    ${formField('Address', 'address', rs.address, 'text', true, false, 2000)}
+                    ${formTextarea('Note', 'note', rs.note || '', false, 2000)}
                     ${formCheckbox('Active', 'is_active', rs.is_active)}
                     <div style="display: flex; gap: 10px; margin-top: 20px;">
                         <button type="submit" style="flex: 1; background: #28a745; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Save</button>
@@ -1586,8 +1591,8 @@
         async function createClient(orgId) {
             const { modal, close } = showModal('Create Client', `
                 <form id="createClientForm">
-                    ${formField('Code Name', 'code_name', '', 'text', true)}
-                    ${formField('Display Name', 'display_name', '', 'text', true)}
+                    ${formField('Code Name', 'code_name', '', 'text', true, false, 100)}
+                    ${formField('Display Name', 'display_name', '', 'text', true, false, 200)}
                     ${formSelect('Client Type', 'client_config', [
                         { value: 'public', label: 'Public Client (Authorization Code Flow)' },
                         { value: 'confidential', label: 'Confidential Client (Client Credentials Flow)' }
@@ -1602,7 +1607,7 @@
                     <div id="confidentialFields" style="display: none;">
                         ${formDuration('Maximum Key Age (Secret Rotation)', 'secret_rotation_seconds', -1, DURATION_PRESETS.rotation)}
                     </div>
-                    ${formTextarea('Note', 'note', '')}
+                    ${formTextarea('Note', 'note', '', false, 2000)}
                     <div style="display: flex; gap: 10px; margin-top: 20px;">
                         <button type="submit" style="flex: 1; background: #007bff; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Create</button>
                         <button type="button" data-action="close-modal" style="flex: 1; background: #6c757d; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Cancel</button>
@@ -1668,7 +1673,7 @@
 
             const { modal, close } = showModal('Edit Client', `
                 <form id="editClientForm">
-                    ${formField('Display Name', 'display_name', client.display_name, 'text', true)}
+                    ${formField('Display Name', 'display_name', client.display_name, 'text', true, false, 200)}
                     ${formDuration('Access Token TTL', 'access_token_ttl_seconds', client.access_token_ttl_seconds, DURATION_PRESETS.access_token, true)}
                     ${client.grant_type === 'authorization_code' ? `
                         ${formCheckbox('Issue Refresh Tokens', 'issue_refresh_tokens', client.issue_refresh_tokens)}
@@ -1678,7 +1683,7 @@
                     ` : `
                         ${formDuration('Maximum Key Age (Secret Rotation)', 'secret_rotation_seconds', client.secret_rotation_seconds, DURATION_PRESETS.rotation)}
                     `}
-                    ${formTextarea('Note', 'note', client.note || '')}
+                    ${formTextarea('Note', 'note', client.note || '', false, 2000)}
                     ${formCheckbox('Active', 'is_active', client.is_active)}
                     <div style="display: flex; gap: 10px; margin-top: 20px;">
                         <button type="submit" style="flex: 1; background: #28a745; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Save</button>
@@ -1728,11 +1733,11 @@
                                 <option value="https://">https://</option>
                                 <option value="http://">http://</option>
                             </select>
-                            <input type="text" name="uri_path" placeholder="localhost:3000/callback" required style="flex: 1; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                            <input type="text" name="uri_path" placeholder="localhost:3000/callback" required maxlength="2000" style="flex: 1; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
                         </div>
                         <small style="color: #6c757d; display: block; margin-top: 4px;">Select the scheme and enter the path.</small>
                     </div>
-                    ${formTextarea('Note', 'note', '')}
+                    ${formTextarea('Note', 'note', '', false, 2000)}
                     <div style="display: flex; gap: 10px; margin-top: 20px;">
                         <button type="submit" style="flex: 1; background: #007bff; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Add</button>
                         <button type="button" data-action="close-modal" style="flex: 1; background: #6c757d; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Cancel</button>
@@ -2083,7 +2088,7 @@
 
             const { modal, close } = showModal('Add Authenticator App', `
                 <form id="mfaSetupForm">
-                    ${formField('Device Name', 'display_name', '', 'text', true)}
+                    ${formField('Device Name', 'display_name', '', 'text', true, false, 200)}
                     <p style="font-size: 13px; color: #999; margin-top: -8px;">A recognizable name, e.g. "Auth App" or "Work Phone".</p>
                     <div style="display: flex; gap: 10px; margin-top: 20px;">
                         <button type="submit" style="flex: 1; background: #007bff; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer; white-space: nowrap;">Next →</button>
@@ -2379,7 +2384,7 @@
                         ${formField('Secret', 'secret', '', 'password')}
                         <small style="color: #6c757d;">Enter your own secret (no validation applied)</small>
                     </div>
-                    ${formTextarea('Note', 'note', '')}
+                    ${formTextarea('Note', 'note', '', false, 2000)}
                     <div style="display: flex; gap: 10px; margin-top: 20px;">
                         <button type="submit" style="flex: 1; background: #007bff; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Create Key</button>
                         <button type="button" data-action="close-modal" style="flex: 1; background: #6c757d; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Cancel</button>
@@ -2465,7 +2470,7 @@
                         ${formField('Secret', 'secret', '', 'password')}
                         <small style="color: #6c757d;">Enter your own secret (no validation applied)</small>
                     </div>
-                    ${formTextarea('Note', 'note', '')}
+                    ${formTextarea('Note', 'note', '', false, 2000)}
                     <div style="display: flex; gap: 10px; margin-top: 20px;">
                         <button type="submit" style="flex: 1; background: #007bff; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Create Key</button>
                         <button type="button" data-action="close-modal" style="flex: 1; background: #6c757d; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Cancel</button>
