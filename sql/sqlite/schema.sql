@@ -651,6 +651,7 @@ create table client_key_usage (
 , authenticated_at text not null
 , source_ip text
 , user_agent text
+, operation text
 );
 
 create table resource_server_key_usage (
@@ -658,6 +659,7 @@ create table resource_server_key_usage (
 , authenticated_at text not null
 , source_ip text
 , user_agent text
+, operation text
 );
 
 create table organization_key_usage (

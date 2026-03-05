@@ -664,6 +664,7 @@ create table logging.client_key_usage (
 , authenticated_at timestamp not null
 , source_ip text
 , user_agent text
+, operation text
 );
 
 create table logging.organization_key_usage (
@@ -679,6 +680,7 @@ create table logging.resource_server_key_usage (
 , authenticated_at timestamp not null
 , source_ip text
 , user_agent text
+, operation text
 );
 
 create table logging.user_mfa_usage (
