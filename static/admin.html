@@ -94,10 +94,12 @@
                 <p>Loading your profile...</p>
             </div>
 
+            <!-- EMAIL_SECTION_START -->
             <h3>Email Addresses</h3>
             <div id="emailsContent">
                 <p>Loading emails...</p>
             </div>
+            <!-- EMAIL_SECTION_END -->
 
             <h3>Security</h3>
             <div id="securityContent">
@@ -2326,7 +2328,7 @@
             if (profile) {
                 document.getElementById('userInfo').textContent = formatUUID(profile.user_id);
             }
-            await loadEmails();
+            /* EMAIL_LOAD_START */ await loadEmails(); /* EMAIL_LOAD_END */
             await loadOrganizations();
 
             // Show dashboard only after layout is fully determined

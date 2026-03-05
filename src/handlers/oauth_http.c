@@ -1298,12 +1298,14 @@ HttpResponse *userinfo_handler(const HttpRequest *req, const RouteParams *params
         jsonbuf_appendf(jb, "\"");
     }
 
+#ifdef EMAIL_SUPPORT
     if (info.email[0] != '\0') {
         jsonbuf_appendf(jb, ",\"email\":\"");
         jsonbuf_append_escaped(jb, info.email);
         jsonbuf_appendf(jb, "\",\"email_verified\":%s",
             info.email_verified ? "true" : "false");
     }
+#endif
 
     jsonbuf_appendf(jb, ",\"server_time\":%lld}", (long long)time(NULL));
 

@@ -105,6 +105,37 @@ static void template_replace(StaticFile *sf,
     sf->length = new_len;
 }
 
+/*
+ * Remove everything between `start` and `end` markers (inclusive).
+ */
+static void template_remove_section(StaticFile *sf,
+                                     const char *start,
+                                     const char *end) {
+    char *s = strstr(sf->content, start);
+    if (!s) return;
+    char *e = strstr(s, end);
+    if (!e) return;
+    e += strlen(end);
+
+    size_t cut = (size_t)(e - s);
+    size_t new_len = sf->length - cut;
+
+    char *buf = malloc(new_len + 1);
+    if (!buf) {
+        log_error("Failed to allocate for template section removal");
+        return;
+    }
+
+    size_t prefix = (size_t)(s - sf->content);
+    memcpy(buf, sf->content, prefix);
+    memcpy(buf + prefix, e, sf->length - prefix - cut);
+    buf[new_len] = '\0';
+
+    free(sf->content);
+    sf->content = buf;
+    sf->length = new_len;
+}
+
 /* -------------------------------------------------------------------- */
 
 /*
@@ -291,6 +322,16 @@ static void apply_templates(const config_t *config) {
     if (login)
         template_replace(login, "placeholder=\"Email or Username\"",
                                  "placeholder=\"Username\"");
+
+    StaticFile *admin = find_static_file("/admin.html");
+    if (admin) {
+        template_remove_section(admin,
+            "<!-- EMAIL_SECTION_START -->",
+            "<!-- EMAIL_SECTION_END -->");
+        template_remove_section(admin,
+            "/* EMAIL_LOAD_START */",
+            "/* EMAIL_LOAD_END */");
+    }
 #endif
 
     /* Mothership link — only when configured */
