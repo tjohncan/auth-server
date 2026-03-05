@@ -677,7 +677,7 @@ HttpResponse *admin_list_organization_keys_handler(const HttpRequest *req, const
     if (!is_localhost_access) {
         /* Try org key authentication */
         long long auth_key_pin;
-        if (try_org_key_auth(req, &auth_org_pin, &auth_key_pin) == 0) {
+        if (try_org_key_auth(req, "list_organization_keys", &auth_org_pin, &auth_key_pin) == 0) {
             if (org_code_name_param) {
                 /* Org code_name provided - verify it matches the key's org */
                 long long requested_org_pin;
@@ -794,7 +794,7 @@ HttpResponse *admin_revoke_organization_key_handler(const HttpRequest *req, cons
     if (!is_localhost_access) {
         /* Try org key authentication */
         long long auth_org_pin, auth_key_pin;
-        if (try_org_key_auth(req, &auth_org_pin, &auth_key_pin) == 0) {
+        if (try_org_key_auth(req, "revoke_organization_key", &auth_org_pin, &auth_key_pin) == 0) {
             /* Org key auth succeeded - verify it matches the key being revoked */
             long long key_org_pin;
             if (organization_key_get_organization_pin(db, key_id, &key_org_pin) == 0) {

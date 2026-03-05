@@ -106,15 +106,18 @@ char *http_cookie_get_value(const char *cookie_header, const char *name);
  * Attempt organization key authentication
  *
  * Extracts X-Org-Key-Id and X-Org-Key-Secret headers and validates them.
+ * On success, logs usage to organization_key_usage with the given operation.
  *
  * Parameters:
  *   req         - HTTP request containing auth headers
+ *   operation   - Operation name for audit logging (e.g., "get_clients")
  *   out_org_pin - Output: organization pin on success
  *   out_key_pin - Output: key pin on success
  *
  * Returns: 0 on success, -1 on failure
  */
-int try_org_key_auth(const HttpRequest *req, long long *out_org_pin, long long *out_key_pin);
+int try_org_key_auth(const HttpRequest *req, const char *operation,
+                     long long *out_org_pin, long long *out_key_pin);
 
 /* ============================================================================
  * Endpoint Handlers

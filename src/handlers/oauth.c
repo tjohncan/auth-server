@@ -871,14 +871,17 @@ int oauth_client_credentials(db_handle_t *db,
 
     /* Step 1: Authenticate client */
     long long client_pin;
+    long long key_pin = 0;
     int auth_result = oauth_client_authenticate(db, client_id, client_key_id,
-                                                 client_secret, source_ip, user_agent,
-                                                 &client_pin);
+                                                 client_secret, &client_pin, &key_pin);
 
     if (auth_result != 1) {
         log_error("Client authentication failed");
         return -1;
     }
+
+    log_key_usage(db, KEY_USAGE_CLIENT, key_pin, "client_credentials",
+                  source_ip, user_agent);
 
     /* Step 2: Look up client to validate grant type */
     oauth_client_info_t client;
@@ -987,34 +990,30 @@ int oauth_handler_client_authenticate(db_handle_t *db,
                                        const unsigned char *client_id,
                                        const unsigned char *client_key_id,
                                        const char *secret,
-                                       const char *source_ip,
-                                       const char *user_agent,
-                                       long long *out_pin) {
+                                       long long *out_pin,
+                                       long long *out_key_pin) {
     if (!db || !client_id || !client_key_id || !secret || !out_pin) {
         log_error("Invalid arguments to oauth_handler_client_authenticate");
         return -1;
     }
 
-    /* Call query layer */
     return oauth_client_authenticate(db, client_id, client_key_id, secret,
-                                      source_ip, user_agent, out_pin);
+                                      out_pin, out_key_pin);
 }
 
 int oauth_handler_resource_server_authenticate(db_handle_t *db,
                                                 const unsigned char *resource_server_id,
                                                 const unsigned char *resource_server_key_id,
                                                 const char *secret,
-                                                const char *source_ip,
-                                                const char *user_agent,
-                                                long long *out_pin) {
+                                                long long *out_pin,
+                                                long long *out_key_pin) {
     if (!db || !resource_server_id || !resource_server_key_id || !secret || !out_pin) {
         log_error("Invalid arguments to oauth_handler_resource_server_authenticate");
         return -1;
     }
 
-    /* Call query layer */
     return oauth_resource_server_authenticate(db, resource_server_id, resource_server_key_id,
-                                               secret, source_ip, user_agent, out_pin);
+                                               secret, out_pin, out_key_pin);
 }
 
 int oauth_handler_revoke_token(db_handle_t *db,

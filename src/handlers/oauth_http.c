@@ -988,15 +988,11 @@ HttpResponse *revoke_handler(const HttpRequest *req, const RouteParams *params) 
     }
     free(client_key_id_str);
 
-    /* Get source IP and user agent for audit logging */
-    const char *source_ip = http_request_get_client_ip(req, NULL);
-    const char *user_agent = http_request_get_header(req, "User-Agent");
-
     /* Authenticate client */
     long long client_pin;
+    long long key_pin = 0;
     int auth_result = oauth_handler_client_authenticate(db, client_id, client_key_id,
-                                                         client_secret, source_ip, user_agent,
-                                                         &client_pin);
+                                                         client_secret, &client_pin, &key_pin);
 
     OPENSSL_cleanse(client_secret, strlen(client_secret));
     free(client_secret);
@@ -1008,6 +1004,10 @@ HttpResponse *revoke_handler(const HttpRequest *req, const RouteParams *params) 
         /* Per RFC 7009: return 200 OK even on auth failure to prevent enumeration */
         return response_json_ok("{}");
     }
+
+    log_key_usage(db, KEY_USAGE_CLIENT, key_pin, "revoke",
+                  http_request_get_client_ip(req, NULL),
+                  http_request_get_header(req, "User-Agent"));
 
     /* Revoke the token */
     int revoke_result = oauth_handler_revoke_token(db, token, token_type_hint, client_pin);
@@ -1117,17 +1117,14 @@ HttpResponse *introspect_handler(const HttpRequest *req, const RouteParams *para
     }
     free(resource_server_key_id_str);
 
-    /* Get source IP and user agent for audit logging */
-    const char *source_ip = http_request_get_client_ip(req, NULL);
-    const char *user_agent = http_request_get_header(req, "User-Agent");
-
     /* Authenticate resource server */
     long long resource_server_pin;
+    long long rs_key_pin = 0;
     int auth_result = oauth_handler_resource_server_authenticate(db, resource_server_id,
                                                                   resource_server_key_id,
                                                                   resource_server_secret,
-                                                                  source_ip, user_agent,
-                                                                  &resource_server_pin);
+                                                                  &resource_server_pin,
+                                                                  &rs_key_pin);
 
     OPENSSL_cleanse(resource_server_secret, strlen(resource_server_secret));
     free(resource_server_secret);
@@ -1139,6 +1136,10 @@ HttpResponse *introspect_handler(const HttpRequest *req, const RouteParams *para
         /* Return inactive per RFC 7662 (don't leak auth failures) */
         return response_json_ok("{\"active\":false}");
     }
+
+    log_key_usage(db, KEY_USAGE_RESOURCE_SERVER, rs_key_pin, "introspect",
+                  http_request_get_client_ip(req, NULL),
+                  http_request_get_header(req, "User-Agent"));
 
     /* Introspect the token */
     int active;

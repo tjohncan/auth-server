@@ -235,11 +235,8 @@ int mfa_verify(db_handle_t *db,
     int valid = crypto_totp_verify(decrypted_secret, totp_code, time(NULL));
     OPENSSL_cleanse(decrypted_secret, sizeof(decrypted_secret));
 
-    /* Log the attempt */
-    if (mfa_log_usage(db, method.pin, valid == 1 ? 1 : 0,
-                      source_ip, user_agent) != 0) {
-        log_error("Failed to log MFA usage (non-fatal)");
-    }
+    /* Log the attempt (fire-and-forget) */
+    mfa_log_usage(db, method.pin, valid == 1 ? 1 : 0, source_ip, user_agent);
 
     if (valid == 1) {
         log_info("MFA verified");

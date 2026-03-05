@@ -98,7 +98,8 @@ static int get_authenticated_user_pin(const HttpRequest *req, long long *out_use
  *
  * Returns: 0 on success with ctx populated, -1 if both methods fail
  */
-static int get_auth_context(const HttpRequest *req, auth_context_t *ctx) {
+static int get_auth_context(const HttpRequest *req, const char *operation,
+                            auth_context_t *ctx) {
     long long user_pin;
 
     /* Try session authentication first */
@@ -113,7 +114,7 @@ static int get_auth_context(const HttpRequest *req, auth_context_t *ctx) {
 
     /* Try org key authentication */
     long long org_pin, key_pin;
-    if (try_org_key_auth(req, &org_pin, &key_pin) == 0) {
+    if (try_org_key_auth(req, operation, &org_pin, &key_pin) == 0) {
         /* Org key auth succeeded */
         ctx->user_account_pin = -1;  /* Sentinel: not session auth */
         ctx->organization_pin = org_pin;
@@ -150,7 +151,7 @@ HttpResponse *admin_get_organizations_handler(const HttpRequest *req, const Rout
 
     /* Dual authentication: session OR org key */
     auth_context_t ctx;
-    if (get_auth_context(req, &ctx) != 0) {
+    if (get_auth_context(req, "get_organizations", &ctx) != 0) {
         return response_json_error(401, "Authentication required");
     }
 
@@ -260,7 +261,7 @@ HttpResponse *admin_update_organization_handler(const HttpRequest *req, const Ro
 
     /* Dual authentication: session OR org key */
     auth_context_t ctx;
-    if (get_auth_context(req, &ctx) != 0) {
+    if (get_auth_context(req, "update_organization", &ctx) != 0) {
         return response_json_error(401, "Authentication required");
     }
 
@@ -379,7 +380,7 @@ HttpResponse *admin_get_resource_servers_handler(const HttpRequest *req, const R
 
     /* Dual authentication: session OR org key */
     auth_context_t ctx;
-    if (get_auth_context(req, &ctx) != 0) {
+    if (get_auth_context(req, "get_resource_servers", &ctx) != 0) {
         return response_json_error(401, "Authentication required");
     }
 
@@ -503,7 +504,7 @@ HttpResponse *admin_create_resource_server_handler(const HttpRequest *req, const
     if (ct_err) return ct_err;
 
     auth_context_t ctx;
-    if (get_auth_context(req, &ctx) != 0) {
+    if (get_auth_context(req, "create_resource_server", &ctx) != 0) {
         return response_json_error(401, "Authentication required");
     }
 
@@ -596,7 +597,7 @@ HttpResponse *admin_update_resource_server_handler(const HttpRequest *req, const
     if (ct_err) return ct_err;
 
     auth_context_t ctx;
-    if (get_auth_context(req, &ctx) != 0) {
+    if (get_auth_context(req, "update_resource_server", &ctx) != 0) {
         return response_json_error(401, "Authentication required");
     }
 
@@ -683,7 +684,7 @@ HttpResponse *admin_get_clients_handler(const HttpRequest *req, const RouteParam
     (void)params;
 
     auth_context_t ctx;
-    if (get_auth_context(req, &ctx) != 0) {
+    if (get_auth_context(req, "get_clients", &ctx) != 0) {
         return response_json_error(401, "Authentication required");
     }
 
@@ -818,7 +819,7 @@ HttpResponse *admin_create_client_handler(const HttpRequest *req, const RoutePar
     if (ct_err) return ct_err;
 
     auth_context_t ctx;
-    if (get_auth_context(req, &ctx) != 0) {
+    if (get_auth_context(req, "create_client", &ctx) != 0) {
         return response_json_error(401, "Authentication required");
     }
 
@@ -917,7 +918,7 @@ HttpResponse *admin_update_client_handler(const HttpRequest *req, const RoutePar
     if (ct_err) return ct_err;
 
     auth_context_t ctx;
-    if (get_auth_context(req, &ctx) != 0) {
+    if (get_auth_context(req, "update_client", &ctx) != 0) {
         return response_json_error(401, "Authentication required");
     }
 
@@ -1006,7 +1007,7 @@ HttpResponse *admin_get_client_redirect_uris_handler(const HttpRequest *req, con
     (void)params;
 
     auth_context_t ctx;
-    if (get_auth_context(req, &ctx) != 0) {
+    if (get_auth_context(req, "get_redirect_uris", &ctx) != 0) {
         return response_json_error(401, "Authentication required");
     }
 
@@ -1069,7 +1070,7 @@ HttpResponse *admin_create_client_redirect_uri_handler(const HttpRequest *req, c
     if (ct_err) return ct_err;
 
     auth_context_t ctx;
-    if (get_auth_context(req, &ctx) != 0) {
+    if (get_auth_context(req, "create_redirect_uri", &ctx) != 0) {
         return response_json_error(401, "Authentication required");
     }
 
@@ -1130,7 +1131,7 @@ HttpResponse *admin_delete_client_redirect_uri_handler(const HttpRequest *req, c
     (void)params;
 
     auth_context_t ctx;
-    if (get_auth_context(req, &ctx) != 0) {
+    if (get_auth_context(req, "delete_redirect_uri", &ctx) != 0) {
         return response_json_error(401, "Authentication required");
     }
 
@@ -1193,7 +1194,7 @@ HttpResponse *admin_get_client_resource_servers_handler(const HttpRequest *req, 
     (void)params;
 
     auth_context_t ctx;
-    if (get_auth_context(req, &ctx) != 0) {
+    if (get_auth_context(req, "get_client_resource_servers", &ctx) != 0) {
         return response_json_error(401, "Authentication required");
     }
 
@@ -1260,7 +1261,7 @@ HttpResponse *admin_get_resource_server_clients_handler(const HttpRequest *req, 
     (void)params;
 
     auth_context_t ctx;
-    if (get_auth_context(req, &ctx) != 0) {
+    if (get_auth_context(req, "get_resource_server_clients", &ctx) != 0) {
         return response_json_error(401, "Authentication required");
     }
 
@@ -1327,7 +1328,7 @@ HttpResponse *admin_create_client_resource_server_link_handler(const HttpRequest
     if (ct_err) return ct_err;
 
     auth_context_t ctx;
-    if (get_auth_context(req, &ctx) != 0) {
+    if (get_auth_context(req, "link_client_resource_server", &ctx) != 0) {
         return response_json_error(401, "Authentication required");
     }
 
@@ -1373,7 +1374,7 @@ HttpResponse *admin_delete_client_resource_server_link_handler(const HttpRequest
     (void)params;
 
     auth_context_t ctx;
-    if (get_auth_context(req, &ctx) != 0) {
+    if (get_auth_context(req, "unlink_client_resource_server", &ctx) != 0) {
         return response_json_error(401, "Authentication required");
     }
 
@@ -1437,7 +1438,7 @@ HttpResponse *admin_create_resource_server_key_handler(const HttpRequest *req, c
     if (ct_err) return ct_err;
 
     auth_context_t ctx;
-    if (get_auth_context(req, &ctx) != 0) {
+    if (get_auth_context(req, "create_resource_server_key", &ctx) != 0) {
         return response_json_error(401, "Authentication required");
     }
 
@@ -1545,7 +1546,7 @@ HttpResponse *admin_get_resource_server_keys_handler(const HttpRequest *req, con
     (void)params;
 
     auth_context_t ctx;
-    if (get_auth_context(req, &ctx) != 0) {
+    if (get_auth_context(req, "get_resource_server_keys", &ctx) != 0) {
         return response_json_error(401, "Authentication required");
     }
 
@@ -1627,7 +1628,7 @@ HttpResponse *admin_delete_resource_server_key_handler(const HttpRequest *req, c
     (void)params;
 
     auth_context_t ctx;
-    if (get_auth_context(req, &ctx) != 0) {
+    if (get_auth_context(req, "delete_resource_server_key", &ctx) != 0) {
         return response_json_error(401, "Authentication required");
     }
 
@@ -1687,7 +1688,7 @@ HttpResponse *admin_create_client_key_handler(const HttpRequest *req, const Rout
     if (ct_err) return ct_err;
 
     auth_context_t ctx;
-    if (get_auth_context(req, &ctx) != 0) {
+    if (get_auth_context(req, "create_client_key", &ctx) != 0) {
         return response_json_error(401, "Authentication required");
     }
 
@@ -1795,7 +1796,7 @@ HttpResponse *admin_get_client_keys_handler(const HttpRequest *req, const RouteP
     (void)params;
 
     auth_context_t ctx;
-    if (get_auth_context(req, &ctx) != 0) {
+    if (get_auth_context(req, "get_client_keys", &ctx) != 0) {
         return response_json_error(401, "Authentication required");
     }
 
@@ -1877,7 +1878,7 @@ HttpResponse *admin_delete_client_key_handler(const HttpRequest *req, const Rout
     (void)params;
 
     auth_context_t ctx;
-    if (get_auth_context(req, &ctx) != 0) {
+    if (get_auth_context(req, "delete_client_key", &ctx) != 0) {
         return response_json_error(401, "Authentication required");
     }
 

@@ -965,14 +965,14 @@ int mfa_update_require_mfa_flag(db_handle_t *db,
  * Logging
  * ========================================================================== */
 
-int mfa_log_usage(db_handle_t *db,
-                  long long user_mfa_pin,
-                  int success,
-                  const char *source_ip,
-                  const char *user_agent) {
+void mfa_log_usage(db_handle_t *db,
+                   long long user_mfa_pin,
+                   int success,
+                   const char *source_ip,
+                   const char *user_agent) {
     if (!db) {
-        log_error("Invalid arguments to mfa_log_usage");
-        return -1;
+        log_warn("mfa_log_usage: no db connection");
+        return;
     }
 
     const char *sql =
@@ -982,8 +982,8 @@ int mfa_log_usage(db_handle_t *db,
 
     db_stmt_t *stmt = NULL;
     if (db_prepare(db, &stmt, sql) != 0) {
-        log_error("Failed to prepare mfa_log_usage statement");
-        return -1;
+        log_warn("mfa_log_usage: failed to prepare statement");
+        return;
     }
 
     db_bind_int64(stmt, 1, user_mfa_pin);
@@ -996,7 +996,9 @@ int mfa_log_usage(db_handle_t *db,
     }
 
     if (user_agent) {
-        db_bind_text(stmt, 4, user_agent, -1);
+        int ua_len = (int)strlen(user_agent);
+        if (ua_len > 512) ua_len = 512;
+        db_bind_text(stmt, 4, user_agent, ua_len);
     } else {
         db_bind_null(stmt, 4);
     }
@@ -1005,9 +1007,6 @@ int mfa_log_usage(db_handle_t *db,
     db_finalize(stmt);
 
     if (rc != DB_DONE) {
-        log_error("Failed to log MFA usage");
-        return -1;
+        log_warn("mfa_log_usage: failed to insert");
     }
-
-    return 0;
 }

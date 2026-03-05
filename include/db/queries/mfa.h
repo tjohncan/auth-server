@@ -128,14 +128,14 @@ int mfa_update_require_mfa_flag(db_handle_t *db,
  * Logging
  * ========================================================================== */
 
-/* Log MFA authentication attempt
+/* Log MFA authentication attempt (fire-and-forget)
  * user_mfa_pin: which method was used
  * success: 1 if code was valid, 0 if invalid
- * Returns: 0 on success, -1 on error */
-int mfa_log_usage(db_handle_t *db,
-                  long long user_mfa_pin,
-                  int success,
-                  const char *source_ip,
-                  const char *user_agent);
+ * Logs warning on failure but never propagates errors. */
+void mfa_log_usage(db_handle_t *db,
+                   long long user_mfa_pin,
+                   int success,
+                   const char *source_ip,
+                   const char *user_agent);
 
 #endif /* DB_QUERIES_MFA_H */

@@ -167,16 +167,16 @@ int oauth_client_credentials(db_handle_t *db,
 /*
  * Authenticate client
  *
- * Validates client credentials and logs usage.
+ * Validates client credentials. Caller is responsible for logging usage
+ * via log_key_usage() after successful authentication.
  *
  * Parameters:
  *   db            - Database handle
  *   client_id     - Client UUID (16 bytes)
  *   client_key_id - Client key UUID (16 bytes)
  *   secret        - Client secret (plaintext)
- *   source_ip     - Source IP (optional, for audit)
- *   user_agent    - User agent (optional, for audit)
  *   out_pin       - Output: Client PIN if authentication succeeds
+ *   out_key_pin   - Output: Client key PIN (for usage logging)
  *
  * Returns: 1 on success (authenticated), 0 on auth failure, -1 on error
  */
@@ -184,23 +184,22 @@ int oauth_handler_client_authenticate(db_handle_t *db,
                                        const unsigned char *client_id,
                                        const unsigned char *client_key_id,
                                        const char *secret,
-                                       const char *source_ip,
-                                       const char *user_agent,
-                                       long long *out_pin);
+                                       long long *out_pin,
+                                       long long *out_key_pin);
 
 /*
  * Authenticate resource server
  *
- * Validates resource server credentials and logs usage.
+ * Validates resource server credentials. Caller is responsible for logging
+ * usage via log_key_usage() after successful authentication.
  *
  * Parameters:
  *   db                      - Database handle
  *   resource_server_id      - Resource server UUID (16 bytes)
  *   resource_server_key_id  - Resource server key UUID (16 bytes)
  *   secret                  - Resource server secret (plaintext)
- *   source_ip               - Source IP (optional, for audit)
- *   user_agent              - User agent (optional, for audit)
  *   out_pin                 - Output: Resource server PIN if authentication succeeds
+ *   out_key_pin             - Output: Resource server key PIN (for usage logging)
  *
  * Returns: 1 on success (authenticated), 0 on auth failure, -1 on error
  */
@@ -208,9 +207,8 @@ int oauth_handler_resource_server_authenticate(db_handle_t *db,
                                                 const unsigned char *resource_server_id,
                                                 const unsigned char *resource_server_key_id,
                                                 const char *secret,
-                                                const char *source_ip,
-                                                const char *user_agent,
-                                                long long *out_pin);
+                                                long long *out_pin,
+                                                long long *out_key_pin);
 
 /*
  * Revoke token

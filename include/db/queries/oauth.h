@@ -304,21 +304,17 @@ int oauth_token_rotate_refresh(db_handle_t *db, const char *old_token,
  *   client_id     - Client UUID (16 bytes)
  *   client_key_id - Client key UUID (16 bytes, identifies which key)
  *   secret        - Client secret (plaintext, will be verified against hash)
- *   source_ip     - Client IP address (optional, can be NULL)
- *   user_agent    - Client user agent (optional, can be NULL)
  *   out_pin       - Output: Client PIN if authentication successful
+ *   out_key_pin   - Output: Client key PIN (for usage logging)
  *
  * Returns: 1 if authenticated, 0 if invalid credentials, -1 on error
- *
- * Logs successful authentications to client_key_usage table.
  */
 int oauth_client_authenticate(db_handle_t *db,
                                const unsigned char *client_id,
                                const unsigned char *client_key_id,
                                const char *secret,
-                               const char *source_ip,
-                               const char *user_agent,
-                               long long *out_pin);
+                               long long *out_pin,
+                               long long *out_key_pin);
 
 /*
  * Resolve resource server for token issuance
@@ -360,21 +356,17 @@ int oauth_resolve_resource_server(db_handle_t *db, long long client_pin,
  *   resource_server_id      - Resource server UUID (16 bytes)
  *   resource_server_key_id  - Resource server key UUID (16 bytes, identifies which key)
  *   secret                  - Resource server secret (plaintext, will be verified against hash)
- *   source_ip               - Client IP address (optional, can be NULL)
- *   user_agent              - Client user agent (optional, can be NULL)
  *   out_pin                 - Output: Resource server PIN if authentication successful
+ *   out_key_pin             - Output: Resource server key PIN (for usage logging)
  *
  * Returns: 1 if authenticated, 0 if invalid credentials, -1 on error
- *
- * Logs successful authentications to resource_server_key_usage table.
  */
 int oauth_resource_server_authenticate(db_handle_t *db,
                                         const unsigned char *resource_server_id,
                                         const unsigned char *resource_server_key_id,
                                         const char *secret,
-                                        const char *source_ip,
-                                        const char *user_agent,
-                                        long long *out_pin);
+                                        long long *out_pin,
+                                        long long *out_key_pin);
 
 /*
  * Introspect a token (RFC 7662 Token Introspection)
@@ -488,5 +480,24 @@ int oauth_revoke_token_chain(db_handle_t *db,
                               int is_authorization_code,
                               int *out_refresh_revoked,
                               int *out_access_revoked);
+
+/* ============================================================================
+ * Key Usage Logging (fire-and-forget)
+ * ========================================================================== */
+
+typedef enum {
+    KEY_USAGE_CLIENT,
+    KEY_USAGE_RESOURCE_SERVER,
+    KEY_USAGE_ORGANIZATION
+} key_usage_type_t;
+
+/*
+ * Log a key authentication event to the appropriate usage table.
+ * Fire-and-forget: logs warning on failure, never propagates errors.
+ * User-agent is truncated to 512 chars.
+ */
+void log_key_usage(db_handle_t *db, key_usage_type_t type, long long key_pin,
+                   const char *operation, const char *source_ip,
+                   const char *user_agent);
 
 #endif /* DB_QUERIES_OAUTH_H */

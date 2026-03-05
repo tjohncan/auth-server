@@ -2,6 +2,7 @@
 #include "db/db.h"
 #include "db/db_pool.h"
 #include "db/queries/org.h"
+#include "db/queries/oauth.h"
 #include "util/data.h"
 #include "util/log.h"
 #include <stdio.h>
@@ -159,7 +160,8 @@ int parse_query_bool(const char *query_string, const char *param_name, int *out_
     return 0;
 }
 
-int try_org_key_auth(const HttpRequest *req, long long *out_org_pin, long long *out_key_pin) {
+int try_org_key_auth(const HttpRequest *req, const char *operation,
+                     long long *out_org_pin, long long *out_key_pin) {
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
         log_error("Failed to get database connection for org key auth");
@@ -184,6 +186,10 @@ int try_org_key_auth(const HttpRequest *req, long long *out_org_pin, long long *
         log_error("Organization key verification failed");
         return -1;
     }
+
+    log_key_usage(db, KEY_USAGE_ORGANIZATION, key_pin, operation,
+                  http_request_get_client_ip(req, NULL),
+                  http_request_get_header(req, "User-Agent"));
 
     *out_org_pin = org_pin;
     *out_key_pin = key_pin;

@@ -204,7 +204,9 @@ int oauth_session_create(db_handle_t *db, long long user_account_pin,
     }
 
     if (user_agent != NULL) {
-        db_bind_text(stmt, 6, user_agent, -1);
+        int ua_len = (int)strlen(user_agent);
+        if (ua_len > 512) ua_len = 512;
+        db_bind_text(stmt, 6, user_agent, ua_len);
     } else {
         db_bind_null(stmt, 6);
     }
@@ -991,10 +993,9 @@ int oauth_client_authenticate(db_handle_t *db,
                                const unsigned char *client_id,
                                const unsigned char *client_key_id,
                                const char *secret,
-                               const char *source_ip,
-                               const char *user_agent,
-                               long long *out_pin) {
-    if (!db || !client_id || !client_key_id || !secret || !out_pin) {
+                               long long *out_pin,
+                               long long *out_key_pin) {
+    if (!db || !client_id || !client_key_id || !secret || !out_pin || !out_key_pin) {
         log_error("Invalid arguments to oauth_client_authenticate");
         return -1;
     }
@@ -1075,33 +1076,8 @@ int oauth_client_authenticate(db_handle_t *db,
         }
     }
 
-    /* Log successful authentication */
-    const char *log_sql =
-        "INSERT INTO " TBL_CLIENT_KEY_USAGE " "
-        "(client_key_pin, authenticated_at, source_ip, user_agent) "
-        "VALUES (" P"1, " NOW ", " P"2, " P"3)";
-
-    db_stmt_t *log_stmt = NULL;
-    if (db_prepare(db, &log_stmt, log_sql) == 0) {
-        db_bind_int64(log_stmt, 1, client_key_pin);
-
-        if (source_ip) {
-            db_bind_text(log_stmt, 2, source_ip, -1);
-        } else {
-            db_bind_null(log_stmt, 2);
-        }
-
-        if (user_agent) {
-            db_bind_text(log_stmt, 3, user_agent, -1);
-        } else {
-            db_bind_null(log_stmt, 3);
-        }
-
-        db_step(log_stmt);
-        db_finalize(log_stmt);
-    }
-
     *out_pin = client_pin;
+    *out_key_pin = client_key_pin;
     char client_id_hex[33];
     bytes_to_hex(client_id, 16, client_id_hex, sizeof(client_id_hex));
     log_info("Client authenticated successfully: client_id=%s", client_id_hex);
@@ -1216,10 +1192,9 @@ int oauth_resource_server_authenticate(db_handle_t *db,
                                         const unsigned char *resource_server_id,
                                         const unsigned char *resource_server_key_id,
                                         const char *secret,
-                                        const char *source_ip,
-                                        const char *user_agent,
-                                        long long *out_pin) {
-    if (!db || !resource_server_id || !resource_server_key_id || !secret || !out_pin) {
+                                        long long *out_pin,
+                                        long long *out_key_pin) {
+    if (!db || !resource_server_id || !resource_server_key_id || !secret || !out_pin || !out_key_pin) {
         log_error("Invalid arguments to oauth_resource_server_authenticate");
         return -1;
     }
@@ -1284,33 +1259,8 @@ int oauth_resource_server_authenticate(db_handle_t *db,
         return 0;
     }
 
-    /* Log successful authentication */
-    const char *log_sql =
-        "INSERT INTO " TBL_RESOURCE_SERVER_KEY_USAGE " "
-        "(resource_server_key_pin, authenticated_at, source_ip, user_agent) "
-        "VALUES (" P"1, " NOW ", " P"2, " P"3)";
-
-    db_stmt_t *log_stmt = NULL;
-    if (db_prepare(db, &log_stmt, log_sql) == 0) {
-        db_bind_int64(log_stmt, 1, resource_server_key_pin);
-
-        if (source_ip) {
-            db_bind_text(log_stmt, 2, source_ip, -1);
-        } else {
-            db_bind_null(log_stmt, 2);
-        }
-
-        if (user_agent) {
-            db_bind_text(log_stmt, 3, user_agent, -1);
-        } else {
-            db_bind_null(log_stmt, 3);
-        }
-
-        db_step(log_stmt);
-        db_finalize(log_stmt);
-    }
-
     *out_pin = resource_server_pin;
+    *out_key_pin = resource_server_key_pin;
     char resource_server_id_hex[33];
     bytes_to_hex(resource_server_id, 16, resource_server_id_hex, sizeof(resource_server_id_hex));
     log_info("Resource server authenticated successfully: resource_server_id=%s", resource_server_id_hex);
@@ -1698,4 +1648,72 @@ int oauth_revoke_token_chain(db_handle_t *db,
     if (out_access_revoked) *out_access_revoked = access_count;
 
     return 0;
+}
+
+void log_key_usage(db_handle_t *db, key_usage_type_t type, long long key_pin,
+                   const char *operation, const char *source_ip,
+                   const char *user_agent) {
+    const char *table;
+    const char *pin_col;
+
+    switch (type) {
+    case KEY_USAGE_CLIENT:
+        table = TBL_CLIENT_KEY_USAGE;
+        pin_col = "client_key_pin";
+        break;
+    case KEY_USAGE_RESOURCE_SERVER:
+        table = TBL_RESOURCE_SERVER_KEY_USAGE;
+        pin_col = "resource_server_key_pin";
+        break;
+    case KEY_USAGE_ORGANIZATION:
+        table = TBL_ORGANIZATION_KEY_USAGE;
+        pin_col = "organization_key_pin";
+        break;
+    default:
+        log_warn("log_key_usage: unknown type %d", type);
+        return;
+    }
+
+    /* Build SQL dynamically since table/column differ per type */
+    char sql[256];
+    int n = snprintf(sql, sizeof(sql),
+        "INSERT INTO %s (%s, authenticated_at, source_ip, user_agent, operation) "
+        "VALUES (" P"1, " NOW ", " P"2, " P"3, " P"4)",
+        table, pin_col);
+
+    if (n < 0 || (size_t)n >= sizeof(sql)) {
+        log_warn("log_key_usage: SQL buffer too small");
+        return;
+    }
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        log_warn("log_key_usage: failed to prepare statement");
+        return;
+    }
+
+    db_bind_int64(stmt, 1, key_pin);
+
+    if (source_ip)
+        db_bind_text(stmt, 2, source_ip, -1);
+    else
+        db_bind_null(stmt, 2);
+
+    if (user_agent) {
+        int ua_len = (int)strlen(user_agent);
+        if (ua_len > 512) ua_len = 512;
+        db_bind_text(stmt, 3, user_agent, ua_len);
+    } else {
+        db_bind_null(stmt, 3);
+    }
+
+    if (operation)
+        db_bind_text(stmt, 4, operation, -1);
+    else
+        db_bind_null(stmt, 4);
+
+    if (db_step(stmt) != DB_DONE)
+        log_warn("log_key_usage: INSERT failed for %s", table);
+
+    db_finalize(stmt);
 }

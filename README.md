@@ -179,7 +179,7 @@ HTTP endpoint implementations for admin API.
 
 **Dual-auth architecture** (`admin_org_http.c`):
 - Organization management endpoints support session cookie OR organization key headers
-- `get_auth_context(req, &ctx)` extracts credentials, sets one PIN, sentinels other to -1
+- `get_auth_context(req, operation, &ctx)` extracts credentials, sets one PIN, sentinels other to -1
 - Both PINs passed through all layers (handler → admin → query)
 - Query layer uses sentinel discrimination and SQL JOINs for authorization
 - TOCTOU protection: specific key re-verified active at query execution time
