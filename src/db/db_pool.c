@@ -13,13 +13,11 @@ static struct {
     pthread_key_t thread_key;   /* Thread-local storage key */
     pthread_mutex_t mutex;      /* Protects pool state */
     int initialized;
-    int shutting_down;          /* Prevents new access during shutdown */
 } pool = {
     .connections = NULL,
     .num_connections = 0,
     .mutex = PTHREAD_MUTEX_INITIALIZER,
-    .initialized = 0,
-    .shutting_down = 0
+    .initialized = 0
 };
 
 /*
@@ -97,17 +95,8 @@ int db_pool_init(size_t num_workers, db_type_t type, const char *connection_stri
 }
 
 db_handle_t *db_pool_get_connection(void) {
-    pthread_mutex_lock(&pool.mutex);
-
-    if (!pool.initialized || pool.shutting_down) {
-        pthread_mutex_unlock(&pool.mutex);
-        log_error("Connection pool not available");
-        return NULL;
-    }
-
-    pthread_mutex_unlock(&pool.mutex);
-
-    /* Get connection from thread-local storage (no lock needed) */
+    /* Workers are created after pool init and joined before shutdown,
+     * so no locking needed — just read the thread-local connection. */
     db_handle_t *db = (db_handle_t *)pthread_getspecific(pool.thread_key);
 
     if (!db) {
@@ -119,48 +108,23 @@ db_handle_t *db_pool_get_connection(void) {
 }
 
 void db_pool_set_connection(db_handle_t *db) {
-    pthread_mutex_lock(&pool.mutex);
-
-    if (!pool.initialized || pool.shutting_down) {
-        pthread_mutex_unlock(&pool.mutex);
-        log_error("Connection pool not available");
-        return;
-    }
-
     if (!db) {
-        pthread_mutex_unlock(&pool.mutex);
         log_error("Cannot set NULL connection");
         return;
     }
 
-    pthread_key_t key = pool.thread_key;
-    pthread_mutex_unlock(&pool.mutex);
-
-    /* Store connection in thread-local storage (no lock needed) */
-    if (pthread_setspecific(key, db) != 0) {
+    if (pthread_setspecific(pool.thread_key, db) != 0) {
         log_error("Failed to set thread-local connection");
     }
 }
 
 db_handle_t *db_pool_get_connection_by_index(size_t index) {
-    pthread_mutex_lock(&pool.mutex);
-
-    if (!pool.initialized || pool.shutting_down) {
-        pthread_mutex_unlock(&pool.mutex);
-        log_error("Connection pool not available");
-        return NULL;
-    }
-
     if (index >= pool.num_connections) {
-        pthread_mutex_unlock(&pool.mutex);
         log_error("Connection index %zu out of bounds (max: %zu)", index, pool.num_connections);
         return NULL;
     }
 
-    db_handle_t *db = pool.connections[index];
-    pthread_mutex_unlock(&pool.mutex);
-
-    return db;
+    return pool.connections[index];
 }
 
 void db_pool_shutdown(void) {
@@ -170,9 +134,6 @@ void db_pool_shutdown(void) {
         pthread_mutex_unlock(&pool.mutex);
         return;
     }
-
-    /* Set shutting_down flag to prevent new accesses */
-    pool.shutting_down = 1;
 
     log_info("Shutting down connection pool");
 
@@ -193,7 +154,6 @@ void db_pool_shutdown(void) {
     pthread_key_delete(pool.thread_key);
 
     pool.initialized = 0;
-    pool.shutting_down = 0;
 
     pthread_mutex_unlock(&pool.mutex);
     log_info("Connection pool shutdown complete");
