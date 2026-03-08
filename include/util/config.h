@@ -1,6 +1,7 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
+#include <stddef.h>    /* For size_t */
 #include "util/log.h"  /* For LogLevel enum */
 
 /*
