@@ -7,7 +7,8 @@
 #include <argon2.h>
 #include <openssl/evp.h>
 
-/* Module-level state (initialized once at startup, read-only after init) */
+/* Module-level state (initialized once at startup, read-only after init)
+ * NOTE: algorithm must never change after passwords exist — hashes don't store which algorithm produced them. */
 static password_hash_algorithm_t g_algorithm;
 static int g_min_iterations;
 static int g_max_iterations;

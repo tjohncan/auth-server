@@ -40,7 +40,7 @@ enable_history_tables = true
 encryption_key = customize_me
 # encryption_key_env = MY_ENCRYPTION_KEY
 
-# Password hashing (argon2id or pbkdf2-sha256)
+# Password hashing (argon2id or pbkdf2-sha256) — do NOT change after users exist
 secret_hashing_algorithm = argon2id
 secret_hash_min_iterations = 4
 secret_hash_max_iterations = 4
