@@ -981,6 +981,57 @@ config_t *config_load(const char *config_file) {
     return config;
 }
 
+/*
+ * Append a libpq single-quoted value to dst at position pos.
+ * Escapes ' and \ per libpq connection string rules.
+ * Returns chars written, or -1 on overflow.
+ */
+static int pg_quote_append(char *dst, size_t dst_size, size_t pos, const char *value) {
+    size_t i = pos;
+    if (i >= dst_size) return -1;
+    dst[i++] = '\'';
+    for (const char *p = value; *p; p++) {
+        if (*p == '\'' || *p == '\\') {
+            if (i + 2 >= dst_size) return -1;
+            dst[i++] = '\\';
+        } else {
+            if (i + 1 >= dst_size) return -1;
+        }
+        dst[i++] = *p;
+    }
+    if (i + 1 >= dst_size) return -1;
+    dst[i++] = '\'';
+    dst[i] = '\0';
+    return (int)(i - pos);
+}
+
+int config_build_pg_connection_string(const config_t *config, char *out, size_t out_size) {
+    int n = snprintf(out, out_size, "host=%s port=%d dbname=", config->db_host, config->db_port);
+    if (n < 0 || (size_t)n >= out_size) return -1;
+    size_t pos = (size_t)n;
+
+    int q = pg_quote_append(out, out_size, pos, config->db_name);
+    if (q < 0) return -1;
+    pos += q;
+
+    n = snprintf(out + pos, out_size - pos, " user=");
+    if (n < 0 || (size_t)n >= out_size - pos) return -1;
+    pos += n;
+
+    q = pg_quote_append(out, out_size, pos, config->db_user);
+    if (q < 0) return -1;
+    pos += q;
+
+    n = snprintf(out + pos, out_size - pos, " password=");
+    if (n < 0 || (size_t)n >= out_size - pos) return -1;
+    pos += n;
+
+    q = pg_quote_append(out, out_size, pos, config->db_password);
+    if (q < 0) return -1;
+
+    return 0;
+}
+
 void config_free(config_t *config) {
     if (!config) return;
 

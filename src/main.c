@@ -219,10 +219,12 @@ int main(void) {
             config_free(config);
             return 1;
         }
-        snprintf(pg_conn_str, sizeof(pg_conn_str),
-                 "host=%s port=%d dbname=%s user=%s password=%s",
-                 config->db_host, config->db_port, config->db_name,
-                 config->db_user, config->db_password);
+        if (config_build_pg_connection_string(config, pg_conn_str, sizeof(pg_conn_str)) != 0) {
+            log_error("PostgreSQL connection string too long");
+            encrypt_cleanup();
+            config_free(config);
+            return 1;
+        }
         connection_string = pg_conn_str;
     }
 

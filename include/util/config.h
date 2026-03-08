@@ -105,6 +105,12 @@ typedef struct {
 config_t *config_load(const char *config_file);
 
 /*
+ * Build a libpq connection string with properly quoted values.
+ * Returns 0 on success, -1 on overflow.
+ */
+int config_build_pg_connection_string(const config_t *config, char *out, size_t out_size);
+
+/*
  * Free configuration structure
  */
 void config_free(config_t *config);
