@@ -81,6 +81,10 @@ static int get_authenticated_user_pin(const HttpRequest *req, long long *out_use
         return -1;
     }
 
+    if (session.user_requires_mfa && !session.mfa_completed) {
+        return -1;
+    }
+
     *out_user_pin = session.user_account_pin;
     return 0;
 }

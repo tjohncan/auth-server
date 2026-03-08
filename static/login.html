@@ -174,7 +174,9 @@
         document.getElementById('loginForm').addEventListener('submit', async (e) => {
             e.preventDefault();
 
-            const username = document.getElementById('id').value;
+            const idEl = document.getElementById('id');
+            if (!idEl) return; /* MFA step has replaced the form */
+            const username = idEl.value;
             const password = document.getElementById('password').value;
             const messageEl = document.getElementById('message');
             const submitBtn = e.target.querySelector('button[type="submit"]');

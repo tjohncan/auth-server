@@ -627,5 +627,17 @@ HttpResponse *mfa_set_require_handler(const HttpRequest *req, const RouteParams 
         return response_json_error(500, "Failed to update MFA requirement");
     }
 
+    /* Mark current session as MFA-completed so user isn't locked out */
+    if (enabled) {
+        const char *cookie_header = http_request_get_header(req, "Cookie");
+        if (cookie_header) {
+            char *session_token = http_cookie_get_value(cookie_header, "session");
+            if (session_token) {
+                oauth_session_set_mfa_completed(db, session_token);
+                free(session_token);
+            }
+        }
+    }
+
     return response_json_ok("{\"message\":\"MFA requirement updated\"}");
 }

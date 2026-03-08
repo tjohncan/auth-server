@@ -394,6 +394,7 @@ int oauth_session_set_mfa_completed(db_handle_t *db, const char *session_token) 
         "updated_at = " NOW " "
         "WHERE session_token = " P"1 "
         "AND is_closed = " BOOL_FALSE " "
+        "AND mfa_completed = " BOOL_FALSE " "
         "RETURNING id";
 
     db_stmt_t *stmt = NULL;
@@ -412,8 +413,8 @@ int oauth_session_set_mfa_completed(db_handle_t *db, const char *session_token) 
         return 0;
     } else if (rc == DB_DONE) {
         db_finalize(stmt);
-        log_debug("Session not found or already closed");
-        return -1;
+        log_debug("Session not found or already MFA-completed");
+        return 0;
     } else {
         log_error("Error setting MFA completed on session");
         db_finalize(stmt);

@@ -305,6 +305,10 @@ HttpResponse *profile_handler(const HttpRequest *req, const RouteParams *params)
     }
     free(session_token);
 
+    if (session.user_requires_mfa && !session.mfa_completed) {
+        return response_json_error(403, "MFA verification required");
+    }
+
     /* Get user profile */
     user_profile_t profile;
     if (user_get_profile(db, session.user_account_pin, &profile) != 0) {
@@ -360,6 +364,10 @@ HttpResponse *emails_handler(const HttpRequest *req, const RouteParams *params) 
         return response_json_error(401, "Invalid or expired session");
     }
     free(session_token);
+
+    if (session.user_requires_mfa && !session.mfa_completed) {
+        return response_json_error(403, "MFA verification required");
+    }
 
     int limit = parse_query_int(req->query_string, "limit", 20, 1, 100);
     int offset = parse_query_int(req->query_string, "offset", 0, 0, 9999);
@@ -428,6 +436,10 @@ HttpResponse *change_password_handler(const HttpRequest *req, const RouteParams 
         return response_json_error(401, "Invalid or expired session");
     }
     free(session_token);
+
+    if (session.user_requires_mfa && !session.mfa_completed) {
+        return response_json_error(403, "MFA verification required");
+    }
 
     /* Parse JSON body */
     if (!req->body) {
@@ -502,6 +514,10 @@ HttpResponse *change_username_handler(const HttpRequest *req, const RouteParams 
         return response_json_error(401, "Invalid or expired session");
     }
     free(session_token);
+
+    if (session.user_requires_mfa && !session.mfa_completed) {
+        return response_json_error(403, "MFA verification required");
+    }
 
     /* Parse JSON body */
     if (!req->body) {
