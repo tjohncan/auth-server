@@ -183,7 +183,7 @@ static Connection *connection_create(int fd, const char *remote_ip, uint64_t con
     conn->fd = fd;
     conn->state = CONN_STATE_READING_HEADERS;
     conn->connection_id = connection_id;
-    conn->last_activity = time(NULL);  /* Track connection start time */
+    clock_gettime(CLOCK_MONOTONIC, &conn->last_activity);
 
     /* Allocate initial read buffer */
     conn->read_buffer = malloc(INITIAL_READ_BUFFER_SIZE);
@@ -513,7 +513,7 @@ static int handle_read(Connection *conn, size_t max_request_size) {
         }
 
         conn->bytes_read += n;
-        conn->last_activity = time(NULL);  /* Update activity timestamp */
+        clock_gettime(CLOCK_MONOTONIC, &conn->last_activity);
 
         /* Check if we have complete HTTP headers (ends with \r\n\r\n) */
         if (conn->bytes_read >= 4) {
@@ -596,7 +596,7 @@ static int handle_write(Connection *conn) {
         }
 
         conn->bytes_written += n;
-        conn->last_activity = time(NULL);  /* Update activity timestamp */
+        clock_gettime(CLOCK_MONOTONIC, &conn->last_activity);
     }
 
     /* All data written */
@@ -695,17 +695,18 @@ static void handle_connection_event(EventLoop *loop, Connection *conn, uint32_t 
 static void close_idle_connections(EventLoop *loop) {
     if (loop->config.connection_timeout_ms <= 0) return;  /* Timeout disabled */
 
-    time_t now = time(NULL);
-    time_t timeout_seconds = loop->config.connection_timeout_ms / 1000;
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
 
     Connection *conn = loop->connections_head;
     while (conn) {
         Connection *next = conn->next;  /* Save next before potential free */
 
-        time_t idle_time = now - conn->last_activity;
-        if (idle_time >= timeout_seconds) {
-            log_info("Closing idle connection %lu (idle for %ld seconds)",
-                    conn->connection_id, idle_time);
+        long idle_ms = (now.tv_sec - conn->last_activity.tv_sec) * 1000
+                     + (now.tv_nsec - conn->last_activity.tv_nsec) / 1000000;
+        if (idle_ms >= loop->config.connection_timeout_ms) {
+            log_info("Closing idle connection %lu (idle for %ldms)",
+                    conn->connection_id, idle_ms);
             close_connection(loop, conn);
         }
 

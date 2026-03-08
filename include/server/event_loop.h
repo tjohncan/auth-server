@@ -64,7 +64,7 @@ typedef struct Connection {
 
     char remote_ip[INET6_ADDRSTRLEN];  /* Client IP address (IPv4 or IPv6, for logging) */
     uint64_t connection_id;       /* Unique ID for logging/debugging */
-    time_t last_activity;         /* Last read/write time (for timeout detection) */
+    struct timespec last_activity; /* Last read/write time (for timeout detection) */
 
     void *userdata;               /* Shared context from handler_context (not owned by connection) */
 
