@@ -1483,10 +1483,10 @@ Get management UI client setups available to current user.
 ```
 
 **Notes**:
-- Returns organizations where user is admin
+- Returns organizations where user has client access (via client_user or universal clients)
 - Filters by matching callback_url and api_url (exact match, case-insensitive)
 - Used by management UI to show organization picker
-- Empty array if user is not admin of any organizations with matching URLs
+- Empty array if user has no accessible clients with matching URLs
 
 **Example**:
 ```bash

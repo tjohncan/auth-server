@@ -121,7 +121,7 @@ typedef struct {
  * Get management UI setups for user
  *
  * Returns valid management UI configurations that:
- * - User is an org admin for
+ * - User has client access for (via client_user table or client.is_universal)
  * - Have active org, client, and resource server
  * - Client redirect_uri matches the provided callback URL (exact match)
  * - Resource server address matches the provided API URL (exact match)
