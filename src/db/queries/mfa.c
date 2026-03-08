@@ -697,6 +697,9 @@ int recovery_code_verify(db_handle_t *db,
     recovery_code_set_t set;
     int result = recovery_code_set_get_active(db, user_account_pin, &set);
 
+    if (result < 0) {
+        return -1;  /* DB error */
+    }
     if (result != 0) {
         log_debug("No active recovery code set found");
         return 0;  /* Invalid - no active set */
