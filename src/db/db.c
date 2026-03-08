@@ -46,7 +46,7 @@ struct db_stmt_t {
     db_handle_t *db;  /* Parent database handle */
     char error_msg[512];
     int param_count;  /* Total parameters in query */
-    int bound_count;  /* Number of parameters bound */
+    int bound_count;  /* Number of bind calls (assumes sequential, no re-binding) */
 #ifdef DB_BACKEND_POSTGRESQL
     char *pg_query;             /* SQL string (duped from prepare) */
     char **pg_param_values;     /* Parameter value strings */
