@@ -24,6 +24,10 @@
 #include <stdbool.h>
 #include <sys/types.h>
 
+static void worker_thread_cleanup(void) {
+    crypto_jwt_thread_cleanup();
+}
+
 static EventLoopPool * volatile global_pool = NULL;
 static pthread_t cleaner_thread;
 static bool cleaner_started = false;
@@ -363,7 +367,8 @@ int main(void) {
         .connection_timeout_ms = 30000,
         .max_connections_per_worker = 1024,
         .handler = router_request_handler,
-        .handler_context = router
+        .handler_context = router,
+        .on_worker_exit = worker_thread_cleanup
     };
 
     /* Create event loop pool */

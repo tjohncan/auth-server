@@ -828,6 +828,9 @@ static void *worker_thread_func(void *arg) {
     /* Run event loop (blocks until stopped) */
     event_loop_run(loop, loop->config.handler, loop->config.handler_context);
 
+    if (loop->config.on_worker_exit)
+        loop->config.on_worker_exit();
+
     log_info("Worker thread %d stopped (tid=%lu)", loop->worker_index, pthread_self());
     return NULL;
 }

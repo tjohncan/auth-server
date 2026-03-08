@@ -257,4 +257,9 @@ int jwt_decode_auth_request(const char *token,
                              const char *prior_secret,
                              auth_request_claims_t *out_claims);
 
+/*
+ * Free thread-local ES256 key cache (call from each worker thread before exit)
+ */
+void crypto_jwt_thread_cleanup(void);
+
 #endif /* CRYPTO_JWT_H */

@@ -468,6 +468,15 @@ static EVP_PKEY *get_cached_public_key(const char *pem_string, int slot) {
     return pkey;
 }
 
+void crypto_jwt_thread_cleanup(void) {
+    for (int i = 0; i < 2; i++) {
+        if (es256_cache[i].pkey) {
+            EVP_PKEY_free(es256_cache[i].pkey);
+            es256_cache[i].pkey = NULL;
+        }
+    }
+}
+
 /*
  * Sign data with ECDSA private key
  * Returns signature length on success, -1 on error

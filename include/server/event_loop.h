@@ -109,6 +109,7 @@ typedef struct {
     int max_connections_per_worker; /* Max concurrent connections per worker (0 = unlimited) */
     RequestHandler handler;       /* Application request handler */
     void *handler_context;        /* Passed to handler (e.g., router) */
+    void (*on_worker_exit)(void); /* Optional per-thread cleanup callback */
 } EventLoopConfig;
 
 /* ============================================================================
