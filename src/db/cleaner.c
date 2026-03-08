@@ -38,6 +38,7 @@ typedef struct {
     const char *extra_where;       /* Additional WHERE clause or NULL */
     int retention_days;            /* Retention period in days */
     int configurable;              /* 1 = read from config, 0 = hardcoded */
+    int owns_table_name;           /* 1 = table_name is heap-allocated */
 } table_cleaner_t;
 
 /* Global state */
@@ -217,7 +218,8 @@ static void discover_history_tables(db_handle_t *db, cleaner_config_t *config) {
                     .timestamp_column = "history_created_at",
                     .extra_where = NULL,
                     .retention_days = config->retention_history_days,
-                    .configurable = 1
+                    .configurable = 1,
+                    .owns_table_name = 1
                 };
                 log_debug("Cleaner: discovered history table: %s", name_copy);
             }
@@ -251,7 +253,8 @@ static void discover_history_tables(db_handle_t *db, cleaner_config_t *config) {
                     .timestamp_column = "history_created_at",
                     .extra_where = NULL,
                     .retention_days = config->retention_history_days,
-                    .configurable = 1
+                    .configurable = 1,
+                    .owns_table_name = 1
                 };
                 log_debug("Cleaner: discovered history table: %s", name_copy);
             }
@@ -544,6 +547,14 @@ static void* cleaner_thread_main(void *arg) {
     }
 
     log_info("Cleaner: stopped (purged %d batches total)", total_purged);
+
+    /* Free dynamically discovered table names */
+    for (int i = 0; i < g_num_active_cleaners; i++) {
+        if (g_active_cleaners[i].owns_table_name)
+            free((char *)g_active_cleaners[i].table_name);
+    }
+    g_num_active_cleaners = 0;
+
     db_disconnect(db);
     free((char *)config->connection_string);
     free(config);
