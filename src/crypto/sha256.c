@@ -1,9 +1,9 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "crypto/sha256.h"
+#include "util/data.h"
 #include "util/log.h"
 #include <openssl/evp.h>
-#include <stdio.h>
 
 int crypto_sha256_hex(const void *data, size_t data_len,
                       char *out_hex, size_t hex_len) {
@@ -29,10 +29,7 @@ int crypto_sha256_hex(const void *data, size_t data_len,
     }
 
     /* Convert to hex string */
-    for (unsigned int i = 0; i < SHA256_DIGEST_LENGTH; i++) {
-        snprintf(out_hex + (i * 2), 3, "%02x", hash[i]);
-    }
-    out_hex[SHA256_DIGEST_LENGTH * 2] = '\0';
+    bytes_to_hex(hash, SHA256_DIGEST_LENGTH, out_hex, hex_len);
 
     return 0;
 }
