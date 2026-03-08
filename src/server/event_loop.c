@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>  /* strncasecmp */
 #include <stdbool.h>
 #include <stdatomic.h>
 #include <unistd.h>
