@@ -514,13 +514,19 @@ HttpResponse *router_dispatch(Router *router, const HttpRequest *req) {
             ParamRoute *pr = &router->param_routes[best];
             RouteParams *params = route_params_create();
 
-            if (params) {
-                for (int s = 0; s < pr->segment_count; s++) {
-                    if (!pr->literal_mask[s]) {
-                        route_params_add(params,
-                                        extract_param_name(pr->segments[s]),
-                                        req_segments[s]);
-                    }
+            if (!params) {
+                for (int s = 0; s < req_seg_count; s++)
+                    free(req_segments[s]);
+                free(req_segments);
+                log_error("Failed to allocate route params");
+                return response_json_error(500, "Internal Server Error");
+            }
+
+            for (int s = 0; s < pr->segment_count; s++) {
+                if (!pr->literal_mask[s]) {
+                    route_params_add(params,
+                                    extract_param_name(pr->segments[s]),
+                                    req_segments[s]);
                 }
             }
 
