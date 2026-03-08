@@ -313,9 +313,7 @@ HttpResponse *profile_handler(const HttpRequest *req, const RouteParams *params)
 
     /* Convert user_id to hex */
     char user_id_hex[33];
-    for (int i = 0; i < 16; i++) {
-        snprintf(user_id_hex + i * 2, 3, "%02x", profile.user_id[i]);
-    }
+    bytes_to_hex(profile.user_id, 16, user_id_hex, sizeof(user_id_hex));
 
     /* Build JSON response */
     JsonBuf *jb = jsonbuf_new(2048);
