@@ -515,6 +515,8 @@ static void set_config_value(config_t *config, const char *key, const char *valu
         } else {
             log_error("Failed to allocate memory for log_level_env");
         }
+    } else {
+        log_warn("Unknown config key: '%s'", key);
     }
 }
 
