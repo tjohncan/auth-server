@@ -101,7 +101,7 @@ typedef int (*RequestHandler)(Connection *conn,
  * ============================================================================ */
 
 typedef struct {
-    int num_workers;              /* Number of worker threads (0 = auto-detect cores) */
+    int num_workers;              /* Number of worker threads (caller must resolve) */
     int port;                     /* Port to listen on */
     int backlog;                  /* Listen queue size (default: 128) */
     size_t max_request_size;      /* Max request size in bytes (default: 1MB) */

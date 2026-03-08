@@ -154,17 +154,6 @@ static int create_listen_socket(int port, int backlog) {
     return fd;
 }
 
-/*
- * get_cpu_count - Detect number of CPU cores
- */
-static int get_cpu_count(void) {
-    long nprocs = sysconf(_SC_NPROCESSORS_ONLN);
-    if (nprocs < 1) {
-        log_warn("Could not detect CPU count, defaulting to 1");
-        return 1;
-    }
-    return (int)nprocs;
-}
 
 /* ============================================================================
  * Connection Management
@@ -861,12 +850,7 @@ EventLoopPool *event_loop_pool_create(EventLoopConfig *config) {
     /* Copy config */
     memcpy(&pool->config, config, sizeof(EventLoopConfig));
 
-    /* Auto-detect number of workers if not specified */
-    if (config->num_workers <= 0) {
-        pool->num_workers = get_cpu_count();
-    } else {
-        pool->num_workers = config->num_workers;
-    }
+    pool->num_workers = config->num_workers;
 
     /* Set defaults */
     if (pool->config.backlog <= 0) pool->config.backlog = DEFAULT_BACKLOG;
