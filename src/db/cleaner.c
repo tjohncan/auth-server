@@ -389,25 +389,25 @@ static void cleaner_init(db_handle_t *db, cleaner_config_t *config) {
     table_cleaner_t all_possible[] = {
         /* Tier 1: High-volume usage logs */
         {TBL_CLIENT_KEY_USAGE, "Client key usage log", PK_SUB, "authenticated_at", NULL,
-         config->retention_usage_days, 1},
+         config->retention_usage_days, 1, 0},
         {TBL_RESOURCE_SERVER_KEY_USAGE, "Resource server key usage log", PK_SUB, "authenticated_at", NULL,
-         config->retention_usage_days, 1},
+         config->retention_usage_days, 1, 0},
         {TBL_ORGANIZATION_KEY_USAGE, "Organization key usage log", PK_SUB, "authenticated_at", NULL,
-         config->retention_usage_days, 1},
+         config->retention_usage_days, 1, 0},
         {TBL_USER_MFA_USAGE, "MFA usage log", PK_SUB, "submitted_at", NULL,
-         config->retention_usage_days, 1},
+         config->retention_usage_days, 1, 0},
 
         /* Tier 2: High-volume sessions and tokens */
         {TBL_BROWSER, "Browser sessions", "id", "expected_expiry", NULL,
-         config->retention_sessions_grace_days, 1},
+         config->retention_sessions_grace_days, 1, 0},
         {TBL_ACCESS_TOKEN, "Access tokens", "id", "expected_expiry", NULL,
-         config->retention_tokens_grace_days, 1},
+         config->retention_tokens_grace_days, 1, 0},
         {TBL_REFRESH_TOKEN, "Refresh tokens", "id", "expected_expiry",
          " AND NOT EXISTS (SELECT 1 FROM " TBL_REFRESH_TOKEN " AS X "
          " WHERE X.origin_refresh_token_id = " TBL_REFRESH_TOKEN ".id) "
          " AND NOT EXISTS (SELECT 1 FROM " TBL_ACCESS_TOKEN
          " WHERE refresh_token_id = " TBL_REFRESH_TOKEN ".id)",
-         config->retention_tokens_grace_days, 1},
+         config->retention_tokens_grace_days, 1, 0},
 
         /* Tier 3: Medium-volume short-lived tokens */
         {TBL_AUTHORIZATION_CODE, "Authorization codes", "id", "expected_expiry",
@@ -415,23 +415,23 @@ static void cleaner_init(db_handle_t *db, cleaner_config_t *config) {
          " WHERE authorization_code_id = " TBL_AUTHORIZATION_CODE ".id) "
          " AND NOT EXISTS (SELECT 1 FROM " TBL_ACCESS_TOKEN
          " WHERE authorization_code_id = " TBL_AUTHORIZATION_CODE ".id)",
-         RETENTION_AUTH_CODE_DAYS, 0},
+         RETENTION_AUTH_CODE_DAYS, 0, 0},
         {TBL_PASSWORDLESS_LOGIN_TOKEN, "Passwordless login tokens", "id", "expected_expiry", NULL,
-         RETENTION_PASSWORDLESS_TOKEN_DAYS, 0},
+         RETENTION_PASSWORDLESS_TOKEN_DAYS, 0, 0},
         {TBL_EMAIL_VERIFICATION_TOKEN, "Email verification tokens", "id", "expected_expiry", NULL,
-         RETENTION_EMAIL_VERIFICATION_DAYS, 0},
+         RETENTION_EMAIL_VERIFICATION_DAYS, 0, 0},
         {TBL_PASSWORD_RESET_TOKEN, "Password reset tokens", "id", "expected_expiry", NULL,
-         RETENTION_PASSWORD_RESET_DAYS, 0},
+         RETENTION_PASSWORD_RESET_DAYS, 0, 0},
 
         /* Tier 4: Low-volume cleanup */
         {TBL_USER_MFA, "Unconfirmed MFA methods", "pin", "created_at",
-         " AND is_confirmed = " BOOL_FALSE, RETENTION_UNCONFIRMED_MFA_DAYS, 0},
+         " AND is_confirmed = " BOOL_FALSE, RETENTION_UNCONFIRMED_MFA_DAYS, 0, 0},
         {TBL_RECOVERY_CODE, "Used recovery codes", "pin", "used_at",
-         " AND is_used = " BOOL_TRUE, RETENTION_USED_RECOVERY_CODE_DAYS, 0},
+         " AND is_used = " BOOL_TRUE, RETENTION_USED_RECOVERY_CODE_DAYS, 0, 0},
         {TBL_RECOVERY_CODE_SET, "Revoked recovery code sets", "pin", "revoked_at",
          " AND is_active = " BOOL_FALSE " AND NOT EXISTS (SELECT 1 FROM " TBL_RECOVERY_CODE
          " WHERE recovery_code_set_pin = " TBL_RECOVERY_CODE_SET ".pin)",
-         RETENTION_REVOKED_RECOVERY_SET_DAYS, 0},
+         RETENTION_REVOKED_RECOVERY_SET_DAYS, 0, 0},
     };
 
     int num_all = sizeof(all_possible) / sizeof(all_possible[0]);
