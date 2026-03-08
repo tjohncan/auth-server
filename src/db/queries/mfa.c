@@ -579,12 +579,20 @@ int recovery_code_set_create(db_handle_t *db,
         "(recovery_code_set_pin, secret_hash, plaintext_last4) "
         "VALUES (" P"1, " P"2, " P"3)";
 
+    db_stmt_t *code_stmt = NULL;
+    if (db_prepare(db, &code_stmt, code_sql) != 0) {
+        log_error("Failed to prepare recovery_code insert");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
     for (int i = 0; i < code_count; i++) {
         const char *plaintext = plaintext_codes[i];
         size_t plaintext_len = strlen(plaintext);
 
         if (plaintext_len < 4) {
             log_error("Recovery code too short (must be at least 4 characters)");
+            db_finalize(code_stmt);
             db_execute_trusted(db, "ROLLBACK");
             return -1;
         }
@@ -594,32 +602,30 @@ int recovery_code_set_create(db_handle_t *db,
                                          salt_hex, hash_iterations,
                                          hash_hex, sizeof(hash_hex)) != 0) {
             log_error("Failed to hash recovery code");
+            db_finalize(code_stmt);
             db_execute_trusted(db, "ROLLBACK");
             return -1;
         }
 
         const char *last4 = plaintext + (plaintext_len - 4);
 
-        db_stmt_t *code_stmt = NULL;
-        if (db_prepare(db, &code_stmt, code_sql) != 0) {
-            log_error("Failed to prepare recovery_code insert");
-            db_execute_trusted(db, "ROLLBACK");
-            return -1;
-        }
-
         db_bind_int64(code_stmt, 1, set_pin);
         db_bind_text(code_stmt, 2, hash_hex, -1);
         db_bind_text(code_stmt, 3, last4, -1);
 
         rc = db_step(code_stmt);
-        db_finalize(code_stmt);
 
         if (rc != DB_DONE) {
             log_error("Failed to insert recovery code");
+            db_finalize(code_stmt);
             db_execute_trusted(db, "ROLLBACK");
             return -1;
         }
+
+        db_reset(code_stmt);
     }
+
+    db_finalize(code_stmt);
 
     if (db_execute_trusted(db, "COMMIT") != 0) {
         log_error("Failed to commit transaction");
