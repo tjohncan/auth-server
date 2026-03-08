@@ -82,7 +82,7 @@ static int base32_decode(const char *input, unsigned char *output, size_t output
     int bits_in_buffer = 0;
 
     for (size_t i = 0; i < input_len; i++) {
-        char c = toupper(input[i]);
+        char c = (char)toupper((unsigned char)input[i]);
 
         /* Decode base32 character to 5-bit value */
         int value;
@@ -215,7 +215,7 @@ int crypto_totp_verify(const char *secret, const char *code, time_t current_time
     }
 
     for (int i = 0; i < TOTP_CODE_DIGITS; i++) {
-        if (!isdigit(code[i])) {
+        if (!isdigit((unsigned char)code[i])) {
             log_debug("Invalid TOTP code: non-digit character");
             return 0;  /* Invalid code */
         }
