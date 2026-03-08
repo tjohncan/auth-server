@@ -12,7 +12,7 @@
 */
 size_t str_copy(char *dst, size_t dst_size, const char *src) {
     if (dst_size == 0) { return 0; }
-    if (!src) { dst[0] = '\0'; return 0; }
+    if (!src) { dst[0] = '\0'; return 1; }
 
     /* Calculate how many bytes to copy */
     size_t src_len = strlen(src);
