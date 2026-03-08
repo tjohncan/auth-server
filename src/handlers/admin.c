@@ -216,6 +216,12 @@ int admin_update_organization(db_handle_t *db, long long user_account_pin,
         return -1;
     }
 
+    /* Verify organization exists and caller is authorized */
+    admin_organization_t existing;
+    if (admin_get_organization(db, user_account_pin, organization_key_pin, org_id, &existing) != 0) {
+        return -1;
+    }
+
     /* Call query layer */
     if (org_update(db, org_id, user_account_pin, organization_key_pin, display_name, note, is_active) != 0) {
         return -1;
@@ -283,6 +289,12 @@ int admin_update_resource_server(db_handle_t *db, long long user_account_pin,
 
     if (!display_name && !address && !note && !is_active) {
         log_error("No fields to update in admin_update_resource_server");
+        return -1;
+    }
+
+    /* Verify resource server exists and caller is authorized */
+    admin_resource_server_t existing;
+    if (admin_get_resource_server(db, user_account_pin, organization_key_pin, server_id, &existing) != 0) {
         return -1;
     }
 
@@ -406,6 +418,12 @@ int admin_update_client(db_handle_t *db, long long user_account_pin,
         !issue_refresh_tokens && !refresh_token_ttl_seconds &&
         !maximum_session_seconds && !secret_rotation_seconds && !is_active) {
         log_error("No fields to update in admin_update_client");
+        return -1;
+    }
+
+    /* Verify client exists and caller is authorized */
+    admin_client_t existing;
+    if (admin_get_client(db, user_account_pin, organization_key_pin, client_id, &existing) != 0) {
         return -1;
     }
 

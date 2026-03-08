@@ -334,25 +334,7 @@ HttpResponse *admin_update_organization_handler(const HttpRequest *req, const Ro
         return response_json_error(404, "Organization not found or update failed");
     }
 
-    /* Return updated organization */
-    admin_organization_t org;
-    if (admin_get_organization(db, ctx.user_account_pin, ctx.organization_key_pin, org_id, &org) != 0) {
-        return response_json_error(500, "Update succeeded but failed to retrieve updated organization");
-    }
-
-    char org_id_hex[33];
-    bytes_to_hex(org.id, 16, org_id_hex, sizeof(org_id_hex));
-
-    JsonBuf *jb = jsonbuf_new(2048);
-    jsonbuf_appendf(jb, "{\"id\":\"%s\",\"code_name\":\"", org_id_hex);
-    jsonbuf_append_escaped(jb, org.code_name);
-    jsonbuf_appendf(jb, "\",\"display_name\":\"");
-    jsonbuf_append_escaped(jb, org.display_name);
-    jsonbuf_appendf(jb, "\",\"note\":\"");
-    jsonbuf_append_escaped(jb, org.note);
-    jsonbuf_appendf(jb, "\",\"is_active\":%s}", org.is_active ? "true" : "false");
-
-    return jsonbuf_to_response(jb, 200);
+    return response_json_ok("{\"message\":\"Organization updated successfully\"}");
 }
 
 /* ============================================================================
