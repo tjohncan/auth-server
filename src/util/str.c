@@ -197,7 +197,7 @@ int str_url_decode(char *dst, size_t dst_size, const char *src) {
 /*******/
 
 void str_to_lower(char *dest, size_t dest_size, const char *src) {
-    if (!dest || dest_size == 0) return;
+    if (!dest || !src || dest_size == 0) return;
     size_t i;
     for (i = 0; src[i] && i < dest_size - 1; i++) {
         dest[i] = (char)tolower((unsigned char)src[i]);
