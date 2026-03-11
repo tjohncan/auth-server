@@ -16,7 +16,9 @@ ifeq ($(DB_BACKEND),sqlite)
     CFLAGS += -Ivendor/sqlite -DDB_BACKEND_SQLITE
     DB_VENDOR_SRCS = vendor/sqlite/sqlite3.c
     ifeq ($(wildcard vendor/sqlite/sqlite3.c),)
-        $(error SQLite amalgamation not found at vendor/sqlite/sqlite3.c — see vendor/setup_notes.txt)
+        ifneq ($(MAKECMDGOALS),clean)
+            $(error SQLite amalgamation not found at vendor/sqlite/sqlite3.c — see vendor/setup_notes.txt)
+        endif
     endif
 else ifeq ($(DB_BACKEND),postgresql)
     CFLAGS += -DDB_BACKEND_POSTGRESQL -I$(shell pg_config --includedir)
