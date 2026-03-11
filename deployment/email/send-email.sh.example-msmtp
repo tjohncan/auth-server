@@ -4,9 +4,11 @@
 
 read -r payload
 
-TO=$(echo "$payload" | jq -r .to)
-FROM=$(echo "$payload" | jq -r .from)
-SUBJECT=$(echo "$payload" | jq -r .subject)
-BODY=$(echo "$payload" | jq -r .body_text)
+extract() { local k="\"$1\":\""; local t="${payload#*$k}"; echo "${t%%\"*}"; }
+
+TO=$(extract to)
+FROM=$(extract from)
+SUBJECT=$(extract subject)
+BODY=$(extract body_text)
 
 printf "From: %s\nTo: %s\nSubject: %s\n\n%s" "$FROM" "$TO" "$SUBJECT" "$BODY" | msmtp "$TO"

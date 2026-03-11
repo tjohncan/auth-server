@@ -83,7 +83,7 @@ retention_tokens_grace_days = 8
 
 # Email Delivery (requires EMAIL_SUPPORT=1 build flag)
 # Command to execute for sending email — receives JSON payload on stdin, exit 0 = success
-# See deployment/email/ for example scripts (AWS SES, SendGrid, SMTP)
+# See deployment/email/ for example scripts
 # email_command = ./deployment/email/send-email.sh
 # email_from = noreply@example.com
 # email_from_name = Auth System

@@ -5,14 +5,8 @@
 
 read -r payload
 
+# Pass the JSON payload directly — reshape if your provider expects a different schema
 curl -sf -X POST "$EMAIL_API_URL" \
   -H "Authorization: Bearer $EMAIL_API_KEY" \
   -H "Content-Type: application/json" \
-  -d "$(echo "$payload" | jq '{
-    to: .to,
-    from: .from,
-    from_name: .from_name,
-    subject: .subject,
-    body_html: .body_html,
-    body_text: .body_text
-  }')"
+  -d "$payload"
