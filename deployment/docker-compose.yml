@@ -21,6 +21,8 @@ services:
       dockerfile: deployment/Dockerfile
       args:
         DB_BACKEND: "${DB_BACKEND:-sqlite}"
+        EMAIL_SUPPORT: "${EMAIL_SUPPORT:-0}"
+        EXTRA_PACKAGES: "${EXTRA_PACKAGES:-}"
     image: auth-server:latest
     container_name: auth-server
     restart: unless-stopped
@@ -38,6 +40,7 @@ services:
     volumes:
       - ../auth.conf:/app/auth.conf:ro
       - ../data:/app/data
+      - ../deployment/email/send-email.sh:/app/deployment/email/send-email.sh:ro
 
     networks:
       - auth-network

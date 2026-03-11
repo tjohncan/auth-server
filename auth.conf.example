@@ -85,6 +85,7 @@ retention_tokens_grace_days = 8
 # Command to execute for sending email — receives JSON payload on stdin, exit 0 = success
 # See deployment/email/ for example scripts
 # email_command = ./deployment/email/send-email.sh
+# (ensure the script has execute permission: chmod +x)
 # email_from = noreply@example.com
 # email_from_name = Auth System
 #

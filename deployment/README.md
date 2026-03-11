@@ -171,9 +171,61 @@ overridden by environment variables (useful for Docker and secrets management).
 | `AUTH_DB_OWNER_ROLE`  | `db_owner_role`  | Schema owner role        | (db_user)      |
 | `AUTH_ENCRYPTION_KEY` | `encryption_key` | Field encryption key     | `customize_me` |
 | `AUTH_LOG_LEVEL`      | `log_level`      | `debug/info/warn/error`  | `info`         |
+| `AUTH_EMAIL_COMMAND`  | `email_command`  | Email delivery script    | —              |
+| `AUTH_EMAIL_FROM`     | `email_from`     | Sender address           | —              |
+| `AUTH_EMAIL_FROM_NAME`| `email_from_name`| Sender display name      | —              |
 
 Environment variable names can be customized in `auth.conf` (e.g., `db_password_env = MY_SECRET`)
 to match your infrastructure's naming conventions.
+
+## Email Delivery (Optional)
+
+Email support is a compile-time feature. Build with `EMAIL_SUPPORT=1` to enable it:
+
+```bash
+make EMAIL_SUPPORT=1
+# or with Docker:
+docker build -f deployment/Dockerfile --build-arg EMAIL_SUPPORT=1 -t auth-server .
+```
+
+The server sends email by piping a JSON payload to a configured command via fork/exec.
+This keeps email delivery a deployment concern — you choose the transport (CLI call, SMTP, HTTP API, etc.).
+
+### Setup
+
+1. **Copy an example script** from `deployment/email/` and make it executable:
+
+   ```bash
+   cp deployment/email/send-email.sh.example-noop deployment/email/send-email.sh
+   chmod +x deployment/email/send-email.sh
+   ```
+
+   Available examples:
+   - `example-noop` — logs to `/tmp/auth-server-email.log` (testing)
+   - `example-cli` — AWS SES via `aws ses send-email`
+   - `example-curl` — generic HTTP API
+   - `example-msmtp` — local SMTP via msmtp
+
+2. **Configure `auth.conf`:**
+
+   ```ini
+   email_command = ./deployment/email/send-email.sh
+   email_from = noreply@yourdomain.com
+   email_from_name = Auth System
+   ```
+
+3. **Test** with the standalone test binary:
+
+   ```bash
+   make EMAIL_SUPPORT=1 test-email
+   ./test-email you@example.com
+   ```
+
+### Docker
+
+Set `EMAIL_SUPPORT=1` in `deployment/.env`. If your email script needs additional packages
+(e.g., `aws-cli`), set `EXTRA_PACKAGES` in `.env` as well. The compose file volume-mounts
+`deployment/email/send-email.sh` into the container automatically.
 
 ## Building the Image
 
@@ -192,6 +244,11 @@ deployment/
 ├── Dockerfile                         # Multi-stage build
 ├── docker-compose.yml                 # auth-server + nginx + certbot
 ├── .env.example                       # Environment variable template
+├── email/
+│   ├── send-email.sh.example-noop     # No-op logger (testing)
+│   ├── send-email.sh.example-cli      # AWS SES via CLI
+│   ├── send-email.sh.example-curl     # Generic HTTP API
+│   └── send-email.sh.example-msmtp    # Local SMTP via msmtp
 ├── nginx/
 │   ├── nginx.conf                     # Main nginx config (rate limiting, security headers)
 │   └── conf.d/
