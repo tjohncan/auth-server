@@ -11,6 +11,9 @@ auth.conf
 # Generated nginx config (from template)
 **/nginx/conf.d/default.conf
 
+# Email delivery script (copy from .example-* and customize)
+deployment/email/send-email.sh
+
 # Build artifacts
 *.o
 auth-server
@@ -19,6 +22,7 @@ test-http
 test-router
 test-db
 test-crypto
+test-email
 
 # SQLite amalgamation (downloaded via vendor/setup_notes.txt)
 vendor/sqlite/*

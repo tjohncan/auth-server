@@ -91,6 +91,22 @@ typedef struct {
 
     /* Branding */
     char *mothership_url;  /* Optional parent/brand URL shown on index page */
+
+#ifdef EMAIL_SUPPORT
+    /* Email delivery */
+    char *email_command;     /* Shell command to exec for sending email (receives JSON on stdin) */
+    char *email_from;        /* Sender email address */
+    char *email_from_name;   /* Sender display name */
+
+    /* Email token TTLs */
+    int password_reset_token_ttl_seconds;        /* How long password reset tokens are valid (default 1 hour) */
+    int email_verification_token_ttl_seconds;    /* How long email verification tokens are valid (default 24 hours) */
+
+    /* Email environment variable overrides */
+    char *email_command_env;
+    char *email_from_env;
+    char *email_from_name_env;
+#endif
 } config_t;
 
 /*

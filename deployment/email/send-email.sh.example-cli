@@ -1,0 +1,15 @@
+#!/bin/bash
+# Send email via AWS SES CLI.
+# Requires: aws cli configured with appropriate credentials and region.
+
+read -r payload
+
+TO=$(echo "$payload" | jq -r .to)
+FROM=$(echo "$payload" | jq -r .from)
+SUBJECT=$(echo "$payload" | jq -r .subject)
+BODY_HTML=$(echo "$payload" | jq -r .body_html)
+
+aws ses send-email \
+  --from "$FROM" \
+  --destination "ToAddresses=$TO" \
+  --message "Subject={Data=$SUBJECT},Body={Html={Data=$BODY_HTML,Charset=UTF-8}}"

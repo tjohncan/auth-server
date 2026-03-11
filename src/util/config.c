@@ -9,6 +9,12 @@
 #include <limits.h>
 #include <openssl/crypto.h>
 
+/* Email defaults */
+#ifdef EMAIL_SUPPORT
+#define DEFAULT_PASSWORD_RESET_TOKEN_TTL_SECONDS 3600       /* 1 hour */
+#define DEFAULT_EMAIL_VERIFICATION_TOKEN_TTL_SECONDS 86400  /* 24 hours */
+#endif
+
 /* Default values */
 #define DEFAULT_HOST "localhost"
 #define DEFAULT_PORT 8080
@@ -515,7 +521,76 @@ static void set_config_value(config_t *config, const char *key, const char *valu
         } else {
             log_error("Failed to allocate memory for log_level_env");
         }
-    } else {
+    }
+#ifdef EMAIL_SUPPORT
+    /* Email delivery settings */
+    else if (strcmp(key, "email_command") == 0) {
+        new_value = str_dup(value);
+        if (new_value) {
+            free(config->email_command);
+            config->email_command = new_value;
+        } else {
+            log_error("Failed to allocate memory for email_command");
+        }
+    } else if (strcmp(key, "email_from") == 0) {
+        new_value = str_dup(value);
+        if (new_value) {
+            free(config->email_from);
+            config->email_from = new_value;
+        } else {
+            log_error("Failed to allocate memory for email_from");
+        }
+    } else if (strcmp(key, "email_from_name") == 0) {
+        new_value = str_dup(value);
+        if (new_value) {
+            free(config->email_from_name);
+            config->email_from_name = new_value;
+        } else {
+            log_error("Failed to allocate memory for email_from_name");
+        }
+    } else if (strcmp(key, "password_reset_token_ttl_seconds") == 0) {
+        int ttl = 0;
+        if (parse_int(value, &ttl) != 0 || ttl < 60) {
+            log_warn("Invalid password_reset_token_ttl_seconds '%s', must be >= 60. Keeping current: %d",
+                    value, config->password_reset_token_ttl_seconds);
+        } else {
+            config->password_reset_token_ttl_seconds = ttl;
+        }
+    } else if (strcmp(key, "email_verification_token_ttl_seconds") == 0) {
+        int ttl = 0;
+        if (parse_int(value, &ttl) != 0 || ttl < 60) {
+            log_warn("Invalid email_verification_token_ttl_seconds '%s', must be >= 60. Keeping current: %d",
+                    value, config->email_verification_token_ttl_seconds);
+        } else {
+            config->email_verification_token_ttl_seconds = ttl;
+        }
+    } else if (strcmp(key, "email_command_env") == 0) {
+        new_value = str_dup(value);
+        if (new_value) {
+            free(config->email_command_env);
+            config->email_command_env = new_value;
+        } else {
+            log_error("Failed to allocate memory for email_command_env");
+        }
+    } else if (strcmp(key, "email_from_env") == 0) {
+        new_value = str_dup(value);
+        if (new_value) {
+            free(config->email_from_env);
+            config->email_from_env = new_value;
+        } else {
+            log_error("Failed to allocate memory for email_from_env");
+        }
+    } else if (strcmp(key, "email_from_name_env") == 0) {
+        new_value = str_dup(value);
+        if (new_value) {
+            free(config->email_from_name_env);
+            config->email_from_name_env = new_value;
+        } else {
+            log_error("Failed to allocate memory for email_from_name_env");
+        }
+    }
+#endif
+    else {
         log_warn("Unknown config key: '%s'", key);
     }
 }
@@ -810,6 +885,51 @@ static void apply_env_overrides(config_t *config) {
         }
     }
 
+#ifdef EMAIL_SUPPORT
+    /* EMAIL_COMMAND */
+    env_var_name = config->email_command_env ? config->email_command_env : "AUTH_EMAIL_COMMAND";
+    env_value = getenv(env_var_name);
+    if (env_value) {
+        char *new_value = str_dup(env_value);
+        if (new_value) {
+            free(config->email_command);
+            config->email_command = new_value;
+            log_info("Config override from %s", env_var_name);
+        } else {
+            log_error("Failed to allocate memory for %s override", env_var_name);
+        }
+    }
+
+    /* EMAIL_FROM */
+    env_var_name = config->email_from_env ? config->email_from_env : "AUTH_EMAIL_FROM";
+    env_value = getenv(env_var_name);
+    if (env_value) {
+        char *new_value = str_dup(env_value);
+        if (new_value) {
+            free(config->email_from);
+            config->email_from = new_value;
+            log_info("Config override from %s", env_var_name);
+        } else {
+            log_error("Failed to allocate memory for %s override", env_var_name);
+        }
+    }
+
+    /* EMAIL_FROM_NAME */
+    env_var_name = config->email_from_name_env ? config->email_from_name_env : "AUTH_EMAIL_FROM_NAME";
+    env_value = getenv(env_var_name);
+    if (env_value) {
+        char *new_value = str_dup(env_value);
+        if (new_value) {
+            free(config->email_from_name);
+            config->email_from_name = new_value;
+            log_info("Config override from %s", env_var_name);
+        } else {
+            log_error("Failed to allocate memory for %s override", env_var_name);
+        }
+    }
+
+#endif
+
     /* ENABLE_HISTORY_TABLES */
     env_value = getenv("AUTH_ENABLE_HISTORY_TABLES");
     if (env_value) {
@@ -913,6 +1033,18 @@ config_t *config_load(const char *config_file) {
     }
 
     config->enable_history_tables = DEFAULT_ENABLE_HISTORY_TABLES;
+
+#ifdef EMAIL_SUPPORT
+    /* Email defaults (all NULL = not configured) */
+    config->email_command = NULL;
+    config->email_from = NULL;
+    config->email_from_name = NULL;
+    config->password_reset_token_ttl_seconds = DEFAULT_PASSWORD_RESET_TOKEN_TTL_SECONDS;
+    config->email_verification_token_ttl_seconds = DEFAULT_EMAIL_VERIFICATION_TOKEN_TTL_SECONDS;
+    config->email_command_env = NULL;
+    config->email_from_env = NULL;
+    config->email_from_name_env = NULL;
+#endif
 
     /* Try to open config file */
     FILE *file = fopen(config_file, "r");
@@ -1068,6 +1200,15 @@ void config_free(config_t *config) {
     free(config->mothership_url);
 
     free(config->encryption_key);
+
+#ifdef EMAIL_SUPPORT
+    free(config->email_command);
+    free(config->email_from);
+    free(config->email_from_name);
+    free(config->email_command_env);
+    free(config->email_from_env);
+    free(config->email_from_name_env);
+#endif
 
     free(config);
 }

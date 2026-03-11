@@ -1,0 +1,8 @@
+#!/bin/bash
+# No-op email script for testing the email delivery pipeline.
+# Logs the JSON payload to a file without sending anything.
+
+LOG_FILE="${EMAIL_LOG_FILE:-/tmp/auth-server-email.log}"
+
+read -r payload
+echo "$(date -Iseconds) $payload" >> "$LOG_FILE"

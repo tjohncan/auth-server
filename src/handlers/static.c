@@ -137,6 +137,7 @@ static void template_replace(StaticFile *sf,
     sf->length = new_len;
 }
 
+#ifndef EMAIL_SUPPORT
 /*
  * Remove everything between `start` and `end` markers (inclusive).
  */
@@ -167,6 +168,7 @@ static void template_remove_section(StaticFile *sf,
     sf->content = buf;
     sf->length = new_len;
 }
+#endif
 
 /* -------------------------------------------------------------------- */
 

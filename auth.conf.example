@@ -80,3 +80,17 @@ retention_tokens_grace_days = 8
 # Mothership (optional parent/brand link on index page)
 # mothership_url = https://{your}.{sponsor}
 # mothership_url_env = AUTH_MOTHERSHIP_URL
+
+# Email Delivery (requires EMAIL_SUPPORT=1 build flag)
+# Command to execute for sending email — receives JSON payload on stdin, exit 0 = success
+# See deployment/email/ for example scripts (AWS SES, SendGrid, SMTP)
+# email_command = ./deployment/email/send-email.sh
+# email_from = noreply@example.com
+# email_from_name = Auth System
+#
+# email_command_env = AUTH_EMAIL_COMMAND
+# email_from_env = AUTH_EMAIL_FROM
+# email_from_name_env = AUTH_EMAIL_FROM_NAME
+#
+# password_reset_token_ttl_seconds = 3600
+# email_verification_token_ttl_seconds = 86400

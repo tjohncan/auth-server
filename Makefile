@@ -2,6 +2,10 @@
 # Override with: make DB_BACKEND=postgresql
 DB_BACKEND ?= sqlite
 
+# Email support (0 or 1)
+# Override with: make EMAIL_SUPPORT=1
+EMAIL_SUPPORT ?= 0
+
 # Compiler and flags
 CC = gcc
 CFLAGS = -Wall -Wextra -std=c11 -O2 -Iinclude
@@ -22,6 +26,11 @@ else
     $(error Invalid DB_BACKEND: $(DB_BACKEND). Must be 'sqlite' or 'postgresql')
 endif
 
+# Configure email support
+ifeq ($(EMAIL_SUPPORT),1)
+    CFLAGS += -DEMAIL_SUPPORT
+endif
+
 # Security hardening flags (enabled by default)
 # - fstack-protector-strong: Stack buffer overflow protection
 # - D_FORTIFY_SOURCE=2: Buffer overflow detection in libc (requires -O1+)
@@ -37,6 +46,9 @@ RELEASE_FLAGS = -O2 -DNDEBUG
 # Source files (organized by subdirectory)
 SERVER_SRCS = src/server/event_loop.c src/server/http.c src/server/router.c
 UTIL_SRCS = src/util/log.c src/util/str.c src/util/config.c src/util/data.c src/util/validation.c src/util/json.c
+ifeq ($(EMAIL_SUPPORT),1)
+    UTIL_SRCS += src/util/email.c
+endif
 HANDLER_SRCS = src/handlers/common.c src/handlers/health.c src/handlers/admin.c src/handlers/admin_http.c \
                src/handlers/admin_org_http.c src/handlers/session.c src/handlers/session_http.c \
                src/handlers/oauth.c src/handlers/oauth_http.c src/handlers/static.c \
@@ -75,7 +87,7 @@ release: clean $(TARGET)
 
 # Clean build artifacts
 clean:
-	rm -f src/*.o src/**/*.o src/**/**/*.o vendor/**/*.o $(TARGET) test-str test-http test-router test-db test-crypto
+	rm -f src/*.o src/**/*.o src/**/**/*.o vendor/**/*.o $(TARGET) test-str test-http test-router test-db test-crypto test-email
 	@echo "Cleaned build artifacts"
 
 # Test programs
@@ -99,6 +111,14 @@ test-crypto:
 	$(CC) $(CFLAGS) $(SECURITY_FLAGS) test/test_crypto.c $(CRYPTO_SRCS) $(UTIL_SRCS) $(DB_SRCS) $(DB_VENDOR_SRCS) -o test-crypto $(LDFLAGS) $(SECURITY_LDFLAGS)
 	@echo "Crypto test built! Run with: ./test-crypto"
 
+test-email:
+ifeq ($(EMAIL_SUPPORT),1)
+	$(CC) $(CFLAGS) $(SECURITY_FLAGS) test/test_email.c $(UTIL_SRCS) -o test-email $(LDFLAGS) $(SECURITY_LDFLAGS)
+	@echo "Email test built! Run with: ./test-email <recipient_email> [config_file]"
+else
+	@echo "Email support not enabled. Build with: make EMAIL_SUPPORT=1 test-email"
+endif
+
 test: test-str test-http test-router test-db test-crypto
 	@echo "All tests built! Running..."
 	./test-str && ./test-http && ./test-router && ./test-db && ./test-crypto
@@ -114,7 +134,8 @@ help:
 	@echo "  make test-router    - Build router test"
 	@echo "  make test-db        - Build database integration test"
 	@echo "  make test-crypto    - Build crypto test (random generation, password hashing, hmac, jwt)"
-	@echo "  make test           - Build and run all tests"
+	@echo "  make test-email     - Build email delivery test (requires EMAIL_SUPPORT=1)"
+	@echo "  make test           - Build and run all tests (excludes test-email)"
 	@echo "  make clean          - Remove build artifacts"
 	@echo "  make help           - Show this help"
 
