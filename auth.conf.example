@@ -87,7 +87,7 @@ retention_tokens_grace_days = 8
 # email_command = ./deployment/email/send-email.sh
 # (ensure the script has execute permission: chmod +x)
 # email_from = noreply@example.com
-# email_from_name = Auth System
+# email_from_name = Auth Server
 #
 # email_command_env = AUTH_EMAIL_COMMAND
 # email_from_env = AUTH_EMAIL_FROM

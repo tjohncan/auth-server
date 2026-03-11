@@ -9,10 +9,14 @@ extract() { local k="\"$1\":\""; local t="${payload#*$k}"; echo "${t%%\"*}"; }
 
 TO=$(extract to)
 FROM=$(extract from)
+FROM_NAME=$(extract from_name)
 SUBJECT=$(extract subject)
 BODY_HTML=$(extract body_html)
 
+SENDER="$FROM"
+[ -n "$FROM_NAME" ] && SENDER="$FROM_NAME <$FROM>"
+
 aws ses send-email \
-  --from "$FROM" \
+  --from "$SENDER" \
   --destination "ToAddresses=$TO" \
   --message "Subject={Data=$SUBJECT},Body={Html={Data=$BODY_HTML,Charset=UTF-8}}"
