@@ -337,6 +337,9 @@ int main(void) {
     router_add(router, HTTP_GET, "/api/user/management-setups", management_setups_handler);
     router_add(router, HTTP_GET, "/api/user/profile", profile_handler);
     router_add(router, HTTP_GET, "/api/user/emails", emails_handler);
+    router_add(router, HTTP_POST, "/api/user/emails", add_email_handler);
+    router_add(router, HTTP_DELETE, "/api/user/emails", delete_email_handler);
+    router_add(router, HTTP_POST, "/api/user/emails/set-primary", set_primary_email_handler);
     router_add(router, HTTP_POST, "/api/user/password", change_password_handler);
     router_add(router, HTTP_POST, "/api/user/username", change_username_handler);
     router_add(router, HTTP_POST, "/logout", logout_handler);

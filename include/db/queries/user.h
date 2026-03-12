@@ -230,6 +230,36 @@ int user_get_emails(db_handle_t *db, long long user_account_pin,
                     user_email_t **out_emails, int *out_count, int *out_total);
 
 /*
+ * Add email to user account
+ *
+ * Inserts a new unverified, non-primary email.
+ * Caller should check user_email_exists() first.
+ *
+ * Returns: 0 on success, -1 on error
+ */
+int user_add_email(db_handle_t *db, long long user_account_pin,
+                   const char *email);
+
+/*
+ * Delete email from user account (idempotent)
+ *
+ * Returns: 0 on success (including no-op), -1 on error
+ */
+int user_delete_email(db_handle_t *db, long long user_account_pin,
+                      const char *email);
+
+/*
+ * Set an email as primary for user account
+ *
+ * Clears current primary (if any) and sets the specified email
+ * in a single atomic UPDATE.
+ *
+ * Returns: 0 on success, 1 if email not found, -1 on error
+ */
+int user_set_primary_email(db_handle_t *db, long long user_account_pin,
+                           const char *email);
+
+/*
  * Change user password
  *
  * Verifies current password and updates to new password.

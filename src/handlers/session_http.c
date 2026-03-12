@@ -26,6 +26,42 @@
 #define SESSION_COOKIE_NAME "session"
 
 /* ============================================================================
+ * Auth Helper
+ * ========================================================================== */
+
+/*
+ * require_authenticated_session - Validate session cookie and MFA completion
+ *
+ * Returns NULL on success (session populated), or error response on failure.
+ */
+static HttpResponse *require_authenticated_session(const HttpRequest *req,
+                                                    db_handle_t *db,
+                                                    oauth_session_info_t *out_session) {
+    const char *cookie_header = http_request_get_header(req, "Cookie");
+    char *session_token = NULL;
+    if (cookie_header) {
+        session_token = http_cookie_get_value(cookie_header, SESSION_COOKIE_NAME);
+    }
+
+    if (!session_token) {
+        return response_json_error(401, "Authentication required");
+    }
+
+    if (oauth_session_get_by_token(db, session_token, out_session) != 0) {
+        free(session_token);
+        return response_json_error(401, "Invalid or expired session");
+    }
+
+    free(session_token);
+
+    if (out_session->user_requires_mfa && !out_session->mfa_completed) {
+        return response_json_error(403, "MFA verification required");
+    }
+
+    return NULL;
+}
+
+/* ============================================================================
  * Login Handler
  * ========================================================================== */
 
@@ -279,35 +315,15 @@ HttpResponse *management_setups_handler(const HttpRequest *req, const RouteParam
 HttpResponse *profile_handler(const HttpRequest *req, const RouteParams *params) {
     (void)params;
 
-    /* Get database connection */
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
         log_error("Failed to get database connection");
         return response_json_error(500, "Internal server error");
     }
 
-    /* Parse session cookie */
-    const char *cookie_header = http_request_get_header(req, "Cookie");
-    char *session_token = NULL;
-    if (cookie_header) {
-        session_token = http_cookie_get_value(cookie_header, "session");
-    }
-
-    if (!session_token) {
-        return response_json_error(401, "Authentication required");
-    }
-
-    /* Get session info */
     oauth_session_info_t session;
-    if (oauth_session_get_by_token(db, session_token, &session) != 0) {
-        free(session_token);
-        return response_json_error(401, "Invalid or expired session");
-    }
-    free(session_token);
-
-    if (session.user_requires_mfa && !session.mfa_completed) {
-        return response_json_error(403, "MFA verification required");
-    }
+    HttpResponse *auth_err = require_authenticated_session(req, db, &session);
+    if (auth_err) return auth_err;
 
     /* Get user profile */
     user_profile_t profile;
@@ -339,35 +355,15 @@ HttpResponse *profile_handler(const HttpRequest *req, const RouteParams *params)
 HttpResponse *emails_handler(const HttpRequest *req, const RouteParams *params) {
     (void)params;
 
-    /* Get database connection */
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
         log_error("Failed to get database connection");
         return response_json_error(500, "Internal server error");
     }
 
-    /* Parse session cookie */
-    const char *cookie_header = http_request_get_header(req, "Cookie");
-    char *session_token = NULL;
-    if (cookie_header) {
-        session_token = http_cookie_get_value(cookie_header, "session");
-    }
-
-    if (!session_token) {
-        return response_json_error(401, "Authentication required");
-    }
-
-    /* Get session info */
     oauth_session_info_t session;
-    if (oauth_session_get_by_token(db, session_token, &session) != 0) {
-        free(session_token);
-        return response_json_error(401, "Invalid or expired session");
-    }
-    free(session_token);
-
-    if (session.user_requires_mfa && !session.mfa_completed) {
-        return response_json_error(403, "MFA verification required");
-    }
+    HttpResponse *auth_err = require_authenticated_session(req, db, &session);
+    if (auth_err) return auth_err;
 
     int limit = parse_query_int(req->query_string, "limit", 20, 1, 100);
     int offset = parse_query_int(req->query_string, "offset", 0, 0, 9999);
@@ -411,35 +407,15 @@ HttpResponse *change_password_handler(const HttpRequest *req, const RouteParams 
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
-    /* Get database connection */
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
         log_error("Failed to get database connection");
         return response_json_error(500, "Internal server error");
     }
 
-    /* Parse session cookie */
-    const char *cookie_header = http_request_get_header(req, "Cookie");
-    char *session_token = NULL;
-    if (cookie_header) {
-        session_token = http_cookie_get_value(cookie_header, "session");
-    }
-
-    if (!session_token) {
-        return response_json_error(401, "Authentication required");
-    }
-
-    /* Get session info */
     oauth_session_info_t session;
-    if (oauth_session_get_by_token(db, session_token, &session) != 0) {
-        free(session_token);
-        return response_json_error(401, "Invalid or expired session");
-    }
-    free(session_token);
-
-    if (session.user_requires_mfa && !session.mfa_completed) {
-        return response_json_error(403, "MFA verification required");
-    }
+    HttpResponse *auth_err = require_authenticated_session(req, db, &session);
+    if (auth_err) return auth_err;
 
     /* Parse JSON body */
     if (!req->body) {
@@ -489,35 +465,15 @@ HttpResponse *change_username_handler(const HttpRequest *req, const RouteParams 
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
-    /* Get database connection */
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
         log_error("Failed to get database connection");
         return response_json_error(500, "Internal server error");
     }
 
-    /* Parse session cookie */
-    const char *cookie_header = http_request_get_header(req, "Cookie");
-    char *session_token = NULL;
-    if (cookie_header) {
-        session_token = http_cookie_get_value(cookie_header, "session");
-    }
-
-    if (!session_token) {
-        return response_json_error(401, "Authentication required");
-    }
-
-    /* Get session info */
     oauth_session_info_t session;
-    if (oauth_session_get_by_token(db, session_token, &session) != 0) {
-        free(session_token);
-        return response_json_error(401, "Invalid or expired session");
-    }
-    free(session_token);
-
-    if (session.user_requires_mfa && !session.mfa_completed) {
-        return response_json_error(403, "MFA verification required");
-    }
+    HttpResponse *auth_err = require_authenticated_session(req, db, &session);
+    if (auth_err) return auth_err;
 
     /* Parse JSON body */
     if (!req->body) {
@@ -548,6 +504,141 @@ HttpResponse *change_username_handler(const HttpRequest *req, const RouteParams 
     } else {
         return response_json_error(500, "Failed to change username");
     }
+}
+
+/*
+ * POST /api/user/emails
+ *
+ * Adds a new email address to the authenticated user's account.
+ * The email is added as unverified and non-primary.
+ */
+HttpResponse *add_email_handler(const HttpRequest *req, const RouteParams *params) {
+    (void)params;
+    HttpResponse *ct_err = require_content_type(req, "application/json");
+    if (ct_err) return ct_err;
+
+    db_handle_t *db = db_pool_get_connection();
+    if (!db) {
+        log_error("Failed to get database connection");
+        return response_json_error(500, "Internal server error");
+    }
+
+    oauth_session_info_t session;
+    HttpResponse *auth_err = require_authenticated_session(req, db, &session);
+    if (auth_err) return auth_err;
+
+    if (!req->body) {
+        return response_json_error(400, "Request body required");
+    }
+
+    char *email = json_get_string(req->body, "email");
+    if (!email) {
+        return response_json_error(400, "email required");
+    }
+
+    char validation_error[256];
+    if (validate_email(email, validation_error, sizeof(validation_error)) != 0) {
+        free(email);
+        return response_json_error(400, validation_error);
+    }
+
+    int exists = user_email_exists(db, email, session.user_account_pin);
+    if (exists < 0) {
+        free(email);
+        return response_json_error(500, "Failed to check email");
+    } else if (exists == 1) {
+        free(email);
+        return response_json_error(409, "Email already taken");
+    }
+
+    if (user_add_email(db, session.user_account_pin, email) != 0) {
+        free(email);
+        return response_json_error(500, "Failed to add email");
+    }
+
+    free(email);
+    return response_json_ok("{\"message\":\"Email added\"}");
+}
+
+/*
+ * DELETE /api/user/emails
+ *
+ * Removes an email address from the authenticated user's account.
+ * Idempotent: returns success even if the email was already gone.
+ */
+HttpResponse *delete_email_handler(const HttpRequest *req, const RouteParams *params) {
+    (void)params;
+    HttpResponse *ct_err = require_content_type(req, "application/json");
+    if (ct_err) return ct_err;
+
+    db_handle_t *db = db_pool_get_connection();
+    if (!db) {
+        log_error("Failed to get database connection");
+        return response_json_error(500, "Internal server error");
+    }
+
+    oauth_session_info_t session;
+    HttpResponse *auth_err = require_authenticated_session(req, db, &session);
+    if (auth_err) return auth_err;
+
+    if (!req->body) {
+        return response_json_error(400, "Request body required");
+    }
+
+    char *email = json_get_string(req->body, "email");
+    if (!email) {
+        return response_json_error(400, "email required");
+    }
+
+    int result = user_delete_email(db, session.user_account_pin, email);
+    free(email);
+
+    if (result < 0) {
+        return response_json_error(500, "Failed to delete email");
+    }
+
+    return response_json_ok("{\"message\":\"Email deleted\"}");
+}
+
+/*
+ * POST /api/user/emails/set-primary
+ *
+ * Sets an email address as the primary email for the authenticated user.
+ */
+HttpResponse *set_primary_email_handler(const HttpRequest *req, const RouteParams *params) {
+    (void)params;
+    HttpResponse *ct_err = require_content_type(req, "application/json");
+    if (ct_err) return ct_err;
+
+    db_handle_t *db = db_pool_get_connection();
+    if (!db) {
+        log_error("Failed to get database connection");
+        return response_json_error(500, "Internal server error");
+    }
+
+    oauth_session_info_t session;
+    HttpResponse *auth_err = require_authenticated_session(req, db, &session);
+    if (auth_err) return auth_err;
+
+    if (!req->body) {
+        return response_json_error(400, "Request body required");
+    }
+
+    char *email = json_get_string(req->body, "email");
+    if (!email) {
+        return response_json_error(400, "email required");
+    }
+
+    int result = user_set_primary_email(db, session.user_account_pin, email);
+    free(email);
+
+    if (result == 1) {
+        return response_json_error(404, "Email not found");
+    } else if (result < 0) {
+        return response_json_error(500, "Failed to set primary email");
+    }
+
+    return response_json_ok("{\"message\":\"Primary email updated\"}");
 }
 
 HttpResponse *logout_handler(const HttpRequest *req, const RouteParams *params) {

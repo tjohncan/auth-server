@@ -170,6 +170,15 @@ HttpResponse *profile_handler(const HttpRequest *req, const RouteParams *params)
 /* GET /api/user/emails - Get current user's email addresses */
 HttpResponse *emails_handler(const HttpRequest *req, const RouteParams *params);
 
+/* POST /api/user/emails - Add email to current user */
+HttpResponse *add_email_handler(const HttpRequest *req, const RouteParams *params);
+
+/* DELETE /api/user/emails - Remove email from current user */
+HttpResponse *delete_email_handler(const HttpRequest *req, const RouteParams *params);
+
+/* POST /api/user/emails/set-primary - Set primary email */
+HttpResponse *set_primary_email_handler(const HttpRequest *req, const RouteParams *params);
+
 /* POST /api/user/password - Change current user's password */
 HttpResponse *change_password_handler(const HttpRequest *req, const RouteParams *params);
 
