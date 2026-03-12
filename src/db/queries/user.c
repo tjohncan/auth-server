@@ -827,68 +827,110 @@ int user_delete_email(db_handle_t *db, long long user_account_pin,
 
 int user_set_primary_email(db_handle_t *db, long long user_account_pin,
                            const char *email) {
-    if (!db || !email) {
+    if (!db) {
         log_error("Invalid arguments to user_set_primary_email");
         return -1;
     }
 
-    char lower_buf[256];
-    str_to_lower(lower_buf, sizeof(lower_buf), email);
     char email_hash[HMAC_SHA256_HEX_LENGTH];
-    if (hash_field(lower_buf, email_hash, sizeof(email_hash)) != 0) {
-        log_error("Failed to hash email for set primary");
+    int have_email = 0;
+
+    if (email) {
+        char lower_buf[256];
+        str_to_lower(lower_buf, sizeof(lower_buf), email);
+        if (hash_field(lower_buf, email_hash, sizeof(email_hash)) != 0) {
+            log_error("Failed to hash email for set primary");
+            return -1;
+        }
+
+        /* Verify email exists for this user */
+        const char *check_sql =
+            "SELECT 1 FROM " TBL_USER_EMAIL " "
+            "WHERE user_account_pin = " P"1 AND email_hash = " P"2 "
+            "LIMIT 1";
+
+        db_stmt_t *check_stmt = NULL;
+        if (db_prepare(db, &check_stmt, check_sql) != 0) {
+            log_error("Failed to prepare email check statement");
+            return -1;
+        }
+
+        db_bind_int64(check_stmt, 1, user_account_pin);
+        db_bind_text(check_stmt, 2, email_hash, -1);
+
+        int rc = db_step(check_stmt);
+        db_finalize(check_stmt);
+
+        if (rc == DB_DONE) {
+            return 1;  /* Not found */
+        } else if (rc != DB_ROW) {
+            log_error("Error checking email existence for set primary");
+            return -1;
+        }
+
+        have_email = 1;
+    }
+
+    /* Clear old primary, then set new — two statements in a transaction.
+     * A single CASE UPDATE would be elegant but SQLite checks its partial
+     * unique index (user_account_pin WHERE is_primary = 1) per-row, so
+     * the new row can be set TRUE before the old one is cleared.
+     * When email is NULL, only the clear step runs (unset primary). */
+    if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
+        log_error("Failed to begin transaction for set primary");
         return -1;
     }
 
-    /* Verify email exists for this user */
-    const char *check_sql =
-        "SELECT 1 FROM " TBL_USER_EMAIL " "
-        "WHERE user_account_pin = " P"1 AND email_hash = " P"2 "
-        "LIMIT 1";
-
-    db_stmt_t *check_stmt = NULL;
-    if (db_prepare(db, &check_stmt, check_sql) != 0) {
-        log_error("Failed to prepare email check statement");
-        return -1;
-    }
-
-    db_bind_int64(check_stmt, 1, user_account_pin);
-    db_bind_text(check_stmt, 2, email_hash, -1);
-
-    int rc = db_step(check_stmt);
-    db_finalize(check_stmt);
-
-    if (rc == DB_DONE) {
-        return 1;  /* Not found */
-    } else if (rc != DB_ROW) {
-        log_error("Error checking email existence for set primary");
-        return -1;
-    }
-
-    /* Clear old primary and set new primary in one statement */
-    const char *sql =
+    const char *clear_sql =
         "UPDATE " TBL_USER_EMAIL " "
-        "SET is_primary = CASE WHEN email_hash = " P"2 "
-        "THEN " BOOL_TRUE " ELSE " BOOL_FALSE " END, "
-        "updated_at = " NOW " "
-        "WHERE user_account_pin = " P"1 "
-        "AND (email_hash = " P"3 OR is_primary = " BOOL_TRUE ")";
+        "SET is_primary = " BOOL_FALSE ", updated_at = " NOW " "
+        "WHERE user_account_pin = " P"1 AND is_primary = " BOOL_TRUE;
 
-    db_stmt_t *stmt = NULL;
-    if (db_prepare(db, &stmt, sql) != 0) {
-        log_error("Failed to prepare set primary statement");
+    db_stmt_t *clear_stmt = NULL;
+    if (db_prepare(db, &clear_stmt, clear_sql) != 0) {
+        log_error("Failed to prepare clear primary statement");
+        db_execute_trusted(db, "ROLLBACK");
         return -1;
     }
 
-    db_bind_int64(stmt, 1, user_account_pin);
-    db_bind_text(stmt, 2, email_hash, -1);
-    db_bind_text(stmt, 3, email_hash, -1);
-
-    rc = db_step(stmt);
-    db_finalize(stmt);
+    db_bind_int64(clear_stmt, 1, user_account_pin);
+    int rc = db_step(clear_stmt);
+    db_finalize(clear_stmt);
 
     if (rc != DB_DONE) {
-        log_error("Failed to set primary email");
+        log_error("Failed to clear existing primary email");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    if (have_email) {
+        const char *set_sql =
+            "UPDATE " TBL_USER_EMAIL " "
+            "SET is_primary = " BOOL_TRUE ", updated_at = " NOW " "
+            "WHERE user_account_pin = " P"1 AND email_hash = " P"2";
+
+        db_stmt_t *set_stmt = NULL;
+        if (db_prepare(db, &set_stmt, set_sql) != 0) {
+            log_error("Failed to prepare set primary statement");
+            db_execute_trusted(db, "ROLLBACK");
+            return -1;
+        }
+
+        db_bind_int64(set_stmt, 1, user_account_pin);
+        db_bind_text(set_stmt, 2, email_hash, -1);
+        rc = db_step(set_stmt);
+        db_finalize(set_stmt);
+
+        if (rc != DB_DONE) {
+            log_error("Failed to set primary email");
+            db_execute_trusted(db, "ROLLBACK");
+            return -1;
+        }
+    }
+
+    if (db_execute_trusted(db, "COMMIT") != 0) {
+        log_error("Failed to commit set primary transaction");
+        db_execute_trusted(db, "ROLLBACK");
         return -1;
     }
 

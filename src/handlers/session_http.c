@@ -625,12 +625,9 @@ HttpResponse *set_primary_email_handler(const HttpRequest *req, const RouteParam
     }
 
     char *email = json_get_string(req->body, "email");
-    if (!email) {
-        return response_json_error(400, "email required");
-    }
 
     int result = user_set_primary_email(db, session.user_account_pin, email);
-    free(email);
+    free(email);  /* safe if NULL */
 
     if (result == 1) {
         return response_json_error(404, "Email not found");

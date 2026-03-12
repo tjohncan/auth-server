@@ -1291,6 +1291,183 @@ curl "http://localhost:8080/api/user/emails?limit=10&offset=10" \
 
 ---
 
+### POST /api/user/emails
+
+Add an email address to the current user's account.
+
+**Authentication**: Session cookie required (MFA must be completed if enrolled)
+
+**Request Body**:
+```json
+{
+  "email": "alice.work@company.com"
+}
+```
+
+| Field | Type   | Required | Description                    |
+|-------|--------|----------|--------------------------------|
+| email | string | Yes      | Email address to add           |
+
+**Success Response** (200 OK):
+```json
+{
+  "message": "Email added"
+}
+```
+
+**Notes**:
+- New emails are added as non-primary and unverified
+- Rejects if the same user already has this email (verified or not)
+- Rejects if a different user has this email verified
+- Email format is validated server-side
+
+**Error Responses**:
+
+- **400 Bad Request** (missing or invalid email):
+```json
+{
+  "error": "email required"
+}
+```
+```json
+{
+  "error": "Invalid email format"
+}
+```
+
+- **401 Unauthorized** (not authenticated):
+```json
+{
+  "error": "Authentication required"
+}
+```
+
+- **409 Conflict** (email already taken):
+```json
+{
+  "error": "Email already taken"
+}
+```
+
+**Example**:
+```bash
+curl -X POST http://localhost:8080/api/user/emails \
+  -H "Cookie: session=<session_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "alice.work@company.com"}'
+```
+
+---
+
+### DELETE /api/user/emails
+
+Remove an email address from the current user's account.
+
+**Authentication**: Session cookie required (MFA must be completed if enrolled)
+
+**Request Body**:
+```json
+{
+  "email": "alice.work@company.com"
+}
+```
+
+| Field | Type   | Required | Description                    |
+|-------|--------|----------|--------------------------------|
+| email | string | Yes      | Email address to remove        |
+
+**Success Response** (200 OK):
+```json
+{
+  "message": "Email deleted"
+}
+```
+
+**Notes**:
+- Idempotent: returns success even if the email was already gone
+- No restriction on deleting primary emails (caller's responsibility)
+
+**Error Responses**:
+
+- **400 Bad Request** (missing email):
+```json
+{
+  "error": "email required"
+}
+```
+
+- **401 Unauthorized** (not authenticated):
+```json
+{
+  "error": "Authentication required"
+}
+```
+
+**Example**:
+```bash
+curl -X DELETE http://localhost:8080/api/user/emails \
+  -H "Cookie: session=<session_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "alice.work@company.com"}'
+```
+
+---
+
+### POST /api/user/emails/set-primary
+
+Set or clear the primary email for the current user.
+
+**Authentication**: Session cookie required (MFA must be completed if enrolled)
+
+**Request Body**:
+```json
+{
+  "email": "alice.work@company.com"
+}
+```
+
+| Field | Type        | Required | Description                                       |
+|-------|-------------|----------|---------------------------------------------------|
+| email | string/null | No       | Email address to make primary, or null to clear    |
+
+**Success Response** (200 OK):
+```json
+{
+  "message": "Primary email updated"
+}
+```
+
+**Notes**:
+- Atomically clears the previous primary and sets the new one in a transaction
+- Pass `null` (or omit `email`) to clear the primary flag without setting a new one
+- The email must belong to the current user
+
+**Error Responses**:
+
+- **401 Unauthorized** (not authenticated):
+```json
+{
+  "error": "Authentication required"
+}
+```
+
+- **404 Not Found** (email not on this account):
+```json
+{
+  "error": "Email not found"
+}
+```
+
+**Example**:
+```bash
+curl -X POST http://localhost:8080/api/user/emails/set-primary \
+  -H "Cookie: session=<session_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "alice.work@company.com"}'
+```
+
+---
+
 ### POST /api/user/password
 
 Change current user's password.

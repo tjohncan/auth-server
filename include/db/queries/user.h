@@ -252,7 +252,8 @@ int user_delete_email(db_handle_t *db, long long user_account_pin,
  * Set an email as primary for user account
  *
  * Clears current primary (if any) and sets the specified email
- * in a single atomic UPDATE.
+ * in a transaction (two UPDATEs). Pass email = NULL to just
+ * clear the primary flag without setting a new one.
  *
  * Returns: 0 on success, 1 if email not found, -1 on error
  */
