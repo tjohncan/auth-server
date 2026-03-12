@@ -272,8 +272,7 @@ create table security.user_account (
 , salt text
 , hash_iterations integer
 , secret_hash text
-, force_password_reset boolean not null default false
-, enable_passwordless_login boolean not null default false
+, allow_passwordless_login boolean not null default false
 , has_mfa boolean not null default false
 , require_mfa boolean not null default false
 
@@ -309,8 +308,12 @@ create table security.user_email (
 , constraint fk_user_email_user_account foreign key (user_account_pin) references security.user_account(pin)
 );
 
-create unique index uix_user_email_email_hash
-  on security.user_email(email_hash);
+create unique index uix_user_email_user_email
+  on security.user_email(user_account_pin, email_hash);
+
+create unique index uix_user_email_verified
+  on security.user_email(email_hash)
+  where is_verified = true;
 
 create unique index uix_user_email_user_primary
   on security.user_email(user_account_pin)

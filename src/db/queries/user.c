@@ -55,7 +55,7 @@ int user_username_exists(db_handle_t *db, const char *username) {
     }
 }
 
-int user_email_exists(db_handle_t *db, const char *email) {
+int user_email_exists(db_handle_t *db, const char *email, long long user_account_pin) {
     if (!db || !email) {
         log_error("Invalid arguments to user_email_exists");
         return -1;
@@ -72,7 +72,10 @@ int user_email_exists(db_handle_t *db, const char *email) {
 
     const char *sql =
         "SELECT 1 FROM " TBL_USER_EMAIL " "
-        "WHERE email_hash = " P"1 "
+        "WHERE user_account_pin = " P"1 AND email_hash = " P"2 "
+        "UNION ALL "
+        "SELECT 1 FROM " TBL_USER_EMAIL " "
+        "WHERE email_hash = " P"3 AND is_verified = " BOOL_TRUE " "
         "LIMIT 1";
 
     db_stmt_t *stmt = NULL;
@@ -81,15 +84,17 @@ int user_email_exists(db_handle_t *db, const char *email) {
         return -1;
     }
 
-    db_bind_text(stmt, 1, hash_hex, -1);
+    db_bind_int64(stmt, 1, user_account_pin);
+    db_bind_text(stmt, 2, hash_hex, -1);
+    db_bind_text(stmt, 3, hash_hex, -1);
 
     int rc = db_step(stmt);
     db_finalize(stmt);
 
     if (rc == DB_ROW) {
-        return 1;  /* Exists */
+        return 1;  /* Taken */
     } else if (rc == DB_DONE) {
-        return 0;  /* Does not exist */
+        return 0;  /* Available */
     } else {
         log_error("Error checking email existence");
         return -1;

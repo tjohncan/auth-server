@@ -893,7 +893,7 @@ int admin_create_user(db_handle_t *db,
 
     /* Check if email already exists */
     if (email) {
-        int exists = user_email_exists(db, email);
+        int exists = user_email_exists(db, email, -1);
         if (exists < 0) {
             return -1;
         } else if (exists == 1) {

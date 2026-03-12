@@ -18,11 +18,17 @@
 int user_username_exists(db_handle_t *db, const char *username);
 
 /*
- * Check if email exists (case-insensitive)
+ * Check if email is taken (case-insensitive)
  *
- * Returns: 1 if exists, 0 if not exists, -1 on error
+ * Returns 1 (taken) if:
+ *   - The same user already has this email (verified or not), OR
+ *   - A different user has this email verified
+ *
+ * Pass user_account_pin = -1 for new user creation (skips same-user check).
+ *
+ * Returns: 1 if taken, 0 if available, -1 on error
  */
-int user_email_exists(db_handle_t *db, const char *email);
+int user_email_exists(db_handle_t *db, const char *email, long long user_account_pin);
 
 /*
  * Check if user exists by ID

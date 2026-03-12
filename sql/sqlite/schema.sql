@@ -282,15 +282,13 @@ create table user_account (
 , salt text
 , hash_iterations integer
 , secret_hash text
-, force_password_reset integer not null default 0
-, enable_passwordless_login integer not null default 0
+, allow_passwordless_login integer not null default 0
 , has_mfa integer not null default 0
 , require_mfa integer not null default 0
 
 , constraint uix_user_account_id unique(id)
 , constraint ck_user_account_is_active check(is_active in (0, 1))
-, constraint ck_user_account_force_password_reset check(force_password_reset in (0, 1))
-, constraint ck_user_account_enable_passwordless check(enable_passwordless_login in (0, 1))
+, constraint ck_user_account_allow_passwordless check(allow_passwordless_login in (0, 1))
 , constraint ck_user_account_mfa_flags check(
     (has_mfa = 0 and require_mfa = 0) or
     (has_mfa = 1 and require_mfa in (0, 1))
@@ -317,11 +315,15 @@ create table user_email (
 , is_verified integer not null default 0
 , verified_at text
 
-, constraint uix_user_email_email_hash unique(email_hash)
+, constraint uix_user_email_user_email unique(user_account_pin, email_hash)
 , constraint ck_user_email_is_primary check(is_primary in (0, 1))
 , constraint ck_user_email_is_verified check(is_verified in (0, 1))
 , constraint fk_user_email_user_account foreign key(user_account_pin) references user_account(pin)
 );
+
+create unique index uix_user_email_verified
+  on user_email(email_hash)
+  where is_verified = 1;
 
 create unique index uix_user_email_user_primary
   on user_email(user_account_pin)
