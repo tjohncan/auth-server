@@ -805,6 +805,39 @@ int user_delete_email(db_handle_t *db, long long user_account_pin,
         return -1;
     }
 
+    if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
+        log_error("Failed to begin transaction for email delete");
+        return -1;
+    }
+
+    /* Delete verification tokens first (FK child) */
+    const char *tokens_sql =
+        "DELETE FROM " TBL_EMAIL_VERIFICATION_TOKEN " "
+        "WHERE user_email_pin IN ("
+            "SELECT pin FROM " TBL_USER_EMAIL " "
+            "WHERE user_account_pin = " P"1 AND email_hash = " P"2"
+        ")";
+
+    db_stmt_t *t_stmt = NULL;
+    if (db_prepare(db, &t_stmt, tokens_sql) != 0) {
+        log_error("Failed to prepare verification token cleanup for email delete");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    db_bind_int64(t_stmt, 1, user_account_pin);
+    db_bind_text(t_stmt, 2, email_hash, -1);
+
+    int rc = db_step(t_stmt);
+    db_finalize(t_stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Failed to delete verification tokens for email");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    /* Delete the email row */
     const char *sql =
         "DELETE FROM " TBL_USER_EMAIL " "
         "WHERE user_account_pin = " P"1 AND email_hash = " P"2";
@@ -812,17 +845,25 @@ int user_delete_email(db_handle_t *db, long long user_account_pin,
     db_stmt_t *stmt = NULL;
     if (db_prepare(db, &stmt, sql) != 0) {
         log_error("Failed to prepare user_delete_email statement");
+        db_execute_trusted(db, "ROLLBACK");
         return -1;
     }
 
     db_bind_int64(stmt, 1, user_account_pin);
     db_bind_text(stmt, 2, email_hash, -1);
 
-    int rc = db_step(stmt);
+    rc = db_step(stmt);
     db_finalize(stmt);
 
     if (rc != DB_DONE) {
         log_error("Failed to delete user_email");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    if (db_execute_trusted(db, "COMMIT") != 0) {
+        log_error("Failed to commit email delete transaction");
+        db_execute_trusted(db, "ROLLBACK");
         return -1;
     }
 
