@@ -663,9 +663,19 @@ HttpResponse *admin_list_organization_keys_handler(const HttpRequest *req, const
     }
 
     /* Get organization_code_name from query string (optional for org key auth) */
+    char *org_code_name_enc = NULL;
+    char org_code_name_param_buf[128];
     char *org_code_name_param = NULL;
     if (req->query_string) {
-        org_code_name_param = http_query_get_param(req->query_string, "organization_code_name");
+        org_code_name_enc = http_query_get_param(req->query_string, "organization_code_name");
+        if (org_code_name_enc) {
+            if (str_url_decode(org_code_name_param_buf, sizeof(org_code_name_param_buf), org_code_name_enc) < 0) {
+                free(org_code_name_enc);
+                return response_json_error(400, "Invalid URL encoding in organization_code_name");
+            }
+            free(org_code_name_enc);
+            org_code_name_param = org_code_name_param_buf;
+        }
     }
 
     /* Dual authentication: localhost OR org key */
@@ -696,7 +706,6 @@ HttpResponse *admin_list_organization_keys_handler(const HttpRequest *req, const
     }
 
     if (!is_localhost_access && !is_org_key_access) {
-        free(org_code_name_param);
         return response_json_error(403, "Forbidden - requires localhost or org key authentication");
     }
 
@@ -725,11 +734,8 @@ HttpResponse *admin_list_organization_keys_handler(const HttpRequest *req, const
     int total = 0;
 
     if (admin_list_organization_keys(db, org_code_name, limit, offset, is_active_ptr, &keys, &count, &total) != 0) {
-        free(org_code_name_param);
         return response_json_error(500, "Failed to list organization keys");
     }
-
-    free(org_code_name_param);
 
     /* Build JSON response */
     JsonBuf *jb = jsonbuf_new(4096 + count * 512);
