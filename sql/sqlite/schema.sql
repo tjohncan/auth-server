@@ -574,12 +574,16 @@ create table passwordless_login_token (
 , is_used integer not null default 0
 , used_at text
 , source_ip text
+, return_to text
 
 , constraint pk_passwordless_login_token primary key(id)
 , constraint uix_passwordless_login_token_token unique(token)
 , constraint ck_passwordless_login_token_is_used check(is_used in (0, 1))
 , constraint fk_passwordless_login_token_user_account foreign key(user_account_pin) references user_account(pin)
 );
+
+create index idx_passwordless_login_token_rate_limit
+  on passwordless_login_token(user_account_pin, issued_at);
 
 create table email_verification_token (
   id blob not null
@@ -603,6 +607,9 @@ create table email_verification_token (
 , constraint fk_email_verification_token_user_email foreign key(user_email_pin) references user_email(pin)
 );
 
+create index idx_email_verification_token_rate_limit
+  on email_verification_token(user_email_pin, issued_at);
+
 create table password_reset_token (
   id blob not null
 , created_at text not null default (datetime('now'))
@@ -624,6 +631,9 @@ create table password_reset_token (
 , constraint ck_password_reset_token_is_revoked check(is_revoked in (0, 1))
 , constraint fk_password_reset_token_user_account foreign key(user_account_pin) references user_account(pin)
 );
+
+create index idx_password_reset_token_rate_limit
+  on password_reset_token(user_account_pin, issued_at);
 
 -- ============================================================================
 -- REFERENCE/LOOKUP - Lookup tables for valid values
@@ -682,6 +692,9 @@ create table user_mfa_usage (
 , constraint ck_user_mfa_usage_success check(success in (0, 1))
 );
 
+create index idx_user_mfa_usage_rate_limit
+  on user_mfa_usage(user_mfa_pin, success, submitted_at);
+
 -- ============================================================================
 -- INDEXES - Database cleaner performance
 -- ============================================================================
@@ -707,14 +720,8 @@ create index idx_passwordless_login_token_expected_expiry
 create index idx_email_verification_token_expected_expiry
   on email_verification_token(expected_expiry);
 
-create index idx_email_verification_token_rate_limit
-  on email_verification_token(user_email_pin, issued_at);
-
 create index idx_password_reset_token_expected_expiry
   on password_reset_token(expected_expiry);
-
-create index idx_password_reset_token_rate_limit
-  on password_reset_token(user_account_pin, issued_at);
 
 -- Usage log cleanup indexes
 create index idx_client_key_usage_authenticated_at
@@ -728,9 +735,6 @@ create index idx_organization_key_usage_authenticated_at
 
 create index idx_user_mfa_usage_submitted_at
   on user_mfa_usage(submitted_at);
-
-create index idx_user_mfa_usage_rate_limit
-  on user_mfa_usage(user_mfa_pin, success, submitted_at);
 
 -- Composite indexes for purging with business logic filters
 -- (Leading with equality condition for better selectivity when deleting old rows)
