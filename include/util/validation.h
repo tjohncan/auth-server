@@ -95,4 +95,13 @@ int validate_note(const char *note, char *error_msg, size_t error_len);
 int validate_url_field(const char *url, const char *field_name,
                        char *error_msg, size_t error_len);
 
+/*
+ * validate_redirect_uri - Validate OAuth2 redirect URI
+ *
+ * Rules:
+ *   - All validate_url_field rules apply
+ *   - Scheme must be http:// or https://
+ */
+int validate_redirect_uri(const char *uri, char *error_msg, size_t error_len);
+
 #endif /* VALIDATION_H */

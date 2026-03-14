@@ -215,3 +215,20 @@ int validate_url_field(const char *url, const char *field_name,
 
     return 0;
 }
+
+int validate_redirect_uri(const char *uri, char *error_msg, size_t error_len) {
+    if (validate_url_field(uri, "Redirect URI", error_msg, error_len) != 0) {
+        return -1;
+    }
+
+    if (strncasecmp(uri, "http://", 7) != 0 &&
+        strncasecmp(uri, "https://", 8) != 0) {
+        if (error_msg && error_len > 0) {
+            snprintf(error_msg, error_len,
+                     "Redirect URI must use http or https scheme");
+        }
+        return -1;
+    }
+
+    return 0;
+}

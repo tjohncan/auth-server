@@ -1081,7 +1081,7 @@ HttpResponse *admin_create_client_redirect_uri_handler(const HttpRequest *req, c
     /* Validate input formats */
     char validation_error[256];
 
-    if (validate_url_field(redirect_uri, "Redirect URI", validation_error, sizeof(validation_error)) != 0) {
+    if (validate_redirect_uri(redirect_uri, validation_error, sizeof(validation_error)) != 0) {
         free(client_id_str); free(redirect_uri); free(note);
         return response_json_error(400, validation_error);
     }
