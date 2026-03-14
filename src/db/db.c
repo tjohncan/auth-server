@@ -653,6 +653,38 @@ static int pg_disconnect(db_handle_t *db) {
 }
 
 /*
+ * Reconnect a dead PostgreSQL connection in place.
+ * Uses PQreset (libpq re-establishes using original connect params).
+ * Returns 0 on success, -1 if reconnect failed.
+ */
+static int pg_reconnect(db_handle_t *db) {
+    PGconn *conn = (PGconn *)db->connection;
+
+    log_warn("PostgreSQL connection lost, attempting reconnect...");
+    PQreset(conn);
+
+    if (PQstatus(conn) != CONNECTION_OK) {
+        snprintf(db->error_msg, sizeof(db->error_msg),
+                 "PostgreSQL reconnect failed: %s", PQerrorMessage(conn));
+        log_error("%s", db->error_msg);
+        return -1;
+    }
+
+    PGresult *tz_result = PQexec(conn, "SET timezone = 'UTC'");
+    if (PQresultStatus(tz_result) != PGRES_COMMAND_OK) {
+        log_error("Failed to set timezone after reconnect: %s",
+                  PQresultErrorMessage(tz_result));
+        PQclear(tz_result);
+        return -1;
+    }
+    PQclear(tz_result);
+
+    log_info("PostgreSQL reconnected to %s:%s/%s",
+             PQhost(conn), PQport(conn), PQdb(conn));
+    return 0;
+}
+
+/*
  * Execute SQL directly (no parameters, no result set)
  */
 static int pg_execute(db_handle_t *db, const char *sql) {
@@ -665,6 +697,8 @@ static int pg_execute(db_handle_t *db, const char *sql) {
                  "PostgreSQL execute failed: %s", PQresultErrorMessage(result));
         log_error("%s", db->error_msg);
         PQclear(result);
+        if (PQstatus(conn) == CONNECTION_BAD)
+            pg_reconnect(db);
         return -1;
     }
 
@@ -685,6 +719,8 @@ static int pg_query(db_handle_t *db, const char *sql, db_result_t **out) {
                  "PostgreSQL query failed: %s", PQresultErrorMessage(pg_result));
         log_error("%s", db->error_msg);
         PQclear(pg_result);
+        if (PQstatus(conn) == CONNECTION_BAD)
+            pg_reconnect(db);
         return -1;
     }
 
@@ -1064,6 +1100,8 @@ static int pg_step(db_stmt_t *stmt) {
             log_error("%s", stmt->error_msg);
             PQclear(stmt->pg_result);
             stmt->pg_result = NULL;
+            if (PQstatus(conn) == CONNECTION_BAD)
+                pg_reconnect(stmt->db);
             return -1;
         }
 
