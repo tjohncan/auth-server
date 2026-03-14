@@ -8,6 +8,7 @@
 #include <strings.h>  /* strncasecmp */
 #include <sys/stat.h>
 #include <dirent.h>
+#include <stdint.h>
 
 /* --------------------------------------------------------------------
  * In-memory static file cache
@@ -23,12 +24,15 @@ typedef struct {
     char   *content;        /* heap-allocated file content   */
     size_t  length;         /* content length in bytes       */
     const char *mime_type;  /* static string, never freed    */
+    int     hash_next;      /* chaining index, -1 = end      */
 } StaticFile;
 
 #define MAX_STATIC_FILES 128
+#define STATIC_HASH_SIZE 64
 
 static StaticFile static_files[MAX_STATIC_FILES];
 static int static_file_count = 0;
+static int static_hash_buckets[STATIC_HASH_SIZE];
 
 /* -------------------------------------------------------------------- */
 
@@ -65,10 +69,21 @@ static const char *get_mime_type(const char *path) {
 
 /* -------------------------------------------------------------------- */
 
+static uint32_t static_hash_path(const char *path) {
+    uint32_t h = 2166136261u;
+    while (*path) {
+        h ^= (uint8_t)*path++;
+        h *= 16777619;
+    }
+    return h % STATIC_HASH_SIZE;
+}
+
 static StaticFile *find_static_file(const char *path) {
-    for (int i = 0; i < static_file_count; i++) {
-        if (strcmp(static_files[i].path, path) == 0)
-            return &static_files[i];
+    int idx = static_hash_buckets[static_hash_path(path)];
+    while (idx >= 0) {
+        if (strcmp(static_files[idx].path, path) == 0)
+            return &static_files[idx];
+        idx = static_files[idx].hash_next;
     }
     return NULL;
 }
@@ -243,11 +258,16 @@ static int cache_file(const char *fs_path, const char *url_path) {
     }
     content[bytes_read] = '\0';
 
-    StaticFile *sf = &static_files[static_file_count++];
+    int idx = static_file_count++;
+    StaticFile *sf = &static_files[idx];
     str_copy(sf->path, sizeof(sf->path), url_path);
     sf->content = content;
     sf->length = bytes_read;
     sf->mime_type = get_mime_type(fs_path);
+
+    uint32_t bucket = static_hash_path(url_path);
+    sf->hash_next = static_hash_buckets[bucket];
+    static_hash_buckets[bucket] = idx;
 
     return 0;
 }
@@ -391,6 +411,8 @@ void register_static_files(Router *router, const config_t *config) {
         return;
     }
 
+    memset(static_hash_buckets, -1, sizeof(static_hash_buckets));
+
     log_info("Scanning ./static/ for files to register...");
     int count = scan_and_register(router, "./static", "");
 
@@ -412,4 +434,5 @@ void static_files_cleanup(void) {
     for (int i = 0; i < static_file_count; i++)
         free(static_files[i].content);
     static_file_count = 0;
+    memset(static_hash_buckets, -1, sizeof(static_hash_buckets));
 }
