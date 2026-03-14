@@ -448,10 +448,11 @@ typedef struct {
     EVP_PKEY *pkey;
 } es256_key_cache_t;
 
-static _Thread_local es256_key_cache_t es256_cache[2];  /* [0]=current, [1]=prior */
+static _Thread_local es256_key_cache_t es256_pub_cache[2];   /* [0]=current, [1]=prior */
+static _Thread_local es256_key_cache_t es256_priv_cache;     /* signing key (single slot) */
 
 static EVP_PKEY *get_cached_public_key(const char *pem_string, int slot) {
-    es256_key_cache_t *entry = &es256_cache[slot];
+    es256_key_cache_t *entry = &es256_pub_cache[slot];
 
     if (entry->pkey && strcmp(entry->pem, pem_string) == 0)
         return entry->pkey;
@@ -468,12 +469,33 @@ static EVP_PKEY *get_cached_public_key(const char *pem_string, int slot) {
     return pkey;
 }
 
+static EVP_PKEY *get_cached_private_key(const char *pem_string) {
+    es256_key_cache_t *entry = &es256_priv_cache;
+
+    if (entry->pkey && strcmp(entry->pem, pem_string) == 0)
+        return entry->pkey;
+
+    EVP_PKEY *pkey = load_private_key_pem(pem_string);
+    if (!pkey) return NULL;
+
+    if (entry->pkey)
+        EVP_PKEY_free(entry->pkey);
+
+    str_copy(entry->pem, sizeof(entry->pem), pem_string);
+    entry->pkey = pkey;
+    return pkey;
+}
+
 void crypto_jwt_thread_cleanup(void) {
     for (int i = 0; i < 2; i++) {
-        if (es256_cache[i].pkey) {
-            EVP_PKEY_free(es256_cache[i].pkey);
-            es256_cache[i].pkey = NULL;
+        if (es256_pub_cache[i].pkey) {
+            EVP_PKEY_free(es256_pub_cache[i].pkey);
+            es256_pub_cache[i].pkey = NULL;
         }
+    }
+    if (es256_priv_cache.pkey) {
+        EVP_PKEY_free(es256_priv_cache.pkey);
+        es256_priv_cache.pkey = NULL;
     }
 }
 
@@ -617,8 +639,8 @@ int jwt_encode_es256(const jwt_claims_t *claims,
         return -1;
     }
 
-    /* Load private key */
-    EVP_PKEY *pkey = load_private_key_pem(private_key_pem);
+    /* Load private key (cached per worker thread) */
+    EVP_PKEY *pkey = get_cached_private_key(private_key_pem);
     if (!pkey) {
         return -1;
     }
@@ -626,7 +648,6 @@ int jwt_encode_es256(const jwt_claims_t *claims,
     /* Build payload JSON */
     char payload_json[1024];
     if (build_payload_json(claims, payload_json, sizeof(payload_json)) != 0) {
-        EVP_PKEY_free(pkey);
         return -1;
     }
 
@@ -637,7 +658,6 @@ int jwt_encode_es256(const jwt_claims_t *claims,
         header_b64, sizeof(header_b64));
     if (header_b64_len == 0) {
         log_error("Failed to encode JWT header");
-        EVP_PKEY_free(pkey);
         return -1;
     }
 
@@ -648,7 +668,6 @@ int jwt_encode_es256(const jwt_claims_t *claims,
         payload_b64, sizeof(payload_b64));
     if (payload_b64_len == 0) {
         log_error("Failed to encode JWT payload");
-        EVP_PKEY_free(pkey);
         return -1;
     }
 
@@ -658,7 +677,6 @@ int jwt_encode_es256(const jwt_claims_t *claims,
                               "%s.%s", header_b64, payload_b64);
     if (signing_len < 0 || (size_t)signing_len >= sizeof(signing_input)) {
         log_error("JWT signing input buffer overflow");
-        EVP_PKEY_free(pkey);
         return -1;
     }
 
@@ -668,11 +686,8 @@ int jwt_encode_es256(const jwt_claims_t *claims,
     if (ecdsa_sign(pkey, (unsigned char *)signing_input, signing_len,
                    der_signature, &der_sig_len) != 0) {
         log_error("Failed to sign JWT with ES256");
-        EVP_PKEY_free(pkey);
         return -1;
     }
-
-    EVP_PKEY_free(pkey);
 
     /* Convert DER to raw R||S per RFC 7518 Section 3.4 */
     unsigned char signature[64];
