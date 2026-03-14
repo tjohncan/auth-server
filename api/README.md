@@ -10,7 +10,8 @@ HTTP endpoints for the OAuth2 authentication server.
 4. [OAuth2 Endpoints (Public)](#oauth2-endpoints-public)
 5. [User Account Endpoints (Session Auth)](#account-endpoints-session-auth)
 6. [Email Verification Endpoints](#email-verification-endpoints)
-7. [MFA Endpoints (Session Auth)](#mfa-endpoints-session-auth)
+7. [Password Reset Endpoints](#password-reset-endpoints)
+8. [MFA Endpoints (Session Auth)](#mfa-endpoints-session-auth)
 
 ---
 
@@ -635,10 +636,22 @@ Standard OAuth2 endpoints for authentication and token management.
 
 User authentication endpoint. Creates browser session on successful login.
 
+The `username` field accepts either a username or a verified email address
+(when built with `EMAIL_SUPPORT=1`). If the value contains `@`, it is
+treated as an email lookup against verified addresses.
+
 **Request Body**:
 ```json
 {
   "username": "alice",
+  "password": "secret123"
+}
+```
+
+Or with email (requires `EMAIL_SUPPORT`):
+```json
+{
+  "username": "alice@example.com",
   "password": "secret123"
 }
 ```
@@ -672,7 +685,7 @@ When `mfa_required` is true, the session cookie is set but the session's `mfa_co
 **Error Response** (401 Unauthorized):
 ```json
 {
-  "error": "Invalid username or password"
+  "error": "Invalid credentials"
 }
 ```
 
@@ -1816,6 +1829,137 @@ Returns an HTML page stating the link is invalid, expired, or already used.
 - This endpoint is submitted by the confirmation page's form — not called directly via API
 - The token must be valid, unexpired, unused, and unrevoked
 - The owning user account must be active
+
+---
+
+## Password Reset Endpoints
+
+Password reset flow for users who have forgotten their password.
+Available only when built with `EMAIL_SUPPORT=1`.
+
+The flow has three steps:
+1. User requests a password reset email (public, unauthenticated)
+2. User clicks the link and sees a "Set New Password" page (public)
+3. User submits a new password, consuming the token (public)
+
+---
+
+### GET /request-password-reset
+
+Render the password reset request page.
+
+**Authentication**: None (public endpoint)
+
+Returns an HTML page with an email input form. On submit, the form
+POSTs to `/request-password-reset` via JavaScript.
+
+**Example**:
+```
+GET /request-password-reset
+```
+
+---
+
+### POST /request-password-reset
+
+Request a password reset email.
+
+**Authentication**: None (public endpoint)
+
+**Request Body**:
+```json
+{
+  "email": "alice@example.com"
+}
+```
+
+| Field | Type   | Required | Description                     |
+|-------|--------|----------|---------------------------------|
+| email | string | Yes      | Email address of the account    |
+
+**Response** (200 OK — always, to prevent user enumeration):
+```json
+{
+  "message": "If that email belongs to a verified account, a reset link has been sent. Check your inbox."
+}
+```
+
+**Notes**:
+- Always returns 200 regardless of whether the email exists
+- Only verified email addresses can trigger a reset
+- Rate limited: maximum 5 reset tokens per user per hour
+- Token TTL is configured via `password_reset_token_ttl_seconds`
+- Sends an email containing a reset link to the address
+
+**Example**:
+```bash
+curl -X POST http://localhost:8080/request-password-reset \
+  -H "Content-Type: application/json" \
+  -d '{"email": "alice@example.com"}'
+```
+
+---
+
+### GET /reset-password
+
+Render the "Set New Password" page.
+
+**Authentication**: None (public endpoint)
+
+**Query Parameters**:
+
+| Parameter | Type   | Required | Description          |
+|-----------|--------|----------|----------------------|
+| token     | string | Yes      | Password reset token |
+
+**Success Response** (200 OK):
+
+Returns an HTML page with new password and confirm password fields,
+plus a submit button. Client-side JavaScript validates that passwords match.
+
+**Error Response** (400 Bad Request):
+
+Returns an HTML page stating the link is invalid or expired,
+with a link to request a new one.
+
+**Example**:
+```
+GET /reset-password?token=abc123...
+```
+
+---
+
+### POST /reset-password
+
+Consume a password reset token and set a new password.
+
+**Authentication**: None (public endpoint)
+
+**Request Body**: Form-encoded (`application/x-www-form-urlencoded`)
+
+| Field    | Type   | Required | Description        |
+|----------|--------|----------|--------------------|
+| token    | string | Yes      | Password reset token |
+| password | string | Yes      | New password       |
+
+**Success Response** (200 OK):
+
+Returns an HTML page confirming the password has been updated,
+with a link to the login page.
+
+**Behavior**:
+- Validates the token (must be valid, unexpired, unused, unrevoked, user active)
+- Marks the token as used
+- Hashes the new password and updates the user account
+- Both steps in a single transaction
+
+**Error Response** (400 Bad Request):
+
+Returns an HTML page stating the link is invalid, expired, or already used.
+
+**Notes**:
+- This endpoint is submitted by the reset page's form — not called directly via API
+- The password is URL-decoded from the form body
 
 ---
 

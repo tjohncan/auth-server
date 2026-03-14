@@ -341,9 +341,13 @@ static void apply_templates(const config_t *config) {
        appropriate text based on build configuration */
 #ifndef EMAIL_SUPPORT
     StaticFile *login = find_static_file("/login.html");
-    if (login)
+    if (login) {
         template_replace(login, "placeholder=\"Email or Username\"",
                                  "placeholder=\"Username\"");
+        template_remove_section(login,
+            "<!-- PASSWORD_RESET_LINK_START -->",
+            "<!-- PASSWORD_RESET_LINK_END -->");
+    }
 
     StaticFile *admin = find_static_file("/admin.html");
     if (admin) {

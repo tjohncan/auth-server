@@ -906,6 +906,351 @@ HttpResponse *verify_email_handler(const HttpRequest *req,
     return resp;
 }
 
+/*
+ * GET /request-password-reset
+ *
+ * Renders a page with an email input form for requesting a password reset.
+ */
+HttpResponse *request_password_reset_page_handler(const HttpRequest *req,
+                                                    const RouteParams *params) {
+    (void)req;
+    (void)params;
+
+    const char *html =
+        "<!DOCTYPE html><html><head>"
+        "<meta charset=\"UTF-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
+        "<title>Request Password Reset</title>"
+        "<link rel=\"stylesheet\" href=\"/css/base.css\">"
+        "<style>"
+        ".reset-container{width:100%%;max-width:400px;margin-top:40px;}"
+        "h1{margin-bottom:24px;font-size:28px;}"
+        ".form-field{margin-bottom:24px;}"
+        "label{display:block;margin-bottom:8px;font-size:14px;font-weight:500;}"
+        "input[type=\"email\"]{width:100%%;padding:12px 16px;font-size:16px;"
+        "border:1px solid #444;border-radius:4px;background:#1a1a1a;color:#fff;box-sizing:border-box;}"
+        "input:focus{outline:none;border-color:#87ceeb;}"
+        "button[type=\"submit\"]{width:100%%;padding:14px;font-size:16px;font-weight:600;"
+        "background:#007bff;color:white;border:none;border-radius:4px;cursor:pointer;margin-top:8px;}"
+        "button[type=\"submit\"]:hover{background:#0056b3;}"
+        "button[type=\"submit\"]:disabled{background:#555;cursor:not-allowed;}"
+        "#message{margin-top:20px;padding:12px;border-radius:4px;text-align:center;font-size:14px;}"
+        "</style></head><body>"
+        "<div class=\"reset-container\">"
+        "<h1>Request Password Reset</h1>"
+        "<form id=\"resetForm\">"
+        "<div class=\"form-field\">"
+        "<label for=\"email\">Email Address</label>"
+        "<input type=\"email\" id=\"email\" name=\"email\" placeholder=\"you@example.com\" required>"
+        "</div>"
+        "<button type=\"submit\">Send Reset Link</button>"
+        "</form>"
+        "<div id=\"message\"></div>"
+        "<p style=\"margin-top:40px;\"><a href=\"/login\">&larr; Back to Login</a></p>"
+        "</div>"
+        "<script>"
+        "document.getElementById('resetForm').addEventListener('submit',async(e)=>{"
+        "e.preventDefault();"
+        "const btn=e.target.querySelector('button[type=\"submit\"]');"
+        "const msg=document.getElementById('message');"
+        "btn.disabled=true;"
+        "try{"
+        "const res=await fetch('/request-password-reset',{"
+        "method:'POST',headers:{'Content-Type':'application/json'},"
+        "body:JSON.stringify({email:document.getElementById('email').value})"
+        "});"
+        "const data=await res.json();"
+        "msg.style.background='#1a2a1a';msg.style.border='1px solid #3a3';msg.style.color='#6c6';"
+        "msg.innerHTML='If that email belongs to a verified account,<br>a reset link has been sent.<br><br>Check your inbox.';"
+        "e.target.style.display='none';"
+        "}catch(err){"
+        "btn.disabled=false;"
+        "msg.style.background='#3a1a1a';msg.style.border='1px solid #c33';msg.style.color='#ff6b6b';"
+        "msg.textContent='Error: '+err.message;"
+        "}"
+        "});"
+        "</script></body></html>";
+
+    HttpResponse *resp = http_response_new(200);
+    http_response_set(resp, CONTENT_TYPE_HTML, html);
+    return resp;
+}
+
+/*
+ * POST /request-password-reset
+ *
+ * Creates a password reset token and sends a reset email.
+ * Always returns 200 to prevent user enumeration.
+ *
+ * Request body: {"email":"user@example.com"}
+ */
+HttpResponse *request_password_reset_handler(const HttpRequest *req,
+                                               const RouteParams *params) {
+    (void)params;
+    HttpResponse *ct_err = require_content_type(req, "application/json");
+    if (ct_err) return ct_err;
+
+    db_handle_t *db = db_pool_get_connection();
+    if (!db) {
+        log_error("Failed to get database connection");
+        return response_json_error(500, "Internal server error");
+    }
+
+    if (!req->body) {
+        return response_json_error(400, "Request body required");
+    }
+
+    char *email = json_get_string(req->body, "email");
+    if (!email) {
+        return response_json_error(400, "email required");
+    }
+
+    char validation_error[256];
+    if (validate_email(email, validation_error, sizeof(validation_error)) != 0) {
+        free(email);
+        return response_json_error(400, validation_error);
+    }
+
+    extern const config_t *g_config;
+
+    char token[44];
+    int result = user_create_password_reset_token(
+        db, email,
+        g_config->password_reset_token_ttl_seconds,
+        http_request_get_client_ip(req, NULL),
+        token);
+
+    if (result == 0) {
+        /* Token created — send email */
+        char reset_url[512];
+        if (strcmp(g_config->host, "localhost") == 0) {
+            snprintf(reset_url, sizeof(reset_url),
+                     "http://localhost:%d/reset-password?token=%s",
+                     g_config->port, token);
+        } else {
+            snprintf(reset_url, sizeof(reset_url),
+                     "https://%s/reset-password?token=%s",
+                     g_config->host, token);
+        }
+
+        char body_text[1024];
+        snprintf(body_text, sizeof(body_text),
+                 "Click the link below to reset your password:\n\n%s\n\n"
+                 "If you did not request this, you can safely ignore this email.",
+                 reset_url);
+
+        char body_html[2048];
+        snprintf(body_html, sizeof(body_html),
+                 "<p>Click the link below to reset your password:</p>"
+                 "<p><a href=\"%s\">%s</a></p>"
+                 "<p>If you did not request this, you can safely ignore this email.</p>",
+                 reset_url, reset_url);
+
+        email_send(g_config, email, "Password Reset", body_text, body_html);
+    }
+
+    free(email);
+
+    /* Always return success to prevent enumeration */
+    return response_json_ok(
+        "{\"message\":\"If that email belongs to a verified account, "
+        "a reset link has been sent. Check your inbox.\"}");
+}
+
+/*
+ * GET /reset-password?token=...
+ *
+ * Public endpoint (no auth). Validates the token and renders
+ * a "Set New Password" page with password input.
+ */
+HttpResponse *reset_password_page_handler(const HttpRequest *req,
+                                            const RouteParams *params) {
+    (void)params;
+
+    db_handle_t *db = db_pool_get_connection();
+    if (!db) {
+        log_error("Failed to get database connection");
+        HttpResponse *resp = http_response_new(500);
+        http_response_set(resp, CONTENT_TYPE_HTML,
+            "<!DOCTYPE html><html><body><p>Internal server error</p></body></html>");
+        return resp;
+    }
+
+    char *token = http_query_get_param(req->query_string, "token");
+    if (!token) {
+        HttpResponse *resp = http_response_new(400);
+        http_response_set(resp, CONTENT_TYPE_HTML,
+            "<!DOCTYPE html><html><body><p>Missing token</p></body></html>");
+        return resp;
+    }
+
+    int rc = user_lookup_password_reset_token(db, token);
+
+    if (rc != 0) {
+        free(token);
+        HttpResponse *resp = http_response_new(400);
+        http_response_set(resp, CONTENT_TYPE_HTML,
+            "<!DOCTYPE html><html><head>"
+            "<meta charset=\"UTF-8\">"
+            "<title>Invalid Link</title>"
+            "<link rel=\"stylesheet\" href=\"/css/base.css\">"
+            "<style>.reset-container{width:100%%;max-width:400px;margin-top:40px;}"
+            "h1{margin-bottom:24px;font-size:28px;}</style>"
+            "</head><body><div class=\"reset-container\">"
+            "<h1>Invalid Link</h1>"
+            "<p>This password reset link is invalid or has expired.</p>"
+            "<p style=\"margin-top:24px;\"><a href=\"/request-password-reset\">"
+            "Request a new reset link</a></p>"
+            "</div></body></html>");
+        return resp;
+    }
+
+    char html[4096];
+    snprintf(html, sizeof(html),
+        "<!DOCTYPE html><html><head>"
+        "<meta charset=\"UTF-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
+        "<title>Set New Password</title>"
+        "<link rel=\"stylesheet\" href=\"/css/base.css\">"
+        "<style>"
+        ".reset-container{width:100%%;max-width:400px;margin-top:40px;}"
+        "h1{margin-bottom:24px;font-size:28px;}"
+        ".form-field{margin-bottom:24px;}"
+        "label{display:block;margin-bottom:8px;font-size:14px;font-weight:500;}"
+        "input[type=\"password\"]{width:100%%;padding:12px 16px;font-size:16px;"
+        "border:1px solid #444;border-radius:4px;background:#1a1a1a;color:#fff;box-sizing:border-box;}"
+        "input:focus{outline:none;border-color:#87ceeb;}"
+        "button[type=\"submit\"]{width:100%%;padding:14px;font-size:16px;font-weight:600;"
+        "background:#28a745;color:white;border:none;border-radius:4px;cursor:pointer;margin-top:8px;}"
+        "button[type=\"submit\"]:hover{background:#218838;}"
+        "#error{margin-top:12px;padding:12px;border-radius:4px;text-align:center;font-size:14px;"
+        "background:#3a1a1a;border:1px solid #c33;color:#ff6b6b;display:none;}"
+        "</style></head><body>"
+        "<div class=\"reset-container\">"
+        "<h1>Set New Password</h1>"
+        "<form method=\"POST\" action=\"/reset-password\" id=\"resetForm\">"
+        "<input type=\"hidden\" name=\"token\" value=\"%s\">"
+        "<div class=\"form-field\">"
+        "<label for=\"password\">New Password</label>"
+        "<input type=\"password\" id=\"password\" name=\"password\" required>"
+        "</div>"
+        "<div class=\"form-field\">"
+        "<label for=\"confirm\">Confirm Password</label>"
+        "<input type=\"password\" id=\"confirm\" required>"
+        "</div>"
+        "<button type=\"submit\">Set New Password</button>"
+        "</form>"
+        "<div id=\"error\"></div>"
+        "</div>"
+        "<script>"
+        "document.getElementById('resetForm').addEventListener('submit',function(e){"
+        "var p=document.getElementById('password').value;"
+        "var c=document.getElementById('confirm').value;"
+        "if(p!==c){"
+        "e.preventDefault();"
+        "var el=document.getElementById('error');"
+        "el.textContent='Passwords do not match.';"
+        "el.style.display='block';"
+        "}"
+        "});"
+        "</script></body></html>",
+        token);
+
+    free(token);
+
+    HttpResponse *resp = http_response_new(200);
+    http_response_set(resp, CONTENT_TYPE_HTML, html);
+    return resp;
+}
+
+/*
+ * POST /reset-password
+ *
+ * Public endpoint (no auth). Consumes the token and sets the new password.
+ * Expects form-encoded body: token=...&password=...
+ */
+HttpResponse *reset_password_handler(const HttpRequest *req,
+                                       const RouteParams *params) {
+    (void)params;
+
+    db_handle_t *db = db_pool_get_connection();
+    if (!db) {
+        log_error("Failed to get database connection");
+        HttpResponse *resp = http_response_new(500);
+        http_response_set(resp, CONTENT_TYPE_HTML,
+            "<!DOCTYPE html><html><body><p>Internal server error</p></body></html>");
+        return resp;
+    }
+
+    char *token = NULL;
+    char *password_enc = NULL;
+    if (req->body) {
+        token = http_query_get_param(req->body, "token");
+        password_enc = http_query_get_param(req->body, "password");
+    }
+
+    if (!token || !password_enc) {
+        free(token);
+        free(password_enc);
+        HttpResponse *resp = http_response_new(400);
+        http_response_set(resp, CONTENT_TYPE_HTML,
+            "<!DOCTYPE html><html><body><p>Missing token or password</p></body></html>");
+        return resp;
+    }
+
+    /* URL-decode password (form-encoded) */
+    char password[256];
+    if (str_url_decode(password, sizeof(password), password_enc) < 0) {
+        free(token);
+        OPENSSL_cleanse(password_enc, strlen(password_enc));
+        free(password_enc);
+        HttpResponse *resp = http_response_new(400);
+        http_response_set(resp, CONTENT_TYPE_HTML,
+            "<!DOCTYPE html><html><body><p>Invalid request</p></body></html>");
+        return resp;
+    }
+    OPENSSL_cleanse(password_enc, strlen(password_enc));
+    free(password_enc);
+
+    int rc = user_consume_password_reset_token(db, token, password);
+    OPENSSL_cleanse(password, strlen(password));
+    free(token);
+
+    if (rc != 0) {
+        HttpResponse *resp = http_response_new(400);
+        http_response_set(resp, CONTENT_TYPE_HTML,
+            "<!DOCTYPE html><html><head>"
+            "<meta charset=\"UTF-8\">"
+            "<title>Reset Failed</title>"
+            "<link rel=\"stylesheet\" href=\"/css/base.css\">"
+            "<style>.reset-container{width:100%%;max-width:400px;margin-top:40px;}"
+            "h1{margin-bottom:24px;font-size:28px;}</style>"
+            "</head><body><div class=\"reset-container\">"
+            "<h1>Reset Failed</h1>"
+            "<p>This password reset link is invalid, expired, or has already been used.</p>"
+            "<p style=\"margin-top:24px;\"><a href=\"/request-password-reset\">"
+            "Request a new reset link</a></p>"
+            "</div></body></html>");
+        return resp;
+    }
+
+    HttpResponse *resp = http_response_new(200);
+    http_response_set(resp, CONTENT_TYPE_HTML,
+        "<!DOCTYPE html><html><head>"
+        "<meta charset=\"UTF-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
+        "<title>Password Updated</title>"
+        "<link rel=\"stylesheet\" href=\"/css/base.css\">"
+        "<style>.reset-container{width:100%%;max-width:400px;margin-top:40px;}"
+        "h1{margin-bottom:24px;font-size:28px;color:#28a745;}</style>"
+        "</head><body><div class=\"reset-container\">"
+        "<h1>Password Updated</h1>"
+        "<p>Your password has been set successfully.</p>"
+        "<p style=\"margin-top:24px;\"><a href=\"/login\">Log in</a></p>"
+        "</div></body></html>");
+    return resp;
+}
+
 #endif /* EMAIL_SUPPORT */
 
 HttpResponse *logout_handler(const HttpRequest *req, const RouteParams *params) {

@@ -188,6 +188,18 @@ HttpResponse *verify_email_page_handler(const HttpRequest *req, const RouteParam
 
 /* POST /verify-email - Consume token and verify email (public, no auth) */
 HttpResponse *verify_email_handler(const HttpRequest *req, const RouteParams *params);
+
+/* GET /request-password-reset - Render password reset request page */
+HttpResponse *request_password_reset_page_handler(const HttpRequest *req, const RouteParams *params);
+
+/* POST /request-password-reset - Create reset token and send email */
+HttpResponse *request_password_reset_handler(const HttpRequest *req, const RouteParams *params);
+
+/* GET /reset-password - Render set-new-password page (public, no auth) */
+HttpResponse *reset_password_page_handler(const HttpRequest *req, const RouteParams *params);
+
+/* POST /reset-password - Consume token and set new password (public, no auth) */
+HttpResponse *reset_password_handler(const HttpRequest *req, const RouteParams *params);
 #endif
 
 /* POST /api/user/password - Change current user's password */

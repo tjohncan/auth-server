@@ -344,6 +344,10 @@ int main(void) {
     router_add(router, HTTP_POST, "/email-verification-token", create_email_verification_token_handler);
     router_add(router, HTTP_GET, "/verify-email", verify_email_page_handler);
     router_add(router, HTTP_POST, "/verify-email", verify_email_handler);
+    router_add(router, HTTP_GET, "/request-password-reset", request_password_reset_page_handler);
+    router_add(router, HTTP_POST, "/request-password-reset", request_password_reset_handler);
+    router_add(router, HTTP_GET, "/reset-password", reset_password_page_handler);
+    router_add(router, HTTP_POST, "/reset-password", reset_password_handler);
 #endif
     router_add(router, HTTP_POST, "/api/user/password", change_password_handler);
     router_add(router, HTTP_POST, "/api/user/username", change_username_handler);

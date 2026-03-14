@@ -1668,3 +1668,235 @@ int user_verify_email_token(db_handle_t *db, const char *token,
     log_info("Email verified for user_email_pin=%lld", user_email_pin);
     return 0;
 }
+
+int user_create_password_reset_token(db_handle_t *db, const char *email,
+                                      int ttl_seconds, const char *source_ip,
+                                      char *out_token) {
+    if (!db || !email || !out_token) {
+        log_error("Invalid arguments to user_create_password_reset_token");
+        return -1;
+    }
+
+    /* Compute email hash for lookup */
+    char lower_buf[256];
+    str_to_lower(lower_buf, sizeof(lower_buf), email);
+    char email_hash[HMAC_SHA256_HEX_LENGTH];
+    if (hash_field(lower_buf, email_hash, sizeof(email_hash)) != 0) {
+        log_error("Failed to hash email for password reset token");
+        return -1;
+    }
+
+    unsigned char id[16];
+    if (crypto_random_bytes(id, sizeof(id)) != 0) {
+        log_error("Failed to generate UUID for password reset token");
+        return -1;
+    }
+
+    char token[VERIFICATION_TOKEN_BUF_SIZE];
+    if (crypto_random_token(token, sizeof(token), VERIFICATION_TOKEN_BYTES) < 0) {
+        log_error("Failed to generate password reset token");
+        return -1;
+    }
+
+    char ttl_str[16];
+    snprintf(ttl_str, sizeof(ttl_str), "%d", ttl_seconds);
+
+    /* INSERT-SELECT: resolve verified email → user_account_pin, rate limit */
+    const char *sql =
+        "INSERT INTO " TBL_PASSWORD_RESET_TOKEN " "
+        "(id, user_account_pin, token, issued_at, expected_expiry, source_ip) "
+        "SELECT " P"1, U.pin, " P"2, " NOW ", " INTERVAL_SECONDS(P"3") ", " P"4 "
+        "FROM " TBL_USER_EMAIL " E "
+        "JOIN " TBL_USER_ACCOUNT " U ON U.pin = E.user_account_pin "
+        "WHERE E.email_hash = " P"5 AND E.is_verified = " BOOL_TRUE " "
+        "AND U.is_active = " BOOL_TRUE " "
+        "AND NOT EXISTS ("
+            "SELECT 1 FROM " TBL_PASSWORD_RESET_TOKEN " T "
+            "WHERE T.user_account_pin = U.pin "
+            "AND T.issued_at > " SECONDS_AGO("3600") " "
+            "LIMIT 1 OFFSET 4"
+        ") "
+        "RETURNING id";
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        log_error("Failed to prepare password reset token insert");
+        return -1;
+    }
+
+    db_bind_blob(stmt, 1, id, sizeof(id));
+    db_bind_text(stmt, 2, token, -1);
+    db_bind_text(stmt, 3, ttl_str, -1);
+    if (source_ip) {
+        db_bind_text(stmt, 4, source_ip, -1);
+    } else {
+        db_bind_null(stmt, 4);
+    }
+    db_bind_text(stmt, 5, email_hash, -1);
+
+    int rc = db_step(stmt);
+    db_finalize(stmt);
+
+    if (rc == DB_ROW) {
+        memcpy(out_token, token, VERIFICATION_TOKEN_BUF_SIZE);
+        return 0;
+    } else if (rc == DB_DONE) {
+        return 1;  /* Not found or rate limited */
+    }
+
+    log_error("Failed to insert password reset token");
+    return -1;
+}
+
+int user_lookup_password_reset_token(db_handle_t *db, const char *token) {
+    if (!db || !token) {
+        log_error("Invalid arguments to user_lookup_password_reset_token");
+        return -1;
+    }
+
+    const char *sql =
+        "SELECT 1 "
+        "FROM " TBL_PASSWORD_RESET_TOKEN " T "
+        "JOIN " TBL_USER_ACCOUNT " U ON U.pin = T.user_account_pin "
+        "WHERE T.token = " P"1 "
+        "AND T.is_used = " BOOL_FALSE " "
+        "AND T.is_revoked = " BOOL_FALSE " "
+        "AND T.expected_expiry > " NOW " "
+        "AND U.is_active = " BOOL_TRUE " "
+        "LIMIT 1";
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        log_error("Failed to prepare password reset token lookup");
+        return -1;
+    }
+
+    db_bind_text(stmt, 1, token, -1);
+
+    int rc = db_step(stmt);
+    db_finalize(stmt);
+
+    if (rc == DB_ROW) return 0;
+    if (rc == DB_DONE) return 1;
+    log_error("Error looking up password reset token");
+    return -1;
+}
+
+int user_consume_password_reset_token(db_handle_t *db, const char *token,
+                                       const char *new_password) {
+    if (!db || !token || !new_password) {
+        log_error("Invalid arguments to user_consume_password_reset_token");
+        return -1;
+    }
+
+    /* Step 1: Look up token and get user_account_pin */
+    const char *lookup_sql =
+        "SELECT T.user_account_pin "
+        "FROM " TBL_PASSWORD_RESET_TOKEN " T "
+        "JOIN " TBL_USER_ACCOUNT " U ON U.pin = T.user_account_pin "
+        "WHERE T.token = " P"1 "
+        "AND T.is_used = " BOOL_FALSE " "
+        "AND T.is_revoked = " BOOL_FALSE " "
+        "AND T.expected_expiry > " NOW " "
+        "AND U.is_active = " BOOL_TRUE " "
+        "LIMIT 1";
+
+    db_stmt_t *lookup_stmt = NULL;
+    if (db_prepare(db, &lookup_stmt, lookup_sql) != 0) {
+        log_error("Failed to prepare password reset token lookup");
+        return -1;
+    }
+
+    db_bind_text(lookup_stmt, 1, token, -1);
+
+    int rc = db_step(lookup_stmt);
+    if (rc != DB_ROW) {
+        db_finalize(lookup_stmt);
+        if (rc == DB_DONE) return 1;
+        log_error("Error looking up password reset token");
+        return -1;
+    }
+
+    long long user_account_pin = db_column_int64(lookup_stmt, 0);
+    db_finalize(lookup_stmt);
+
+    /* Step 2: Hash new password */
+    char salt[PASSWORD_SALT_HEX_MAX_LENGTH];
+    int iterations;
+    char hash[PASSWORD_HASH_HEX_MAX_LENGTH];
+
+    if (crypto_password_hash(new_password, strlen(new_password),
+                            salt, sizeof(salt),
+                            &iterations,
+                            hash, sizeof(hash)) != 0) {
+        log_error("Failed to hash new password for reset");
+        return -1;
+    }
+
+    /* Step 3: Transaction — mark token used + update password */
+    if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
+        log_error("Failed to begin password reset transaction");
+        return -1;
+    }
+
+    const char *use_sql =
+        "UPDATE " TBL_PASSWORD_RESET_TOKEN " "
+        "SET is_used = " BOOL_TRUE ", used_at = " NOW ", updated_at = " NOW " "
+        "WHERE token = " P"1 "
+        "AND is_used = " BOOL_FALSE;
+
+    db_stmt_t *use_stmt = NULL;
+    if (db_prepare(db, &use_stmt, use_sql) != 0) {
+        log_error("Failed to prepare token use update");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    db_bind_text(use_stmt, 1, token, -1);
+    rc = db_step(use_stmt);
+    db_finalize(use_stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Failed to mark password reset token as used");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    const char *update_sql =
+        "UPDATE " TBL_USER_ACCOUNT " "
+        "SET salt = " P"1, "
+        "hash_iterations = " P"2, "
+        "secret_hash = " P"3, "
+        "updated_at = " NOW " "
+        "WHERE pin = " P"4 AND is_active = " BOOL_TRUE;
+
+    db_stmt_t *update_stmt = NULL;
+    if (db_prepare(db, &update_stmt, update_sql) != 0) {
+        log_error("Failed to prepare password update statement");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    db_bind_text(update_stmt, 1, salt, -1);
+    db_bind_int(update_stmt, 2, iterations);
+    db_bind_text(update_stmt, 3, hash, -1);
+    db_bind_int64(update_stmt, 4, user_account_pin);
+
+    rc = db_step(update_stmt);
+    db_finalize(update_stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Failed to update password");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    if (db_execute_trusted(db, "COMMIT") != 0) {
+        log_error("Failed to commit password reset transaction");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    log_info("Password reset completed for user_account_pin=%lld", user_account_pin);
+    return 0;
+}

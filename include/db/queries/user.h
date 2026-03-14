@@ -386,4 +386,38 @@ int user_lookup_email_verification_token(db_handle_t *db, const char *token,
 int user_verify_email_token(db_handle_t *db, const char *token,
                              email_verification_result_t *out_result);
 
+/*
+ * Create password reset token
+ *
+ * Looks up user by verified email, generates token, inserts into
+ * password_reset_token. Rate-limited: fails if >= 5 tokens issued
+ * in last hour for this user.
+ *
+ * Returns: 0 on success, 1 on failure (not found/rate limited), -1 on error
+ */
+int user_create_password_reset_token(db_handle_t *db, const char *email,
+                                      int ttl_seconds, const char *source_ip,
+                                      char *out_token);
+
+/*
+ * Look up password reset token (read-only)
+ *
+ * Validates token is usable (exists, not expired, not used, not revoked,
+ * user is active).
+ *
+ * Returns: 0 if valid, 1 if invalid/expired/used, -1 on error
+ */
+int user_lookup_password_reset_token(db_handle_t *db, const char *token);
+
+/*
+ * Consume password reset token and set new password
+ *
+ * Single transaction: validate token, mark used, hash new password,
+ * update user_account.
+ *
+ * Returns: 0 on success, 1 if token invalid/expired/used, -1 on error
+ */
+int user_consume_password_reset_token(db_handle_t *db, const char *token,
+                                       const char *new_password);
+
 #endif /* DB_QUERIES_USER_H */
