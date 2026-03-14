@@ -16,7 +16,12 @@ BODY_HTML=$(field body_html)
 SENDER="$FROM"
 [ -n "$FROM_NAME" ] && SENDER="$FROM_NAME <$FROM>"
 
+MSG=$(jq -n \
+  --arg subj "$SUBJECT" \
+  --arg html "$BODY_HTML" \
+  '{Subject:{Data:$subj,Charset:"UTF-8"},Body:{Html:{Data:$html,Charset:"UTF-8"}}}')
+
 aws ses send-email \
   --from "$SENDER" \
   --destination "ToAddresses=$TO" \
-  --message "Subject={Data=$SUBJECT},Body={Html={Data=$BODY_HTML,Charset=UTF-8}}"
+  --message "$MSG"
