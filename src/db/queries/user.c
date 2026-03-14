@@ -1900,3 +1900,247 @@ int user_consume_password_reset_token(db_handle_t *db, const char *token,
     log_info("Password reset completed for user_account_pin=%lld", user_account_pin);
     return 0;
 }
+
+/* ============================================================================
+ * Passwordless Login Token Functions
+ * ========================================================================== */
+
+int user_create_passwordless_login_token(db_handle_t *db, const char *email,
+                                          int ttl_seconds, const char *source_ip,
+                                          const char *return_to, char *out_token) {
+    if (!db || !email || !out_token) {
+        log_error("Invalid arguments to user_create_passwordless_login_token");
+        return -1;
+    }
+
+    char lower_buf[256];
+    str_to_lower(lower_buf, sizeof(lower_buf), email);
+    char email_hash[HMAC_SHA256_HEX_LENGTH];
+    if (hash_field(lower_buf, email_hash, sizeof(email_hash)) != 0) {
+        log_error("Failed to hash email for passwordless login token");
+        return -1;
+    }
+
+    unsigned char id[16];
+    if (crypto_random_bytes(id, sizeof(id)) != 0) {
+        log_error("Failed to generate UUID for passwordless login token");
+        return -1;
+    }
+
+    char token[VERIFICATION_TOKEN_BUF_SIZE];
+    if (crypto_random_token(token, sizeof(token), VERIFICATION_TOKEN_BYTES) < 0) {
+        log_error("Failed to generate passwordless login token");
+        return -1;
+    }
+
+    char ttl_str[16];
+    snprintf(ttl_str, sizeof(ttl_str), "%d", ttl_seconds);
+
+    /* Encrypt plaintext email for storage */
+    char encrypted_email[512];
+    if (encrypt_field(email, encrypted_email, sizeof(encrypted_email)) != 0) {
+        log_error("Failed to encrypt email for passwordless login token");
+        return -1;
+    }
+
+    const char *sql =
+        "INSERT INTO " TBL_PASSWORDLESS_LOGIN_TOKEN " "
+        "(id, user_account_pin, email_address, token, issued_at, expected_expiry, source_ip, return_to) "
+        "SELECT " P"1" ", U.pin, " P"2" ", " P"3" ", "
+        NOW ", " INTERVAL_SECONDS(P"4") ", " P"5" ", " P"6 "
+        "FROM " TBL_USER_EMAIL " E "
+        "JOIN " TBL_USER_ACCOUNT " U ON U.pin = E.user_account_pin "
+        "WHERE E.email_hash = " P"7 AND E.is_verified = " BOOL_TRUE " "
+        "AND U.is_active = " BOOL_TRUE " "
+        "AND U.allow_passwordless_login = " BOOL_TRUE " "
+        "AND NOT EXISTS ("
+            "SELECT 1 FROM " TBL_PASSWORDLESS_LOGIN_TOKEN " T "
+            "WHERE T.user_account_pin = U.pin "
+            "AND T.issued_at > " SECONDS_AGO("3600") " "
+            "LIMIT 1 OFFSET 4"
+        ") "
+        "RETURNING id";
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        log_error("Failed to prepare passwordless login token insert");
+        return -1;
+    }
+
+    db_bind_blob(stmt, 1, id, sizeof(id));
+    db_bind_text(stmt, 2, encrypted_email, -1);
+    db_bind_text(stmt, 3, token, -1);
+    db_bind_text(stmt, 4, ttl_str, -1);
+    if (source_ip) {
+        db_bind_text(stmt, 5, source_ip, -1);
+    } else {
+        db_bind_null(stmt, 5);
+    }
+    if (return_to && return_to[0]) {
+        db_bind_text(stmt, 6, return_to, -1);
+    } else {
+        db_bind_null(stmt, 6);
+    }
+    db_bind_text(stmt, 7, email_hash, -1);
+
+    int rc = db_step(stmt);
+    db_finalize(stmt);
+
+    if (rc == DB_ROW) {
+        memcpy(out_token, token, VERIFICATION_TOKEN_BUF_SIZE);
+        return 0;
+    } else if (rc == DB_DONE) {
+        return 1;
+    }
+
+    log_error("Failed to insert passwordless login token");
+    return -1;
+}
+
+int user_lookup_passwordless_login_token(db_handle_t *db, const char *token,
+                                          passwordless_login_lookup_t *out_result) {
+    if (!db || !token || !out_result) {
+        log_error("Invalid arguments to user_lookup_passwordless_login_token");
+        return -1;
+    }
+
+    const char *sql =
+        "SELECT T.email_address, U.username "
+        "FROM " TBL_PASSWORDLESS_LOGIN_TOKEN " T "
+        "JOIN " TBL_USER_ACCOUNT " U ON U.pin = T.user_account_pin "
+        "WHERE T.token = " P"1 "
+        "AND T.is_used = " BOOL_FALSE " "
+        "AND T.expected_expiry > " NOW " "
+        "AND U.is_active = " BOOL_TRUE " "
+        "AND U.allow_passwordless_login = " BOOL_TRUE " "
+        "LIMIT 1";
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        log_error("Failed to prepare passwordless login token lookup");
+        return -1;
+    }
+
+    db_bind_text(stmt, 1, token, -1);
+
+    int rc = db_step(stmt);
+    if (rc == DB_ROW) {
+        const char *enc_email = db_column_text(stmt, 0);
+        if (enc_email) {
+            decrypt_field(enc_email, out_result->email_address, sizeof(out_result->email_address));
+        } else {
+            out_result->email_address[0] = '\0';
+        }
+
+        const char *enc_username = db_column_text(stmt, 1);
+        if (enc_username) {
+            decrypt_field(enc_username, out_result->username, sizeof(out_result->username));
+        } else {
+            out_result->username[0] = '\0';
+        }
+
+        db_finalize(stmt);
+        return 0;
+    }
+
+    db_finalize(stmt);
+    if (rc == DB_DONE) return 1;
+    log_error("Error looking up passwordless login token");
+    return -1;
+}
+
+int user_consume_passwordless_login_token(db_handle_t *db, const char *token,
+                                           long long *out_user_pin,
+                                           unsigned char *out_user_id,
+                                           char *out_return_to, size_t return_to_size) {
+    if (!db || !token || !out_user_pin || !out_user_id || !out_return_to) {
+        log_error("Invalid arguments to user_consume_passwordless_login_token");
+        return -1;
+    }
+
+    out_return_to[0] = '\0';
+
+    /* Step 1: Look up token and get user identity */
+    const char *lookup_sql =
+        "SELECT T.user_account_pin, U.id, T.return_to "
+        "FROM " TBL_PASSWORDLESS_LOGIN_TOKEN " T "
+        "JOIN " TBL_USER_ACCOUNT " U ON U.pin = T.user_account_pin "
+        "WHERE T.token = " P"1 "
+        "AND T.is_used = " BOOL_FALSE " "
+        "AND T.expected_expiry > " NOW " "
+        "AND U.is_active = " BOOL_TRUE " "
+        "AND U.allow_passwordless_login = " BOOL_TRUE " "
+        "LIMIT 1";
+
+    db_stmt_t *lookup_stmt = NULL;
+    if (db_prepare(db, &lookup_stmt, lookup_sql) != 0) {
+        log_error("Failed to prepare passwordless login token lookup");
+        return -1;
+    }
+
+    db_bind_text(lookup_stmt, 1, token, -1);
+
+    int rc = db_step(lookup_stmt);
+    if (rc != DB_ROW) {
+        db_finalize(lookup_stmt);
+        if (rc == DB_DONE) return 1;
+        log_error("Error looking up passwordless login token");
+        return -1;
+    }
+
+    long long user_pin = db_column_int64(lookup_stmt, 0);
+
+    const void *id_blob = db_column_blob(lookup_stmt, 1);
+    int id_len = db_column_bytes(lookup_stmt, 1);
+    if (!id_blob || id_len != 16) {
+        db_finalize(lookup_stmt);
+        log_error("Invalid user_account_id in passwordless token lookup");
+        return -1;
+    }
+    memcpy(out_user_id, id_blob, 16);
+
+    const char *return_to_val = db_column_text(lookup_stmt, 2);
+    if (return_to_val) {
+        str_copy(out_return_to, return_to_size, return_to_val);
+    }
+
+    db_finalize(lookup_stmt);
+
+    /* Step 2: Transaction — mark token used */
+    if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
+        log_error("Failed to begin passwordless login transaction");
+        return -1;
+    }
+
+    const char *use_sql =
+        "UPDATE " TBL_PASSWORDLESS_LOGIN_TOKEN " "
+        "SET is_used = " BOOL_TRUE ", used_at = " NOW ", updated_at = " NOW " "
+        "WHERE token = " P"1 "
+        "AND is_used = " BOOL_FALSE;
+
+    db_stmt_t *use_stmt = NULL;
+    if (db_prepare(db, &use_stmt, use_sql) != 0) {
+        log_error("Failed to prepare passwordless token use update");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    db_bind_text(use_stmt, 1, token, -1);
+    rc = db_step(use_stmt);
+    db_finalize(use_stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Failed to mark passwordless login token as used");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    if (db_execute_trusted(db, "COMMIT") != 0) {
+        log_error("Failed to commit passwordless login transaction");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    *out_user_pin = user_pin;
+    return 0;
+}

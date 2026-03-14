@@ -13,6 +13,7 @@
 #ifdef EMAIL_SUPPORT
 #define DEFAULT_PASSWORD_RESET_TOKEN_TTL_SECONDS 3600       /* 1 hour */
 #define DEFAULT_EMAIL_VERIFICATION_TOKEN_TTL_SECONDS 86400  /* 24 hours */
+#define DEFAULT_PASSWORDLESS_LOGIN_TOKEN_TTL_SECONDS 600    /* 10 minutes */
 #endif
 
 /* Default values */
@@ -564,6 +565,14 @@ static void set_config_value(config_t *config, const char *key, const char *valu
         } else {
             config->email_verification_token_ttl_seconds = ttl;
         }
+    } else if (strcmp(key, "passwordless_login_token_ttl_seconds") == 0) {
+        int ttl = 0;
+        if (parse_int(value, &ttl) != 0 || ttl < 60) {
+            log_warn("Invalid passwordless_login_token_ttl_seconds '%s', must be >= 60. Keeping current: %d",
+                    value, config->passwordless_login_token_ttl_seconds);
+        } else {
+            config->passwordless_login_token_ttl_seconds = ttl;
+        }
     } else if (strcmp(key, "email_command_env") == 0) {
         new_value = str_dup(value);
         if (new_value) {
@@ -1041,6 +1050,7 @@ config_t *config_load(const char *config_file) {
     config->email_from_name = NULL;
     config->password_reset_token_ttl_seconds = DEFAULT_PASSWORD_RESET_TOKEN_TTL_SECONDS;
     config->email_verification_token_ttl_seconds = DEFAULT_EMAIL_VERIFICATION_TOKEN_TTL_SECONDS;
+    config->passwordless_login_token_ttl_seconds = DEFAULT_PASSWORDLESS_LOGIN_TOKEN_TTL_SECONDS;
     config->email_command_env = NULL;
     config->email_from_env = NULL;
     config->email_from_name_env = NULL;

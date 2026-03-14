@@ -347,6 +347,9 @@ static void apply_templates(const config_t *config) {
         template_remove_section(login,
             "<!-- PASSWORD_RESET_LINK_START -->",
             "<!-- PASSWORD_RESET_LINK_END -->");
+        template_remove_section(login,
+            "<!-- PASSWORDLESS_LOGIN_LINK_START -->",
+            "<!-- PASSWORDLESS_LOGIN_LINK_END -->");
     }
 
     StaticFile *admin = find_static_file("/admin.html");

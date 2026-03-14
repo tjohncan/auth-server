@@ -200,6 +200,18 @@ HttpResponse *reset_password_page_handler(const HttpRequest *req, const RoutePar
 
 /* POST /reset-password - Consume token and set new password (public, no auth) */
 HttpResponse *reset_password_handler(const HttpRequest *req, const RouteParams *params);
+
+/* GET /request-passwordless-login - Render passwordless login request page */
+HttpResponse *request_passwordless_login_page_handler(const HttpRequest *req, const RouteParams *params);
+
+/* POST /request-passwordless-login - Create token and send email */
+HttpResponse *request_passwordless_login_handler(const HttpRequest *req, const RouteParams *params);
+
+/* GET /passwordless-login - Render login confirmation page (public, no auth) */
+HttpResponse *passwordless_login_page_handler(const HttpRequest *req, const RouteParams *params);
+
+/* POST /passwordless-login - Consume token, create session, redirect (public, no auth) */
+HttpResponse *passwordless_login_handler(const HttpRequest *req, const RouteParams *params);
 #endif
 
 /* POST /api/user/password - Change current user's password */

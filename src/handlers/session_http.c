@@ -9,6 +9,7 @@
 #include "db/queries/user.h"
 #include "db/queries/oauth.h"
 #include "db/queries/mfa.h"
+#include "crypto/random.h"
 #include "util/data.h"
 #include "util/log.h"
 #include "util/str.h"
@@ -27,6 +28,9 @@
 
 /* Cookie name for session token */
 #define SESSION_COOKIE_NAME "session"
+
+/* Session token size: 32 bytes (256 bits) — matches session.c */
+#define SESSION_TOKEN_BYTES 32
 
 /* ============================================================================
  * Auth Helper
@@ -1248,6 +1252,396 @@ HttpResponse *reset_password_handler(const HttpRequest *req,
         "<p>Your password has been set successfully.</p>"
         "<p style=\"margin-top:24px;\"><a href=\"/login\">Log in</a></p>"
         "</div></body></html>");
+    return resp;
+}
+
+/* ============================================================================
+ * Passwordless Login Handlers
+ * ========================================================================== */
+
+/*
+ * GET /request-passwordless-login
+ *
+ * Renders a page with an email input form for requesting a passwordless login link.
+ * Carries return_to from query param into a hidden form field.
+ */
+HttpResponse *request_passwordless_login_page_handler(const HttpRequest *req,
+                                                        const RouteParams *params) {
+    (void)params;
+
+    /* Extract return_to from query string (authorize query params, or empty) */
+    char *return_to = NULL;
+    if (req->query_string)
+        return_to = http_query_get_param(req->query_string, "return_to");
+
+    char escaped_return_to[2048];
+    escaped_return_to[0] = '\0';
+    if (return_to && return_to[0]) {
+        str_html_escape(escaped_return_to, sizeof(escaped_return_to), return_to);
+    }
+    free(return_to);
+
+    char html[4096];
+    snprintf(html, sizeof(html),
+        "<!DOCTYPE html><html><head>"
+        "<meta charset=\"UTF-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
+        "<title>Request Temporary Access Link</title>"
+        "<link rel=\"stylesheet\" href=\"/css/base.css\">"
+        "<style>"
+        ".reset-container{width:100%%;max-width:400px;margin-top:40px;}"
+        "h1{margin-bottom:24px;font-size:28px;}"
+        ".form-field{margin-bottom:24px;}"
+        "label{display:block;margin-bottom:8px;font-size:14px;font-weight:500;}"
+        "input[type=\"email\"]{width:100%%;padding:12px 16px;font-size:16px;"
+        "border:1px solid #444;border-radius:4px;background:#1a1a1a;color:#fff;box-sizing:border-box;}"
+        "input:focus{outline:none;border-color:#87ceeb;}"
+        "button[type=\"submit\"]{width:100%%;padding:14px;font-size:16px;font-weight:600;"
+        "background:#007bff;color:white;border:none;border-radius:4px;cursor:pointer;margin-top:8px;}"
+        "button[type=\"submit\"]:hover{background:#0056b3;}"
+        "button[type=\"submit\"]:disabled{background:#555;cursor:not-allowed;}"
+        "#message{margin-top:20px;padding:12px;border-radius:4px;text-align:center;font-size:14px;}"
+        "</style></head><body>"
+        "<div class=\"reset-container\">"
+        "<h1>Request Temporary Access Link</h1>"
+        "<form id=\"plForm\">"
+        "<input type=\"hidden\" id=\"returnTo\" value=\"%s\">"
+        "<div class=\"form-field\">"
+        "<label for=\"email\">Email Address</label>"
+        "<input type=\"email\" id=\"email\" name=\"email\" placeholder=\"you@example.com\" required>"
+        "</div>"
+        "<button type=\"submit\">Send Access Link</button>"
+        "</form>"
+        "<div id=\"message\"></div>"
+        "<p style=\"margin-top:40px;\"><a href=\"/login\">&larr; Back to Login</a></p>"
+        "</div>"
+        "<script>"
+        "document.getElementById('plForm').addEventListener('submit',async(e)=>{"
+        "e.preventDefault();"
+        "const btn=e.target.querySelector('button[type=\"submit\"]');"
+        "const msg=document.getElementById('message');"
+        "btn.disabled=true;"
+        "try{"
+        "const body={email:document.getElementById('email').value};"
+        "const rt=document.getElementById('returnTo').value;"
+        "if(rt)body.return_to=rt;"
+        "const res=await fetch('/request-passwordless-login',{"
+        "method:'POST',headers:{'Content-Type':'application/json'},"
+        "body:JSON.stringify(body)"
+        "});"
+        "const data=await res.json();"
+        "msg.style.background='#1a2a1a';msg.style.border='1px solid #3a3';msg.style.color='#6c6';"
+        "msg.innerHTML='If that email belongs to a verified account<br>with passwordless login enabled,"
+        "<br>a login link has been sent.<br><br>Check your inbox.';"
+        "e.target.style.display='none';"
+        "}catch(err){"
+        "btn.disabled=false;"
+        "msg.style.background='#3a1a1a';msg.style.border='1px solid #c33';msg.style.color='#ff6b6b';"
+        "msg.textContent='Error: '+err.message;"
+        "}"
+        "});"
+        "</script></body></html>",
+        escaped_return_to);
+
+    HttpResponse *resp = http_response_new(200);
+    http_response_set(resp, CONTENT_TYPE_HTML, html);
+    return resp;
+}
+
+/*
+ * POST /request-passwordless-login
+ *
+ * Creates a passwordless login token and sends a login email.
+ * Always returns 200 to prevent user enumeration.
+ *
+ * Request body: {"email":"user@example.com","return_to":"client_id=...&..."}
+ */
+HttpResponse *request_passwordless_login_handler(const HttpRequest *req,
+                                                   const RouteParams *params) {
+    (void)params;
+    HttpResponse *ct_err = require_content_type(req, "application/json");
+    if (ct_err) return ct_err;
+
+    db_handle_t *db = db_pool_get_connection();
+    if (!db) {
+        log_error("Failed to get database connection");
+        return response_json_error(500, "Internal server error");
+    }
+
+    if (!req->body) {
+        return response_json_error(400, "Request body required");
+    }
+
+    char *email = json_get_string(req->body, "email");
+    if (!email) {
+        return response_json_error(400, "email required");
+    }
+
+    char validation_error[256];
+    if (validate_email(email, validation_error, sizeof(validation_error)) != 0) {
+        free(email);
+        return response_json_error(400, validation_error);
+    }
+
+    /* Extract and validate return_to (authorize query string, no path) */
+    char *return_to = json_get_string(req->body, "return_to");
+    if (return_to) {
+        /* Reject if it contains newlines or is unreasonably long */
+        if (strlen(return_to) > 2000 || strchr(return_to, '\n') || strchr(return_to, '\r')) {
+            free(return_to);
+            return_to = NULL;
+        }
+    }
+
+    extern const config_t *g_config;
+
+    char token[44];
+    int result = user_create_passwordless_login_token(
+        db, email,
+        g_config->passwordless_login_token_ttl_seconds,
+        http_request_get_client_ip(req, NULL),
+        return_to, token);
+
+    if (result == 0) {
+        char login_url[512];
+        if (strcmp(g_config->host, "localhost") == 0) {
+            snprintf(login_url, sizeof(login_url),
+                     "http://localhost:%d/passwordless-login?token=%s",
+                     g_config->port, token);
+        } else {
+            snprintf(login_url, sizeof(login_url),
+                     "https://%s/passwordless-login?token=%s",
+                     g_config->host, token);
+        }
+
+        char body_text[1024];
+        snprintf(body_text, sizeof(body_text),
+                 "Click the link below to log in:\n\n%s\n\n"
+                 "If you did not request this, you can safely ignore this email.",
+                 login_url);
+
+        char body_html[2048];
+        snprintf(body_html, sizeof(body_html),
+                 "<p>Click the link below to log in:</p>"
+                 "<p><a href=\"%s\">%s</a></p>"
+                 "<p>If you did not request this, you can safely ignore this email.</p>",
+                 login_url, login_url);
+
+        email_send(g_config, email, "Temporary Access Link", body_text, body_html);
+    }
+
+    free(email);
+    free(return_to);
+
+    return response_json_ok(
+        "{\"message\":\"If that email belongs to a verified account "
+        "with passwordless login enabled, a login link has been sent. "
+        "Check your inbox.\"}");
+}
+
+/*
+ * GET /passwordless-login?token=...
+ *
+ * Public endpoint (no auth). Validates the token and renders
+ * a confirmation page: "Log in as user@example.com?"
+ */
+HttpResponse *passwordless_login_page_handler(const HttpRequest *req,
+                                                const RouteParams *params) {
+    (void)params;
+
+    db_handle_t *db = db_pool_get_connection();
+    if (!db) {
+        log_error("Failed to get database connection");
+        HttpResponse *resp = http_response_new(500);
+        http_response_set(resp, CONTENT_TYPE_HTML,
+            "<!DOCTYPE html><html><body><p>Internal server error</p></body></html>");
+        return resp;
+    }
+
+    char *token = http_query_get_param(req->query_string, "token");
+    if (!token) {
+        HttpResponse *resp = http_response_new(400);
+        http_response_set(resp, CONTENT_TYPE_HTML,
+            "<!DOCTYPE html><html><body><p>Missing token</p></body></html>");
+        return resp;
+    }
+
+    passwordless_login_lookup_t lookup;
+    int rc = user_lookup_passwordless_login_token(db, token, &lookup);
+
+    if (rc != 0) {
+        free(token);
+        HttpResponse *resp = http_response_new(400);
+        http_response_set(resp, CONTENT_TYPE_HTML,
+            "<!DOCTYPE html><html><head>"
+            "<meta charset=\"UTF-8\">"
+            "<title>Invalid Link</title>"
+            "<link rel=\"stylesheet\" href=\"/css/base.css\">"
+            "<style>.reset-container{width:100%%;max-width:400px;margin-top:40px;}"
+            "h1{margin-bottom:24px;font-size:28px;}</style>"
+            "</head><body><div class=\"reset-container\">"
+            "<h1>Invalid Link</h1>"
+            "<p>This login link is invalid or has expired.</p>"
+            "<p style=\"margin-top:24px;\"><a href=\"/request-passwordless-login\">"
+            "Request a new login link</a></p>"
+            "</div></body></html>");
+        return resp;
+    }
+
+    char escaped_email[512];
+    char escaped_username[512];
+    char escaped_token[128];
+    str_html_escape(escaped_email, sizeof(escaped_email), lookup.email_address);
+    str_html_escape(escaped_username, sizeof(escaped_username), lookup.username);
+    str_html_escape(escaped_token, sizeof(escaped_token), token);
+    free(token);
+
+    char display_info[1280];
+    if (escaped_username[0]) {
+        snprintf(display_info, sizeof(display_info),
+                 "<p style=\"font-size:18px;margin-bottom:8px;\">%s</p>"
+                 "<p style=\"color:#888;margin-bottom:24px;\">%s</p>",
+                 escaped_email, escaped_username);
+    } else {
+        snprintf(display_info, sizeof(display_info),
+                 "<p style=\"font-size:18px;margin-bottom:24px;\">%s</p>",
+                 escaped_email);
+    }
+
+    char html[4096];
+    snprintf(html, sizeof(html),
+        "<!DOCTYPE html><html><head>"
+        "<meta charset=\"UTF-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
+        "<title>Confirm Login</title>"
+        "<link rel=\"stylesheet\" href=\"/css/base.css\">"
+        "<style>"
+        ".reset-container{width:100%%;max-width:400px;margin-top:40px;}"
+        "h1{margin-bottom:24px;font-size:28px;}"
+        "button[type=\"submit\"]{width:100%%;padding:14px;font-size:16px;font-weight:600;"
+        "background:#28a745;color:white;border:none;border-radius:4px;cursor:pointer;}"
+        "button[type=\"submit\"]:hover{background:#218838;}"
+        "</style></head><body>"
+        "<div class=\"reset-container\">"
+        "<h1>Confirm Login</h1>"
+        "%s"
+        "<form method=\"POST\" action=\"/passwordless-login\">"
+        "<input type=\"hidden\" name=\"token\" value=\"%s\">"
+        "<button type=\"submit\">Log In</button>"
+        "</form>"
+        "</div></body></html>",
+        display_info, escaped_token);
+
+    HttpResponse *resp = http_response_new(200);
+    http_response_set(resp, CONTENT_TYPE_HTML, html);
+    return resp;
+}
+
+/*
+ * POST /passwordless-login
+ *
+ * Public endpoint (no auth). Consumes the token, creates a session,
+ * sets the session cookie, and redirects to return_to or /.
+ * Expects form-encoded body: token=...
+ */
+HttpResponse *passwordless_login_handler(const HttpRequest *req,
+                                           const RouteParams *params) {
+    (void)params;
+
+    db_handle_t *db = db_pool_get_connection();
+    if (!db) {
+        log_error("Failed to get database connection");
+        HttpResponse *resp = http_response_new(500);
+        http_response_set(resp, CONTENT_TYPE_HTML,
+            "<!DOCTYPE html><html><body><p>Internal server error</p></body></html>");
+        return resp;
+    }
+
+    char *token = NULL;
+    if (req->body)
+        token = http_query_get_param(req->body, "token");
+
+    if (!token) {
+        HttpResponse *resp = http_response_new(400);
+        http_response_set(resp, CONTENT_TYPE_HTML,
+            "<!DOCTYPE html><html><body><p>Missing token</p></body></html>");
+        return resp;
+    }
+
+    long long user_pin = 0;
+    unsigned char user_id[16];
+    char return_to[2048];
+    int rc = user_consume_passwordless_login_token(db, token, &user_pin, user_id,
+                                                    return_to, sizeof(return_to));
+    free(token);
+
+    if (rc != 0) {
+        HttpResponse *resp = http_response_new(400);
+        http_response_set(resp, CONTENT_TYPE_HTML,
+            "<!DOCTYPE html><html><head>"
+            "<meta charset=\"UTF-8\">"
+            "<title>Login Failed</title>"
+            "<link rel=\"stylesheet\" href=\"/css/base.css\">"
+            "<style>.reset-container{width:100%%;max-width:400px;margin-top:40px;}"
+            "h1{margin-bottom:24px;font-size:28px;}</style>"
+            "</head><body><div class=\"reset-container\">"
+            "<h1>Login Failed</h1>"
+            "<p>This login link is invalid, expired, or has already been used.</p>"
+            "<p style=\"margin-top:24px;\"><a href=\"/request-passwordless-login\">"
+            "Request a new login link</a></p>"
+            "</div></body></html>");
+        return resp;
+    }
+
+    /* Generate session token */
+    size_t token_buf_size = crypto_token_encoded_size(SESSION_TOKEN_BYTES);
+    char *session_token = malloc(token_buf_size);
+    if (!session_token) {
+        log_error("Failed to allocate session token");
+        return response_json_error(500, "Internal server error");
+    }
+
+    if (crypto_random_token(session_token, token_buf_size, SESSION_TOKEN_BYTES) <= 0) {
+        log_error("Failed to generate session token");
+        free(session_token);
+        return response_json_error(500, "Internal server error");
+    }
+
+    /* Create session */
+    unsigned char session_id[16];
+    rc = oauth_session_create(db, user_pin, user_id, session_token,
+                              "passwordless",
+                              http_request_get_client_ip(req, NULL),
+                              http_request_get_header(req, "User-Agent"),
+                              DEFAULT_SESSION_TTL_SECONDS,
+                              session_id);
+
+    if (rc != 0) {
+        log_error("Failed to create session for passwordless login");
+        free(session_token);
+        return response_json_error(500, "Internal server error");
+    }
+
+    /* Build Set-Cookie header */
+    char cookie_header[512];
+    snprintf(cookie_header, sizeof(cookie_header),
+             "%s=%s; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=%d",
+             SESSION_COOKIE_NAME, session_token, DEFAULT_SESSION_TTL_SECONDS);
+    free(session_token);
+
+    /* Determine redirect location */
+    char location[2560];
+    if (return_to[0]) {
+        snprintf(location, sizeof(location), "/authorize?%s", return_to);
+    } else {
+        str_copy(location, sizeof(location), "/");
+    }
+
+    HttpResponse *resp = http_response_new(303);
+    http_response_set_header(resp, "Set-Cookie", cookie_header);
+    http_response_set_header(resp, "Location", location);
+    http_response_set(resp, CONTENT_TYPE_HTML,
+        "<!DOCTYPE html><html><body><p>Redirecting...</p></body></html>");
     return resp;
 }
 

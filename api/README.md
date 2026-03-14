@@ -11,7 +11,8 @@ HTTP endpoints for the OAuth2 authentication server.
 5. [User Account Endpoints (Session Auth)](#account-endpoints-session-auth)
 6. [Email Verification Endpoints](#email-verification-endpoints)
 7. [Password Reset Endpoints](#password-reset-endpoints)
-8. [MFA Endpoints (Session Auth)](#mfa-endpoints-session-auth)
+8. [Passwordless Login Endpoints](#passwordless-login-endpoints)
+9. [MFA Endpoints (Session Auth)](#mfa-endpoints-session-auth)
 
 ---
 
@@ -1960,6 +1961,150 @@ Returns an HTML page stating the link is invalid, expired, or already used.
 **Notes**:
 - This endpoint is submitted by the reset page's form — not called directly via API
 - The password is URL-decoded from the form body
+
+---
+
+## Passwordless Login Endpoints
+
+Passwordless login flow for users with `allow_passwordless_login` enabled.
+Available only when built with `EMAIL_SUPPORT=1`.
+
+The flow has three steps:
+1. User requests a login email (public, unauthenticated)
+2. User clicks the link and sees a confirmation page (public)
+3. User confirms, consuming the token and creating a session (public)
+
+**OAuth redirect preservation**: When a user arrives at the login page via
+`/authorize?...`, the authorize query string is stored in the token row as
+`return_to`. After login, the user is redirected to `/authorize?{return_to}`
+to complete the OAuth flow. The `return_to` value never appears in the email link.
+
+---
+
+### GET /request-passwordless-login
+
+Render the passwordless login request page.
+
+**Authentication**: None (public endpoint)
+
+**Query Parameters**:
+
+| Parameter | Type   | Required | Description                                          |
+|-----------|--------|----------|------------------------------------------------------|
+| return_to | string | No       | Authorize query string to redirect after login       |
+
+Returns an HTML page with an email input form. On submit, the form
+POSTs to `/request-passwordless-login` via JavaScript.
+
+**Example**:
+```
+GET /request-passwordless-login
+GET /request-passwordless-login?return_to=client_id%3Dabc%26redirect_uri%3Dhttps...
+```
+
+---
+
+### POST /request-passwordless-login
+
+Request a passwordless login email.
+
+**Authentication**: None (public endpoint)
+
+**Request Body**:
+```json
+{
+  "email": "alice@example.com",
+  "return_to": "client_id=abc&redirect_uri=https://app.example.com/callback"
+}
+```
+
+| Field     | Type   | Required | Description                                    |
+|-----------|--------|----------|------------------------------------------------|
+| email     | string | Yes      | Email address of the account                   |
+| return_to | string | No       | Authorize query string for post-login redirect |
+
+**Response** (200 OK — always, to prevent user enumeration):
+```json
+{
+  "message": "If that email belongs to a verified account with passwordless login enabled, a login link has been sent. Check your inbox."
+}
+```
+
+**Notes**:
+- Always returns 200 regardless of whether the email exists or passwordless is enabled
+- Only verified email addresses on accounts with `allow_passwordless_login` can trigger a token
+- Rate limited: maximum 5 tokens per user per hour
+- Token TTL is configured via `passwordless_login_token_ttl_seconds` (default 600s / 10 min)
+- `return_to` is stored in the database, never included in the email link
+- `return_to` is validated: max 2000 chars, no newlines
+
+**Example**:
+```bash
+curl -X POST http://localhost:8080/request-passwordless-login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "alice@example.com"}'
+```
+
+---
+
+### GET /passwordless-login
+
+Render the login confirmation page.
+
+**Authentication**: None (public endpoint)
+
+**Query Parameters**:
+
+| Parameter | Type   | Required | Description              |
+|-----------|--------|----------|--------------------------|
+| token     | string | Yes      | Passwordless login token |
+
+**Success Response** (200 OK):
+
+Returns an HTML page showing the email address and username, with a
+"Log In" button. The user confirms their identity before the token is consumed.
+
+**Error Response** (400 Bad Request):
+
+Returns an HTML page stating the link is invalid or expired,
+with a link to request a new one.
+
+**Example**:
+```
+GET /passwordless-login?token=abc123...
+```
+
+---
+
+### POST /passwordless-login
+
+Consume a passwordless login token and create a session.
+
+**Authentication**: None (public endpoint)
+
+**Request Body**: Form-encoded (`application/x-www-form-urlencoded`)
+
+| Field | Type   | Required | Description              |
+|-------|--------|----------|--------------------------|
+| token | string | Yes      | Passwordless login token |
+
+**Success Response** (303 See Other):
+- Sets `session` cookie (HttpOnly, Secure, SameSite=Strict)
+- Redirects to `/authorize?{return_to}` if return_to was stored, otherwise `/`
+
+**Behavior**:
+- Validates the token (must be valid, unexpired, unused, user active, passwordless still allowed)
+- Marks the token as used (single transaction)
+- Creates a browser session with `authentication_method = "passwordless"`
+- MFA is still enforced after login if the user has MFA configured
+
+**Error Response** (400 Bad Request):
+
+Returns an HTML page stating the link is invalid, expired, or already used.
+
+**Notes**:
+- This endpoint is submitted by the confirmation page's form — not called directly via API
+- Session is created via `oauth_session_create` (not `session_authenticate_and_create`)
 
 ---
 

@@ -101,6 +101,7 @@ typedef struct {
     /* Email token TTLs */
     int password_reset_token_ttl_seconds;        /* How long password reset tokens are valid (default 1 hour) */
     int email_verification_token_ttl_seconds;    /* How long email verification tokens are valid (default 24 hours) */
+    int passwordless_login_token_ttl_seconds;    /* How long passwordless login tokens are valid (default 10 min) */
 
     /* Email environment variable overrides */
     char *email_command_env;

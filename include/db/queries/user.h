@@ -420,4 +420,54 @@ int user_lookup_password_reset_token(db_handle_t *db, const char *token);
 int user_consume_password_reset_token(db_handle_t *db, const char *token,
                                        const char *new_password);
 
+/*
+ * Create passwordless login token
+ *
+ * Looks up user by verified email where allow_passwordless_login is enabled.
+ * Rate-limited: fails if >= 5 tokens issued in last hour for this user.
+ *
+ * Parameters:
+ *   return_to  - OAuth authorize query string to redirect after login (can be NULL)
+ *
+ * Returns: 0 on success, 1 on failure (not found/not allowed/rate limited), -1 on error
+ */
+int user_create_passwordless_login_token(db_handle_t *db, const char *email,
+                                          int ttl_seconds, const char *source_ip,
+                                          const char *return_to, char *out_token);
+
+/* Passwordless login lookup result */
+typedef struct {
+    char email_address[256];
+    char username[256];
+} passwordless_login_lookup_t;
+
+/*
+ * Look up passwordless login token (read-only)
+ *
+ * Validates token is usable (exists, not expired, not used, user active,
+ * passwordless login still allowed) and returns email + username for display.
+ *
+ * Returns: 0 if valid, 1 if invalid/expired/used, -1 on error
+ */
+int user_lookup_passwordless_login_token(db_handle_t *db, const char *token,
+                                          passwordless_login_lookup_t *out_result);
+
+/*
+ * Consume passwordless login token
+ *
+ * Transaction: validate token, mark used, return user identity for session creation.
+ *
+ * Parameters:
+ *   out_user_pin  - Output: user account PIN
+ *   out_user_id   - Output: user UUID (16 bytes)
+ *   out_return_to - Output: return_to query string (caller-provided buffer, can be empty)
+ *   return_to_size - Size of out_return_to buffer
+ *
+ * Returns: 0 on success, 1 if token invalid/expired/used, -1 on error
+ */
+int user_consume_passwordless_login_token(db_handle_t *db, const char *token,
+                                           long long *out_user_pin,
+                                           unsigned char *out_user_id,
+                                           char *out_return_to, size_t return_to_size);
+
 #endif /* DB_QUERIES_USER_H */

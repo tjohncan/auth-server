@@ -132,6 +132,12 @@
         </p>
         <!-- PASSWORD_RESET_LINK_END -->
 
+        <!-- PASSWORDLESS_LOGIN_LINK_START -->
+        <p style="margin-top: 12px; text-align: center; font-size: 14px;">
+            <a href="/request-passwordless-login" id="passwordlessLink" style="color: #87ceeb;">Request Temporary Access Link</a>
+        </p>
+        <!-- PASSWORDLESS_LOGIN_LINK_END -->
+
         <p style="margin-top: 40px;"><a href="/">← Home</a></p>
     </div>
 
@@ -150,6 +156,17 @@
             if (url.startsWith('/') && !url.startsWith('//') && !url.startsWith('/\\')) return url;
             return '/admin';
         }
+
+        /* Carry authorize context to passwordless login link */
+        (function updatePasswordlessLink() {
+            const link = document.getElementById('passwordlessLink');
+            if (!link) return;
+            const returnUrl = getReturnUrl();
+            if (returnUrl && returnUrl.startsWith('/authorize?')) {
+                const qs = returnUrl.substring('/authorize?'.length);
+                link.href = '/request-passwordless-login?return_to=' + encodeURIComponent(qs);
+            }
+        })();
 
         /* Check if redirected here for MFA challenge (mfa_step=1) */
         (async function checkMfaStep() {
