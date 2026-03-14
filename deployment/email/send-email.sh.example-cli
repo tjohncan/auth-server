@@ -4,14 +4,14 @@
 
 read -r payload
 
-# Extract fields using bash parameter expansion
-extract() { local k="\"$1\":\""; local t="${payload#*$k}"; echo "${t%%\"*}"; }
+# Extract fields using jq (handles JSON escapes correctly)
+field() { echo "$payload" | jq -r ".$1 // empty"; }
 
-TO=$(extract to)
-FROM=$(extract from)
-FROM_NAME=$(extract from_name)
-SUBJECT=$(extract subject)
-BODY_HTML=$(extract body_html)
+TO=$(field to)
+FROM=$(field from)
+FROM_NAME=$(field from_name)
+SUBJECT=$(field subject)
+BODY_HTML=$(field body_html)
 
 SENDER="$FROM"
 [ -n "$FROM_NAME" ] && SENDER="$FROM_NAME <$FROM>"
