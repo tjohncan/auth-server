@@ -1229,7 +1229,7 @@ int user_create_email_verification_token(db_handle_t *db,
     const char *sql =
         "INSERT INTO " TBL_EMAIL_VERIFICATION_TOKEN " "
         "(id, user_email_pin, token, issued_at, expected_expiry, source_ip) "
-        "SELECT E.pin, " P"1, " P"2, " NOW ", " INTERVAL_SECONDS(P"3") ", " P"4 "
+        "SELECT " P"1, E.pin, " P"2, " NOW ", " INTERVAL_SECONDS(P"3") ", " P"4 "
         "FROM " TBL_USER_EMAIL " E "
         "JOIN " TBL_USER_ACCOUNT " U ON U.pin = E.user_account_pin "
         "WHERE E.user_account_pin = " P"5 AND E.email_hash = " P"6 "
