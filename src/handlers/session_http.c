@@ -129,8 +129,7 @@ HttpResponse *login_handler(const HttpRequest *req, const RouteParams *params) {
     free(password);
 
     if (rc != 0) {
-        /* Authentication failed */
-        return response_json_error(401, "Invalid username or password");
+        return response_json_error(401, "Invalid credentials");
     }
 
     /* Build Set-Cookie header */

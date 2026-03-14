@@ -431,6 +431,89 @@ int user_verify_password(db_handle_t *db, const char *username,
     return valid;  /* 1 if valid, 0 if invalid, -1 on error */
 }
 
+#ifdef EMAIL_SUPPORT
+int user_verify_password_by_email(db_handle_t *db, const char *email,
+                                   const char *password, long long *out_pin,
+                                   unsigned char *out_id) {
+    if (!db || !email || !password) {
+        log_error("Invalid arguments to user_verify_password_by_email");
+        return -1;
+    }
+
+    /* Compute HMAC hash for lookup */
+    char lower_buf[256];
+    str_to_lower(lower_buf, sizeof(lower_buf), email);
+    char hash_hex[HMAC_SHA256_HEX_LENGTH];
+    if (hash_field(lower_buf, hash_hex, sizeof(hash_hex)) != 0) {
+        log_error("Failed to hash email for password verification");
+        return -1;
+    }
+
+    const char *sql =
+        "SELECT ua.pin, ua.id, ua.salt, ua.hash_iterations, ua.secret_hash "
+        "FROM " TBL_USER_EMAIL " ue "
+        "JOIN " TBL_USER_ACCOUNT " ua ON ua.pin = ue.user_account_pin "
+        "WHERE ue.email_hash = " P"1 AND ue.is_verified = " BOOL_TRUE " "
+        "AND ua.is_active = " BOOL_TRUE " "
+        "LIMIT 1";
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        log_error("Failed to prepare user_verify_password_by_email statement");
+        return -1;
+    }
+
+    db_bind_text(stmt, 1, hash_hex, -1);
+
+    int rc = db_step(stmt);
+
+    if (rc != DB_ROW) {
+        db_finalize(stmt);
+        /* Dummy verification to equalize timing */
+        crypto_password_verify(password, strlen(password),
+                               "00000000000000000000000000000000",
+                               crypto_password_min_iterations(),
+                               "0000000000000000000000000000000000000000000000000000000000000000");
+        return 0;
+    }
+
+    long long pin = db_column_int64(stmt, 0);
+    const unsigned char *id = db_column_blob(stmt, 1);
+    const char *salt_ptr = (const char *)db_column_text(stmt, 2);
+    int iterations = db_column_int(stmt, 3);
+    const char *hash_ptr = (const char *)db_column_text(stmt, 4);
+
+    if (!id || !salt_ptr || !hash_ptr) {
+        log_error("NULL fields in user_account (email login)");
+        db_finalize(stmt);
+        return -1;
+    }
+
+    /* Copy column data before finalize */
+    unsigned char user_id[16];
+    memcpy(user_id, id, 16);
+    char salt[256], hash[256];
+    snprintf(salt, sizeof(salt), "%s", salt_ptr);
+    snprintf(hash, sizeof(hash), "%s", hash_ptr);
+
+    db_finalize(stmt);
+
+    int valid = crypto_password_verify(password, strlen(password),
+                                       salt, iterations, hash);
+
+    if (valid == 1) {
+        if (out_pin != NULL) {
+            *out_pin = pin;
+        }
+        if (out_id != NULL) {
+            memcpy(out_id, user_id, 16);
+        }
+    }
+
+    return valid;
+}
+#endif /* EMAIL_SUPPORT */
+
 int user_make_org_admin(db_handle_t *db, const unsigned char *user_id,
                         const char *org_code_name) {
     if (!db || !user_id || !org_code_name) {

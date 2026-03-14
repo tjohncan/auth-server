@@ -19,6 +19,7 @@ int session_authenticate_and_create(db_handle_t *db,
                                      int session_ttl_seconds,
                                      char **out_session_token,
                                      long long *out_user_pin) {
+    /* username may be an email address (routed by @ detection below) */
     if (!db || !username || !password || !out_session_token || !out_user_pin) {
         log_error("Invalid arguments to session_authenticate_and_create");
         return -1;
@@ -27,13 +28,20 @@ int session_authenticate_and_create(db_handle_t *db,
     /* Step 1: Verify password and get user PIN and ID */
     long long user_pin = 0;
     unsigned char user_id[16];
-    int valid = user_verify_password(db, username, password, &user_pin, user_id);
+    int valid;
+
+#ifdef EMAIL_SUPPORT
+    if (strchr(username, '@'))
+        valid = user_verify_password_by_email(db, username, password, &user_pin, user_id);
+    else
+#endif
+        valid = user_verify_password(db, username, password, &user_pin, user_id);
 
     if (valid != 1) {
         if (valid == 0) {
-            log_info("Authentication failed for username='%s' (invalid credentials)", username);
+            log_info("Authentication failed for '%s' (invalid credentials)", username);
         } else {
-            log_error("Error verifying password for username='%s'", username);
+            log_error("Error verifying password for '%s'", username);
         }
         return -1;
     }

@@ -94,6 +94,20 @@ int user_verify_password(db_handle_t *db, const char *username,
                          const char *password, long long *out_pin,
                          unsigned char *out_id);
 
+#ifdef EMAIL_SUPPORT
+/*
+ * Verify user password by verified email
+ *
+ * Looks up user by verified email address and verifies password hash.
+ * Same semantics as user_verify_password.
+ *
+ * Returns: 1 if password valid, 0 if invalid, -1 on error
+ */
+int user_verify_password_by_email(db_handle_t *db, const char *email,
+                                   const char *password, long long *out_pin,
+                                   unsigned char *out_id);
+#endif
+
 /*
  * Make user an admin of organization
  *
