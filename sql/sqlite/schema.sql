@@ -713,6 +713,9 @@ create index idx_email_verification_token_rate_limit
 create index idx_password_reset_token_expected_expiry
   on password_reset_token(expected_expiry);
 
+create index idx_password_reset_token_rate_limit
+  on password_reset_token(user_account_pin, issued_at);
+
 -- Usage log cleanup indexes
 create index idx_client_key_usage_authenticated_at
   on client_key_usage(authenticated_at);
