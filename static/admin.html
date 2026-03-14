@@ -308,6 +308,7 @@
                 case 'delete-email': deleteEmail(target.dataset.email); break;
                 case 'set-primary-email': setPrimaryEmail(target.dataset.email); break;
                 case 'unset-primary-email': unsetPrimaryEmail(); break;
+                case 'verify-email': requestEmailVerification(target.dataset.email); break;
                 case 'select-setup': selectSetup(target.dataset.clientId); break;
                 case 'navigate-org-list': navigateToOrgList(); break;
                 case 'navigate-to-org': navigateToOrg(target.dataset.id); break;
@@ -552,6 +553,10 @@
                             : '<span style="color: #999; font-size: 12px; white-space: nowrap;">&#9675; Unverified</span>';
 
                         let buttons = '';
+                        if (!email.is_verified) {
+                            buttons += `<button data-action="verify-email" data-email="${escapeHtml(email.email_address)}"
+                                                style="background: #28a745; color: white; border: none; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 13px; margin-right: 6px;">Verify</button>`;
+                        }
                         if (email.is_primary) {
                             buttons += `<button data-action="unset-primary-email"
                                                 style="background: #111; color: #666; border: 1px solid #333; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; margin-right: 6px;">Unset Primary</button>`;
@@ -655,6 +660,32 @@
                 loadEmails();
             } catch (error) {
                 showAlert('Failed to unset primary email: ' + error.message);
+            }
+        }
+
+        async function requestEmailVerification(email) {
+            try {
+                const response = await fetch(`${HOST}/email-verification-token`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include',
+                    body: JSON.stringify({ email })
+                });
+
+                if (!response.ok) {
+                    const error = await response.json().catch(() => ({ error: 'Unknown error' }));
+                    throw new Error(error.error || `HTTP ${response.status}`);
+                }
+
+                showModal('Verification Email Sent', `
+                    <p>A verification email has been sent to <strong>${escapeHtml(email)}</strong>.</p>
+                    <p style="margin-top: 12px; color: #ccc;">Check your inbox and click the verification link.</p>
+                    <div style="margin-top: 20px;">
+                        <button type="button" data-action="close-modal" style="width: 100%; background: #6c757d; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Close</button>
+                    </div>
+                `);
+            } catch (error) {
+                showAlert('Failed to send verification email: ' + error.message);
             }
         }
 

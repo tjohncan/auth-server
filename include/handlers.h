@@ -179,6 +179,17 @@ HttpResponse *delete_email_handler(const HttpRequest *req, const RouteParams *pa
 /* POST /api/user/emails/set-primary - Set primary email */
 HttpResponse *set_primary_email_handler(const HttpRequest *req, const RouteParams *params);
 
+#ifdef EMAIL_SUPPORT
+/* POST /email-verification-token - Create verification token and send email */
+HttpResponse *create_email_verification_token_handler(const HttpRequest *req, const RouteParams *params);
+
+/* GET /verify-email - Render verification confirmation page (public, no auth) */
+HttpResponse *verify_email_page_handler(const HttpRequest *req, const RouteParams *params);
+
+/* POST /verify-email - Consume token and verify email (public, no auth) */
+HttpResponse *verify_email_handler(const HttpRequest *req, const RouteParams *params);
+#endif
+
 /* POST /api/user/password - Change current user's password */
 HttpResponse *change_password_handler(const HttpRequest *req, const RouteParams *params);
 

@@ -340,6 +340,11 @@ int main(void) {
     router_add(router, HTTP_POST, "/api/user/emails", add_email_handler);
     router_add(router, HTTP_DELETE, "/api/user/emails", delete_email_handler);
     router_add(router, HTTP_POST, "/api/user/emails/set-primary", set_primary_email_handler);
+#ifdef EMAIL_SUPPORT
+    router_add(router, HTTP_POST, "/email-verification-token", create_email_verification_token_handler);
+    router_add(router, HTTP_GET, "/verify-email", verify_email_page_handler);
+    router_add(router, HTTP_POST, "/verify-email", verify_email_handler);
+#endif
     router_add(router, HTTP_POST, "/api/user/password", change_password_handler);
     router_add(router, HTTP_POST, "/api/user/username", change_username_handler);
     router_add(router, HTTP_POST, "/logout", logout_handler);

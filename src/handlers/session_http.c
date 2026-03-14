@@ -14,6 +14,9 @@
 #include "util/str.h"
 #include "util/json.h"
 #include "util/validation.h"
+#ifdef EMAIL_SUPPORT
+#include "util/email.h"
+#endif
 #include <openssl/crypto.h>
 #include <string.h>
 #include <stdio.h>
@@ -637,6 +640,274 @@ HttpResponse *set_primary_email_handler(const HttpRequest *req, const RouteParam
 
     return response_json_ok("{\"message\":\"Primary email updated\"}");
 }
+
+#ifdef EMAIL_SUPPORT
+
+/*
+ * POST /email-verification-token
+ *
+ * Creates a verification token and sends a verification email.
+ * Requires valid session cookie.
+ *
+ * Request body:
+ *   {"email":"user@example.com"}
+ */
+HttpResponse *create_email_verification_token_handler(const HttpRequest *req,
+                                                       const RouteParams *params) {
+    (void)params;
+    HttpResponse *ct_err = require_content_type(req, "application/json");
+    if (ct_err) return ct_err;
+
+    db_handle_t *db = db_pool_get_connection();
+    if (!db) {
+        log_error("Failed to get database connection");
+        return response_json_error(500, "Internal server error");
+    }
+
+    oauth_session_info_t session;
+    HttpResponse *auth_err = require_authenticated_session(req, db, &session);
+    if (auth_err) return auth_err;
+
+    if (!req->body) {
+        return response_json_error(400, "Request body required");
+    }
+
+    char *email = json_get_string(req->body, "email");
+    if (!email) {
+        return response_json_error(400, "email required");
+    }
+
+    char validation_error[256];
+    if (validate_email(email, validation_error, sizeof(validation_error)) != 0) {
+        free(email);
+        return response_json_error(400, validation_error);
+    }
+
+    extern const config_t *g_config;
+
+    char token[44];
+    int result = user_create_email_verification_token(
+        db, session.user_account_pin, email,
+        g_config->email_verification_token_ttl_seconds,
+        http_request_get_client_ip(req, NULL),
+        token);
+
+    if (result != 0) {
+        free(email);
+        if (result == 1) {
+            return response_json_error(400, "Unable to send verification email");
+        }
+        return response_json_error(500, "Failed to create verification token");
+    }
+
+    /* Build verification URL */
+    char verify_url[512];
+    if (strcmp(g_config->host, "localhost") == 0) {
+        snprintf(verify_url, sizeof(verify_url),
+                 "http://localhost:%d/verify-email?token=%s",
+                 g_config->port, token);
+    } else {
+        snprintf(verify_url, sizeof(verify_url),
+                 "https://%s/verify-email?token=%s",
+                 g_config->host, token);
+    }
+
+    /* Send verification email */
+    char body_text[1024];
+    snprintf(body_text, sizeof(body_text),
+             "Click the link below to verify your email address:\n\n%s\n\n"
+             "If you did not request this, you can safely ignore this email.",
+             verify_url);
+
+    char body_html[2048];
+    snprintf(body_html, sizeof(body_html),
+             "<p>Click the link below to verify your email address:</p>"
+             "<p><a href=\"%s\">%s</a></p>"
+             "<p>If you did not request this, you can safely ignore this email.</p>",
+             verify_url, verify_url);
+
+    email_send(g_config, email, "Verify your email address", body_text, body_html);
+
+    free(email);
+    return response_json_ok("{\"message\":\"Verification email sent\"}");
+}
+
+/*
+ * GET /verify-email?token=...
+ *
+ * Public endpoint (no auth). Renders confirmation page showing the email
+ * address and username so the user can confirm before verifying.
+ */
+HttpResponse *verify_email_page_handler(const HttpRequest *req,
+                                         const RouteParams *params) {
+    (void)params;
+
+    db_handle_t *db = db_pool_get_connection();
+    if (!db) {
+        log_error("Failed to get database connection");
+        HttpResponse *resp = http_response_new(500);
+        http_response_set(resp, CONTENT_TYPE_HTML,
+            "<!DOCTYPE html><html><body><p>Internal server error</p></body></html>");
+        return resp;
+    }
+
+    char *token = http_query_get_param(req->query_string, "token");
+    if (!token) {
+        HttpResponse *resp = http_response_new(400);
+        http_response_set(resp, CONTENT_TYPE_HTML,
+            "<!DOCTYPE html><html><body><p>Missing token</p></body></html>");
+        return resp;
+    }
+
+    email_verification_result_t result;
+    int rc = user_lookup_email_verification_token(db, token, &result);
+
+    if (rc != 0) {
+        free(token);
+        HttpResponse *resp = http_response_new(400);
+        http_response_set(resp, CONTENT_TYPE_HTML,
+            "<!DOCTYPE html><html><body>"
+            "<p>This verification link is invalid or has expired.</p>"
+            "</body></html>");
+        return resp;
+    }
+
+    /* Render confirmation page */
+    char html[4096];
+    char escaped_email[512];
+    str_html_escape(escaped_email, sizeof(escaped_email), result.email_address);
+
+    char user_id_hex[33];
+    bytes_to_hex(result.user_id, 16, user_id_hex, sizeof(user_id_hex));
+
+    char username_display[640];
+    if (result.username[0] != '\0') {
+        char escaped_username[512];
+        str_html_escape(escaped_username, sizeof(escaped_username), result.username);
+        snprintf(username_display, sizeof(username_display),
+                 "<strong>%s</strong>", escaped_username);
+    } else {
+        snprintf(username_display, sizeof(username_display),
+                 "<em style=\"color:#666;\">not set</em>");
+    }
+
+    snprintf(html, sizeof(html),
+        "<!DOCTYPE html><html><head>"
+        "<meta charset=\"UTF-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
+        "<title>Verify Email</title>"
+        "<link rel=\"stylesheet\" href=\"/css/base.css\">"
+        "<style>"
+        ".verify-container{width:100%%;max-width:400px;margin-top:40px;}"
+        "h1{margin-bottom:24px;font-size:28px;}"
+        ".info{margin-bottom:24px;padding:16px;border:1px solid #444;border-radius:4px;}"
+        ".info p{margin:4px 0;font-size:14px;color:#ccc;}"
+        ".info strong{color:#fff;}"
+        "button[type=\"submit\"]{width:100%%;padding:14px;font-size:16px;font-weight:600;"
+        "background:#28a745;color:white;border:none;border-radius:4px;cursor:pointer;}"
+        "button[type=\"submit\"]:hover{background:#218838;}"
+        "</style></head><body>"
+        "<div class=\"verify-container\">"
+        "<h1>Verify Email</h1>"
+        "<div class=\"info\">"
+        "<p>Email: <strong>%s</strong></p>"
+        "<p>Username: %s</p>"
+        "<p>User ID: <span style=\"font-family:monospace;font-size:12px;color:#888;\">%s</span></p>"
+        "</div>"
+        "<form method=\"POST\" action=\"/verify-email\">"
+        "<input type=\"hidden\" name=\"token\" value=\"%s\">"
+        "<button type=\"submit\">Confirm Verification</button>"
+        "</form>"
+        "<p style=\"margin-top:16px;font-size:14px;color:#999;\">"
+        "If you did not request this, close this page.</p>"
+        "</div></body></html>",
+        escaped_email, username_display, user_id_hex, token);
+
+    free(token);
+
+    HttpResponse *resp = http_response_new(200);
+    http_response_set(resp, CONTENT_TYPE_HTML, html);
+    return resp;
+}
+
+/*
+ * POST /verify-email
+ *
+ * Public endpoint (no auth). Consumes the token and marks the email verified.
+ * Expects form-encoded body: token=...
+ */
+HttpResponse *verify_email_handler(const HttpRequest *req,
+                                    const RouteParams *params) {
+    (void)params;
+
+    db_handle_t *db = db_pool_get_connection();
+    if (!db) {
+        log_error("Failed to get database connection");
+        HttpResponse *resp = http_response_new(500);
+        http_response_set(resp, CONTENT_TYPE_HTML,
+            "<!DOCTYPE html><html><body><p>Internal server error</p></body></html>");
+        return resp;
+    }
+
+    /* Parse token from form body */
+    char *token = NULL;
+    if (req->body) {
+        token = http_query_get_param(req->body, "token");
+    }
+
+    if (!token) {
+        HttpResponse *resp = http_response_new(400);
+        http_response_set(resp, CONTENT_TYPE_HTML,
+            "<!DOCTYPE html><html><body><p>Missing token</p></body></html>");
+        return resp;
+    }
+
+    email_verification_result_t result;
+    int rc = user_verify_email_token(db, token, &result);
+    free(token);
+
+    if (rc != 0) {
+        HttpResponse *resp = http_response_new(400);
+        http_response_set(resp, CONTENT_TYPE_HTML,
+            "<!DOCTYPE html><html><head>"
+            "<meta charset=\"UTF-8\">"
+            "<title>Verification Failed</title>"
+            "<link rel=\"stylesheet\" href=\"/css/base.css\">"
+            "<style>.verify-container{width:100%%;max-width:400px;margin-top:40px;}"
+            "h1{margin-bottom:24px;font-size:28px;}</style>"
+            "</head><body><div class=\"verify-container\">"
+            "<h1>Verification Failed</h1>"
+            "<p>This verification link is invalid, expired, or has already been used.</p>"
+            "<p style=\"margin-top:24px;\"><a href=\"/admin\">Go to your profile</a></p>"
+            "</div></body></html>");
+        return resp;
+    }
+
+    char html[2048];
+    char escaped_email[512];
+    str_html_escape(escaped_email, sizeof(escaped_email), result.email_address);
+
+    snprintf(html, sizeof(html),
+        "<!DOCTYPE html><html><head>"
+        "<meta charset=\"UTF-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
+        "<title>Email Verified</title>"
+        "<link rel=\"stylesheet\" href=\"/css/base.css\">"
+        "<style>.verify-container{width:100%%;max-width:400px;margin-top:40px;}"
+        "h1{margin-bottom:24px;font-size:28px;color:#28a745;}</style>"
+        "</head><body><div class=\"verify-container\">"
+        "<h1>Email Verified</h1>"
+        "<p><strong>%s</strong> has been verified.</p>"
+        "<p style=\"margin-top:24px;\"><a href=\"/admin\">Go to your profile</a></p>"
+        "</div></body></html>",
+        escaped_email);
+
+    HttpResponse *resp = http_response_new(200);
+    http_response_set(resp, CONTENT_TYPE_HTML, html);
+    return resp;
+}
+
+#endif /* EMAIL_SUPPORT */
 
 HttpResponse *logout_handler(const HttpRequest *req, const RouteParams *params) {
     (void)params;

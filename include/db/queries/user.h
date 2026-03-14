@@ -301,4 +301,75 @@ int user_change_username(db_handle_t *db, long long user_account_pin,
                          const unsigned char *user_account_id,
                          const char *new_username);
 
+/*
+ * Create email verification token
+ *
+ * Generates a random token and inserts into email_verification_token via
+ * INSERT-SELECT (resolves user_email.pin internally from natural keys).
+ * Rate-limited: fails if >= 5 active (unexpired, unused, unrevoked) tokens
+ * exist for this email.
+ *
+ * Parameters:
+ *   db                - Database handle
+ *   user_account_pin  - User account PIN (from session)
+ *   email             - Email address to verify
+ *   ttl_seconds       - Token lifetime in seconds
+ *   source_ip         - Client IP for audit trail (can be NULL)
+ *   out_token         - Output: token string (caller-provided buffer, >= 44 bytes)
+ *
+ * Returns: 0 on success (token created),
+ *          1 on failure (rate limited or email not found),
+ *          -1 on error
+ */
+int user_create_email_verification_token(db_handle_t *db,
+                                          long long user_account_pin,
+                                          const char *email,
+                                          int ttl_seconds,
+                                          const char *source_ip,
+                                          char *out_token);
+
+/* Verification result data (returned by lookup/verify token functions) */
+typedef struct {
+    unsigned char user_id[16]; /* User UUID */
+    char email_address[256];   /* Decrypted email that was verified */
+    char username[256];        /* Decrypted username (empty string if not set) */
+} email_verification_result_t;
+
+/*
+ * Look up email verification token (read-only)
+ *
+ * Validates token is usable (exists, not expired, not used, not revoked,
+ * user is active) and returns the email address + username for display
+ * on the confirmation page. Does NOT consume the token.
+ *
+ * Parameters:
+ *   db         - Database handle
+ *   token      - Token string from verification link
+ *   out_result - Output: email address + username
+ *
+ * Returns: 0 on success, 1 if token invalid/expired/used, -1 on error
+ */
+int user_lookup_email_verification_token(db_handle_t *db, const char *token,
+                                          email_verification_result_t *out_result);
+
+/*
+ * Verify email using token
+ *
+ * Single transaction:
+ *   1. Validate token (exists, not expired, not used, not revoked)
+ *   2. Mark token used
+ *   3. Mark email verified
+ *   4. Squatter cleanup: delete other users' unverified rows with same
+ *      email_hash (and their verification tokens — FK children first)
+ *
+ * Parameters:
+ *   db         - Database handle
+ *   token      - Token string from verification link
+ *   out_result - Output: email address + username (for confirmation page)
+ *
+ * Returns: 0 on success, 1 if token invalid/expired/used, -1 on error
+ */
+int user_verify_email_token(db_handle_t *db, const char *token,
+                             email_verification_result_t *out_result);
+
 #endif /* DB_QUERIES_USER_H */

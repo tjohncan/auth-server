@@ -9,7 +9,8 @@ HTTP endpoints for the OAuth2 authentication server.
 3. [Organization Management API (Org-Key Auth)](#organization-management-api-org-key-auth)
 4. [OAuth2 Endpoints (Public)](#oauth2-endpoints-public)
 5. [User Account Endpoints (Session Auth)](#account-endpoints-session-auth)
-6. [MFA Endpoints (Session Auth)](#mfa-endpoints-session-auth)
+6. [Email Verification Endpoints](#email-verification-endpoints)
+7. [MFA Endpoints (Session Auth)](#mfa-endpoints-session-auth)
 
 ---
 
@@ -1670,6 +1671,151 @@ Get management UI client setups available to current user.
 curl "http://localhost:8080/api/user/management-setups?callback_url=http%3A%2F%2Flocalhost%3A8080%2Fcallback&api_url=http%3A%2F%2Flocalhost%3A8080%2Fapi" \
   -H "Cookie: session=<session_token>"
 ```
+
+---
+
+## Email Verification Endpoints
+
+Email verification flow for proving ownership of an email address.
+Available only when built with `EMAIL_SUPPORT=1`.
+
+The flow has three steps:
+1. User requests a verification email (authenticated)
+2. User clicks the link and sees a confirmation page (public)
+3. User confirms, consuming the token and marking the email verified (public)
+
+When an email is verified, any unverified copies of that email on other accounts
+are automatically cleaned up (squatter cleanup).
+
+---
+
+### POST /email-verification-token
+
+Request a verification email for one of the current user's email addresses.
+
+**Authentication**: Session cookie required (MFA must be completed if enrolled)
+
+**Request Body**:
+```json
+{
+  "email": "alice@example.com"
+}
+```
+
+| Field | Type   | Required | Description                              |
+|-------|--------|----------|------------------------------------------|
+| email | string | Yes      | Email address to verify (must be on account) |
+
+**Success Response** (200 OK):
+```json
+{
+  "message": "Verification email sent"
+}
+```
+
+**Notes**:
+- The email must belong to the current user's account
+- Sends an email containing a verification link to the address
+- Rate limited: maximum 5 verification emails per address per hour
+- Rate limit counts all tokens issued, regardless of whether they were used
+- Token TTL is configured via `email_verification_token_ttl_seconds`
+
+**Error Responses**:
+
+- **400 Bad Request** (missing, invalid, or rate limited):
+```json
+{
+  "error": "email required"
+}
+```
+```json
+{
+  "error": "Unable to send verification email"
+}
+```
+
+- **401 Unauthorized** (not authenticated):
+```json
+{
+  "error": "Authentication required"
+}
+```
+
+**Example**:
+```bash
+curl -X POST http://localhost:8080/email-verification-token \
+  -H "Cookie: session=<session_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "alice@example.com"}'
+```
+
+---
+
+### GET /verify-email
+
+Render the email verification confirmation page.
+
+**Authentication**: None (public endpoint)
+
+**Query Parameters**:
+
+| Parameter | Type   | Required | Description          |
+|-----------|--------|----------|----------------------|
+| token     | string | Yes      | Verification token   |
+
+**Success Response** (200 OK):
+
+Returns an HTML page displaying:
+- The email address being verified
+- The username associated with the account (or "not set" if none)
+- The user ID (hex)
+- A "Confirm Verification" button that submits a form POST
+
+This information helps the recipient identify who requested the verification,
+protecting against confused-inbox scenarios.
+
+**Error Response** (400 Bad Request):
+
+Returns an HTML page stating the link is invalid or expired.
+
+**Example**:
+```
+GET /verify-email?token=abc123...
+```
+
+---
+
+### POST /verify-email
+
+Consume a verification token and mark the email as verified.
+
+**Authentication**: None (public endpoint)
+
+**Request Body**: Form-encoded (`application/x-www-form-urlencoded`)
+
+| Field | Type   | Required | Description        |
+|-------|--------|----------|--------------------|
+| token | string | Yes      | Verification token |
+
+**Success Response** (200 OK):
+
+Returns an HTML page confirming the email has been verified,
+with a link back to the management console.
+
+**Behavior**:
+- Marks the token as used (cannot be reused)
+- Sets `is_verified = true` and `verified_at` on the email
+- Squatter cleanup: removes unverified copies of this email from other accounts,
+  along with their pending verification tokens
+
+**Error Response** (400 Bad Request):
+
+Returns an HTML page stating the link is invalid, expired, or already used.
+
+**Notes**:
+- This endpoint is submitted by the confirmation page's form — not called directly via API
+- The token must be valid, unexpired, unused, and unrevoked
+- The owning user account must be active
 
 ---
 
