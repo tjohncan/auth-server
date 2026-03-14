@@ -9,38 +9,6 @@
 #include <sys/stat.h>
 #include <dirent.h>
 
-/*
- * html_escape - Escape a string for safe embedding in HTML
- *
- * Handles &, <, >, ", ' — covers both element content and attribute values.
- * Returns number of bytes written (excluding NUL), or 0 if buffer too small.
- */
-static size_t html_escape(char *dst, size_t dst_size, const char *src) {
-    size_t i = 0;
-    for (; *src; src++) {
-        const char *ent;
-        switch (*src) {
-            case '&':  ent = "&amp;";  break;
-            case '<':  ent = "&lt;";   break;
-            case '>':  ent = "&gt;";   break;
-            case '"':  ent = "&quot;"; break;
-            case '\'': ent = "&#39;";  break;
-            default:   ent = NULL;     break;
-        }
-        if (ent) {
-            size_t len = strlen(ent);
-            if (i + len >= dst_size) return 0;
-            memcpy(dst + i, ent, len);
-            i += len;
-        } else {
-            if (i + 1 >= dst_size) return 0;
-            dst[i++] = *src;
-        }
-    }
-    dst[i] = '\0';
-    return i;
-}
-
 /* --------------------------------------------------------------------
  * In-memory static file cache
  *
@@ -387,8 +355,8 @@ static void apply_templates(const config_t *config) {
             /* HTML-escape both the href and display text */
             char escaped_url[512];
             char escaped_display[512];
-            html_escape(escaped_url, sizeof(escaped_url), config->mothership_url);
-            html_escape(escaped_display, sizeof(escaped_display), display_clean);
+            str_html_escape(escaped_url, sizeof(escaped_url), config->mothership_url);
+            str_html_escape(escaped_display, sizeof(escaped_display), display_clean);
 
             /* Build footer HTML */
             char mothership_html[1280];
