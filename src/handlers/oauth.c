@@ -440,7 +440,7 @@ int oauth_exchange_authorization_code(db_handle_t *db,
         return -1;
     }
 
-    /* Step 6: Get signing key for access token (before transaction) */
+    /* Step 7: Get signing key for access token (before transaction) */
     signing_key_t *signing_key = NULL;
     if (signing_key_get_or_rotate(db, SIGNING_KEY_ACCESS_TOKEN, &signing_key) != 0) {
         log_error("Failed to get access token signing key");
@@ -454,7 +454,7 @@ int oauth_exchange_authorization_code(db_handle_t *db,
         return -1;
     }
 
-    /* Step 7: Consume authorization code from DB (atomic, replay detection) */
+    /* Step 8: Consume authorization code from DB (atomic, replay detection) */
     /* The DB record was created at /authorize time with is_exchanged=FALSE */
     /* This atomically updates to is_exchanged=TRUE and returns the record data */
     oauth_auth_code_data_t db_code_data;
@@ -484,7 +484,7 @@ int oauth_exchange_authorization_code(db_handle_t *db,
         return -1;
     }
 
-    /* Step 8: Validate JWT claims match DB record (integrity check) */
+    /* Step 9: Validate JWT claims match DB record (integrity check) */
     if (db_code_data.client_pin != client.pin) {
         signing_key_free(signing_key);
         db_execute_trusted(db, "ROLLBACK");
@@ -501,7 +501,7 @@ int oauth_exchange_authorization_code(db_handle_t *db,
 
     /* Use JWT claims for token creation (cryptographically verified) */
 
-    /* Step 9: Resolve resource server (RFC 8707) */
+    /* Step 10: Resolve resource server (RFC 8707) */
     long long resource_server_pin;
     unsigned char resource_server_id[16];
     if (oauth_resolve_resource_server(db, client.pin, resource,
@@ -512,7 +512,7 @@ int oauth_exchange_authorization_code(db_handle_t *db,
         return -1;
     }
 
-    /* Step 10: Build JWT claims for access token (UUIDs, not internal PINs) */
+    /* Step 11: Build JWT claims for access token (UUIDs, not internal PINs) */
     char user_id_hex[33], rs_id_hex[33], client_id_hex[33];
     bytes_to_hex(auth_claims.user_account_id, 16, user_id_hex, sizeof(user_id_hex));
     bytes_to_hex(resource_server_id, 16, rs_id_hex, sizeof(rs_id_hex));
@@ -545,7 +545,7 @@ int oauth_exchange_authorization_code(db_handle_t *db,
 
     signing_key_free(signing_key);
 
-    /* Step 11: Create access token in database */
+    /* Step 12: Create access token in database */
     unsigned char access_token_id[16];
     if (oauth_token_create_access(db, resource_server_pin, client.pin,
                                    user_account_pin,
@@ -559,7 +559,7 @@ int oauth_exchange_authorization_code(db_handle_t *db,
         return -1;
     }
 
-    /* Step 12: Create refresh token (if configured) */
+    /* Step 13: Create refresh token (if configured) */
     char *refresh_token = NULL;
     if (client.issue_refresh_tokens) {
         size_t refresh_token_size = crypto_token_encoded_size(REFRESH_TOKEN_BYTES);
