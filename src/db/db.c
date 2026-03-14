@@ -610,8 +610,8 @@ static int sqlite_finalize(db_stmt_t *stmt) {
 static int pg_connect(db_handle_t *db, const char *connection_string) {
     PGconn *conn = PQconnectdb(connection_string);
     if (PQstatus(conn) != CONNECTION_OK) {
-        snprintf(db->error_msg, sizeof(db->error_msg),
-                 "PostgreSQL connection failed: %s", PQerrorMessage(conn));
+        str_copy(db->error_msg, sizeof(db->error_msg),
+                 "PostgreSQL connection failed");
         log_error("%s", db->error_msg);
         PQfinish(conn);
         return -1;
@@ -625,8 +625,8 @@ static int pg_connect(db_handle_t *db, const char *connection_string) {
      * as UTC to keep EXTRACT(EPOCH FROM ...) consistent. */
     PGresult *tz_result = PQexec(conn, "SET timezone = 'UTC'");
     if (PQresultStatus(tz_result) != PGRES_COMMAND_OK) {
-        snprintf(db->error_msg, sizeof(db->error_msg),
-                 "Failed to set timezone: %s", PQresultErrorMessage(tz_result));
+        str_copy(db->error_msg, sizeof(db->error_msg),
+                 "Failed to set timezone on new connection");
         log_error("%s", db->error_msg);
         PQclear(tz_result);
         PQfinish(conn);
@@ -635,8 +635,7 @@ static int pg_connect(db_handle_t *db, const char *connection_string) {
     }
     PQclear(tz_result);
 
-    log_debug("PostgreSQL connected to %s:%s/%s",
-              PQhost(conn), PQport(conn), PQdb(conn));
+    log_debug("PostgreSQL connected successfully");
     return 0;
 }
 
@@ -664,23 +663,21 @@ static int pg_reconnect(db_handle_t *db) {
     PQreset(conn);
 
     if (PQstatus(conn) != CONNECTION_OK) {
-        snprintf(db->error_msg, sizeof(db->error_msg),
-                 "PostgreSQL reconnect failed: %s", PQerrorMessage(conn));
+        str_copy(db->error_msg, sizeof(db->error_msg),
+                 "PostgreSQL reconnect failed");
         log_error("%s", db->error_msg);
         return -1;
     }
 
     PGresult *tz_result = PQexec(conn, "SET timezone = 'UTC'");
     if (PQresultStatus(tz_result) != PGRES_COMMAND_OK) {
-        log_error("Failed to set timezone after reconnect: %s",
-                  PQresultErrorMessage(tz_result));
+        log_error("Failed to set timezone after reconnect");
         PQclear(tz_result);
         return -1;
     }
     PQclear(tz_result);
 
-    log_info("PostgreSQL reconnected to %s:%s/%s",
-             PQhost(conn), PQport(conn), PQdb(conn));
+    log_info("PostgreSQL reconnected successfully");
     return 0;
 }
 
@@ -693,8 +690,8 @@ static int pg_execute(db_handle_t *db, const char *sql) {
     ExecStatusType status = PQresultStatus(result);
 
     if (status != PGRES_COMMAND_OK && status != PGRES_TUPLES_OK) {
-        snprintf(db->error_msg, sizeof(db->error_msg),
-                 "PostgreSQL execute failed: %s", PQresultErrorMessage(result));
+        str_copy(db->error_msg, sizeof(db->error_msg),
+                 "PostgreSQL execute failed");
         log_error("%s", db->error_msg);
         PQclear(result);
         if (PQstatus(conn) == CONNECTION_BAD)
@@ -715,8 +712,8 @@ static int pg_query(db_handle_t *db, const char *sql, db_result_t **out) {
     ExecStatusType status = PQresultStatus(pg_result);
 
     if (status != PGRES_TUPLES_OK) {
-        snprintf(db->error_msg, sizeof(db->error_msg),
-                 "PostgreSQL query failed: %s", PQresultErrorMessage(pg_result));
+        str_copy(db->error_msg, sizeof(db->error_msg),
+                 "PostgreSQL query failed");
         log_error("%s", db->error_msg);
         PQclear(pg_result);
         if (PQstatus(conn) == CONNECTION_BAD)
@@ -1095,8 +1092,8 @@ static int pg_step(db_stmt_t *stmt) {
         ExecStatusType status = PQresultStatus(stmt->pg_result);
 
         if (status != PGRES_TUPLES_OK && status != PGRES_COMMAND_OK) {
-            snprintf(stmt->error_msg, sizeof(stmt->error_msg),
-                     "PostgreSQL step failed: %s", PQresultErrorMessage(stmt->pg_result));
+            str_copy(stmt->error_msg, sizeof(stmt->error_msg),
+                     "PostgreSQL step failed");
             log_error("%s", stmt->error_msg);
             PQclear(stmt->pg_result);
             stmt->pg_result = NULL;
