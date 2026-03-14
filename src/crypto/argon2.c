@@ -133,5 +133,7 @@ int crypto_argon2_verify(const char *password, size_t password_len,
     }
 
     /* Constant-time comparison */
-    return CRYPTO_memcmp(expected_hash_hex, computed_hash_hex, hash_len) == 0 ? 1 : 0;
+    int match = CRYPTO_memcmp(expected_hash_hex, computed_hash_hex, hash_len) == 0 ? 1 : 0;
+    OPENSSL_cleanse(computed_hash_hex, sizeof(computed_hash_hex));
+    return match;
 }
