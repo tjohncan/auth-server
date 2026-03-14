@@ -707,6 +707,9 @@ create index idx_passwordless_login_token_expected_expiry
 create index idx_email_verification_token_expected_expiry
   on email_verification_token(expected_expiry);
 
+create index idx_email_verification_token_rate_limit
+  on email_verification_token(user_email_pin, issued_at);
+
 create index idx_password_reset_token_expected_expiry
   on password_reset_token(expected_expiry);
 
