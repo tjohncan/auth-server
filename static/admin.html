@@ -664,6 +664,8 @@
         }
 
         async function requestEmailVerification(email) {
+            const btn = document.querySelector(`[data-action="verify-email"][data-email="${CSS.escape(email)}"]`);
+            if (btn) { btn.disabled = true; btn.style.opacity = '0.5'; }
             try {
                 const response = await fetch(`${HOST}/email-verification-token`, {
                     method: 'POST',
@@ -686,6 +688,7 @@
                 `);
             } catch (error) {
                 showAlert('Failed to send verification email: ' + error.message);
+                if (btn) { btn.disabled = false; btn.style.opacity = ''; }
             }
         }
 
