@@ -16,6 +16,7 @@
 #include "server/http.h"
 #include "handlers.h"
 #include "util/str.h"
+#include "util/template.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -377,6 +378,9 @@ int main(void) {
     /* Register static files from ./static/ directory */
     register_static_files(router, config);
 
+    /* Load templates from ./templates/ directory */
+    template_init("./templates");
+
     /* Configure event loop (use resolved num_workers) */
     EventLoopConfig event_config = {
         .num_workers = num_workers,
@@ -429,6 +433,7 @@ int main(void) {
     }
 
     static_files_cleanup();
+    template_cleanup();
     db_pool_shutdown();
     encrypt_cleanup();
     config_free(config);

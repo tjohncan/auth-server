@@ -98,6 +98,7 @@ Common helper functions.
 - **String** (`str.c`, `include/util/str.h`) - Safe string operations
 - **Logging** (`log.c`, `include/util/log.h`) - Thread-safe timestamped logging
 - **Config** (`config.c`, `include/util/config.h`) - Configuration file + environment variable parsing
+- **Template** (`template.c`, `include/util/template.h`) - In-memory template engine with {{placeholder}} substitution
 - **Data** (`data.c`, `include/util/data.h`) - Hex encoding/decoding utilities used by crypto modules
 - **Validation** (`validation.c`, `include/util/validation.h`) - Input validation for usernames, emails, and code names
 - **JSON** (`json.c`, `include/util/json.h`) - JSON parsing utilities (unescape, get_string, get_int, get_bool)
@@ -364,6 +365,7 @@ src/
 │   ├── str.c
 │   ├── log.c
 │   ├── config.c
+│   ├── template.c
 │   ├── data.c
 │   ├── validation.c
 │   └── json.c
@@ -417,6 +419,7 @@ include/
 │   ├── str.h
 │   ├── log.h
 │   ├── config.h
+│   ├── template.h
 │   ├── data.h
 │   ├── validation.h
 │   └── json.h
@@ -432,12 +435,13 @@ test/
 ├── test_router.c       # Router unit tests
 ├── test_str.c          # String utilities unit tests
 ├── test_db.c           # Database integration test
-└── test_crypto.c       # Crypto test (random, password hashing, hmac, jwt)
+├── test_crypto.c       # Crypto test (random, password hashing, hmac, jwt)
+└── test_email.c   # Infrastructure/deployment convenience check; not in standard "make test" battery 
 
 data/  # Git-ignored default home for SQLite database
 
 static/  # website files (HTML, JS, images) for login and admin pages
-templates/  # email composition
+templates/  # email composition and transient pages
 
 vendor/
 ├── setup_notes.txt     # Commands to fetch SQLite amalgamation
@@ -474,6 +478,7 @@ vendor/
 - `make test-db` - Database integration test
 - `make test-crypto` - Crypto tests (random generation, password hashing, hmac, jwt)
 - `make test` - All of the above!
+- `make test-email` - Deliver a test email through the deployed "send script" (optional infrastructure)
 
 ## Linux-Specific Features
 

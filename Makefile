@@ -47,7 +47,7 @@ RELEASE_FLAGS = -O2 -DNDEBUG
 
 # Source files (organized by subdirectory)
 SERVER_SRCS = src/server/event_loop.c src/server/http.c src/server/router.c
-UTIL_SRCS = src/util/log.c src/util/str.c src/util/config.c src/util/data.c src/util/validation.c src/util/json.c
+UTIL_SRCS = src/util/log.c src/util/str.c src/util/config.c src/util/data.c src/util/validation.c src/util/json.c src/util/template.c
 ifeq ($(EMAIL_SUPPORT),1)
     UTIL_SRCS += src/util/email.c
 endif

@@ -15,10 +15,12 @@
 #include "util/str.h"
 #include "util/json.h"
 #include "util/validation.h"
+#include "util/template.h"
 #ifdef EMAIL_SUPPORT
 #include "util/email.h"
 #endif
 #include <openssl/crypto.h>
+#include <stdarg.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -648,6 +650,55 @@ HttpResponse *set_primary_email_handler(const HttpRequest *req, const RouteParam
 
 #ifdef EMAIL_SUPPORT
 
+/* ============================================================================
+ * Template Helper
+ * ========================================================================== */
+
+/*
+ * Render a template and return it as an HTML response.
+ * Takes ownership of the rendered buffer via http_response_set_body_owned.
+ * Returns NULL if the template is not found.
+ */
+static HttpResponse *response_template(int status, const char *name, ...) {
+    va_list args;
+    va_start(args, name);
+
+    /* Collect substitutions into array, then render */
+    const char *keys[16], *vals[16];
+    int n = 0;
+    const char *key;
+    while ((key = va_arg(args, const char *)) != NULL && n < 16) {
+        keys[n] = key;
+        vals[n] = va_arg(args, const char *);
+        if (!vals[n]) break;
+        n++;
+    }
+    va_end(args);
+
+    /* Build a single varargs call to template_render — since we can't
+     * forward varargs, call with explicit pairs up to the count we have */
+    char *html = NULL;
+    switch (n) {
+    case 0: html = template_render(name, NULL); break;
+    case 1: html = template_render(name, keys[0], vals[0], NULL); break;
+    case 2: html = template_render(name, keys[0], vals[0], keys[1], vals[1], NULL); break;
+    case 3: html = template_render(name, keys[0], vals[0], keys[1], vals[1], keys[2], vals[2], NULL); break;
+    case 4: html = template_render(name, keys[0], vals[0], keys[1], vals[1], keys[2], vals[2], keys[3], vals[3], NULL); break;
+    default: html = template_render(name, keys[0], vals[0], keys[1], vals[1], keys[2], vals[2], keys[3], vals[3], NULL); break;
+    }
+
+    if (!html) return NULL;
+
+    HttpResponse *resp = http_response_new(status);
+    http_response_set_header(resp, "Content-Type", CONTENT_TYPE_HTML);
+    http_response_set_body_owned(resp, html, strlen(html));
+    return resp;
+}
+
+/* ============================================================================
+ * Email Verification Handlers
+ * ========================================================================== */
+
 /*
  * POST /email-verification-token
  *
@@ -718,20 +769,14 @@ HttpResponse *create_email_verification_token_handler(const HttpRequest *req,
     }
 
     /* Send verification email */
-    char body_text[1024];
-    snprintf(body_text, sizeof(body_text),
-             "Click the link below to verify your email address:\n\n%s\n\n"
-             "If you did not request this, you can safely ignore this email.",
-             verify_url);
+    char *body_text = template_render("emails/verify.txt", "URL", verify_url, NULL);
+    char *body_html = template_render("emails/verify.html", "URL", verify_url, NULL);
 
-    char body_html[2048];
-    snprintf(body_html, sizeof(body_html),
-             "<p>Click the link below to verify your email address:</p>"
-             "<p><a href=\"%s\">%s</a></p>"
-             "<p>If you did not request this, you can safely ignore this email.</p>",
-             verify_url, verify_url);
+    if (body_text && body_html)
+        email_send(g_config, email, "Verify your email address", body_text, body_html);
 
-    email_send(g_config, email, "Verify your email address", body_text, body_html);
+    free(body_text);
+    free(body_html);
 
     free(email);
     return response_json_ok("{\"message\":\"Verification email sent\"}");
@@ -769,16 +814,10 @@ HttpResponse *verify_email_page_handler(const HttpRequest *req,
 
     if (rc != 0) {
         free(token);
-        HttpResponse *resp = http_response_new(400);
-        http_response_set(resp, CONTENT_TYPE_HTML,
-            "<!DOCTYPE html><html><body>"
-            "<p>This verification link is invalid or has expired.</p>"
-            "</body></html>");
-        return resp;
+        HttpResponse *resp = response_template(400, "pages/verify-email-invalid.html", NULL);
+        return resp ? resp : response_json_error(400, "Invalid token");
     }
 
-    /* Render confirmation page */
-    char html[4096];
     char escaped_email[512];
     str_html_escape(escaped_email, sizeof(escaped_email), result.email_address);
 
@@ -796,43 +835,14 @@ HttpResponse *verify_email_page_handler(const HttpRequest *req,
                  "<em style=\"color:#666;\">not set</em>");
     }
 
-    snprintf(html, sizeof(html),
-        "<!DOCTYPE html><html><head>"
-        "<meta charset=\"UTF-8\">"
-        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
-        "<title>Verify Email</title>"
-        "<link rel=\"stylesheet\" href=\"/css/base.css\">"
-        "<style>"
-        ".verify-container{width:100%%;max-width:400px;margin-top:40px;}"
-        "h1{margin-bottom:24px;font-size:28px;}"
-        ".info{margin-bottom:24px;padding:16px;border:1px solid #444;border-radius:4px;}"
-        ".info p{margin:4px 0;font-size:14px;color:#ccc;}"
-        ".info strong{color:#fff;}"
-        "button[type=\"submit\"]{width:100%%;padding:14px;font-size:16px;font-weight:600;"
-        "background:#28a745;color:white;border:none;border-radius:4px;cursor:pointer;}"
-        "button[type=\"submit\"]:hover{background:#218838;}"
-        "</style></head><body>"
-        "<div class=\"verify-container\">"
-        "<h1>Verify Email</h1>"
-        "<div class=\"info\">"
-        "<p>Email: <strong>%s</strong></p>"
-        "<p>Username: %s</p>"
-        "<p>User ID: <span style=\"font-family:monospace;font-size:12px;color:#888;\">%s</span></p>"
-        "</div>"
-        "<form method=\"POST\" action=\"/verify-email\">"
-        "<input type=\"hidden\" name=\"token\" value=\"%s\">"
-        "<button type=\"submit\">Confirm Verification</button>"
-        "</form>"
-        "<p style=\"margin-top:16px;font-size:14px;color:#999;\">"
-        "If you did not request this, close this page.</p>"
-        "</div></body></html>",
-        escaped_email, username_display, user_id_hex, token);
-
+    HttpResponse *resp = response_template(200, "pages/verify-email.html",
+        "EMAIL", escaped_email,
+        "USERNAME_DISPLAY", username_display,
+        "USER_ID", user_id_hex,
+        "TOKEN", token,
+        NULL);
     free(token);
-
-    HttpResponse *resp = http_response_new(200);
-    http_response_set(resp, CONTENT_TYPE_HTML, html);
-    return resp;
+    return resp ? resp : response_json_error(500, "Template error");
 }
 
 /*
@@ -872,44 +882,16 @@ HttpResponse *verify_email_handler(const HttpRequest *req,
     free(token);
 
     if (rc != 0) {
-        HttpResponse *resp = http_response_new(400);
-        http_response_set(resp, CONTENT_TYPE_HTML,
-            "<!DOCTYPE html><html><head>"
-            "<meta charset=\"UTF-8\">"
-            "<title>Verification Failed</title>"
-            "<link rel=\"stylesheet\" href=\"/css/base.css\">"
-            "<style>.verify-container{width:100%%;max-width:400px;margin-top:40px;}"
-            "h1{margin-bottom:24px;font-size:28px;}</style>"
-            "</head><body><div class=\"verify-container\">"
-            "<h1>Verification Failed</h1>"
-            "<p>This verification link is invalid, expired, or has already been used.</p>"
-            "<p style=\"margin-top:24px;\"><a href=\"/admin\">Go to your profile</a></p>"
-            "</div></body></html>");
-        return resp;
+        HttpResponse *resp = response_template(400, "pages/verify-email-error.html", NULL);
+        return resp ? resp : response_json_error(400, "Verification failed");
     }
 
-    char html[2048];
     char escaped_email[512];
     str_html_escape(escaped_email, sizeof(escaped_email), result.email_address);
 
-    snprintf(html, sizeof(html),
-        "<!DOCTYPE html><html><head>"
-        "<meta charset=\"UTF-8\">"
-        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
-        "<title>Email Verified</title>"
-        "<link rel=\"stylesheet\" href=\"/css/base.css\">"
-        "<style>.verify-container{width:100%%;max-width:400px;margin-top:40px;}"
-        "h1{margin-bottom:24px;font-size:28px;color:#28a745;}</style>"
-        "</head><body><div class=\"verify-container\">"
-        "<h1>Email Verified</h1>"
-        "<p><strong>%s</strong> has been verified.</p>"
-        "<p style=\"margin-top:24px;\"><a href=\"/admin\">Go to your profile</a></p>"
-        "</div></body></html>",
-        escaped_email);
-
-    HttpResponse *resp = http_response_new(200);
-    http_response_set(resp, CONTENT_TYPE_HTML, html);
-    return resp;
+    HttpResponse *resp = response_template(200, "pages/verify-email-success.html",
+        "EMAIL", escaped_email, NULL);
+    return resp ? resp : response_json_error(500, "Template error");
 }
 
 /*
@@ -922,64 +904,8 @@ HttpResponse *request_password_reset_page_handler(const HttpRequest *req,
     (void)req;
     (void)params;
 
-    const char *html =
-        "<!DOCTYPE html><html><head>"
-        "<meta charset=\"UTF-8\">"
-        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
-        "<title>Request Password Reset</title>"
-        "<link rel=\"stylesheet\" href=\"/css/base.css\">"
-        "<style>"
-        ".reset-container{width:100%%;max-width:400px;margin-top:40px;}"
-        "h1{margin-bottom:24px;font-size:28px;}"
-        ".form-field{margin-bottom:24px;}"
-        "label{display:block;margin-bottom:8px;font-size:14px;font-weight:500;}"
-        "input[type=\"email\"]{width:100%%;padding:12px 16px;font-size:16px;"
-        "border:1px solid #444;border-radius:4px;background:#1a1a1a;color:#fff;box-sizing:border-box;}"
-        "input:focus{outline:none;border-color:#87ceeb;}"
-        "button[type=\"submit\"]{width:100%%;padding:14px;font-size:16px;font-weight:600;"
-        "background:#007bff;color:white;border:none;border-radius:4px;cursor:pointer;margin-top:8px;}"
-        "button[type=\"submit\"]:hover{background:#0056b3;}"
-        "button[type=\"submit\"]:disabled{background:#555;cursor:not-allowed;}"
-        "#message{margin-top:20px;padding:12px;border-radius:4px;text-align:center;font-size:14px;}"
-        "</style></head><body>"
-        "<div class=\"reset-container\">"
-        "<h1>Request Password Reset</h1>"
-        "<form id=\"resetForm\">"
-        "<div class=\"form-field\">"
-        "<label for=\"email\">Email Address</label>"
-        "<input type=\"email\" id=\"email\" name=\"email\" placeholder=\"you@example.com\" required>"
-        "</div>"
-        "<button type=\"submit\">Send Reset Link</button>"
-        "</form>"
-        "<div id=\"message\"></div>"
-        "<p style=\"margin-top:40px;\"><a href=\"/login\">&larr; Back to Login</a></p>"
-        "</div>"
-        "<script>"
-        "document.getElementById('resetForm').addEventListener('submit',async(e)=>{"
-        "e.preventDefault();"
-        "const btn=e.target.querySelector('button[type=\"submit\"]');"
-        "const msg=document.getElementById('message');"
-        "btn.disabled=true;"
-        "try{"
-        "const res=await fetch('/request-password-reset',{"
-        "method:'POST',headers:{'Content-Type':'application/json'},"
-        "body:JSON.stringify({email:document.getElementById('email').value})"
-        "});"
-        "const data=await res.json();"
-        "msg.style.background='#1a2a1a';msg.style.border='1px solid #3a3';msg.style.color='#6c6';"
-        "msg.innerHTML='If that email belongs to a verified account,<br>a reset link has been sent.<br><br>Check your inbox.';"
-        "e.target.style.display='none';"
-        "}catch(err){"
-        "btn.disabled=false;"
-        "msg.style.background='#3a1a1a';msg.style.border='1px solid #c33';msg.style.color='#ff6b6b';"
-        "msg.textContent='Error: '+err.message;"
-        "}"
-        "});"
-        "</script></body></html>";
-
-    HttpResponse *resp = http_response_new(200);
-    http_response_set(resp, CONTENT_TYPE_HTML, html);
-    return resp;
+    HttpResponse *resp = response_template(200, "pages/request-password-reset.html", NULL);
+    return resp ? resp : response_json_error(500, "Template error");
 }
 
 /*
@@ -1039,20 +965,14 @@ HttpResponse *request_password_reset_handler(const HttpRequest *req,
                      g_config->host, token);
         }
 
-        char body_text[1024];
-        snprintf(body_text, sizeof(body_text),
-                 "Click the link below to reset your password:\n\n%s\n\n"
-                 "If you did not request this, you can safely ignore this email.",
-                 reset_url);
+        char *body_text = template_render("emails/reset.txt", "URL", reset_url, NULL);
+        char *body_html = template_render("emails/reset.html", "URL", reset_url, NULL);
 
-        char body_html[2048];
-        snprintf(body_html, sizeof(body_html),
-                 "<p>Click the link below to reset your password:</p>"
-                 "<p><a href=\"%s\">%s</a></p>"
-                 "<p>If you did not request this, you can safely ignore this email.</p>",
-                 reset_url, reset_url);
+        if (body_text && body_html)
+            email_send(g_config, email, "Password Reset", body_text, body_html);
 
-        email_send(g_config, email, "Password Reset", body_text, body_html);
+        free(body_text);
+        free(body_html);
     }
 
     free(email);
@@ -1094,79 +1014,14 @@ HttpResponse *reset_password_page_handler(const HttpRequest *req,
 
     if (rc != 0) {
         free(token);
-        HttpResponse *resp = http_response_new(400);
-        http_response_set(resp, CONTENT_TYPE_HTML,
-            "<!DOCTYPE html><html><head>"
-            "<meta charset=\"UTF-8\">"
-            "<title>Invalid Link</title>"
-            "<link rel=\"stylesheet\" href=\"/css/base.css\">"
-            "<style>.reset-container{width:100%%;max-width:400px;margin-top:40px;}"
-            "h1{margin-bottom:24px;font-size:28px;}</style>"
-            "</head><body><div class=\"reset-container\">"
-            "<h1>Invalid Link</h1>"
-            "<p>This password reset link is invalid or has expired.</p>"
-            "<p style=\"margin-top:24px;\"><a href=\"/request-password-reset\">"
-            "Request a new reset link</a></p>"
-            "</div></body></html>");
-        return resp;
+        HttpResponse *resp = response_template(400, "pages/reset-password-invalid.html", NULL);
+        return resp ? resp : response_json_error(400, "Invalid token");
     }
 
-    char html[4096];
-    snprintf(html, sizeof(html),
-        "<!DOCTYPE html><html><head>"
-        "<meta charset=\"UTF-8\">"
-        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
-        "<title>Set New Password</title>"
-        "<link rel=\"stylesheet\" href=\"/css/base.css\">"
-        "<style>"
-        ".reset-container{width:100%%;max-width:400px;margin-top:40px;}"
-        "h1{margin-bottom:24px;font-size:28px;}"
-        ".form-field{margin-bottom:24px;}"
-        "label{display:block;margin-bottom:8px;font-size:14px;font-weight:500;}"
-        "input[type=\"password\"]{width:100%%;padding:12px 16px;font-size:16px;"
-        "border:1px solid #444;border-radius:4px;background:#1a1a1a;color:#fff;box-sizing:border-box;}"
-        "input:focus{outline:none;border-color:#87ceeb;}"
-        "button[type=\"submit\"]{width:100%%;padding:14px;font-size:16px;font-weight:600;"
-        "background:#28a745;color:white;border:none;border-radius:4px;cursor:pointer;margin-top:8px;}"
-        "button[type=\"submit\"]:hover{background:#218838;}"
-        "#error{margin-top:12px;padding:12px;border-radius:4px;text-align:center;font-size:14px;"
-        "background:#3a1a1a;border:1px solid #c33;color:#ff6b6b;display:none;}"
-        "</style></head><body>"
-        "<div class=\"reset-container\">"
-        "<h1>Set New Password</h1>"
-        "<form method=\"POST\" action=\"/reset-password\" id=\"resetForm\">"
-        "<input type=\"hidden\" name=\"token\" value=\"%s\">"
-        "<div class=\"form-field\">"
-        "<label for=\"password\">New Password</label>"
-        "<input type=\"password\" id=\"password\" name=\"password\" required>"
-        "</div>"
-        "<div class=\"form-field\">"
-        "<label for=\"confirm\">Confirm Password</label>"
-        "<input type=\"password\" id=\"confirm\" required>"
-        "</div>"
-        "<button type=\"submit\">Set New Password</button>"
-        "</form>"
-        "<div id=\"error\"></div>"
-        "</div>"
-        "<script>"
-        "document.getElementById('resetForm').addEventListener('submit',function(e){"
-        "var p=document.getElementById('password').value;"
-        "var c=document.getElementById('confirm').value;"
-        "if(p!==c){"
-        "e.preventDefault();"
-        "var el=document.getElementById('error');"
-        "el.textContent='Passwords do not match.';"
-        "el.style.display='block';"
-        "}"
-        "});"
-        "</script></body></html>",
-        token);
-
+    HttpResponse *resp = response_template(200, "pages/reset-password.html",
+        "TOKEN", token, NULL);
     free(token);
-
-    HttpResponse *resp = http_response_new(200);
-    http_response_set(resp, CONTENT_TYPE_HTML, html);
-    return resp;
+    return resp ? resp : response_json_error(500, "Template error");
 }
 
 /*
@@ -1223,38 +1078,12 @@ HttpResponse *reset_password_handler(const HttpRequest *req,
     free(token);
 
     if (rc != 0) {
-        HttpResponse *resp = http_response_new(400);
-        http_response_set(resp, CONTENT_TYPE_HTML,
-            "<!DOCTYPE html><html><head>"
-            "<meta charset=\"UTF-8\">"
-            "<title>Reset Failed</title>"
-            "<link rel=\"stylesheet\" href=\"/css/base.css\">"
-            "<style>.reset-container{width:100%%;max-width:400px;margin-top:40px;}"
-            "h1{margin-bottom:24px;font-size:28px;}</style>"
-            "</head><body><div class=\"reset-container\">"
-            "<h1>Reset Failed</h1>"
-            "<p>This password reset link is invalid, expired, or has already been used.</p>"
-            "<p style=\"margin-top:24px;\"><a href=\"/request-password-reset\">"
-            "Request a new reset link</a></p>"
-            "</div></body></html>");
-        return resp;
+        HttpResponse *resp = response_template(400, "pages/reset-password-error.html", NULL);
+        return resp ? resp : response_json_error(400, "Reset failed");
     }
 
-    HttpResponse *resp = http_response_new(200);
-    http_response_set(resp, CONTENT_TYPE_HTML,
-        "<!DOCTYPE html><html><head>"
-        "<meta charset=\"UTF-8\">"
-        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
-        "<title>Password Updated</title>"
-        "<link rel=\"stylesheet\" href=\"/css/base.css\">"
-        "<style>.reset-container{width:100%%;max-width:400px;margin-top:40px;}"
-        "h1{margin-bottom:24px;font-size:28px;color:#28a745;}</style>"
-        "</head><body><div class=\"reset-container\">"
-        "<h1>Password Updated</h1>"
-        "<p>Your password has been set successfully.</p>"
-        "<p style=\"margin-top:24px;\"><a href=\"/login\">Log In</a></p>"
-        "</div></body></html>");
-    return resp;
+    HttpResponse *resp = response_template(200, "pages/reset-password-success.html", NULL);
+    return resp ? resp : response_json_error(500, "Template error");
 }
 
 /* ============================================================================
@@ -1283,71 +1112,9 @@ HttpResponse *request_passwordless_login_page_handler(const HttpRequest *req,
     }
     free(return_to);
 
-    char html[4096];
-    snprintf(html, sizeof(html),
-        "<!DOCTYPE html><html><head>"
-        "<meta charset=\"UTF-8\">"
-        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
-        "<title>Request Temporary Access Link</title>"
-        "<link rel=\"stylesheet\" href=\"/css/base.css\">"
-        "<style>"
-        ".reset-container{width:100%%;max-width:400px;margin-top:40px;}"
-        "h1{margin-bottom:24px;font-size:28px;}"
-        ".form-field{margin-bottom:24px;}"
-        "label{display:block;margin-bottom:8px;font-size:14px;font-weight:500;}"
-        "input[type=\"email\"]{width:100%%;padding:12px 16px;font-size:16px;"
-        "border:1px solid #444;border-radius:4px;background:#1a1a1a;color:#fff;box-sizing:border-box;}"
-        "input:focus{outline:none;border-color:#87ceeb;}"
-        "button[type=\"submit\"]{width:100%%;padding:14px;font-size:16px;font-weight:600;"
-        "background:#007bff;color:white;border:none;border-radius:4px;cursor:pointer;margin-top:8px;}"
-        "button[type=\"submit\"]:hover{background:#0056b3;}"
-        "button[type=\"submit\"]:disabled{background:#555;cursor:not-allowed;}"
-        "#message{margin-top:20px;padding:12px;border-radius:4px;text-align:center;font-size:14px;}"
-        "</style></head><body>"
-        "<div class=\"reset-container\">"
-        "<h1>Request Temporary Access Link</h1>"
-        "<form id=\"plForm\">"
-        "<input type=\"hidden\" id=\"returnTo\" value=\"%s\">"
-        "<div class=\"form-field\">"
-        "<label for=\"email\">Email Address</label>"
-        "<input type=\"email\" id=\"email\" name=\"email\" placeholder=\"you@example.com\" required>"
-        "</div>"
-        "<button type=\"submit\">Send Access Link</button>"
-        "</form>"
-        "<div id=\"message\"></div>"
-        "<p style=\"margin-top:40px;\"><a href=\"/login\">&larr; Back to Login</a></p>"
-        "</div>"
-        "<script>"
-        "document.getElementById('plForm').addEventListener('submit',async(e)=>{"
-        "e.preventDefault();"
-        "const btn=e.target.querySelector('button[type=\"submit\"]');"
-        "const msg=document.getElementById('message');"
-        "btn.disabled=true;"
-        "try{"
-        "const body={email:document.getElementById('email').value};"
-        "const rt=document.getElementById('returnTo').value;"
-        "if(rt)body.return_to=rt;"
-        "const res=await fetch('/request-passwordless-login',{"
-        "method:'POST',headers:{'Content-Type':'application/json'},"
-        "body:JSON.stringify(body)"
-        "});"
-        "const data=await res.json();"
-        "msg.style.background='#1a2a1a';msg.style.border='1px solid #3a3';msg.style.color='#6c6';"
-        "msg.innerHTML='If that email belongs to a verified account<br>with passwordless login enabled,"
-        "<br>a login link has been sent.<br><br>Check your inbox.';"
-        "e.target.style.display='none';"
-        "}catch(err){"
-        "btn.disabled=false;"
-        "msg.style.background='#3a1a1a';msg.style.border='1px solid #c33';msg.style.color='#ff6b6b';"
-        "msg.textContent='Error: '+err.message;"
-        "}"
-        "});"
-        "</script></body></html>",
-        escaped_return_to);
-
-    HttpResponse *resp = http_response_new(200);
-    http_response_set(resp, CONTENT_TYPE_HTML, html);
-    return resp;
+    HttpResponse *resp = response_template(200, "pages/request-passwordless-login.html",
+        "RETURN_TO", escaped_return_to, NULL);
+    return resp ? resp : response_json_error(500, "Template error");
 }
 
 /*
@@ -1416,20 +1183,14 @@ HttpResponse *request_passwordless_login_handler(const HttpRequest *req,
                      g_config->host, token);
         }
 
-        char body_text[1024];
-        snprintf(body_text, sizeof(body_text),
-                 "Click the link below to log in:\n\n%s\n\n"
-                 "If you did not request this, you can safely ignore this email.",
-                 login_url);
+        char *body_text = template_render("emails/passwordless.txt", "URL", login_url, NULL);
+        char *body_html = template_render("emails/passwordless.html", "URL", login_url, NULL);
 
-        char body_html[2048];
-        snprintf(body_html, sizeof(body_html),
-                 "<p>Click the link below to log in:</p>"
-                 "<p><a href=\"%s\">%s</a></p>"
-                 "<p>If you did not request this, you can safely ignore this email.</p>",
-                 login_url, login_url);
+        if (body_text && body_html)
+            email_send(g_config, email, "Temporary Access Link", body_text, body_html);
 
-        email_send(g_config, email, "Temporary Access Link", body_text, body_html);
+        free(body_text);
+        free(body_html);
     }
 
     free(email);
@@ -1473,21 +1234,8 @@ HttpResponse *passwordless_login_page_handler(const HttpRequest *req,
 
     if (rc != 0) {
         free(token);
-        HttpResponse *resp = http_response_new(400);
-        http_response_set(resp, CONTENT_TYPE_HTML,
-            "<!DOCTYPE html><html><head>"
-            "<meta charset=\"UTF-8\">"
-            "<title>Invalid Link</title>"
-            "<link rel=\"stylesheet\" href=\"/css/base.css\">"
-            "<style>.reset-container{width:100%%;max-width:400px;margin-top:40px;}"
-            "h1{margin-bottom:24px;font-size:28px;}</style>"
-            "</head><body><div class=\"reset-container\">"
-            "<h1>Invalid Link</h1>"
-            "<p>This login link is invalid or has expired.</p>"
-            "<p style=\"margin-top:24px;\"><a href=\"/request-passwordless-login\">"
-            "Request a new login link</a></p>"
-            "</div></body></html>");
-        return resp;
+        HttpResponse *resp = response_template(400, "pages/passwordless-login-invalid.html", NULL);
+        return resp ? resp : response_json_error(400, "Invalid token");
     }
 
     char escaped_email[512];
@@ -1510,33 +1258,11 @@ HttpResponse *passwordless_login_page_handler(const HttpRequest *req,
                  escaped_email);
     }
 
-    char html[4096];
-    snprintf(html, sizeof(html),
-        "<!DOCTYPE html><html><head>"
-        "<meta charset=\"UTF-8\">"
-        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
-        "<title>Confirm Login</title>"
-        "<link rel=\"stylesheet\" href=\"/css/base.css\">"
-        "<style>"
-        ".reset-container{width:100%%;max-width:400px;margin-top:40px;}"
-        "h1{margin-bottom:24px;font-size:28px;}"
-        "button[type=\"submit\"]{width:100%%;padding:14px;font-size:16px;font-weight:600;"
-        "background:#28a745;color:white;border:none;border-radius:4px;cursor:pointer;}"
-        "button[type=\"submit\"]:hover{background:#218838;}"
-        "</style></head><body>"
-        "<div class=\"reset-container\">"
-        "<h1>Confirm Login</h1>"
-        "%s"
-        "<form method=\"POST\" action=\"/passwordless-login\">"
-        "<input type=\"hidden\" name=\"token\" value=\"%s\">"
-        "<button type=\"submit\">Log In</button>"
-        "</form>"
-        "</div></body></html>",
-        display_info, escaped_token);
-
-    HttpResponse *resp = http_response_new(200);
-    http_response_set(resp, CONTENT_TYPE_HTML, html);
-    return resp;
+    HttpResponse *resp = response_template(200, "pages/passwordless-login.html",
+        "DISPLAY_INFO", display_info,
+        "TOKEN", escaped_token,
+        NULL);
+    return resp ? resp : response_json_error(500, "Template error");
 }
 
 /*
