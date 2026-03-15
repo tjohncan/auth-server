@@ -212,6 +212,9 @@ HttpResponse *passwordless_login_page_handler(const HttpRequest *req, const Rout
 
 /* POST /passwordless-login - Consume token, create session, redirect (public, no auth) */
 HttpResponse *passwordless_login_handler(const HttpRequest *req, const RouteParams *params);
+
+/* POST /api/user/passwordless-login - Toggle allow_passwordless_login */
+HttpResponse *passwordless_login_toggle_handler(const HttpRequest *req, const RouteParams *params);
 #endif
 
 /* POST /api/user/password - Change current user's password */

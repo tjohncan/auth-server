@@ -1196,18 +1196,20 @@ Get current user's profile information.
   "user_id": "a1b2c3d4-0000-4aaa-944b-a1b2c3d4e5f6",
   "username": "alice",
   "has_mfa": true,
-  "require_mfa": false
+  "require_mfa": false,
+  "allow_passwordless_login": false
 }
 ```
 
 **Response Fields**:
 
-| Field       | Type    | Description                                        |
-|-------------|---------|----------------------------------------------------|
-| user_id     | string  | User UUID (never exposes internal PIN)             |
-| username    | string  | Username (empty string for email-only accounts)    |
-| has_mfa     | boolean | True if user has at least one confirmed MFA method |
-| require_mfa | boolean | True if user opted in to enforce MFA on themselves |
+| Field                    | Type    | Description                                        |
+|--------------------------|---------|----------------------------------------------------|
+| user_id                  | string  | User UUID (never exposes internal PIN)             |
+| username                 | string  | Username (empty string for email-only accounts)    |
+| has_mfa                  | boolean | True if user has at least one confirmed MFA method |
+| require_mfa              | boolean | True if user opted in to enforce MFA on themselves |
+| allow_passwordless_login | boolean | True if user allows login via emailed link         |
 
 **Error Response** (401 Unauthorized):
 ```json
@@ -1600,6 +1602,58 @@ curl -X POST http://localhost:8080/api/user/username \
   -H "Cookie: session=<session_token>" \
   -H "Content-Type: application/json" \
   -d '{"new_username": "alice_new"}'
+```
+
+---
+
+### POST /api/user/passwordless-login
+
+Toggle passwordless login (login via emailed link) for current user. Requires `EMAIL_SUPPORT`.
+
+**Authentication**: Session cookie required
+
+**Request Body**:
+```json
+{
+  "enabled": true
+}
+```
+
+**Success Response** (200 OK):
+```json
+{
+  "message": "Passwordless login enabled"
+}
+```
+
+**Error Responses**:
+
+- **400 Bad Request** (no verified email):
+```json
+{
+  "error": "Cannot enable passwordless login without a verified email address"
+}
+```
+
+- **401 Unauthorized** (not authenticated):
+```json
+{
+  "error": "Authentication required"
+}
+```
+
+**Notes**:
+- Enabling requires at least one verified email address on the account
+- Disabling always succeeds
+- When enabled, user can request a temporary login link sent to their verified email
+- The login page shows "Request Temporary Access Link" only when `EMAIL_SUPPORT` is compiled in
+
+**Example**:
+```bash
+curl -X POST http://localhost:8080/api/user/passwordless-login \
+  -H "Cookie: session=<session_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": true}'
 ```
 
 ---

@@ -345,9 +345,11 @@ HttpResponse *profile_handler(const HttpRequest *req, const RouteParams *params)
     JsonBuf *jb = jsonbuf_new(2048);
     jsonbuf_appendf(jb, "{\"user_id\":\"%s\",\"username\":\"", user_id_hex);
     jsonbuf_append_escaped(jb, profile.username);
-    jsonbuf_appendf(jb, "\",\"has_mfa\":%s,\"require_mfa\":%s}",
+    jsonbuf_appendf(jb, "\",\"has_mfa\":%s,\"require_mfa\":%s,"
+                    "\"allow_passwordless_login\":%s}",
                     profile.has_mfa ? "true" : "false",
-                    profile.require_mfa ? "true" : "false");
+                    profile.require_mfa ? "true" : "false",
+                    profile.allow_passwordless_login ? "true" : "false");
 
     return jsonbuf_to_response(jb, 200);
 }
@@ -1250,7 +1252,7 @@ HttpResponse *reset_password_handler(const HttpRequest *req,
         "</head><body><div class=\"reset-container\">"
         "<h1>Password Updated</h1>"
         "<p>Your password has been set successfully.</p>"
-        "<p style=\"margin-top:24px;\"><a href=\"/login\">Log in</a></p>"
+        "<p style=\"margin-top:24px;\"><a href=\"/login\">Log In</a></p>"
         "</div></body></html>");
     return resp;
 }
@@ -1643,6 +1645,56 @@ HttpResponse *passwordless_login_handler(const HttpRequest *req,
     http_response_set(resp, CONTENT_TYPE_HTML,
         "<!DOCTYPE html><html><body><p>Redirecting...</p></body></html>");
     return resp;
+}
+
+/*
+ * POST /api/user/passwordless-login
+ *
+ * Toggles allow_passwordless_login for the authenticated user.
+ * Requires at least one verified email to enable.
+ */
+HttpResponse *passwordless_login_toggle_handler(const HttpRequest *req,
+                                                 const RouteParams *params) {
+    (void)params;
+
+    db_handle_t *db = db_pool_get_connection();
+    if (!db) {
+        log_error("Failed to get database connection");
+        return response_json_error(500, "Internal server error");
+    }
+
+    oauth_session_info_t session;
+    HttpResponse *auth_err = require_authenticated_session(req, db, &session);
+    if (auth_err) return auth_err;
+
+    if (!req->body) {
+        return response_json_error(400, "Request body required");
+    }
+
+    int enabled = 0;
+    if (json_get_bool(req->body, "enabled", &enabled) != 0) {
+        return response_json_error(400, "enabled field required (true or false)");
+    }
+
+    /* Can only enable if user has at least one verified email */
+    if (enabled) {
+        int has_verified = 0;
+        if (user_has_verified_email(db, session.user_account_pin, &has_verified) != 0) {
+            return response_json_error(500, "Failed to check email status");
+        }
+        if (!has_verified) {
+            return response_json_error(400,
+                "Cannot enable passwordless login without a verified email address");
+        }
+    }
+
+    if (user_update_allow_passwordless_login(db, session.user_account_pin, enabled) != 0) {
+        return response_json_error(500, "Failed to update passwordless login setting");
+    }
+
+    return response_json_ok(
+        enabled ? "{\"message\":\"Passwordless login enabled\"}"
+                : "{\"message\":\"Passwordless login disabled\"}");
 }
 
 #endif /* EMAIL_SUPPORT */

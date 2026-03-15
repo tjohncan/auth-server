@@ -171,6 +171,7 @@ typedef struct {
     char username[256];          /* Username (may be empty string if not set) */
     int has_mfa;                 /* 1 if user has at least one confirmed MFA method */
     int require_mfa;             /* 1 if user opted in to enforce MFA themselves */
+    int allow_passwordless_login; /* 1 if user allows passwordless login via email link */
 } user_profile_t;
 
 /*
@@ -469,5 +470,22 @@ int user_consume_passwordless_login_token(db_handle_t *db, const char *token,
                                            long long *out_user_pin,
                                            unsigned char *out_user_id,
                                            char *out_return_to, size_t return_to_size);
+
+/*
+ * Check if user has at least one verified email
+ *
+ * Returns: 0 on success (result in out_has_verified), -1 on error
+ */
+int user_has_verified_email(db_handle_t *db, long long user_account_pin,
+                             int *out_has_verified);
+
+/*
+ * Update user allow_passwordless_login flag
+ *
+ * Returns: 0 on success, -1 on error
+ */
+int user_update_allow_passwordless_login(db_handle_t *db,
+                                          long long user_account_pin,
+                                          int allow);
 
 #endif /* DB_QUERIES_USER_H */

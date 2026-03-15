@@ -668,7 +668,8 @@ int user_get_profile(db_handle_t *db, long long user_account_pin,
     }
 
     const char *sql =
-        "SELECT id, username, has_mfa, require_mfa FROM " TBL_USER_ACCOUNT " "
+        "SELECT id, username, has_mfa, require_mfa, allow_passwordless_login "
+        "FROM " TBL_USER_ACCOUNT " "
         "WHERE pin = " P"1 AND is_active = " BOOL_TRUE " "
         "LIMIT 1";
 
@@ -706,9 +707,10 @@ int user_get_profile(db_handle_t *db, long long user_account_pin,
             out_profile->username[0] = '\0';
         }
 
-        /* Extract MFA flags */
+        /* Extract flags */
         out_profile->has_mfa = db_column_int(stmt, 2);
         out_profile->require_mfa = db_column_int(stmt, 3);
+        out_profile->allow_passwordless_login = db_column_int(stmt, 4);
 
         db_finalize(stmt);
         return 0;
@@ -2142,5 +2144,78 @@ int user_consume_passwordless_login_token(db_handle_t *db, const char *token,
     }
 
     *out_user_pin = user_pin;
+    return 0;
+}
+
+/* ============================================================================
+ * Passwordless Login Toggle Functions
+ * ========================================================================== */
+
+int user_has_verified_email(db_handle_t *db, long long user_account_pin,
+                             int *out_has_verified) {
+    if (!db || !out_has_verified) {
+        log_error("Invalid arguments to user_has_verified_email");
+        return -1;
+    }
+
+    const char *sql =
+        "SELECT 1 FROM " TBL_USER_EMAIL " "
+        "WHERE user_account_pin = " P"1 AND is_verified = " BOOL_TRUE " "
+        "LIMIT 1";
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        log_error("Failed to prepare user_has_verified_email statement");
+        return -1;
+    }
+
+    db_bind_int64(stmt, 1, user_account_pin);
+
+    int rc = db_step(stmt);
+    db_finalize(stmt);
+
+    if (rc == DB_ROW) {
+        *out_has_verified = 1;
+        return 0;
+    } else if (rc == DB_DONE) {
+        *out_has_verified = 0;
+        return 0;
+    }
+
+    log_error("Failed to check verified email");
+    return -1;
+}
+
+int user_update_allow_passwordless_login(db_handle_t *db,
+                                          long long user_account_pin,
+                                          int allow) {
+    if (!db) {
+        log_error("Invalid arguments to user_update_allow_passwordless_login");
+        return -1;
+    }
+
+    const char *sql =
+        "UPDATE " TBL_USER_ACCOUNT " "
+        "SET allow_passwordless_login = " P"1, updated_at = " NOW " "
+        "WHERE pin = " P"2 AND allow_passwordless_login != " P"1";
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        log_error("Failed to prepare user_update_allow_passwordless_login statement");
+        return -1;
+    }
+
+    db_bind_int(stmt, 1, allow ? 1 : 0);
+    db_bind_int64(stmt, 2, user_account_pin);
+
+    int rc = db_step(stmt);
+    db_finalize(stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Failed to update allow_passwordless_login flag");
+        return -1;
+    }
+
+    log_info("Updated allow_passwordless_login to %d", allow);
     return 0;
 }

@@ -352,6 +352,7 @@ int main(void) {
     router_add(router, HTTP_POST, "/request-passwordless-login", request_passwordless_login_handler);
     router_add(router, HTTP_GET, "/passwordless-login", passwordless_login_page_handler);
     router_add(router, HTTP_POST, "/passwordless-login", passwordless_login_handler);
+    router_add(router, HTTP_POST, "/api/user/passwordless-login", passwordless_login_toggle_handler);
 #endif
     router_add(router, HTTP_POST, "/api/user/password", change_password_handler);
     router_add(router, HTTP_POST, "/api/user/username", change_username_handler);

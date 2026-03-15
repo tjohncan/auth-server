@@ -304,6 +304,7 @@
                 case 'mfa-resume-confirm': showMFAResumeConfirm(target.dataset.id); break;
                 case 'mfa-regenerate-codes': mfaRegenerateCodes(); break;
                 case 'toggle-mfa-require': toggleMfaRequire(); break;
+                case 'toggle-passwordless': togglePasswordless(); break;
                 case 'add-email': addEmail(); break;
                 case 'delete-email': deleteEmail(target.dataset.email); break;
                 case 'set-primary-email': setPrimaryEmail(target.dataset.email); break;
@@ -467,7 +468,12 @@
             }
         }
 
+        let cachedProfile = null;
+        let cachedHasVerifiedEmail = false;
+
         function renderSecuritySection(profile) {
+            cachedProfile = profile;
+
             const mfaStatus = profile.has_mfa ? 'Enrolled' : 'Not enrolled';
             const mfaColor = profile.has_mfa ? '#28a745' : '#999';
             const requireStatus = profile.require_mfa ? 'Required' : 'Not required';
@@ -482,14 +488,29 @@
                 `;
             }
 
+            let passwordlessBox = '';
+            if (cachedHasVerifiedEmail) {
+                const plStatus = profile.allow_passwordless_login ? 'Allowed' : 'Not allowed';
+                const plColor = profile.allow_passwordless_login ? '#28a745' : '#999';
+                const plToggleText = profile.allow_passwordless_login ? 'Disable Passwordless Login' : 'Allow Passwordless Login';
+                const plToggleColor = profile.allow_passwordless_login ? '#6c757d' : '#28a745';
+                passwordlessBox = `
+                    <div style="margin-top: 15px; padding: 12px; background: #1a1a1a; border: 1px solid #444; border-radius: 4px;">
+                        <div><strong>Passwordless Login:</strong> <span style="color: ${plColor};">${plStatus}</span></div>
+                        <button data-action="toggle-passwordless" style="background: ${plToggleColor}; color: white; border: none; padding: 8px 14px; border-radius: 4px; cursor: pointer; margin-top: 10px;">${plToggleText}</button>
+                    </div>
+                `;
+            }
+
             document.getElementById('securityContent').innerHTML = `
                 <div style="margin-bottom: 15px; padding: 12px; background: #1a1a1a; border: 1px solid #444; border-radius: 4px;">
                     <div style="margin-bottom: 6px;"><strong>Multi-Factor Authentication:</strong> <span style="color: ${mfaColor};">${mfaStatus}</span></div>
-                    <div><strong>Enforcement:</strong> <span style="color: ${requireColor};">${requireStatus}</span></div>
+                    <div><strong>MFA Enforcement:</strong> <span style="color: ${requireColor};">${requireStatus}</span></div>
                     ${toggleButton}
                 </div>
                 <button data-action="show-change-password">Change Password</button>
                 <button data-action="show-mfa-setup" style="margin-left: 10px;">Configure MFA</button>
+                ${passwordlessBox}
             `;
         }
 
@@ -584,6 +605,13 @@
 
                     html += '<button data-action="add-email" style="margin-top: 5px;">+ Add Email Address</button>';
                     container.innerHTML = html;
+                }
+
+                /* Update passwordless box visibility based on verified email state */
+                const hadVerified = cachedHasVerifiedEmail;
+                cachedHasVerifiedEmail = data.emails.some(e => e.is_verified);
+                if (cachedHasVerifiedEmail !== hadVerified && cachedProfile) {
+                    renderSecuritySection(cachedProfile);
                 }
             } catch (error) {
                 console.error('Failed to load emails:', error);
@@ -2422,6 +2450,20 @@
                 await loadProfile();
             } catch (error) {
                 showAlert('Failed to update MFA requirement: ' + error.message);
+            }
+        }
+
+        async function togglePasswordless() {
+            try {
+                const newState = !cachedProfile.allow_passwordless_login;
+                const action = newState ? 'enable' : 'disable';
+
+                if (!(await showConfirm(`Are you sure you want to ${action} passwordless login?`))) return;
+
+                await apiPost('/user/passwordless-login', { enabled: newState });
+                await loadProfile();
+            } catch (error) {
+                showAlert('Failed to update passwordless login: ' + error.message);
             }
         }
 
