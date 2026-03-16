@@ -407,7 +407,9 @@ HttpResponse *admin_get_resource_servers_handler(const HttpRequest *req, const R
         jsonbuf_append_escaped(jb, server.address);
         jsonbuf_appendf(jb, "\",\"note\":\"");
         jsonbuf_append_escaped(jb, server.note);
-        jsonbuf_appendf(jb, "\",\"is_active\":%s}", server.is_active ? "true" : "false");
+        jsonbuf_appendf(jb, "\",\"is_active\":%s,\"allow_user_provisioning\":%s}",
+            server.is_active ? "true" : "false",
+            server.allow_user_provisioning ? "true" : "false");
 
         return jsonbuf_to_response(jb, 200);
     }
@@ -461,8 +463,9 @@ HttpResponse *admin_get_resource_servers_handler(const HttpRequest *req, const R
         jsonbuf_append_escaped(jb, servers[i].address);
         jsonbuf_appendf(jb, "\",\"note\":\"");
         jsonbuf_append_escaped(jb, servers[i].note);
-        jsonbuf_appendf(jb, "\",\"is_active\":%s}",
-                        servers[i].is_active ? "true" : "false");
+        jsonbuf_appendf(jb, "\",\"is_active\":%s,\"allow_user_provisioning\":%s}",
+                        servers[i].is_active ? "true" : "false",
+                        servers[i].allow_user_provisioning ? "true" : "false");
     }
 
     jsonbuf_appendf(jb, "],\"pagination\":{\"limit\":%d,\"offset\":%d,\"count\":%d,\"total\":%d}}",
@@ -622,6 +625,12 @@ HttpResponse *admin_update_resource_server_handler(const HttpRequest *req, const
         is_active = &is_active_val;
     }
 
+    int allow_user_provisioning_val;
+    int *allow_user_provisioning = NULL;
+    if (json_get_bool(req->body, "allow_user_provisioning", &allow_user_provisioning_val) == 0) {
+        allow_user_provisioning = &allow_user_provisioning_val;
+    }
+
     /* Validate input formats */
     char validation_error[256];
 
@@ -640,12 +649,12 @@ HttpResponse *admin_update_resource_server_handler(const HttpRequest *req, const
         return response_json_error(400, validation_error);
     }
 
-    if (!display_name && !address && !note && !is_active) {
+    if (!display_name && !address && !note && !is_active && !allow_user_provisioning) {
         free(display_name); free(address); free(note);
         return response_json_error(400, "At least one field must be provided for update");
     }
 
-    int result = admin_update_resource_server(db, ctx.user_account_pin, ctx.organization_key_pin, server_id, display_name, address, note, is_active);
+    int result = admin_update_resource_server(db, ctx.user_account_pin, ctx.organization_key_pin, server_id, display_name, address, note, is_active, allow_user_provisioning);
 
     free(display_name); free(address); free(note);
 

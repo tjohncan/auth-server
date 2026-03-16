@@ -945,6 +945,33 @@ int user_delete_email(db_handle_t *db, long long user_account_pin,
         return -1;
     }
 
+    /* Delete invitation tokens (FK child) */
+    const char *invite_sql =
+        "DELETE FROM " TBL_INVITATION_TOKEN " "
+        "WHERE user_email_pin IN ("
+            "SELECT pin FROM " TBL_USER_EMAIL " "
+            "WHERE user_account_pin = " P"1 AND email_hash = " P"2"
+        ")";
+
+    db_stmt_t *inv_stmt = NULL;
+    if (db_prepare(db, &inv_stmt, invite_sql) != 0) {
+        log_error("Failed to prepare invitation token cleanup for email delete");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    db_bind_int64(inv_stmt, 1, user_account_pin);
+    db_bind_text(inv_stmt, 2, email_hash, -1);
+
+    rc = db_step(inv_stmt);
+    db_finalize(inv_stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Failed to delete invitation tokens for email");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
     /* Delete the email row */
     const char *sql =
         "DELETE FROM " TBL_USER_EMAIL " "
@@ -1644,6 +1671,7 @@ int user_verify_email_token(db_handle_t *db, const char *token,
     /* Step 4: Squatter cleanup — delete verification tokens for other users'
      * unverified rows with the same email_hash (FK children first) */
     if (email_hash[0] != '\0') {
+        /* Delete squatter verification tokens (FK child of user_email) */
         const char *cleanup_tokens_sql =
             "DELETE FROM " TBL_EMAIL_VERIFICATION_TOKEN " "
             "WHERE user_email_pin IN ("
@@ -1667,6 +1695,34 @@ int user_verify_email_token(db_handle_t *db, const char *token,
 
         if (rc != DB_DONE) {
             log_error("Failed to delete squatter verification tokens");
+            db_execute_trusted(db, "ROLLBACK");
+            return -1;
+        }
+
+        /* Delete squatter invitation tokens (FK child of user_email) */
+        const char *cleanup_invite_sql =
+            "DELETE FROM " TBL_INVITATION_TOKEN " "
+            "WHERE user_email_pin IN ("
+                "SELECT pin FROM " TBL_USER_EMAIL " "
+                "WHERE email_hash = " P"1 "
+                "AND user_account_pin != " P"2 "
+                "AND is_verified = " BOOL_FALSE
+            ")";
+
+        db_stmt_t *ci_stmt = NULL;
+        if (db_prepare(db, &ci_stmt, cleanup_invite_sql) != 0) {
+            log_error("Failed to prepare squatter invitation token cleanup");
+            db_execute_trusted(db, "ROLLBACK");
+            return -1;
+        }
+
+        db_bind_text(ci_stmt, 1, email_hash, -1);
+        db_bind_int64(ci_stmt, 2, user_account_pin);
+        rc = db_step(ci_stmt);
+        db_finalize(ci_stmt);
+
+        if (rc != DB_DONE) {
+            log_error("Failed to delete squatter invitation tokens");
             db_execute_trusted(db, "ROLLBACK");
             return -1;
         }

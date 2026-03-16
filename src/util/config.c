@@ -16,6 +16,9 @@
 #define DEFAULT_PASSWORDLESS_LOGIN_TOKEN_TTL_SECONDS 600    /* 10 minutes */
 #endif
 
+/* Invitation token default (not gated by EMAIL_SUPPORT) */
+#define DEFAULT_INVITATION_TOKEN_TTL_SECONDS 259200  /* 72 hours */
+
 /* Default values */
 #define DEFAULT_HOST "localhost"
 #define DEFAULT_PORT 8080
@@ -410,6 +413,17 @@ static void set_config_value(config_t *config, const char *key, const char *valu
                     value, config->jwt_clock_skew_seconds);
         } else {
             config->jwt_clock_skew_seconds = skew;
+        }
+    }
+
+    /* Invitation token TTL */
+    else if (strcmp(key, "invitation_token_ttl_seconds") == 0) {
+        int ttl = 0;
+        if (parse_int(value, &ttl) != 0 || ttl < 60) {
+            log_warn("Invalid invitation_token_ttl_seconds '%s', must be >= 60. Keeping current: %d",
+                    value, config->invitation_token_ttl_seconds);
+        } else {
+            config->invitation_token_ttl_seconds = ttl;
         }
     }
 
@@ -1018,6 +1032,9 @@ config_t *config_load(const char *config_file) {
 
     /* JWT settings */
     config->jwt_clock_skew_seconds = DEFAULT_JWT_CLOCK_SKEW_SECONDS;
+
+    /* Invitation token TTL */
+    config->invitation_token_ttl_seconds = DEFAULT_INVITATION_TOKEN_TTL_SECONDS;
 
     /* Database cleaner defaults */
     config->cleaner_enabled = DEFAULT_CLEANER_ENABLED;

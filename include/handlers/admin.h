@@ -205,7 +205,8 @@ int admin_update_resource_server(db_handle_t *db, long long user_account_pin,
                                   const char *display_name,
                                   const char *address,
                                   const char *note,
-                                  const int *is_active);
+                                  const int *is_active,
+                                  const int *allow_user_provisioning);
 
 /* ============================================================================
  * CLIENT OPERATIONS

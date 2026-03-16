@@ -58,6 +58,9 @@ typedef struct {
     /* JWT settings */
     int jwt_clock_skew_seconds;  /* Clock skew tolerance for JWT validation (default 0) */
 
+    /* Invitation token TTL (not gated by EMAIL_SUPPORT — RS provisioning always needs this) */
+    int invitation_token_ttl_seconds;  /* How long invitation tokens are valid (default 72 hours) */
+
     /* Database cleaner settings */
     int cleaner_enabled;                    /* Master switch: 0=off, 1=on */
     int cleaner_interval_seconds;           /* Sleep between table checks */

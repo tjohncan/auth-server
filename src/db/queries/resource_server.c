@@ -278,7 +278,7 @@ int resource_server_list_all(db_handle_t *db, long long user_account_pin,
     const char *sql_session =
         "SELECT rs.id, rs.pin, rs.organization_pin, rs.code_name, "
         "rs.display_name, rs.address, rs.note, rs.is_active, "
-        "COUNT(*) OVER() as total_count "
+        "rs.allow_user_provisioning, COUNT(*) OVER() as total_count "
         "FROM " TBL_RESOURCE_SERVER " rs "
         "JOIN " TBL_ORGANIZATION " o ON o.pin = rs.organization_pin "
         "JOIN " TBL_ORGANIZATION_ADMIN " oa ON oa.organization_pin = rs.organization_pin "
@@ -290,7 +290,7 @@ int resource_server_list_all(db_handle_t *db, long long user_account_pin,
     const char *sql_org_key =
         "SELECT rs.id, rs.pin, rs.organization_pin, rs.code_name, "
         "rs.display_name, rs.address, rs.note, rs.is_active, "
-        "COUNT(*) OVER() as total_count "
+        "rs.allow_user_provisioning, COUNT(*) OVER() as total_count "
         "FROM " TBL_RESOURCE_SERVER " rs "
         "JOIN " TBL_ORGANIZATION " o ON o.pin = rs.organization_pin "
         "JOIN " TBL_ORGANIZATION_KEY " ok ON ok.organization_pin = rs.organization_pin "
@@ -345,7 +345,7 @@ int resource_server_list_all(db_handle_t *db, long long user_account_pin,
         memset(&server, 0, sizeof(server));
 
         if (first_row) {
-            total_count = db_column_int(stmt, 8);
+            total_count = db_column_int(stmt, 9);
             first_row = 0;
         }
 
@@ -381,6 +381,7 @@ int resource_server_list_all(db_handle_t *db, long long user_account_pin,
         }
 
         server.is_active = db_column_int(stmt, 7);
+        server.allow_user_provisioning = db_column_int(stmt, 8);
 
         /* Append to list */
         if (db_results_append(&list, &list_tail, &server, sizeof(server)) != 0) {
@@ -438,7 +439,8 @@ int resource_server_get_by_id(db_handle_t *db, const unsigned char *server_id,
         /* Org key authentication - verify key is active */
         sql =
             "SELECT rs.id, rs.pin, rs.organization_pin, rs.code_name, "
-            "rs.display_name, rs.address, rs.note, rs.is_active "
+            "rs.display_name, rs.address, rs.note, rs.is_active, "
+            "rs.allow_user_provisioning "
             "FROM " TBL_RESOURCE_SERVER " rs "
             "JOIN " TBL_ORGANIZATION_KEY " ok ON ok.organization_pin = rs.organization_pin "
             "WHERE rs.id = " P"1 "
@@ -449,7 +451,8 @@ int resource_server_get_by_id(db_handle_t *db, const unsigned char *server_id,
         /* Session authentication - verify user is org admin */
         sql =
             "SELECT rs.id, rs.pin, rs.organization_pin, rs.code_name, "
-            "rs.display_name, rs.address, rs.note, rs.is_active "
+            "rs.display_name, rs.address, rs.note, rs.is_active, "
+            "rs.allow_user_provisioning "
             "FROM " TBL_RESOURCE_SERVER " rs "
             "JOIN " TBL_ORGANIZATION_ADMIN " oa ON oa.organization_pin = rs.organization_pin "
             "JOIN " TBL_USER_ACCOUNT " ua ON ua.pin = oa.user_account_pin "
@@ -514,6 +517,7 @@ int resource_server_get_by_id(db_handle_t *db, const unsigned char *server_id,
     }
 
     out_server->is_active = db_column_int(stmt, 7);
+    out_server->allow_user_provisioning = db_column_int(stmt, 8);
 
     db_finalize(stmt);
     return 0;
@@ -523,14 +527,15 @@ int resource_server_update(db_handle_t *db, const unsigned char *server_id,
                            long long user_account_pin,
                            long long organization_key_pin,
                            const char *display_name, const char *address,
-                           const char *note, const int *is_active) {
+                           const char *note, const int *is_active,
+                           const int *allow_user_provisioning) {
     if (!db || !server_id) {
         log_error("Invalid arguments to resource_server_update");
         return -1;
     }
 
     /* At least one field must be updated */
-    if (!display_name && !address && !note && !is_active) {
+    if (!display_name && !address && !note && !is_active && !allow_user_provisioning) {
         log_error("No fields to update in resource_server_update");
         return -1;
     }
@@ -564,6 +569,9 @@ int resource_server_update(db_handle_t *db, const unsigned char *server_id,
     }
     if (is_active) {
         pos += snprintf(sql + pos, sizeof(sql) - pos, ", is_active = " P"%d", param++);
+    }
+    if (allow_user_provisioning) {
+        pos += snprintf(sql + pos, sizeof(sql) - pos, ", allow_user_provisioning = " P"%d", param++);
     }
 
     /* Build WHERE clause with dual-auth security check */
@@ -650,6 +658,13 @@ int resource_server_update(db_handle_t *db, const unsigned char *server_id,
         pos += snprintf(sql + pos, sizeof(sql) - pos,
             "is_active IS DISTINCT FROM " P"%d", param++);
     }
+    if (allow_user_provisioning) {
+        if (conditions++ > 0) {
+            pos += snprintf(sql + pos, sizeof(sql) - pos, " OR ");
+        }
+        pos += snprintf(sql + pos, sizeof(sql) - pos,
+            "allow_user_provisioning IS DISTINCT FROM " P"%d", param++);
+    }
 
     /* Close WHERE clause */
     snprintf(sql + pos, sizeof(sql) - pos, ")");
@@ -682,6 +697,9 @@ int resource_server_update(db_handle_t *db, const unsigned char *server_id,
     }
     if (is_active) {
         db_bind_int(stmt, param++, *is_active);
+    }
+    if (allow_user_provisioning) {
+        db_bind_int(stmt, param++, *allow_user_provisioning);
     }
 
     /* Bind uniqueness check parameter for address if needed */

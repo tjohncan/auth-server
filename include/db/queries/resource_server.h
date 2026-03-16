@@ -94,6 +94,7 @@ typedef struct {
     char address[512];
     char note[512];
     int is_active;
+    int allow_user_provisioning;
 } resource_server_data_t;
 
 /*
@@ -175,7 +176,8 @@ int resource_server_update(db_handle_t *db, const unsigned char *server_id,
                            long long user_account_pin,
                            long long organization_key_pin,
                            const char *display_name, const char *address,
-                           const char *note, const int *is_active);
+                           const char *note, const int *is_active,
+                           const int *allow_user_provisioning);
 
 /*
  * Resource Server Key data structure

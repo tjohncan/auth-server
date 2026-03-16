@@ -281,13 +281,14 @@ int admin_update_resource_server(db_handle_t *db, long long user_account_pin,
                                   const char *display_name,
                                   const char *address,
                                   const char *note,
-                                  const int *is_active) {
+                                  const int *is_active,
+                                  const int *allow_user_provisioning) {
     if (!db || !server_id) {
         log_error("Invalid arguments to admin_update_resource_server");
         return -1;
     }
 
-    if (!display_name && !address && !note && !is_active) {
+    if (!display_name && !address && !note && !is_active && !allow_user_provisioning) {
         log_error("No fields to update in admin_update_resource_server");
         return -1;
     }
@@ -298,7 +299,7 @@ int admin_update_resource_server(db_handle_t *db, long long user_account_pin,
         return -1;
     }
 
-    if (resource_server_update(db, server_id, user_account_pin, organization_key_pin, display_name, address, note, is_active) != 0) {
+    if (resource_server_update(db, server_id, user_account_pin, organization_key_pin, display_name, address, note, is_active, allow_user_provisioning) != 0) {
         return -1;
     }
 
