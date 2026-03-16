@@ -23,6 +23,7 @@
 #define RETENTION_PASSWORDLESS_TOKEN_DAYS 1  /* 24 hours */
 #define RETENTION_EMAIL_VERIFICATION_DAYS 7
 #define RETENTION_PASSWORD_RESET_DAYS 7
+#define RETENTION_INVITATION_DAYS 7
 #define RETENTION_UNCONFIRMED_MFA_DAYS 7
 #define RETENTION_USED_RECOVERY_CODE_DAYS 30
 #define RETENTION_REVOKED_RECOVERY_SET_DAYS 30
@@ -422,6 +423,8 @@ static void cleaner_init(db_handle_t *db, cleaner_config_t *config) {
          RETENTION_EMAIL_VERIFICATION_DAYS, 0, 0},
         {TBL_PASSWORD_RESET_TOKEN, "Password reset tokens", "id", "expected_expiry", NULL,
          RETENTION_PASSWORD_RESET_DAYS, 0, 0},
+        {TBL_INVITATION_TOKEN, "Invitation tokens", "id", "expected_expiry", NULL,
+         RETENTION_INVITATION_DAYS, 0, 0},
 
         /* Tier 4: Low-volume cleanup */
         {TBL_USER_MFA, "Unconfirmed MFA methods", "pin", "created_at",

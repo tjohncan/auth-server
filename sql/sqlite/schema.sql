@@ -96,6 +96,7 @@ create table resource_server (
 , organization_pin integer not null
 , code_name text not null
 , display_name text not null
+, allow_user_provisioning integer not null default 0
 , address text not null
 , note text
 
@@ -104,6 +105,7 @@ create table resource_server (
 , constraint ck_resource_server_is_active check(is_active in (0, 1))
 , constraint ck_resource_server_code_name_len check(length(code_name) <= 100)
 , constraint ck_resource_server_display_name_len check(length(display_name) <= 200)
+, constraint ck_resource_server_allow_user_provisioning check(allow_user_provisioning in (0, 1))
 , constraint ck_resource_server_address_len check(length(address) <= 2000)
 , constraint ck_resource_server_note_len check(length(note) <= 2000)
 , constraint fk_resource_server_organization foreign key(organization_pin) references organization(pin)
@@ -246,10 +248,10 @@ create table client_redirect_uri (
 , note text
 
 , constraint uix_client_redirect_uri unique(client_pin, redirect_uri)
-, constraint fk_client_redirect_uri_client foreign key(client_pin) references client(pin)
 , constraint ck_redirect_uri_scheme check(lower(redirect_uri) like 'http://%' or lower(redirect_uri) like 'https://%')
 , constraint ck_client_redirect_uri_len check(length(redirect_uri) <= 2000)
 , constraint ck_client_redirect_uri_note_len check(length(note) <= 2000)
+, constraint fk_client_redirect_uri_client foreign key(client_pin) references client(pin)
 );
 
 create table client_resource_server (
@@ -635,6 +637,27 @@ create table password_reset_token (
 create index idx_password_reset_token_rate_limit
   on password_reset_token(user_account_pin, issued_at);
 
+create table invitation_token (
+  id blob not null
+, created_at text not null default (datetime('now'))
+, updated_at text not null default (datetime('now'))
+
+, user_account_pin integer not null
+, user_email_pin integer
+, token text not null
+, issued_at text not null
+, expected_expiry text not null
+, is_used integer not null default 0
+, used_at text
+, source_ip text
+
+, constraint pk_invitation_token primary key(id)
+, constraint uix_invitation_token_token unique(token)
+, constraint ck_invitation_token_is_used check(is_used in (0, 1))
+, constraint fk_invitation_token_user_account foreign key(user_account_pin) references user_account(pin)
+, constraint fk_invitation_token_user_email foreign key(user_email_pin) references user_email(pin)
+);
+
 -- ============================================================================
 -- REFERENCE/LOOKUP - Lookup tables for valid values
 -- ============================================================================
@@ -722,6 +745,9 @@ create index idx_email_verification_token_expected_expiry
 
 create index idx_password_reset_token_expected_expiry
   on password_reset_token(expected_expiry);
+
+create index idx_invitation_token_expected_expiry
+  on invitation_token(expected_expiry);
 
 -- Usage log cleanup indexes
 create index idx_client_key_usage_authenticated_at

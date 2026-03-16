@@ -117,6 +117,7 @@ create table security.resource_server (
 , organization_pin bigint not null
 , code_name text not null
 , display_name text not null
+, allow_user_provisioning boolean not null default false
 , address text not null
 , note text
 
@@ -182,7 +183,6 @@ create table security.client (
 , constraint pk_client primary key (pin)
 , constraint uix_client_id unique (id)
 , constraint uix_client_org_pin unique (organization_pin, pin)
-, constraint fk_client_organization foreign key (organization_pin) references security.organization(pin)
 , constraint ck_client_type check(client_type in ('public', 'confidential'))
 , constraint ck_grant_type check(grant_type in ('authorization_code', 'client_credentials'))
 , constraint ck_client_type_grant_type_pair check(
@@ -197,6 +197,7 @@ create table security.client (
 , constraint ck_client_code_name_len check(length(code_name) <= 100)
 , constraint ck_client_display_name_len check(length(display_name) <= 200)
 , constraint ck_client_note_len check(length(note) <= 2000)
+, constraint fk_client_organization foreign key (organization_pin) references security.organization(pin)
 );
 
 create unique index uix_client_org_code
@@ -233,10 +234,10 @@ create table security.client_redirect_uri (
 , note text
 
 , constraint pk_client_redirect_uri primary key (pin)
-, constraint fk_client_redirect_uri_client foreign key (client_pin) references security.client(pin)
 , constraint ck_redirect_uri_scheme check(lower(redirect_uri) like 'http://%' or lower(redirect_uri) like 'https://%')
 , constraint ck_client_redirect_uri_len check(length(redirect_uri) <= 2000)
 , constraint ck_client_redirect_uri_note_len check(length(note) <= 2000)
+, constraint fk_client_redirect_uri_client foreign key (client_pin) references security.client(pin)
 );
 
 create unique index uix_client_redirect_uri on security.client_redirect_uri (client_pin, redirect_uri);
@@ -599,6 +600,26 @@ create table session.password_reset_token (
 create index idx_password_reset_token_rate_limit
   on session.password_reset_token(user_account_pin, issued_at);
 
+create table session.invitation_token (
+  id uuid not null
+, created_at timestamp not null default current_timestamp
+, updated_at timestamp not null default current_timestamp
+
+, user_account_pin bigint not null
+, user_email_pin bigint
+, token text not null
+, issued_at timestamp not null
+, expected_expiry timestamp not null
+, is_used boolean not null default false
+, used_at timestamp
+, source_ip text
+
+, constraint pk_invitation_token primary key (id)
+, constraint uix_invitation_token_token unique (token)
+, constraint fk_invitation_token_user_account foreign key (user_account_pin) references security.user_account(pin)
+, constraint fk_invitation_token_user_email foreign key (user_email_pin) references security.user_email(pin)
+);
+
 -- ============================================================================
 -- LOOKUP - Reference/lookup tables
 -- ============================================================================
@@ -734,6 +755,9 @@ create index idx_email_verification_token_expected_expiry
 
 create index idx_password_reset_token_expected_expiry
   on session.password_reset_token(expected_expiry);
+
+create index idx_invitation_token_expected_expiry
+  on session.invitation_token(expected_expiry);
 
 -- Usage log cleanup indexes
 create index idx_client_key_usage_authenticated_at
