@@ -1392,6 +1392,7 @@
                         <div><strong>Code Name:</strong> ${escapeHtml(rs.code_name)}</div>
                         <div><strong>Address:</strong> ${escapeHtml(rs.address)}</div>
                         <div><strong>Status:</strong> ${statusBadge}</div>
+                        <div><strong>User Provisioning:</strong> ${rs.allow_user_provisioning ? 'Yes' : 'No'}</div>
                         <div style="display: flex; align-items: center; gap: 8px;">
                             <strong>Resource Server ID:</strong>
                             <code style="font-size: 12px;">${escapeHtml(formatUUID(rs.id))}</code>
@@ -1723,6 +1724,7 @@
                     ${formField('Address', 'address', rs.address, 'text', true, false, 2000)}
                     ${formTextarea('Note', 'note', rs.note || '', false, 2000)}
                     ${formCheckbox('Active', 'is_active', rs.is_active)}
+                    ${formCheckbox('Allow User Provisioning', 'allow_user_provisioning', rs.allow_user_provisioning)}
                     <div style="display: flex; gap: 10px; margin-top: 20px;">
                         <button type="submit" style="flex: 1; background: #28a745; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Save</button>
                         <button type="button" data-action="close-modal" style="flex: 1; background: #6c757d; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Cancel</button>
@@ -1740,7 +1742,8 @@
                         display_name: formData.get('display_name'),
                         address: formData.get('address'),
                         note: formData.get('note'),
-                        is_active: formData.get('is_active') === 'on'
+                        is_active: formData.get('is_active') === 'on',
+                        allow_user_provisioning: formData.get('allow_user_provisioning') === 'on'
                     });
                     close();
                     renderOrgManagement();
