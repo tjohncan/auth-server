@@ -4,6 +4,7 @@
 #include "crypto/random.h"
 #include "util/log.h"
 #include "util/data.h"
+#include <openssl/crypto.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -61,6 +62,7 @@ int session_authenticate_and_create(db_handle_t *db,
     int token_len = crypto_random_token(session_token, token_buf_size, SESSION_TOKEN_BYTES);
     if (token_len <= 0) {
         log_error("Failed to generate session token");
+        OPENSSL_cleanse(session_token, token_buf_size);
         free(session_token);
         return -1;
     }
@@ -75,6 +77,7 @@ int session_authenticate_and_create(db_handle_t *db,
 
     if (rc != 0) {
         log_error("Failed to create session for user_id=%s", user_id_hex);
+        OPENSSL_cleanse(session_token, token_buf_size);
         free(session_token);
         return -1;
     }

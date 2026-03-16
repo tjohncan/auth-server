@@ -5,6 +5,7 @@
 #include "util/log.h"
 #include "util/data.h"
 #include "util/str.h"
+#include <openssl/crypto.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -1088,6 +1089,8 @@ int resource_server_key_verify(db_handle_t *db,
 
     /* Verify secret using timing-safe comparison */
     int valid = crypto_password_verify(secret, strlen(secret), salt, iterations, hash);
+    OPENSSL_cleanse(salt, sizeof(salt));
+    OPENSSL_cleanse(hash, sizeof(hash));
 
     /* If valid, return resource server pin if requested */
     if (valid == 1) {

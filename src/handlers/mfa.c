@@ -24,7 +24,7 @@ static int generate_recovery_codes(char ***out_codes) {
         unsigned char rand_bytes[MFA_RECOVERY_CODE_LENGTH / 2];
         if (crypto_random_bytes(rand_bytes, sizeof(rand_bytes)) != 0) {
             log_error("Failed to generate random bytes for recovery code");
-            for (int j = 0; j < i; j++) free(codes[j]);
+            for (int j = 0; j < i; j++) { OPENSSL_cleanse(codes[j], MFA_RECOVERY_CODE_LENGTH); free(codes[j]); }
             free(codes);
             return -1;
         }
@@ -32,7 +32,7 @@ static int generate_recovery_codes(char ***out_codes) {
         codes[i] = malloc(MFA_RECOVERY_CODE_LENGTH + 1);
         if (!codes[i]) {
             log_error("Failed to allocate recovery code string");
-            for (int j = 0; j < i; j++) free(codes[j]);
+            for (int j = 0; j < i; j++) { OPENSSL_cleanse(codes[j], MFA_RECOVERY_CODE_LENGTH); free(codes[j]); }
             free(codes);
             return -1;
         }
@@ -178,7 +178,7 @@ int mfa_totp_confirm(db_handle_t *db,
                                      code_ptrs, MFA_RECOVERY_CODE_COUNT,
                                      set_id) != 0) {
             log_error("Failed to store recovery codes");
-            for (int i = 0; i < MFA_RECOVERY_CODE_COUNT; i++) free(codes[i]);
+            for (int i = 0; i < MFA_RECOVERY_CODE_COUNT; i++) { OPENSSL_cleanse(codes[i], MFA_RECOVERY_CODE_LENGTH); free(codes[i]); }
             free(codes);
             return -1;
         }
@@ -330,7 +330,7 @@ int mfa_regenerate_recovery_codes(db_handle_t *db,
                                  code_ptrs, MFA_RECOVERY_CODE_COUNT,
                                  set_id) != 0) {
         log_error("Failed to store recovery codes");
-        for (int i = 0; i < MFA_RECOVERY_CODE_COUNT; i++) free(codes[i]);
+        for (int i = 0; i < MFA_RECOVERY_CODE_COUNT; i++) { OPENSSL_cleanse(codes[i], MFA_RECOVERY_CODE_LENGTH); free(codes[i]); }
         free(codes);
         return -1;
     }

@@ -9,6 +9,7 @@
 #include "util/log.h"
 #include "util/data.h"
 #include "util/str.h"
+#include <openssl/crypto.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -614,6 +615,7 @@ int recovery_code_set_create(db_handle_t *db,
         db_bind_text(code_stmt, 3, last4, -1);
 
         rc = db_step(code_stmt);
+        OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
 
         if (rc != DB_DONE) {
             log_error("Failed to insert recovery code");
@@ -723,6 +725,7 @@ int recovery_code_verify(db_handle_t *db,
     /* Begin transaction (need to check and mark as used atomically) */
     if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
         log_error("Failed to begin transaction");
+        OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
         return -1;
     }
 
@@ -739,6 +742,7 @@ int recovery_code_verify(db_handle_t *db,
     if (db_prepare(db, &select_stmt, select_sql) != 0) {
         log_error("Failed to prepare recovery code select");
         db_execute_trusted(db, "ROLLBACK");
+        OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
         return -1;
     }
 
@@ -750,12 +754,14 @@ int recovery_code_verify(db_handle_t *db,
     if (rc != DB_ROW) {
         db_finalize(select_stmt);
         db_execute_trusted(db, "ROLLBACK");
+        OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
         log_debug("Recovery code not found or already used");
         return 0;  /* Invalid */
     }
 
     long long code_pin = db_column_int64(select_stmt, 0);
     db_finalize(select_stmt);
+    OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
 
     /* Mark code as used */
     const char *update_sql =

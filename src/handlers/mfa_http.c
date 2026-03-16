@@ -14,6 +14,7 @@
 #include "util/log.h"
 #include "util/json.h"
 #include "util/validation.h"
+#include <openssl/crypto.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -233,7 +234,7 @@ HttpResponse *mfa_totp_confirm_handler(const HttpRequest *req, const RouteParams
 
         jsonbuf_appendf(jb, "]}");
 
-        for (int i = 0; i < recovery_count; i++) free(recovery_codes[i]);
+        for (int i = 0; i < recovery_count; i++) { OPENSSL_cleanse(recovery_codes[i], strlen(recovery_codes[i])); free(recovery_codes[i]); }
         free(recovery_codes);
 
         return jsonbuf_to_response(jb, 200);
@@ -561,7 +562,7 @@ HttpResponse *mfa_regenerate_recovery_codes_handler(const HttpRequest *req,
 
     jsonbuf_appendf(jb, "]}");
 
-    for (int i = 0; i < count; i++) free(codes[i]);
+    for (int i = 0; i < count; i++) { OPENSSL_cleanse(codes[i], strlen(codes[i])); free(codes[i]); }
     free(codes);
 
     return jsonbuf_to_response(jb, 200);

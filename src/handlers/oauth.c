@@ -28,8 +28,14 @@
 
 void oauth_token_response_free(oauth_token_response_t *resp) {
     if (!resp) return;
-    free(resp->access_token);
-    free(resp->refresh_token);
+    if (resp->access_token) {
+        OPENSSL_cleanse(resp->access_token, strlen(resp->access_token));
+        free(resp->access_token);
+    }
+    if (resp->refresh_token) {
+        OPENSSL_cleanse(resp->refresh_token, strlen(resp->refresh_token));
+        free(resp->refresh_token);
+    }
     free(resp->scope);
     memset(resp, 0, sizeof(*resp));
 }

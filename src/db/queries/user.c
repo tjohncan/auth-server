@@ -10,6 +10,7 @@
 #include "util/data.h"
 #include "util/str.h"
 #include "util/validation.h"
+#include <openssl/crypto.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -223,6 +224,7 @@ int user_create(db_handle_t *db, const char *username,
                             &iterations,
                             hash, sizeof(hash)) != 0) {
         log_error("Failed to hash password");
+        OPENSSL_cleanse(salt, sizeof(salt));
         return -1;
     }
 
@@ -232,12 +234,16 @@ int user_create(db_handle_t *db, const char *username,
     if (username) {
         if (encrypt_field(username, encrypted_username, sizeof(encrypted_username)) != 0) {
             log_error("Failed to encrypt username");
+            OPENSSL_cleanse(salt, sizeof(salt));
+            OPENSSL_cleanse(hash, sizeof(hash));
             return -1;
         }
         char lower_buf[256];
         str_to_lower(lower_buf, sizeof(lower_buf), username);
         if (hash_field(lower_buf, username_hash, sizeof(username_hash)) != 0) {
             log_error("Failed to hash username");
+            OPENSSL_cleanse(salt, sizeof(salt));
+            OPENSSL_cleanse(hash, sizeof(hash));
             return -1;
         }
     }
@@ -248,12 +254,16 @@ int user_create(db_handle_t *db, const char *username,
     if (email) {
         if (encrypt_field(email, encrypted_email, sizeof(encrypted_email)) != 0) {
             log_error("Failed to encrypt email");
+            OPENSSL_cleanse(salt, sizeof(salt));
+            OPENSSL_cleanse(hash, sizeof(hash));
             return -1;
         }
         char lower_buf[256];
         str_to_lower(lower_buf, sizeof(lower_buf), email);
         if (hash_field(lower_buf, email_hash, sizeof(email_hash)) != 0) {
             log_error("Failed to hash email");
+            OPENSSL_cleanse(salt, sizeof(salt));
+            OPENSSL_cleanse(hash, sizeof(hash));
             return -1;
         }
     }
@@ -262,6 +272,8 @@ int user_create(db_handle_t *db, const char *username,
     if (email) {
         if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
             log_error("Failed to begin transaction");
+            OPENSSL_cleanse(salt, sizeof(salt));
+            OPENSSL_cleanse(hash, sizeof(hash));
             return -1;
         }
     }
@@ -277,6 +289,8 @@ int user_create(db_handle_t *db, const char *username,
     if (db_prepare(db, &stmt, sql) != 0) {
         log_error("Failed to prepare user_create statement");
         if (email) db_execute_trusted(db, "ROLLBACK");
+        OPENSSL_cleanse(salt, sizeof(salt));
+        OPENSSL_cleanse(hash, sizeof(hash));
         return -1;
     }
 
@@ -300,11 +314,16 @@ int user_create(db_handle_t *db, const char *username,
         log_error("Failed to insert user_account");
         db_finalize(stmt);
         if (email) db_execute_trusted(db, "ROLLBACK");
+        OPENSSL_cleanse(salt, sizeof(salt));
+        OPENSSL_cleanse(hash, sizeof(hash));
         return -1;
     }
 
     long long user_pin = db_column_int64(stmt, 0);
     db_finalize(stmt);
+
+    OPENSSL_cleanse(salt, sizeof(salt));
+    OPENSSL_cleanse(hash, sizeof(hash));
 
     /* Insert user_email if provided */
     if (email) {
@@ -417,6 +436,8 @@ int user_verify_password(db_handle_t *db, const char *username,
     /* Verify password using crypto module */
     int valid = crypto_password_verify(password, strlen(password),
                                        salt, iterations, hash);
+    OPENSSL_cleanse(salt, sizeof(salt));
+    OPENSSL_cleanse(hash, sizeof(hash));
 
     /* If password valid, return pin and id if requested */
     if (valid == 1) {
@@ -500,6 +521,8 @@ int user_verify_password_by_email(db_handle_t *db, const char *email,
 
     int valid = crypto_password_verify(password, strlen(password),
                                        salt, iterations, hash);
+    OPENSSL_cleanse(salt, sizeof(salt));
+    OPENSSL_cleanse(hash, sizeof(hash));
 
     if (valid == 1) {
         if (out_pin != NULL) {
@@ -1117,6 +1140,8 @@ int user_change_password(db_handle_t *db, long long user_account_pin,
     /* Step 2: Verify current password */
     int valid = crypto_password_verify(current_password, strlen(current_password),
                                        salt, iterations, hash);
+    OPENSSL_cleanse(salt, sizeof(salt));
+    OPENSSL_cleanse(hash, sizeof(hash));
 
     if (valid != 1) {
         log_info("Current password verification failed for password change");
@@ -1133,6 +1158,7 @@ int user_change_password(db_handle_t *db, long long user_account_pin,
                             &new_iterations,
                             new_hash, sizeof(new_hash)) != 0) {
         log_error("Failed to hash new password");
+        OPENSSL_cleanse(new_salt, sizeof(new_salt));
         return -1;
     }
 
@@ -1148,6 +1174,8 @@ int user_change_password(db_handle_t *db, long long user_account_pin,
     db_stmt_t *update_stmt = NULL;
     if (db_prepare(db, &update_stmt, update_sql) != 0) {
         log_error("Failed to prepare password update statement");
+        OPENSSL_cleanse(new_salt, sizeof(new_salt));
+        OPENSSL_cleanse(new_hash, sizeof(new_hash));
         return -1;
     }
 
@@ -1158,6 +1186,9 @@ int user_change_password(db_handle_t *db, long long user_account_pin,
 
     rc = db_step(update_stmt);
     db_finalize(update_stmt);
+
+    OPENSSL_cleanse(new_salt, sizeof(new_salt));
+    OPENSSL_cleanse(new_hash, sizeof(new_hash));
 
     if (rc != DB_DONE) {
         log_error("Failed to update password");
@@ -1371,6 +1402,7 @@ int user_create_email_verification_token(db_handle_t *db,
     db_stmt_t *stmt = NULL;
     if (db_prepare(db, &stmt, sql) != 0) {
         log_error("Failed to prepare verification token insert");
+        OPENSSL_cleanse(token, sizeof(token));
         return -1;
     }
 
@@ -1391,8 +1423,13 @@ int user_create_email_verification_token(db_handle_t *db,
     if (rc == DB_ROW) {
         /* Token created successfully */
         memcpy(out_token, token, VERIFICATION_TOKEN_BUF_SIZE);
+        OPENSSL_cleanse(token, sizeof(token));
         return 0;
-    } else if (rc == DB_DONE) {
+    }
+
+    OPENSSL_cleanse(token, sizeof(token));
+
+    if (rc == DB_DONE) {
         /* No row inserted: email not found or rate limited */
         return 1;
     }
@@ -1723,6 +1760,7 @@ int user_create_password_reset_token(db_handle_t *db, const char *email,
     db_stmt_t *stmt = NULL;
     if (db_prepare(db, &stmt, sql) != 0) {
         log_error("Failed to prepare password reset token insert");
+        OPENSSL_cleanse(token, sizeof(token));
         return -1;
     }
 
@@ -1741,8 +1779,13 @@ int user_create_password_reset_token(db_handle_t *db, const char *email,
 
     if (rc == DB_ROW) {
         memcpy(out_token, token, VERIFICATION_TOKEN_BUF_SIZE);
+        OPENSSL_cleanse(token, sizeof(token));
         return 0;
-    } else if (rc == DB_DONE) {
+    }
+
+    OPENSSL_cleanse(token, sizeof(token));
+
+    if (rc == DB_DONE) {
         return 1;  /* Not found or rate limited */
     }
 
@@ -1832,12 +1875,15 @@ int user_consume_password_reset_token(db_handle_t *db, const char *token,
                             &iterations,
                             hash, sizeof(hash)) != 0) {
         log_error("Failed to hash new password for reset");
+        OPENSSL_cleanse(salt, sizeof(salt));
         return -1;
     }
 
     /* Step 3: Transaction — mark token used + update password */
     if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
         log_error("Failed to begin password reset transaction");
+        OPENSSL_cleanse(salt, sizeof(salt));
+        OPENSSL_cleanse(hash, sizeof(hash));
         return -1;
     }
 
@@ -1851,6 +1897,8 @@ int user_consume_password_reset_token(db_handle_t *db, const char *token,
     if (db_prepare(db, &use_stmt, use_sql) != 0) {
         log_error("Failed to prepare token use update");
         db_execute_trusted(db, "ROLLBACK");
+        OPENSSL_cleanse(salt, sizeof(salt));
+        OPENSSL_cleanse(hash, sizeof(hash));
         return -1;
     }
 
@@ -1861,6 +1909,8 @@ int user_consume_password_reset_token(db_handle_t *db, const char *token,
     if (rc != DB_DONE) {
         log_error("Failed to mark password reset token as used");
         db_execute_trusted(db, "ROLLBACK");
+        OPENSSL_cleanse(salt, sizeof(salt));
+        OPENSSL_cleanse(hash, sizeof(hash));
         return -1;
     }
 
@@ -1876,6 +1926,8 @@ int user_consume_password_reset_token(db_handle_t *db, const char *token,
     if (db_prepare(db, &update_stmt, update_sql) != 0) {
         log_error("Failed to prepare password update statement");
         db_execute_trusted(db, "ROLLBACK");
+        OPENSSL_cleanse(salt, sizeof(salt));
+        OPENSSL_cleanse(hash, sizeof(hash));
         return -1;
     }
 
@@ -1886,6 +1938,9 @@ int user_consume_password_reset_token(db_handle_t *db, const char *token,
 
     rc = db_step(update_stmt);
     db_finalize(update_stmt);
+
+    OPENSSL_cleanse(salt, sizeof(salt));
+    OPENSSL_cleanse(hash, sizeof(hash));
 
     if (rc != DB_DONE) {
         log_error("Failed to update password");
@@ -1942,6 +1997,7 @@ int user_create_passwordless_login_token(db_handle_t *db, const char *email,
     char encrypted_email[512];
     if (encrypt_field(email, encrypted_email, sizeof(encrypted_email)) != 0) {
         log_error("Failed to encrypt email for passwordless login token");
+        OPENSSL_cleanse(token, sizeof(token));
         return -1;
     }
 
@@ -1966,6 +2022,7 @@ int user_create_passwordless_login_token(db_handle_t *db, const char *email,
     db_stmt_t *stmt = NULL;
     if (db_prepare(db, &stmt, sql) != 0) {
         log_error("Failed to prepare passwordless login token insert");
+        OPENSSL_cleanse(token, sizeof(token));
         return -1;
     }
 
@@ -1990,8 +2047,13 @@ int user_create_passwordless_login_token(db_handle_t *db, const char *email,
 
     if (rc == DB_ROW) {
         memcpy(out_token, token, VERIFICATION_TOKEN_BUF_SIZE);
+        OPENSSL_cleanse(token, sizeof(token));
         return 0;
-    } else if (rc == DB_DONE) {
+    }
+
+    OPENSSL_cleanse(token, sizeof(token));
+
+    if (rc == DB_DONE) {
         return 1;
     }
 

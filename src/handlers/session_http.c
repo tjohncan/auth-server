@@ -57,10 +57,12 @@ static HttpResponse *require_authenticated_session(const HttpRequest *req,
     }
 
     if (oauth_session_get_by_token(db, session_token, out_session) != 0) {
+        OPENSSL_cleanse(session_token, strlen(session_token));
         free(session_token);
         return response_json_error(401, "Invalid or expired session");
     }
 
+    OPENSSL_cleanse(session_token, strlen(session_token));
     free(session_token);
 
     if (out_session->user_requires_mfa && !out_session->mfa_completed) {
@@ -147,7 +149,9 @@ HttpResponse *login_handler(const HttpRequest *req, const RouteParams *params) {
     /* Get user profile to check MFA preference */
     user_profile_t profile;
     if (user_get_profile(db, user_pin, &profile) != 0) {
+        OPENSSL_cleanse(session_token, strlen(session_token));
         free(session_token);
+        OPENSSL_cleanse(cookie_header, sizeof(cookie_header));
         return response_json_error(500, "Failed to retrieve user profile");
     }
 
@@ -155,7 +159,9 @@ HttpResponse *login_handler(const HttpRequest *req, const RouteParams *params) {
     mfa_method_t *mfa_methods = NULL;
     int mfa_count = 0;
     if (mfa_method_list(db, user_pin, 1, &mfa_methods, &mfa_count) != 0) {
+        OPENSSL_cleanse(session_token, strlen(session_token));
         free(session_token);
+        OPENSSL_cleanse(cookie_header, sizeof(cookie_header));
         return response_json_error(500, "Failed to retrieve MFA methods");
     }
 
@@ -184,14 +190,18 @@ HttpResponse *login_handler(const HttpRequest *req, const RouteParams *params) {
     }
 
     if (!resp) {
+        OPENSSL_cleanse(session_token, strlen(session_token));
         free(session_token);
+        OPENSSL_cleanse(cookie_header, sizeof(cookie_header));
         log_error("Failed to create HTTP response");
         return response_json_error(500, "Internal server error");
     }
 
     http_response_set_header(resp, "Set-Cookie", cookie_header);
 
+    OPENSSL_cleanse(session_token, strlen(session_token));
     free(session_token);
+    OPENSSL_cleanse(cookie_header, sizeof(cookie_header));
 
     return resp;
 }
@@ -274,9 +284,11 @@ HttpResponse *management_setups_handler(const HttpRequest *req, const RouteParam
     /* Get session info */
     oauth_session_info_t session;
     if (oauth_session_get_by_token(db, session_token, &session) != 0) {
+        OPENSSL_cleanse(session_token, strlen(session_token));
         free(session_token);
         return response_json_error(401, "Invalid or expired session");
     }
+    OPENSSL_cleanse(session_token, strlen(session_token));
     free(session_token);
 
     /* Get management UI setups */
@@ -1331,6 +1343,7 @@ HttpResponse *passwordless_login_handler(const HttpRequest *req,
 
     if (crypto_random_token(session_token, token_buf_size, SESSION_TOKEN_BYTES) <= 0) {
         log_error("Failed to generate session token");
+        OPENSSL_cleanse(session_token, token_buf_size);
         free(session_token);
         return response_json_error(500, "Internal server error");
     }
@@ -1346,6 +1359,7 @@ HttpResponse *passwordless_login_handler(const HttpRequest *req,
 
     if (rc != 0) {
         log_error("Failed to create session for passwordless login");
+        OPENSSL_cleanse(session_token, token_buf_size);
         free(session_token);
         return response_json_error(500, "Internal server error");
     }
@@ -1355,6 +1369,7 @@ HttpResponse *passwordless_login_handler(const HttpRequest *req,
     snprintf(cookie_header, sizeof(cookie_header),
              "%s=%s; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=%d",
              SESSION_COOKIE_NAME, session_token, DEFAULT_SESSION_TTL_SECONDS);
+    OPENSSL_cleanse(session_token, token_buf_size);
     free(session_token);
 
     /* Determine redirect location */
@@ -1367,6 +1382,7 @@ HttpResponse *passwordless_login_handler(const HttpRequest *req,
 
     HttpResponse *resp = http_response_new(303);
     http_response_set_header(resp, "Set-Cookie", cookie_header);
+    OPENSSL_cleanse(cookie_header, sizeof(cookie_header));
     http_response_set_header(resp, "Location", location);
     http_response_set(resp, CONTENT_TYPE_HTML,
         "<!DOCTYPE html><html><body><p>Redirecting...</p></body></html>");
@@ -1448,6 +1464,7 @@ HttpResponse *logout_handler(const HttpRequest *req, const RouteParams *params) 
 
     /* Close session in database */
     int result = oauth_session_close(db, session_token);
+    OPENSSL_cleanse(session_token, strlen(session_token));
     free(session_token);
 
     if (result != 0) {
