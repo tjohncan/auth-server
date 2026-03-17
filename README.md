@@ -133,11 +133,13 @@ HTTP endpoint implementations.
 - `oauth_http.c` - HTTP endpoints for OAuth2 flows (authorize, token, introspect, revoke)
 - `mfa.c` - Business logic for MFA enrollment, verification, and recovery
 - `mfa_http.c` - HTTP endpoints for MFA operations (TOTP setup/confirm, verify, recover)
+- `rs.c` - Resource servers invite users and manage their access to clients
+- `rs_http.c` - HTTP endpoints for the user provisioning API
 - `static.c` - Static file serving for management console
 
 ## Handler Architecture
 
-The application uses a three-layer handler architecture for separation of concerns:
+Each handler domain (admin, session, OAuth, MFA, user provisioning) follows the same three-layer pattern — query, business logic, HTTP:
 
 ### 1. Database Query Layer (`src/db/queries/`)
 Entity-based query functions for direct database operations.
@@ -250,6 +252,20 @@ HTTP endpoint for OAuth2 token operations.
 
 Examples:
 - `token_handler(req, params)` - POST /token
+
+### 8. RS User Provisioning Layer (`src/handlers/rs.c`, `rs_http.c`)
+User provisioning (invitations, admission to clients) is a power and responsibility of resource servers (via resource server keys).
+
+- **Files**: `rs.c` (business logic), `rs_http.c` (HTTP layer), `rs.h` (header)
+- **Responsibility**: User find-or-create, invitation tokens, client-user link/unlink/list
+- **Authentication**: RS key credentials in JSON body (same keys used for `/introspect`)
+- **Authorization**: `allow_user_provisioning` flag on resource server, client scope via `client_resource_server`
+- **Design**: Shared `rs_authenticate()` helper, `rs_user_info_t` result struct with dynamic emails array
+
+Examples:
+- `rs_provision_user_handler(req, params)` - POST /api/rs/users
+- `rs_lookup_user_handler(req, params)` - GET /api/rs/users
+- `rs_link_client_user_handler(req, params)` - POST /api/rs/client-users
 
 ## Cryptographic Infrastructure
 
@@ -381,6 +397,8 @@ src/
 │   ├── oauth_http.c
 │   ├── mfa.c
 │   ├── mfa_http.c
+│   ├── rs.c
+│   ├── rs_http.c
 │   └── static.c
 └── main.c              # Server entry point
 
@@ -427,7 +445,8 @@ include/
 │   ├── admin.h
 │   ├── session.h
 │   ├── oauth.h
-│   └── mfa.h
+│   ├── mfa.h
+│   └── rs.h
 └── handlers.h
 
 test/
@@ -499,6 +518,11 @@ See **[sql/README.md](sql/README.md)** for full schema documentation. Key design
 - Organizations own resource servers (APIs) and clients (applications)
 - Cross-tenant mix-ups prevented via composite foreign keys
 
+**User Sovereignty**
+- Users are independent entities — once created, no organization or resource server can modify, delete, or impersonate them
+- Resource servers can invite users and control access to their own clients, but cannot alter user credentials or profile
+- Account-level moderation (activate/deactivate) is reserved for the server administrator (localhost-only)
+
 **Stateless Authorization Codes**
 - Authorization codes are signed JWTs containing all required state
 - Minimal database footprint: one row per code for replay detection only
@@ -518,4 +542,4 @@ See **[sql/README.md](sql/README.md)** for full schema documentation. Key design
 - We love speed and hate waste
 - Correctness over convenience: never settle for less than our achievable best!
 - Accept dependencies only when DIY feels dumb or dangerous
-- Vibe: ace-tight, military-grade, production-ready (for low-impact 0-user systems)
+- Vibe: ace-tight, military-grade, production-ready
