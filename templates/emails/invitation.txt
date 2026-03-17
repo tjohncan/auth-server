@@ -1,0 +1,5 @@
+An account has been created for you. Click the link below to set your password:
+
+{{URL}}
+
+If you did not expect this, you can safely ignore this email.
