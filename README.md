@@ -125,7 +125,7 @@ HTTP endpoint implementations.
 - `common.c` - JSON response helpers with injection protection
 - `health.c` - GET /health endpoint
 - `admin.c` - Business logic for administrative operations
-- `admin_http.c` - HTTP endpoints for localhost-only bootstrap admin API
+- `admin_http.c` - HTTP endpoints for localhost-only admin API (bootstrap, user moderation)
 - `admin_org_http.c` - HTTP endpoints for authenticated organization management API
 - `session.c` - Business logic for user authentication and session management
 - `session_http.c` - HTTP endpoints for login, logout, and user profile
