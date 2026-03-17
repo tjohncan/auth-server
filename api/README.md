@@ -2498,6 +2498,7 @@ All endpoints require RS key authentication and `allow_user_provisioning = true`
 - **Scope**: Client-user operations scoped to clients linked to the authenticated RS
 - **Content-Type**: `application/json` for all endpoints (including GET)
 - **Audience**: Resource server backends
+- **Browser aliases**: `POST /api/rs/users/lookup` and `POST /api/rs/client-users/list` are provided as POST alternatives to the GET endpoints, since browsers cannot send GET requests with a JSON body. Same handlers, identical behavior.
 
 ### Auth Fields (required on all endpoints)
 
