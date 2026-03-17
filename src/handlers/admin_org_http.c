@@ -1533,7 +1533,7 @@ HttpResponse *admin_create_resource_server_key_handler(const HttpRequest *req, c
  *
  * Query params:
  *   resource_server_id - Resource server UUID (hex, required)
- *   limit             - Max results (default 100, max 1000)
+ *   limit             - Max results (default 20, max 100)
  *   offset            - Skip N results (default 0)
  *   is_active         - Filter by active status (optional)
  */
@@ -1783,7 +1783,7 @@ HttpResponse *admin_create_client_key_handler(const HttpRequest *req, const Rout
  *
  * Query params:
  *   client_id - Client UUID (hex, required)
- *   limit     - Max results (default 100, max 1000)
+ *   limit     - Max results (default 20, max 100)
  *   offset    - Skip N results (default 0)
  *   is_active - Filter by active status (optional)
  */
