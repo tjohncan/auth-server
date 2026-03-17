@@ -74,6 +74,7 @@ Authentication sessions, OAuth flows, and verification tokens.
 - `passwordless_login_token` - One-time codes for email-based login
 - `email_verification_token` - Confirm email ownership
 - `password_reset_token` - Self-service password reset
+- `invitation_token` - RS-provisioned user invitation (email verify + password set)
 
 ### Reference/Lookup Domain
 Lookup tables for valid values.
