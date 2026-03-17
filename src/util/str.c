@@ -61,6 +61,8 @@ The input/output `count` parameter is updated after execution, reflecting the nu
 
 */
 char **str_split(const char *str, char delim, int *count) {
+    if (!str || !count) return NULL;
+
     /* Determine number of output elements */
     int num_parts = 1;  /* Always at least 1 part (even if empty string) */
     for (const char *p = str; *p != '\0'; p++) {
