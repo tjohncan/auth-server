@@ -167,6 +167,95 @@ void test_real_world_request(void) {
     http_request_cleanup(&req);
 }
 
+void test_malformed_requests(void) {
+    printf("\n=== Testing Malformed Request Handling ===\n\n");
+
+    /* Test 1: Empty input */
+    {
+        char req[] = "";
+        HttpRequest parsed = http_request_parse(req, 0);
+        assert(parsed.method == HTTP_UNKNOWN);
+        http_request_cleanup(&parsed);
+        printf("✓ Empty input rejected\n");
+    }
+
+    /* Test 2: No header terminator (missing \r\n\r\n) */
+    {
+        char req[] = "GET /health HTTP/1.0\r\nHost: localhost\r\n";
+        HttpRequest parsed = http_request_parse(req, strlen(req));
+        assert(parsed.method == HTTP_UNKNOWN);
+        http_request_cleanup(&parsed);
+        printf("✓ Missing header terminator rejected\n");
+    }
+
+    /* Test 3: Incomplete request line (no version) */
+    {
+        char req[] = "GET /health\r\n\r\n";
+        HttpRequest parsed = http_request_parse(req, strlen(req));
+        assert(parsed.method == HTTP_UNKNOWN);
+        http_request_cleanup(&parsed);
+        printf("✓ Incomplete request line rejected\n");
+    }
+
+    /* Test 4: Unsupported HTTP version */
+    {
+        char req[] = "GET /health HTTP/2.0\r\n\r\n";
+        HttpRequest parsed = http_request_parse(req, strlen(req));
+        assert(parsed.method == HTTP_UNKNOWN);
+        http_request_cleanup(&parsed);
+        printf("✓ Unsupported HTTP version rejected\n");
+    }
+
+    /* Test 5: Excessive headers (over 50 limit) */
+    {
+        char req[8192];
+        int pos = sprintf(req, "GET /health HTTP/1.0\r\n");
+        for (int i = 0; i < 55; i++) {
+            pos += sprintf(req + pos, "X-Header-%d: value%d\r\n", i, i);
+        }
+        pos += sprintf(req + pos, "\r\n");
+
+        HttpRequest parsed = http_request_parse(req, pos);
+        assert(parsed.method == HTTP_UNKNOWN);
+        http_request_cleanup(&parsed);
+        printf("✓ Excessive headers rejected\n");
+    }
+
+    /* Test 6: Body larger than Content-Length (truncated to declared) */
+    {
+        char req[] =
+            "POST /api HTTP/1.0\r\n"
+            "Content-Length: 5\r\n"
+            "\r\n"
+            "hello extra bytes here";
+
+        HttpRequest parsed = http_request_parse(req, strlen(req));
+        assert(parsed.method == HTTP_POST);
+        assert(parsed.body_length == 5);
+        assert(strncmp(parsed.body, "hello", 5) == 0);
+        http_request_cleanup(&parsed);
+        printf("✓ Body truncated to Content-Length\n");
+    }
+
+    /* Test 7: Garbage input */
+    {
+        char req[] = "\x01\x02\x03\x04\x05\x06\x07\x08";
+        HttpRequest parsed = http_request_parse(req, strlen(req));
+        assert(parsed.method == HTTP_UNKNOWN);
+        http_request_cleanup(&parsed);
+        printf("✓ Garbage input rejected\n");
+    }
+
+    /* Test 8: Request line with no path */
+    {
+        char req[] = "GET  HTTP/1.0\r\n\r\n";
+        HttpRequest parsed = http_request_parse(req, strlen(req));
+        /* Parser may accept with empty path or reject — either is safe */
+        http_request_cleanup(&parsed);
+        printf("✓ No-path request handled without crash\n");
+    }
+}
+
 int main(void) {
     log_init(LOG_INFO);
     log_info("HTTP Parser Test Suite");
@@ -174,6 +263,7 @@ int main(void) {
     test_request_parsing();
     test_response_building();
     test_real_world_request();
+    test_malformed_requests();
 
     printf("\n=== All Tests Passed! ===\n\n");
 
