@@ -217,6 +217,16 @@ HttpResponse *passwordless_login_handler(const HttpRequest *req, const RoutePara
 HttpResponse *passwordless_login_toggle_handler(const HttpRequest *req, const RouteParams *params);
 #endif
 
+/* ============================================================================
+ * Invitation Endpoints (Public, No Auth)
+ * ============================================================================ */
+
+/* GET /accept-invitation - Render password-set form (public, no auth) */
+HttpResponse *accept_invitation_page_handler(const HttpRequest *req, const RouteParams *params);
+
+/* POST /accept-invitation - Consume token and set password */
+HttpResponse *accept_invitation_handler(const HttpRequest *req, const RouteParams *params);
+
 /* POST /api/user/password - Change current user's password */
 HttpResponse *change_password_handler(const HttpRequest *req, const RouteParams *params);
 
@@ -314,6 +324,25 @@ HttpResponse *admin_delete_resource_server_key_handler(const HttpRequest *req, c
 HttpResponse *admin_create_client_key_handler(const HttpRequest *req, const RouteParams *params);
 HttpResponse *admin_get_client_keys_handler(const HttpRequest *req, const RouteParams *params);
 HttpResponse *admin_delete_client_key_handler(const HttpRequest *req, const RouteParams *params);
+
+/* ============================================================================
+ * RS User Provisioning API (RS Key Auth)
+ * ============================================================================ */
+
+/* POST /api/rs/users - Find-or-create user + generate invitation */
+HttpResponse *rs_provision_user_handler(const HttpRequest *req, const RouteParams *params);
+
+/* GET /api/rs/users - Look up user */
+HttpResponse *rs_lookup_user_handler(const HttpRequest *req, const RouteParams *params);
+
+/* POST /api/rs/client-users - Link user to client */
+HttpResponse *rs_link_client_user_handler(const HttpRequest *req, const RouteParams *params);
+
+/* DELETE /api/rs/client-users - Unlink user from client */
+HttpResponse *rs_unlink_client_user_handler(const HttpRequest *req, const RouteParams *params);
+
+/* GET /api/rs/client-users - List users linked to client */
+HttpResponse *rs_list_client_users_handler(const HttpRequest *req, const RouteParams *params);
 
 /* ============================================================================
  * Static File Serving

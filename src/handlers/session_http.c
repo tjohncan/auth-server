@@ -660,8 +660,6 @@ HttpResponse *set_primary_email_handler(const HttpRequest *req, const RouteParam
     return response_json_ok("{\"message\":\"Primary email updated\"}");
 }
 
-#ifdef EMAIL_SUPPORT
-
 /* ============================================================================
  * Template Helper
  * ========================================================================== */
@@ -706,6 +704,8 @@ static HttpResponse *response_template(int status, const char *name, ...) {
     http_response_set_body_owned(resp, html, strlen(html));
     return resp;
 }
+
+#ifdef EMAIL_SUPPORT
 
 /* ============================================================================
  * Email Verification Handlers
@@ -1097,6 +1097,148 @@ HttpResponse *reset_password_handler(const HttpRequest *req,
     HttpResponse *resp = response_template(200, "pages/reset-password-success.html", NULL);
     return resp ? resp : response_json_error(500, "Template error");
 }
+
+#endif /* EMAIL_SUPPORT */
+
+/* ============================================================================
+ * Invitation Handlers
+ * ========================================================================== */
+
+/*
+ * GET /accept-invitation?token=...
+ *
+ * Public endpoint (no auth). Validates invitation token and renders
+ * password-set form showing username and/or email.
+ */
+HttpResponse *accept_invitation_page_handler(const HttpRequest *req,
+                                               const RouteParams *params) {
+    (void)params;
+
+    db_handle_t *db = db_pool_get_connection();
+    if (!db) {
+        log_error("Failed to get database connection");
+        HttpResponse *resp = http_response_new(500);
+        http_response_set(resp, CONTENT_TYPE_HTML,
+            "<!DOCTYPE html><html><body><p>Internal server error</p></body></html>");
+        return resp;
+    }
+
+    char *token = http_query_get_param(req->query_string, "token");
+    if (!token) {
+        HttpResponse *resp = http_response_new(400);
+        http_response_set(resp, CONTENT_TYPE_HTML,
+            "<!DOCTYPE html><html><body><p>Missing token</p></body></html>");
+        return resp;
+    }
+
+    /* Look up token */
+    invitation_token_lookup_t result;
+    int rc = user_lookup_invitation_token(db, token, &result);
+
+    if (rc != 0) {
+        free(token);
+        HttpResponse *resp = response_template(400, "pages/accept-invitation-invalid.html", NULL);
+        return resp ? resp : response_json_error(400, "Invalid token");
+    }
+
+    /* Build account info HTML */
+    char account_info[1024];
+    account_info[0] = '\0';
+    int pos = 0;
+
+    if (result.username[0]) {
+        char escaped[512];
+        str_html_escape(escaped, sizeof(escaped), result.username);
+        pos += snprintf(account_info + pos, sizeof(account_info) - pos,
+                        "<p>Username: <strong>%s</strong></p>", escaped);
+    }
+
+    if (result.email_address[0]) {
+        char escaped[512];
+        str_html_escape(escaped, sizeof(escaped), result.email_address);
+        pos += snprintf(account_info + pos, sizeof(account_info) - pos,
+                        "<p>Email: <strong>%s</strong></p>", escaped);
+    }
+
+    HttpResponse *resp = response_template(200, "pages/accept-invitation.html",
+        "TOKEN", token,
+        "ACCOUNT_INFO", account_info,
+        NULL);
+    free(token);
+    return resp ? resp : response_json_error(500, "Template error");
+}
+
+/*
+ * POST /accept-invitation
+ *
+ * Public endpoint (no auth). Consumes the invitation token and sets password.
+ * Expects form-encoded body: token=...&password=...
+ */
+HttpResponse *accept_invitation_handler(const HttpRequest *req,
+                                          const RouteParams *params) {
+    (void)params;
+
+    db_handle_t *db = db_pool_get_connection();
+    if (!db) {
+        log_error("Failed to get database connection");
+        HttpResponse *resp = http_response_new(500);
+        http_response_set(resp, CONTENT_TYPE_HTML,
+            "<!DOCTYPE html><html><body><p>Internal server error</p></body></html>");
+        return resp;
+    }
+
+    char *token = NULL;
+    char *password_enc = NULL;
+    if (req->body) {
+        token = http_query_get_param(req->body, "token");
+        password_enc = http_query_get_param(req->body, "password");
+    }
+
+    if (!token || !password_enc) {
+        free(token);
+        free(password_enc);
+        HttpResponse *resp = http_response_new(400);
+        http_response_set(resp, CONTENT_TYPE_HTML,
+            "<!DOCTYPE html><html><body><p>Missing token or password</p></body></html>");
+        return resp;
+    }
+
+    /* URL-decode password (form-encoded) */
+    char password[256];
+    if (str_url_decode(password, sizeof(password), password_enc) < 0) {
+        free(token);
+        OPENSSL_cleanse(password_enc, strlen(password_enc));
+        free(password_enc);
+        HttpResponse *resp = http_response_new(400);
+        http_response_set(resp, CONTENT_TYPE_HTML,
+            "<!DOCTYPE html><html><body><p>Invalid request</p></body></html>");
+        return resp;
+    }
+    OPENSSL_cleanse(password_enc, strlen(password_enc));
+    free(password_enc);
+
+    int rc = user_consume_invitation_token(db, token, password);
+    OPENSSL_cleanse(password, strlen(password));
+    free(token);
+
+    if (rc == 2) {
+        HttpResponse *resp = response_template(400, "pages/accept-invitation-error.html",
+            "MESSAGE", "This email address is already verified by another account. "
+                       "You may already have an account — try logging in.",
+            NULL);
+        return resp ? resp : response_json_error(400, "Email conflict");
+    }
+
+    if (rc != 0) {
+        HttpResponse *resp = response_template(400, "pages/accept-invitation-invalid.html", NULL);
+        return resp ? resp : response_json_error(400, "Invalid invitation");
+    }
+
+    HttpResponse *resp = response_template(200, "pages/accept-invitation-success.html", NULL);
+    return resp ? resp : response_json_error(500, "Template error");
+}
+
+#ifdef EMAIL_SUPPORT
 
 /* ============================================================================
  * Passwordless Login Handlers

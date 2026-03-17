@@ -54,7 +54,8 @@ endif
 HANDLER_SRCS = src/handlers/common.c src/handlers/health.c src/handlers/admin.c src/handlers/admin_http.c \
                src/handlers/admin_org_http.c src/handlers/session.c src/handlers/session_http.c \
                src/handlers/oauth.c src/handlers/oauth_http.c src/handlers/static.c \
-               src/handlers/mfa.c src/handlers/mfa_http.c
+               src/handlers/mfa.c src/handlers/mfa_http.c \
+               src/handlers/rs.c src/handlers/rs_http.c
 DB_SRCS = src/db/db.c src/db/db_pool.c src/db/cleaner.c src/db/init/db_init.c src/db/init/db_history.c \
           src/db/queries/org.c src/db/queries/user.c src/db/queries/client.c src/db/queries/resource_server.c src/db/queries/oauth.c \
           src/db/queries/mfa.c

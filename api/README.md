@@ -13,6 +13,8 @@ HTTP endpoints for the OAuth2 authentication server.
 7. [Password Reset Endpoints](#password-reset-endpoints)
 8. [Passwordless Login Endpoints](#passwordless-login-endpoints)
 9. [MFA Endpoints (Session Auth)](#mfa-endpoints-session-auth)
+10. [RS User Provisioning API (RS Key Auth)](#rs-user-provisioning-api-rs-key-auth)
+11. [Invitation Endpoints (Public)](#invitation-endpoints-public)
 
 ---
 
@@ -2481,3 +2483,341 @@ curl -X POST http://localhost:8080/api/user/mfa/require \
   -H "Content-Type: application/json" \
   -d '{"enabled": false}'
 ```
+
+---
+
+## RS User Provisioning API (RS Key Auth)
+
+Endpoints for resource servers to manage users programmatically.
+All endpoints require RS key authentication and `allow_user_provisioning = true` on the resource server.
+
+### Security Model
+
+- **Authentication**: RS key credentials in JSON body (same key pair used for `/introspect`)
+- **Authorization**: `allow_user_provisioning` must be enabled on the resource server
+- **Scope**: Client-user operations scoped to clients linked to the authenticated RS
+- **Content-Type**: `application/json` for all endpoints (including GET)
+- **Audience**: Resource server backends
+
+### Auth Fields (required on all endpoints)
+
+```json
+{
+  "resource_server_id": "<hex uuid>",
+  "resource_server_key_id": "<hex uuid>",
+  "resource_server_secret": "<plaintext secret>"
+}
+```
+
+---
+
+### POST /api/rs/users
+
+Find or create a user. If user exists (by username or verified email), returns user info.
+If user doesn't exist, creates user (active, no password), creates invitation token, and optionally sends invitation email.
+
+At least one of `username` or `email` required. If both are provided and they match two different existing users, returns 409 (ambiguous).
+
+**Request Body**:
+```json
+{
+  "resource_server_id": "...",
+  "resource_server_key_id": "...",
+  "resource_server_secret": "...",
+  "username": "jdoe",
+  "email": "jdoe@example.com"
+}
+```
+
+**Success Response — existing user** (200 OK):
+```json
+{
+  "user_id": "a1b2c3...",
+  "username": "jdoe",
+  "is_active": true,
+  "emails": [
+    {"address": "jdoe@example.com", "is_verified": true, "is_primary": true}
+  ],
+  "created": false
+}
+```
+
+**Success Response — new user** (200 OK):
+```json
+{
+  "user_id": "d4e5f6...",
+  "username": "jdoe",
+  "is_active": true,
+  "emails": [
+    {"address": "jdoe@example.com", "is_verified": false, "is_primary": true}
+  ],
+  "created": true,
+  "invitation": {
+    "token": "abc123...",
+    "url": "https://host/accept-invitation?token=abc123..."
+  }
+}
+```
+
+**Error Responses**:
+- `400` — missing username and email
+- `401` — authentication failed
+- `403` — user provisioning not enabled
+- `409` — ambiguous match (username and email resolve to different users)
+
+**Notes**:
+- The `invitation` object is only present when `created` is `true`
+- When `EMAIL_SUPPORT=1`, an invitation email is automatically sent to the provided email address
+- The invitation URL is always returned regardless of `EMAIL_SUPPORT` so the RS can deliver it through its own channel
+- Created users have no password — they must use the invitation link to set one
+- Invitation tokens expire after `invitation_token_ttl_seconds` (default 72 hours)
+
+**Example**:
+```bash
+curl -X POST http://localhost:8080/api/rs/users \
+  -H "Content-Type: application/json" \
+  -d '{
+    "resource_server_id": "aabbccdd...",
+    "resource_server_key_id": "11223344...",
+    "resource_server_secret": "mysecret",
+    "username": "jdoe",
+    "email": "jdoe@example.com"
+  }'
+```
+
+---
+
+### GET /api/rs/users
+
+Look up a user without creating. Preferred lookup key is `user_id`; falls back to `username` and/or `email` identity matching.
+
+At least one identifier required.
+
+**Request Body**:
+```json
+{
+  "resource_server_id": "...",
+  "resource_server_key_id": "...",
+  "resource_server_secret": "...",
+  "user_id": "a1b2c3..."
+}
+```
+
+Or by identity:
+```json
+{
+  "resource_server_id": "...",
+  "resource_server_key_id": "...",
+  "resource_server_secret": "...",
+  "username": "jdoe",
+  "email": "jdoe@example.com"
+}
+```
+
+**Success Response** (200 OK):
+```json
+{
+  "user_id": "a1b2c3...",
+  "username": "jdoe",
+  "is_active": true,
+  "emails": [
+    {"address": "jdoe@example.com", "is_verified": true, "is_primary": true}
+  ]
+}
+```
+
+**Error Responses**:
+- `400` — no identifiers provided
+- `401` — authentication failed
+- `403` — user provisioning not enabled
+- `404` — user not found
+- `409` — ambiguous match
+
+**Example**:
+```bash
+curl -X GET http://localhost:8080/api/rs/users \
+  -H "Content-Type: application/json" \
+  -d '{
+    "resource_server_id": "aabbccdd...",
+    "resource_server_key_id": "11223344...",
+    "resource_server_secret": "mysecret",
+    "user_id": "a1b2c3d4e5f6..."
+  }'
+```
+
+---
+
+### POST /api/rs/client-users
+
+Link a user to a client. Idempotent — succeeds if already linked.
+
+The client must be linked to the authenticated resource server via `client_resource_server`.
+
+**Request Body**:
+```json
+{
+  "resource_server_id": "...",
+  "resource_server_key_id": "...",
+  "resource_server_secret": "...",
+  "client_id": "aabb...",
+  "user_id": "ccdd..."
+}
+```
+
+**Success Response** (200 OK):
+```json
+{"message": "User linked to client"}
+```
+
+**Error Responses**:
+- `400` — missing client_id or user_id
+- `401` — authentication failed
+- `403` — user provisioning not enabled
+- `404` — client not linked to this resource server, or user not found
+
+**Example**:
+```bash
+curl -X POST http://localhost:8080/api/rs/client-users \
+  -H "Content-Type: application/json" \
+  -d '{
+    "resource_server_id": "aabbccdd...",
+    "resource_server_key_id": "11223344...",
+    "resource_server_secret": "mysecret",
+    "client_id": "eeff0011...",
+    "user_id": "a1b2c3d4..."
+  }'
+```
+
+---
+
+### DELETE /api/rs/client-users
+
+Unlink a user from a client. Idempotent — succeeds even if not currently linked.
+
+**Request Body**:
+```json
+{
+  "resource_server_id": "...",
+  "resource_server_key_id": "...",
+  "resource_server_secret": "...",
+  "client_id": "aabb...",
+  "user_id": "ccdd..."
+}
+```
+
+**Success Response** (200 OK):
+```json
+{"message": "User unlinked from client"}
+```
+
+**Error Responses**:
+- `400` — missing client_id or user_id
+- `401` — authentication failed
+- `403` — user provisioning not enabled
+- `404` — client not linked to this resource server
+
+**Example**:
+```bash
+curl -X DELETE http://localhost:8080/api/rs/client-users \
+  -H "Content-Type: application/json" \
+  -d '{
+    "resource_server_id": "aabbccdd...",
+    "resource_server_key_id": "11223344...",
+    "resource_server_secret": "mysecret",
+    "client_id": "eeff0011...",
+    "user_id": "a1b2c3d4..."
+  }'
+```
+
+---
+
+### GET /api/rs/client-users
+
+List users linked to a client. Paginated.
+
+**Request Body**:
+```json
+{
+  "resource_server_id": "...",
+  "resource_server_key_id": "...",
+  "resource_server_secret": "...",
+  "client_id": "aabb...",
+  "limit": 20,
+  "offset": 0
+}
+```
+
+**Success Response** (200 OK):
+```json
+{
+  "users": [
+    {"user_id": "a1b2c3...", "username": "jdoe", "is_active": true},
+    {"user_id": "d4e5f6...", "username": "jsmith", "is_active": true}
+  ],
+  "pagination": {"limit": 20, "offset": 0, "count": 2, "total": 2}
+}
+```
+
+**Error Responses**:
+- `400` — missing client_id
+- `401` — authentication failed
+- `403` — user provisioning not enabled
+- `404` — client not linked to this resource server
+
+**Notes**:
+- `limit` defaults to 20, clamped to 1–100
+- `offset` defaults to 0
+
+**Example**:
+```bash
+curl -X GET http://localhost:8080/api/rs/client-users \
+  -H "Content-Type: application/json" \
+  -d '{
+    "resource_server_id": "aabbccdd...",
+    "resource_server_key_id": "11223344...",
+    "resource_server_secret": "mysecret",
+    "client_id": "eeff0011..."
+  }'
+```
+
+---
+
+## Invitation Endpoints (Public)
+
+Public endpoints for accepting user invitations created by the RS provisioning API.
+No authentication required — the invitation token serves as the credential.
+
+---
+
+### GET /accept-invitation
+
+Renders a password-set form. Validates the invitation token and displays the username and/or email associated with the invitation.
+
+**Query Parameters**:
+- `token` (required) — invitation token from the invitation URL
+
+**Success Response**: HTML page with password form
+
+**Error Response**: HTML page indicating invalid or expired token
+
+---
+
+### POST /accept-invitation
+
+Consumes the invitation token and sets the user's password. Also verifies the associated email address (if any) and performs squatter cleanup.
+
+**Request Body** (form-encoded):
+```
+token=<invitation_token>&password=<new_password>
+```
+
+**Success Response**: HTML page confirming account is ready with link to login
+
+**Error Responses**:
+- Invalid/expired token: HTML error page
+- Email conflict (another user verified same email): HTML error page with guidance to log in
+
+**Notes**:
+- Each invitation token can only be used once
+- On success, the user can log in with username + password or email + password
+- Email verification and password set happen atomically in the same transaction

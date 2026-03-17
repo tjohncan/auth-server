@@ -375,6 +375,17 @@ int main(void) {
     router_add(router, HTTP_GET, "/.well-known/jwks.json", jwks_handler);
     router_add(router, HTTP_GET, "/userinfo", userinfo_handler);
 
+    /* Invitation endpoints */
+    router_add(router, HTTP_GET, "/accept-invitation", accept_invitation_page_handler);
+    router_add(router, HTTP_POST, "/accept-invitation", accept_invitation_handler);
+
+    /* RS user provisioning API */
+    router_add(router, HTTP_POST, "/api/rs/users", rs_provision_user_handler);
+    router_add(router, HTTP_GET, "/api/rs/users", rs_lookup_user_handler);
+    router_add(router, HTTP_POST, "/api/rs/client-users", rs_link_client_user_handler);
+    router_add(router, HTTP_DELETE, "/api/rs/client-users", rs_unlink_client_user_handler);
+    router_add(router, HTTP_GET, "/api/rs/client-users", rs_list_client_users_handler);
+
     /* Register static files from ./static/ directory */
     register_static_files(router, config);
 
