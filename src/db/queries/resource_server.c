@@ -770,7 +770,6 @@ int resource_server_key_create(db_handle_t *db,
             "WHERE rs.id = " P"2 "
             "AND ok.pin = " P"7 "
             "AND ok.is_active = " BOOL_TRUE " "
-            "AND rs.is_active = " BOOL_TRUE " "
             "LIMIT 1";
     } else {
         /* Session authentication - verify user is org admin */
@@ -784,7 +783,6 @@ int resource_server_key_create(db_handle_t *db,
             "WHERE rs.id = " P"2 "
             "AND oa.user_account_pin = " P"7 "
             "AND ua.is_active = " BOOL_TRUE " "
-            "AND rs.is_active = " BOOL_TRUE " "
             "LIMIT 1";
     }
 
