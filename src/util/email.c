@@ -133,14 +133,14 @@ int email_send(const config_t *config,
     }
 
     if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
-        log_info("Email sent to %s: %s", to, subject ? subject : "(no subject)");
+        log_info("Email sent: %s", subject ? subject : "(no subject)");
         return 0;
     }
 
     if (WIFEXITED(status)) {
-        log_warn("Email command exited with status %d (to: %s)", WEXITSTATUS(status), to);
+        log_warn("Email command exited with status %d", WEXITSTATUS(status));
     } else {
-        log_warn("Email command terminated abnormally (to: %s)", to);
+        log_warn("Email command terminated abnormally");
     }
 
     return -1;

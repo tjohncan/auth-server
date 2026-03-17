@@ -40,9 +40,9 @@ int session_authenticate_and_create(db_handle_t *db,
 
     if (valid != 1) {
         if (valid == 0) {
-            log_info("Authentication failed for '%s' (invalid credentials)", username);
+            log_info("Authentication failed (invalid credentials)");
         } else {
-            log_error("Error verifying password for '%s'", username);
+            log_error("Error verifying password");
         }
         return -1;
     }
