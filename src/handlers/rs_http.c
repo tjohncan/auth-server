@@ -157,7 +157,7 @@ HttpResponse *rs_provision_user_handler(const HttpRequest *req,
         return response_json_error(400, "username and/or email required");
     }
 
-    rs_user_info_t info;
+    rs_user_info_t info = {0};
     int rc = rs_handler_provision_user(auth.db, auth.rs_pin, username, email,
                                         g_config->invitation_token_ttl_seconds,
                                         http_request_get_client_ip(req, NULL),
@@ -166,6 +166,7 @@ HttpResponse *rs_provision_user_handler(const HttpRequest *req,
     if (rc != 0) {
         free(username);
         free(email);
+        rs_user_info_free(&info);
         return rs_error_response(rc, "provision_user");
     }
 
@@ -249,18 +250,21 @@ HttpResponse *rs_lookup_user_handler(const HttpRequest *req,
         return response_json_error(400, "user_id, username, and/or email required");
     }
 
-    rs_user_info_t info;
+    rs_user_info_t info = {0};
     int rc = rs_handler_lookup_user(auth.db, auth.rs_pin,
                                      user_id_ptr, username, email, &info);
 
     free(username);
     free(email);
 
-    if (rc == 1) return response_json_error(404, "User not found");
-    if (rc == 2) return response_json_error(409,
-        "Ambiguous match: username and email resolve to different users");
-    if (rc == 3) return response_json_error(403, "User provisioning not enabled");
-    if (rc != 0) return response_json_error(500, "Internal error");
+    if (rc != 0) {
+        rs_user_info_free(&info);
+        if (rc == 1) return response_json_error(404, "User not found");
+        if (rc == 2) return response_json_error(409,
+            "Ambiguous match: username and email resolve to different users");
+        if (rc == 3) return response_json_error(403, "User provisioning not enabled");
+        return response_json_error(500, "Internal error");
+    }
 
     JsonBuf *jb = jsonbuf_new(2048);
     append_user_json(jb, &info);
