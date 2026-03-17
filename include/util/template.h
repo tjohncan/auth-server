@@ -23,6 +23,10 @@ int template_init(const char *templates_dir);
  * Substitutions are key-value pairs terminated by NULL sentinel.
  * Placeholders in template files use {{KEY}} syntax.
  *
+ * WARNING: Values are inserted verbatim (no escaping).
+ * Callers MUST html-escape any user-influenced values before passing them
+ * (e.g., via str_html_escape) to prevent XSS in rendered HTML.
+ *
  * Returns: heap-allocated string (caller frees), NULL on error.
  *
  * Example:
