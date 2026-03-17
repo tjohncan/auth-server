@@ -386,6 +386,10 @@ int main(void) {
     router_add(router, HTTP_DELETE, "/api/rs/client-users", rs_unlink_client_user_handler);
     router_add(router, HTTP_GET, "/api/rs/client-users", rs_list_client_users_handler);
 
+    /* POST aliases for GET endpoints (browsers cannot send GET with JSON body) */
+    router_add(router, HTTP_POST, "/api/rs/users/lookup", rs_lookup_user_handler);
+    router_add(router, HTTP_POST, "/api/rs/client-users/list", rs_list_client_users_handler);
+
     /* Register static files from ./static/ directory */
     register_static_files(router, config);
 
