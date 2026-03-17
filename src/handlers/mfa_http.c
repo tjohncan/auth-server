@@ -123,6 +123,8 @@ HttpResponse *mfa_totp_setup_handler(const HttpRequest *req, const RouteParams *
     free(display_name);
 
     if (rc != 0) {
+        OPENSSL_cleanse(secret, sizeof(secret));
+        OPENSSL_cleanse(qr_url, sizeof(qr_url));
         return response_json_error(500, "Failed to set up MFA");
     }
 
@@ -138,6 +140,8 @@ HttpResponse *mfa_totp_setup_handler(const HttpRequest *req, const RouteParams *
     jsonbuf_append_escaped(jb, qr_url);
     jsonbuf_appendf(jb, "\"}");
 
+    OPENSSL_cleanse(secret, sizeof(secret));
+    OPENSSL_cleanse(qr_url, sizeof(qr_url));
     return jsonbuf_to_response(jb, 200);
 }
 
