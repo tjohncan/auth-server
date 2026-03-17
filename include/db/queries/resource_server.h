@@ -296,4 +296,62 @@ int resource_server_key_verify(db_handle_t *db,
                                const char *secret,
                                long long *out_resource_server_pin);
 
+/*
+ * Check if resource server has user provisioning enabled
+ *
+ * Parameters:
+ *   db      - Database handle
+ *   rs_pin  - Resource server PIN (from key auth)
+ *
+ * Returns: 1 if allowed, 0 if not allowed, -1 on error
+ */
+int resource_server_provisioning_allowed(db_handle_t *db, long long rs_pin);
+
+/* RS client-user entry for list results */
+typedef struct {
+    unsigned char user_id[16];
+    char username[256];
+    int is_active;
+} rs_client_user_t;
+
+/*
+ * Resolve client UUID within RS scope
+ *
+ * Verifies the client is linked to this resource server via
+ * client_resource_server and returns the client_pin.
+ *
+ * Returns: 0 found (in scope), 1 not found or not in scope, -1 on error
+ */
+int rs_resolve_client(db_handle_t *db, long long resource_server_pin,
+                       const unsigned char *client_id,
+                       long long *out_client_pin);
+
+/*
+ * Link user to client (idempotent)
+ *
+ * Resolves user UUID to PIN internally.
+ *
+ * Returns: 0 on success (including already-linked), 1 user not found, -1 on error
+ */
+int rs_client_user_link(db_handle_t *db, long long client_pin,
+                         const unsigned char *user_id);
+
+/*
+ * Unlink user from client (idempotent)
+ *
+ * Returns: 0 on success (including no-op), -1 on error
+ */
+int rs_client_user_unlink(db_handle_t *db, long long client_pin,
+                           const unsigned char *user_id);
+
+/*
+ * List users linked to client
+ *
+ * Returns: 0 on success, -1 on error
+ */
+int rs_client_user_list(db_handle_t *db, long long client_pin,
+                         int limit, int offset,
+                         rs_client_user_t **out_users, int *out_count,
+                         int *out_total);
+
 #endif /* DB_QUERIES_RESOURCE_SERVER_H */

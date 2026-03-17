@@ -2,6 +2,7 @@
 #include "db/db_sql.h"
 #include "crypto/random.h"
 #include "crypto/password.h"
+#include "crypto/encrypt.h"
 #include "util/log.h"
 #include "util/data.h"
 #include "util/str.h"
@@ -1124,4 +1125,258 @@ int resource_server_key_verify(db_handle_t *db,
         log_error("Error during resource server key verification");
         return -1;  /* Error */
     }
+}
+
+int resource_server_provisioning_allowed(db_handle_t *db, long long rs_pin) {
+    if (!db) {
+        log_error("Invalid arguments to resource_server_provisioning_allowed");
+        return -1;
+    }
+
+    const char *sql =
+        "SELECT allow_user_provisioning FROM " TBL_RESOURCE_SERVER
+        " WHERE pin = " P"1 AND is_active = " BOOL_TRUE;
+
+    db_stmt_t *stmt;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        log_error("Failed to prepare resource_server_provisioning_allowed");
+        return -1;
+    }
+
+    db_bind_int64(stmt, 1, rs_pin);
+
+    int result = -1;
+    if (db_step(stmt) == DB_ROW) {
+        result = db_column_int(stmt, 0) ? 1 : 0;
+    }
+
+    db_finalize(stmt);
+    return result;
+}
+
+/* ============================================================================
+ * RS Client-User Operations
+ * ========================================================================== */
+
+int rs_resolve_client(db_handle_t *db, long long resource_server_pin,
+                       const unsigned char *client_id,
+                       long long *out_client_pin) {
+    if (!db || !client_id || !out_client_pin) {
+        log_error("Invalid arguments to rs_resolve_client");
+        return -1;
+    }
+
+    const char *sql =
+        "SELECT CRS.client_pin "
+        "FROM " TBL_CLIENT_RESOURCE_SERVER " CRS "
+        "JOIN " TBL_CLIENT " C ON C.pin = CRS.client_pin "
+        "WHERE CRS.resource_server_pin = " P"1 "
+        "AND C.id = " P"2 "
+        "LIMIT 1";
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        log_error("Failed to prepare rs_resolve_client");
+        return -1;
+    }
+
+    db_bind_int64(stmt, 1, resource_server_pin);
+    db_bind_blob(stmt, 2, client_id, 16);
+
+    int rc = db_step(stmt);
+    if (rc == DB_ROW) {
+        *out_client_pin = db_column_int64(stmt, 0);
+        db_finalize(stmt);
+        return 0;
+    }
+
+    db_finalize(stmt);
+    if (rc == DB_DONE) return 1;
+    log_error("Error in rs_resolve_client query");
+    return -1;
+}
+
+int rs_client_user_link(db_handle_t *db, long long client_pin,
+                         const unsigned char *user_id) {
+    if (!db || !user_id) {
+        log_error("Invalid arguments to rs_client_user_link");
+        return -1;
+    }
+
+    /* INSERT-SELECT: resolve user UUID, skip if already linked */
+    const char *sql =
+        "INSERT INTO " TBL_CLIENT_USER " (client_pin, user_account_pin) "
+        "SELECT " P"1, UA.pin "
+        "FROM " TBL_USER_ACCOUNT " UA "
+        "WHERE UA.id = " P"2 "
+        "AND NOT EXISTS ("
+            "SELECT 1 FROM " TBL_CLIENT_USER " CU "
+            "WHERE CU.client_pin = " P"1 AND CU.user_account_pin = UA.pin"
+        ") "
+        "RETURNING pin";
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        log_error("Failed to prepare rs_client_user_link insert");
+        return -1;
+    }
+
+    db_bind_int64(stmt, 1, client_pin);
+    db_bind_blob(stmt, 2, user_id, 16);
+
+    int rc = db_step(stmt);
+    db_finalize(stmt);
+
+    if (rc == DB_ROW) return 0;  /* Newly linked */
+
+    if (rc == DB_DONE) {
+        /* 0 rows: already linked or user not found — check which */
+        const char *check_sql =
+            "SELECT 1 FROM " TBL_CLIENT_USER " CU "
+            "JOIN " TBL_USER_ACCOUNT " UA ON UA.pin = CU.user_account_pin "
+            "WHERE CU.client_pin = " P"1 AND UA.id = " P"2 "
+            "LIMIT 1";
+
+        db_stmt_t *check_stmt = NULL;
+        if (db_prepare(db, &check_stmt, check_sql) != 0) {
+            log_error("Failed to prepare rs_client_user_link check");
+            return -1;
+        }
+
+        db_bind_int64(check_stmt, 1, client_pin);
+        db_bind_blob(check_stmt, 2, user_id, 16);
+
+        rc = db_step(check_stmt);
+        db_finalize(check_stmt);
+
+        if (rc == DB_ROW) return 0;  /* Already linked — idempotent success */
+        if (rc == DB_DONE) return 1;  /* User not found */
+        log_error("Error in rs_client_user_link check query");
+        return -1;
+    }
+
+    log_error("Failed to insert client_user link");
+    return -1;
+}
+
+int rs_client_user_unlink(db_handle_t *db, long long client_pin,
+                           const unsigned char *user_id) {
+    if (!db || !user_id) {
+        log_error("Invalid arguments to rs_client_user_unlink");
+        return -1;
+    }
+
+    const char *sql =
+        "DELETE FROM " TBL_CLIENT_USER " "
+        "WHERE client_pin = " P"1 "
+        "AND user_account_pin = ("
+            "SELECT pin FROM " TBL_USER_ACCOUNT " WHERE id = " P"2"
+        ")";
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        log_error("Failed to prepare rs_client_user_unlink");
+        return -1;
+    }
+
+    db_bind_int64(stmt, 1, client_pin);
+    db_bind_blob(stmt, 2, user_id, 16);
+
+    int rc = db_step(stmt);
+    db_finalize(stmt);
+
+    if (rc == DB_DONE) return 0;  /* Deleted or no-op — both success */
+    log_error("Failed to delete client_user link");
+    return -1;
+}
+
+int rs_client_user_list(db_handle_t *db, long long client_pin,
+                         int limit, int offset,
+                         rs_client_user_t **out_users, int *out_count,
+                         int *out_total) {
+    if (!db || !out_users || !out_count) {
+        log_error("Invalid arguments to rs_client_user_list");
+        return -1;
+    }
+
+    if (limit <= 0 || offset < 0) {
+        log_error("Invalid limit/offset: limit=%d, offset=%d", limit, offset);
+        return -1;
+    }
+
+    const char *sql =
+        "SELECT UA.id, UA.username, UA.is_active, "
+        "COUNT(*) OVER() as total_count "
+        "FROM " TBL_CLIENT_USER " CU "
+        "JOIN " TBL_USER_ACCOUNT " UA ON UA.pin = CU.user_account_pin "
+        "WHERE CU.client_pin = " P"1 "
+        "ORDER BY CU.created_at ASC "
+        "LIMIT " P"2 OFFSET " P"3";
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        log_error("Failed to prepare rs_client_user_list");
+        return -1;
+    }
+
+    db_bind_int64(stmt, 1, client_pin);
+    db_bind_int(stmt, 2, limit);
+    db_bind_int(stmt, 3, offset);
+
+    db_result_node_t *list = NULL, *list_tail = NULL;
+    int total_count = 0;
+    int first_row = 1;
+
+    while (db_step(stmt) == DB_ROW) {
+        rs_client_user_t entry;
+        memset(&entry, 0, sizeof(entry));
+
+        const unsigned char *id_blob = db_column_blob(stmt, 0);
+        int id_len = db_column_bytes(stmt, 0);
+        if (id_blob && id_len == 16) {
+            memcpy(entry.user_id, id_blob, 16);
+        }
+
+        const char *encrypted_username = (const char *)db_column_text(stmt, 1);
+        if (encrypted_username) {
+            if (decrypt_field(encrypted_username, entry.username,
+                              sizeof(entry.username)) != 0) {
+                log_error("Failed to decrypt username in client_user list");
+                db_results_free(list);
+                db_finalize(stmt);
+                return -1;
+            }
+        }
+
+        entry.is_active = db_column_int(stmt, 2);
+
+        if (first_row) {
+            total_count = db_column_int(stmt, 3);
+            first_row = 0;
+        }
+
+        if (db_results_append(&list, &list_tail, &entry, sizeof(entry)) != 0) {
+            log_error("Failed to append to client_user list");
+            db_results_free(list);
+            db_finalize(stmt);
+            return -1;
+        }
+    }
+
+    db_finalize(stmt);
+
+    int count;
+    rs_client_user_t *users = DB_RESULTS_TO_ARRAY(list, &count, rs_client_user_t);
+
+    if (count == 0) {
+        *out_users = NULL;
+        *out_count = 0;
+        if (out_total) *out_total = 0;
+        return 0;
+    }
+
+    *out_users = users;
+    *out_count = count;
+    if (out_total) *out_total = total_count;
+    return 0;
 }
