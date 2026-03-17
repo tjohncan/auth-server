@@ -227,6 +227,39 @@ Set `EMAIL_SUPPORT=1` in `deployment/.env`. If your email script needs additiona
 (e.g., `aws-cli`), set `EXTRA_PACKAGES` in `.env` as well. The compose file volume-mounts
 `deployment/email/send-email.sh` into the container automatically.
 
+## Production Hardening
+
+### Secrets
+
+The default setup loads database credentials from `.env` into container environment variables.
+This is standard for single-server deployments. For higher-security environments, be aware that
+environment variables are visible via `docker inspect` and `/proc/1/environ` inside the container.
+Alternatives include Docker Swarm secrets or mounting a credentials file as a read-only volume.
+
+### Resource Limits
+
+To set memory, CPU, or other resource constraints without modifying the committed
+`docker-compose.yml`, create a `docker-compose.override.yml` (gitignored) in the same directory.
+Docker Compose automatically merges it with the base file.
+
+Example `docker-compose.override.yml`:
+
+```yaml
+services:
+  auth-server:
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '2.0'
+  nginx:
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.5'
+```
+
 ## Building the Image
 
 ```bash
