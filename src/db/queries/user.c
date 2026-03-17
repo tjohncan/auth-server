@@ -3119,3 +3119,63 @@ int user_get_by_id(db_handle_t *db, const unsigned char *user_id,
     db_finalize(stmt);
     return 0;
 }
+
+int user_set_active(db_handle_t *db, const unsigned char *user_id, int active) {
+    if (!db || !user_id) {
+        log_error("Invalid arguments to user_set_active");
+        return -1;
+    }
+
+    int val = active ? 1 : 0;
+
+    /* Check current state */
+    const char *check_sql =
+        "SELECT is_active FROM " TBL_USER_ACCOUNT " WHERE id = " P"1";
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, check_sql) != 0) {
+        log_error("Failed to prepare user_set_active check");
+        return -1;
+    }
+
+    db_bind_blob(stmt, 1, user_id, 16);
+
+    int rc = db_step(stmt);
+    if (rc != DB_ROW) {
+        db_finalize(stmt);
+        if (rc == DB_DONE) return 1; /* not found */
+        log_error("Error in user_set_active check");
+        return -1;
+    }
+
+    int current = db_column_int(stmt, 0);
+    db_finalize(stmt);
+
+    if (current == val) return 0; /* already in desired state */
+
+    /* Apply change */
+    const char *update_sql =
+        "UPDATE " TBL_USER_ACCOUNT " "
+        "SET is_active = " P"1, updated_at = " NOW " "
+        "WHERE id = " P"2 "
+        "AND is_active IS DISTINCT FROM " P"1";
+
+    stmt = NULL;
+    if (db_prepare(db, &stmt, update_sql) != 0) {
+        log_error("Failed to prepare user_set_active update");
+        return -1;
+    }
+
+    db_bind_int(stmt, 1, val);
+    db_bind_blob(stmt, 2, user_id, 16);
+
+    rc = db_step(stmt);
+    db_finalize(stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Error in user_set_active update");
+        return -1;
+    }
+
+    return 0;
+}

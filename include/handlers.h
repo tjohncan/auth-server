@@ -154,6 +154,12 @@ HttpResponse *admin_list_organization_keys_handler(const HttpRequest *req, const
 /* DELETE /api/admin/organization-keys - Revoke organization key (dual-auth) */
 HttpResponse *admin_revoke_organization_key_handler(const HttpRequest *req, const RouteParams *params);
 
+/* POST /api/admin/users/activate - Activate user account (localhost-only) */
+HttpResponse *server_activate_user_handler(const HttpRequest *req, const RouteParams *params);
+
+/* POST /api/admin/users/deactivate - Deactivate user account (localhost-only) */
+HttpResponse *server_deactivate_user_handler(const HttpRequest *req, const RouteParams *params);
+
 /* ============================================================================
  * Authentication Endpoints
  * ============================================================================ */

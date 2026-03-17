@@ -598,4 +598,14 @@ int user_create_no_password(db_handle_t *db, const char *username,
 int user_get_by_id(db_handle_t *db, const unsigned char *user_id,
                     user_identity_t *out_info);
 
+/*
+ * Set user active/inactive
+ *
+ * Idempotent: setting the same state is a no-op.
+ * active: 1 = active, 0 = inactive
+ *
+ * Returns: 0 success, 1 not found, -1 on error
+ */
+int user_set_active(db_handle_t *db, const unsigned char *user_id, int active);
+
 #endif /* DB_QUERIES_USER_H */

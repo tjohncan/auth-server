@@ -334,6 +334,10 @@ int main(void) {
     router_add(router, HTTP_GET, "/api/admin/client-keys", admin_get_client_keys_handler);
     router_add(router, HTTP_DELETE, "/api/admin/client-keys", admin_delete_client_key_handler);
 
+    /* User activate/deactivate (localhost-only) */
+    router_add(router, HTTP_POST, "/api/admin/users/activate", server_activate_user_handler);
+    router_add(router, HTTP_POST, "/api/admin/users/deactivate", server_deactivate_user_handler);
+
     router_add(router, HTTP_POST, "/login", login_handler);
     router_add(router, HTTP_GET, "/api/user/management-setups", management_setups_handler);
     router_add(router, HTTP_GET, "/api/user/profile", profile_handler);

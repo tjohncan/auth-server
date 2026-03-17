@@ -823,3 +823,53 @@ HttpResponse *admin_revoke_organization_key_handler(const HttpRequest *req, cons
 
     return response_json_ok("{\"message\":\"Organization key revoked successfully\"}");
 }
+
+/* ============================================================================
+ * POST /api/admin/users/activate
+ * POST /api/admin/users/deactivate
+ * ========================================================================== */
+
+static HttpResponse *set_user_active(const HttpRequest *req, int active) {
+    HttpResponse *ct_err = require_content_type(req, "application/json");
+    if (ct_err) return ct_err;
+
+    if (!is_localhost(req))
+        return response_json_error(403, "Server admin endpoints only accessible from localhost");
+
+    db_handle_t *db = db_pool_get_connection();
+    if (!db) {
+        log_error("Failed to get database connection");
+        return response_json_error(500, "Internal server error");
+    }
+
+    char *user_id_str = json_get_string(req->body ? req->body : "", "user_id");
+    if (!user_id_str)
+        return response_json_error(400, "user_id required");
+
+    unsigned char user_id[16];
+    if (hex_to_bytes(user_id_str, user_id, 16) != 0) {
+        free(user_id_str);
+        return response_json_error(400, "Invalid user_id format");
+    }
+    free(user_id_str);
+
+    int rc = user_set_active(db, user_id, active);
+    if (rc == 1) return response_json_error(404, "User not found");
+    if (rc != 0) return response_json_error(500, "Internal error");
+
+    return response_json_ok(active
+        ? "{\"message\":\"User activated\"}"
+        : "{\"message\":\"User deactivated\"}");
+}
+
+HttpResponse *server_activate_user_handler(const HttpRequest *req,
+                                            const RouteParams *params) {
+    (void)params;
+    return set_user_active(req, 1);
+}
+
+HttpResponse *server_deactivate_user_handler(const HttpRequest *req,
+                                              const RouteParams *params) {
+    (void)params;
+    return set_user_active(req, 0);
+}

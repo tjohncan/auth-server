@@ -296,6 +296,80 @@ curl -X POST http://localhost:8080/api/admin/org-admins \
 
 ---
 
+### POST /api/admin/users/activate
+
+Activate a user account. Idempotent — activating an already-active user succeeds silently without touching the row.
+
+**Request Body**:
+```json
+{
+  "user_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"
+}
+```
+
+| Field   | Type   | Required | Description           |
+|---------|--------|----------|-----------------------|
+| user_id | string | Yes      | 32-character hex UUID |
+
+**Success Response** (200 OK):
+```json
+{
+  "message": "User activated"
+}
+```
+
+**Error Responses**:
+- **400** — missing or invalid user_id
+- **403** — not from localhost
+- **404** — user not found
+
+**Example**:
+```bash
+curl -X POST http://localhost:8080/api/admin/users/activate \
+  -H "Content-Type: application/json" \
+  -d '{"user_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"}'
+```
+
+---
+
+### POST /api/admin/users/deactivate
+
+Deactivate a user account. Idempotent — deactivating an already-inactive user succeeds silently without touching the row.
+
+Deactivated users cannot log in or create new sessions. Existing tokens are not revoked but will fail introspection and session checks (is_active is evaluated at use time).
+
+**Request Body**:
+```json
+{
+  "user_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"
+}
+```
+
+| Field   | Type   | Required | Description           |
+|---------|--------|----------|-----------------------|
+| user_id | string | Yes      | 32-character hex UUID |
+
+**Success Response** (200 OK):
+```json
+{
+  "message": "User deactivated"
+}
+```
+
+**Error Responses**:
+- **400** — missing or invalid user_id
+- **403** — not from localhost
+- **404** — user not found
+
+**Example**:
+```bash
+curl -X POST http://localhost:8080/api/admin/users/deactivate \
+  -H "Content-Type: application/json" \
+  -d '{"user_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"}'
+```
+
+---
+
 ### Complete Bootstrap Workflow
 
 ```bash
