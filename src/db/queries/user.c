@@ -6,6 +6,7 @@
 #include "crypto/password.h"
 #include "crypto/encrypt.h"
 #include "crypto/hmac.h"
+#include "crypto/sha256.h"
 #include "util/log.h"
 #include "util/data.h"
 #include "util/str.h"
@@ -1434,8 +1435,17 @@ int user_create_email_verification_token(db_handle_t *db,
         return -1;
     }
 
+    /* Hash token for storage (plaintext returned to caller via out_token) */
+    char token_hash[SHA256_HEX_LENGTH];
+    if (crypto_sha256_hex(token, strlen(token), token_hash, sizeof(token_hash)) != 0) {
+        log_error("Failed to hash verification token");
+        OPENSSL_cleanse(token, sizeof(token));
+        db_finalize(stmt);
+        return -1;
+    }
+
     db_bind_blob(stmt, 1, id, sizeof(id));
-    db_bind_text(stmt, 2, token, -1);
+    db_bind_text(stmt, 2, token_hash, -1);
     db_bind_text(stmt, 3, ttl_str, -1);
     if (source_ip) {
         db_bind_text(stmt, 4, source_ip, -1);
@@ -1449,7 +1459,7 @@ int user_create_email_verification_token(db_handle_t *db,
     db_finalize(stmt);
 
     if (rc == DB_ROW) {
-        /* Token created successfully */
+        /* Token created — return plaintext to caller (hash stored in DB) */
         memcpy(out_token, token, VERIFICATION_TOKEN_BUF_SIZE);
         OPENSSL_cleanse(token, sizeof(token));
         return 0;
@@ -1493,7 +1503,14 @@ int user_lookup_email_verification_token(db_handle_t *db, const char *token,
         return -1;
     }
 
-    db_bind_text(stmt, 1, token, -1);
+    char token_hash[SHA256_HEX_LENGTH];
+    if (crypto_sha256_hex(token, strlen(token), token_hash, sizeof(token_hash)) != 0) {
+        log_error("Failed to hash verification token for lookup");
+        db_finalize(stmt);
+        return -1;
+    }
+
+    db_bind_text(stmt, 1, token_hash, -1);
 
     int rc = db_step(stmt);
     if (rc != DB_ROW) {
@@ -1542,6 +1559,13 @@ int user_verify_email_token(db_handle_t *db, const char *token,
 
     memset(out_result, 0, sizeof(*out_result));
 
+    /* Hash token once for all queries in this function */
+    char token_hash[SHA256_HEX_LENGTH];
+    if (crypto_sha256_hex(token, strlen(token), token_hash, sizeof(token_hash)) != 0) {
+        log_error("Failed to hash verification token");
+        return -1;
+    }
+
     /* Step 1: Look up token, join to email + user account */
     const char *lookup_sql =
         "SELECT T.user_email_pin, E.email_address, E.email_hash, "
@@ -1562,7 +1586,7 @@ int user_verify_email_token(db_handle_t *db, const char *token,
         return -1;
     }
 
-    db_bind_text(lookup_stmt, 1, token, -1);
+    db_bind_text(lookup_stmt, 1, token_hash, -1);
 
     int rc = db_step(lookup_stmt);
     if (rc != DB_ROW) {
@@ -1636,7 +1660,7 @@ int user_verify_email_token(db_handle_t *db, const char *token,
         return -1;
     }
 
-    db_bind_text(use_stmt, 1, token, -1);
+    db_bind_text(use_stmt, 1, token_hash, -1);
     rc = db_step(use_stmt);
     db_finalize(use_stmt);
 
@@ -1821,8 +1845,16 @@ int user_create_password_reset_token(db_handle_t *db, const char *email,
         return -1;
     }
 
+    char token_hash[SHA256_HEX_LENGTH];
+    if (crypto_sha256_hex(token, strlen(token), token_hash, sizeof(token_hash)) != 0) {
+        log_error("Failed to hash password reset token");
+        OPENSSL_cleanse(token, sizeof(token));
+        db_finalize(stmt);
+        return -1;
+    }
+
     db_bind_blob(stmt, 1, id, sizeof(id));
-    db_bind_text(stmt, 2, token, -1);
+    db_bind_text(stmt, 2, token_hash, -1);
     db_bind_text(stmt, 3, ttl_str, -1);
     if (source_ip) {
         db_bind_text(stmt, 4, source_ip, -1);
@@ -1873,7 +1905,14 @@ int user_lookup_password_reset_token(db_handle_t *db, const char *token) {
         return -1;
     }
 
-    db_bind_text(stmt, 1, token, -1);
+    char token_hash[SHA256_HEX_LENGTH];
+    if (crypto_sha256_hex(token, strlen(token), token_hash, sizeof(token_hash)) != 0) {
+        log_error("Failed to hash password reset token for lookup");
+        db_finalize(stmt);
+        return -1;
+    }
+
+    db_bind_text(stmt, 1, token_hash, -1);
 
     int rc = db_step(stmt);
     db_finalize(stmt);
@@ -1888,6 +1927,12 @@ int user_consume_password_reset_token(db_handle_t *db, const char *token,
                                        const char *new_password) {
     if (!db || !token || !new_password) {
         log_error("Invalid arguments to user_consume_password_reset_token");
+        return -1;
+    }
+
+    char token_hash[SHA256_HEX_LENGTH];
+    if (crypto_sha256_hex(token, strlen(token), token_hash, sizeof(token_hash)) != 0) {
+        log_error("Failed to hash password reset token");
         return -1;
     }
 
@@ -1909,7 +1954,7 @@ int user_consume_password_reset_token(db_handle_t *db, const char *token,
         return -1;
     }
 
-    db_bind_text(lookup_stmt, 1, token, -1);
+    db_bind_text(lookup_stmt, 1, token_hash, -1);
 
     int rc = db_step(lookup_stmt);
     if (rc != DB_ROW) {
@@ -1959,7 +2004,7 @@ int user_consume_password_reset_token(db_handle_t *db, const char *token,
         return -1;
     }
 
-    db_bind_text(use_stmt, 1, token, -1);
+    db_bind_text(use_stmt, 1, token_hash, -1);
     rc = db_step(use_stmt);
     db_finalize(use_stmt);
 
@@ -2083,9 +2128,17 @@ int user_create_passwordless_login_token(db_handle_t *db, const char *email,
         return -1;
     }
 
+    char token_hash[SHA256_HEX_LENGTH];
+    if (crypto_sha256_hex(token, strlen(token), token_hash, sizeof(token_hash)) != 0) {
+        log_error("Failed to hash passwordless login token");
+        OPENSSL_cleanse(token, sizeof(token));
+        db_finalize(stmt);
+        return -1;
+    }
+
     db_bind_blob(stmt, 1, id, sizeof(id));
     db_bind_text(stmt, 2, encrypted_email, -1);
-    db_bind_text(stmt, 3, token, -1);
+    db_bind_text(stmt, 3, token_hash, -1);
     db_bind_text(stmt, 4, ttl_str, -1);
     if (source_ip) {
         db_bind_text(stmt, 5, source_ip, -1);
@@ -2142,7 +2195,14 @@ int user_lookup_passwordless_login_token(db_handle_t *db, const char *token,
         return -1;
     }
 
-    db_bind_text(stmt, 1, token, -1);
+    char token_hash[SHA256_HEX_LENGTH];
+    if (crypto_sha256_hex(token, strlen(token), token_hash, sizeof(token_hash)) != 0) {
+        log_error("Failed to hash passwordless login token for lookup");
+        db_finalize(stmt);
+        return -1;
+    }
+
+    db_bind_text(stmt, 1, token_hash, -1);
 
     int rc = db_step(stmt);
     if (rc == DB_ROW) {
@@ -2181,6 +2241,12 @@ int user_consume_passwordless_login_token(db_handle_t *db, const char *token,
 
     out_return_to[0] = '\0';
 
+    char token_hash[SHA256_HEX_LENGTH];
+    if (crypto_sha256_hex(token, strlen(token), token_hash, sizeof(token_hash)) != 0) {
+        log_error("Failed to hash passwordless login token");
+        return -1;
+    }
+
     /* Step 1: Look up token and get user identity */
     const char *lookup_sql =
         "SELECT T.user_account_pin, U.id, T.return_to "
@@ -2199,7 +2265,7 @@ int user_consume_passwordless_login_token(db_handle_t *db, const char *token,
         return -1;
     }
 
-    db_bind_text(lookup_stmt, 1, token, -1);
+    db_bind_text(lookup_stmt, 1, token_hash, -1);
 
     int rc = db_step(lookup_stmt);
     if (rc != DB_ROW) {
@@ -2246,7 +2312,7 @@ int user_consume_passwordless_login_token(db_handle_t *db, const char *token,
         return -1;
     }
 
-    db_bind_text(use_stmt, 1, token, -1);
+    db_bind_text(use_stmt, 1, token_hash, -1);
     rc = db_step(use_stmt);
     db_finalize(use_stmt);
 
@@ -2383,6 +2449,14 @@ int user_create_invitation_token(db_handle_t *db,
         return -1;
     }
 
+    char token_hash[SHA256_HEX_LENGTH];
+    if (crypto_sha256_hex(token, strlen(token), token_hash, sizeof(token_hash)) != 0) {
+        log_error("Failed to hash invitation token");
+        OPENSSL_cleanse(token, sizeof(token));
+        db_finalize(stmt);
+        return -1;
+    }
+
     db_bind_blob(stmt, 1, id, sizeof(id));
     db_bind_int64(stmt, 2, user_account_pin);
     if (user_email_pin > 0) {
@@ -2390,7 +2464,7 @@ int user_create_invitation_token(db_handle_t *db,
     } else {
         db_bind_null(stmt, 3);
     }
-    db_bind_text(stmt, 4, token, -1);
+    db_bind_text(stmt, 4, token_hash, -1);
     db_bind_text(stmt, 5, ttl_str, -1);
     if (source_ip) {
         db_bind_text(stmt, 6, source_ip, -1);
@@ -2438,7 +2512,14 @@ int user_lookup_invitation_token(db_handle_t *db, const char *token,
         return -1;
     }
 
-    db_bind_text(stmt, 1, token, -1);
+    char token_hash[SHA256_HEX_LENGTH];
+    if (crypto_sha256_hex(token, strlen(token), token_hash, sizeof(token_hash)) != 0) {
+        log_error("Failed to hash invitation token for lookup");
+        db_finalize(stmt);
+        return -1;
+    }
+
+    db_bind_text(stmt, 1, token_hash, -1);
 
     int rc = db_step(stmt);
     if (rc != DB_ROW) {
@@ -2487,6 +2568,12 @@ int user_consume_invitation_token(db_handle_t *db, const char *token,
         return -1;
     }
 
+    char token_hash[SHA256_HEX_LENGTH];
+    if (crypto_sha256_hex(token, strlen(token), token_hash, sizeof(token_hash)) != 0) {
+        log_error("Failed to hash invitation token");
+        return -1;
+    }
+
     /* Step 1: Look up token + user + optional email */
     const char *lookup_sql =
         "SELECT T.user_account_pin, T.user_email_pin, "
@@ -2506,7 +2593,7 @@ int user_consume_invitation_token(db_handle_t *db, const char *token,
         return -1;
     }
 
-    db_bind_text(lookup_stmt, 1, token, -1);
+    db_bind_text(lookup_stmt, 1, token_hash, -1);
 
     int rc = db_step(lookup_stmt);
     if (rc != DB_ROW) {
@@ -2602,7 +2689,7 @@ int user_consume_invitation_token(db_handle_t *db, const char *token,
         return -1;
     }
 
-    db_bind_text(use_stmt, 1, token, -1);
+    db_bind_text(use_stmt, 1, token_hash, -1);
     rc = db_step(use_stmt);
     db_finalize(use_stmt);
 
