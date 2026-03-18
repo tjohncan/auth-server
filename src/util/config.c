@@ -394,6 +394,17 @@ static void set_config_value(config_t *config, const char *key, const char *valu
         }
     }
 
+    /* Password policy */
+    else if (strcmp(key, "password_min_length") == 0) {
+        int len = 0;
+        if (parse_int(value, &len) != 0 || len < 1) {
+            log_warn("Invalid password_min_length '%s', must be >= 1. Keeping current: %d",
+                    value, config->password_min_length);
+        } else {
+            config->password_min_length = len;
+        }
+    }
+
     /* OAuth2 token limits */
     else if (strcmp(key, "max_access_token_ttl_seconds") == 0) {
         int ttl = 0;
@@ -1026,6 +1037,7 @@ config_t *config_load(const char *config_file) {
     config->secret_hashing_algorithm = PASSWORD_HASH_ARGON2ID;  /* Default to Argon2id */
     config->secret_hash_min_iterations = 4;                     /* Default constant iterations */
     config->secret_hash_max_iterations = 4;
+    config->password_min_length = 1;
 
     /* OAuth2 token limits */
     config->max_access_token_ttl_seconds = DEFAULT_MAX_ACCESS_TOKEN_TTL_SECONDS;
@@ -1124,6 +1136,9 @@ config_t *config_load(const char *config_file) {
     }
 
     fclose(file);
+
+    /* Cleanse parse buffers (may contain db_password or encryption_key) */
+    OPENSSL_cleanse(line, sizeof(line));
 
     /* Apply environment variable overrides */
     apply_env_overrides(config);

@@ -7,6 +7,7 @@
 #include "db/db_pool.h"
 #include "db/queries/user.h"
 #include "db/queries/org.h"
+#include "crypto/password.h"
 #include "crypto/random.h"
 #include "util/config.h"
 #include "util/log.h"
@@ -610,12 +611,19 @@ HttpResponse *admin_create_organization_key_handler(const HttpRequest *req, cons
 
     /* Create organization key */
     unsigned char key_id[16];
-    if (organization_key_create(db, org_code_name, secret_to_use, note, key_id) != 0) {
+    int result = organization_key_create(db, org_code_name, secret_to_use, note, key_id);
+    if (result != 0) {
         free(org_code_name);
         if (user_secret) OPENSSL_cleanse(user_secret, strlen(user_secret));
         free(user_secret);
         OPENSSL_cleanse(generated_secret, sizeof(generated_secret));
         free(note);
+        if (result == -2) {
+            char msg[128];
+            snprintf(msg, sizeof(msg),
+                     "Secret must be at least %d characters", crypto_password_min_length());
+            return response_json_error(400, msg);
+        }
         return response_json_error(500, "Failed to create organization key");
     }
 

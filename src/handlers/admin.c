@@ -595,10 +595,9 @@ int admin_create_resource_server_key(db_handle_t *db,
         return -1;
     }
 
-    if (resource_server_key_create(db, user_account_pin, organization_key_pin,
-                                    resource_server_id, secret, note, out_key_id) != 0) {
-        return -1;
-    }
+    int rc = resource_server_key_create(db, user_account_pin, organization_key_pin,
+                                    resource_server_id, secret, note, out_key_id);
+    if (rc != 0) return rc;
 
     return 0;
 }
@@ -663,10 +662,9 @@ int admin_create_client_key(db_handle_t *db,
         return -1;
     }
 
-    if (client_key_create(db, user_account_pin, organization_key_pin,
-                          client_id, secret, note, out_key_id) != 0) {
-        return -1;
-    }
+    int rc = client_key_create(db, user_account_pin, organization_key_pin,
+                          client_id, secret, note, out_key_id);
+    if (rc != 0) return rc;
 
     return 0;
 }

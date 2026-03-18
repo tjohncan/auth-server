@@ -499,7 +499,8 @@ typedef struct {
  * - Session auth: Verifies user is org admin
  * - Org key auth: Verifies specific key is active
  *
- * Returns: 0 on success, -1 on error (or if client is not confidential)
+ * Returns: 0 on success, -1 on error (or if client is not confidential),
+ *          -2 if secret below minimum length
  */
 int client_key_create(db_handle_t *db,
                       long long user_account_pin,

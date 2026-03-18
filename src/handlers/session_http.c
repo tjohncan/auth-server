@@ -9,6 +9,7 @@
 #include "db/queries/user.h"
 #include "db/queries/oauth.h"
 #include "db/queries/mfa.h"
+#include "crypto/password.h"
 #include "crypto/random.h"
 #include "util/data.h"
 #include "util/log.h"
@@ -470,6 +471,11 @@ HttpResponse *change_password_handler(const HttpRequest *req, const RouteParams 
     } else if (result == 0) {
         /* Invalid current password */
         return response_json_error(401, "Current password is incorrect");
+    } else if (result == -2) {
+        char msg[128];
+        snprintf(msg, sizeof(msg),
+                 "Password must be at least %d characters", crypto_password_min_length());
+        return response_json_error(400, msg);
     } else {
         /* Error */
         return response_json_error(500, "Failed to change password");
@@ -1030,8 +1036,10 @@ HttpResponse *reset_password_page_handler(const HttpRequest *req,
         return resp ? resp : response_json_error(400, "Invalid token");
     }
 
+    char min_len[12];
+    snprintf(min_len, sizeof(min_len), "%d", crypto_password_min_length());
     HttpResponse *resp = response_template(200, "pages/reset-password.html",
-        "TOKEN", token, NULL);
+        "TOKEN", token, "MIN_LENGTH", min_len, NULL);
     free(token);
     return resp ? resp : response_json_error(500, "Template error");
 }
@@ -1089,8 +1097,18 @@ HttpResponse *reset_password_handler(const HttpRequest *req,
     OPENSSL_cleanse(password, strlen(password));
     free(token);
 
+    if (rc == -2) {
+        char msg[128];
+        snprintf(msg, sizeof(msg),
+                 "Password must be at least %d characters.", crypto_password_min_length());
+        HttpResponse *resp = response_template(400, "pages/reset-password-error.html",
+            "MESSAGE", msg, NULL);
+        return resp ? resp : response_json_error(400, msg);
+    }
     if (rc != 0) {
-        HttpResponse *resp = response_template(400, "pages/reset-password-error.html", NULL);
+        HttpResponse *resp = response_template(400, "pages/reset-password-error.html",
+            "MESSAGE", "This password reset link is invalid, expired, or has already been used.",
+            NULL);
         return resp ? resp : response_json_error(400, "Reset failed");
     }
 
@@ -1160,9 +1178,12 @@ HttpResponse *accept_invitation_page_handler(const HttpRequest *req,
                         "<p>Email: <strong>%s</strong></p>", escaped);
     }
 
+    char min_len[12];
+    snprintf(min_len, sizeof(min_len), "%d", crypto_password_min_length());
     HttpResponse *resp = response_template(200, "pages/accept-invitation.html",
         "TOKEN", token,
         "ACCOUNT_INFO", account_info,
+        "MIN_LENGTH", min_len,
         NULL);
     free(token);
     return resp ? resp : response_json_error(500, "Template error");
@@ -1220,6 +1241,15 @@ HttpResponse *accept_invitation_handler(const HttpRequest *req,
     int rc = user_consume_invitation_token(db, token, password);
     OPENSSL_cleanse(password, strlen(password));
     free(token);
+
+    if (rc == -2) {
+        char msg[128];
+        snprintf(msg, sizeof(msg),
+                 "Password must be at least %d characters.", crypto_password_min_length());
+        HttpResponse *resp = response_template(400, "pages/accept-invitation-error.html",
+            "MESSAGE", msg, NULL);
+        return resp ? resp : response_json_error(400, msg);
+    }
 
     if (rc == 2) {
         HttpResponse *resp = response_template(400, "pages/accept-invitation-error.html",

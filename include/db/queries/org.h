@@ -233,7 +233,7 @@ int organization_key_get_organization_pin(db_handle_t *db,
  *   note                 - Optional description
  *   out_key_id           - Output: Generated key UUID (16 bytes)
  *
- * Returns: 0 on success, -1 on error
+ * Returns: 0 on success, -1 on error, -2 if secret below minimum length
  */
 int organization_key_create(db_handle_t *db,
                             const char *organization_code_name,

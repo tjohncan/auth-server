@@ -9,6 +9,7 @@
 #include "db/queries/resource_server.h"
 #include "db/queries/client.h"
 #include "db/queries/oauth.h"
+#include "crypto/password.h"
 #include "crypto/random.h"
 #include "util/log.h"
 #include "util/str.h"
@@ -1504,6 +1505,13 @@ HttpResponse *admin_create_resource_server_key_handler(const HttpRequest *req, c
     if (user_secret) OPENSSL_cleanse(user_secret, strlen(user_secret));
     free(user_secret);
 
+    if (result == -2) {
+        OPENSSL_cleanse(generated_secret, sizeof(generated_secret));
+        char msg[128];
+        snprintf(msg, sizeof(msg),
+                 "Secret must be at least %d characters", crypto_password_min_length());
+        return response_json_error(400, msg);
+    }
     if (result != 0) {
         OPENSSL_cleanse(generated_secret, sizeof(generated_secret));
         return response_json_error(409, "Key creation failed");
@@ -1754,6 +1762,13 @@ HttpResponse *admin_create_client_key_handler(const HttpRequest *req, const Rout
     if (user_secret) OPENSSL_cleanse(user_secret, strlen(user_secret));
     free(user_secret);
 
+    if (result == -2) {
+        OPENSSL_cleanse(generated_secret, sizeof(generated_secret));
+        char msg[128];
+        snprintf(msg, sizeof(msg),
+                 "Secret must be at least %d characters", crypto_password_min_length());
+        return response_json_error(400, msg);
+    }
     if (result != 0) {
         OPENSSL_cleanse(generated_secret, sizeof(generated_secret));
         return response_json_error(409, "Key creation failed (client must be confidential)");

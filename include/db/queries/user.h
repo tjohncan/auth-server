@@ -66,7 +66,7 @@ int user_lookup_id_by_username(db_handle_t *db, const char *username,
  *
  * Transaction: Creates user_account + user_email in single transaction if email provided
  *
- * Returns: 0 on success, -1 on error
+ * Returns: 0 on success, -1 on error, -2 if password below minimum length
  */
 int user_create(db_handle_t *db, const char *username,
                 const char *email, const char *password,
@@ -290,7 +290,8 @@ int user_set_primary_email(db_handle_t *db, long long user_account_pin,
  *
  * Returns: 1 if password changed successfully,
  *          0 if current password is invalid,
- *          -1 on error
+ *          -1 on error,
+ *          -2 if new password below minimum length
  */
 int user_change_password(db_handle_t *db, long long user_account_pin,
                          const unsigned char *user_account_id,
@@ -416,7 +417,8 @@ int user_lookup_password_reset_token(db_handle_t *db, const char *token);
  * Single transaction: validate token, mark used, hash new password,
  * update user_account.
  *
- * Returns: 0 on success, 1 if token invalid/expired/used, -1 on error
+ * Returns: 0 on success, 1 if token invalid/expired/used,
+ *          -1 on error, -2 if password below minimum length
  */
 int user_consume_password_reset_token(db_handle_t *db, const char *token,
                                        const char *new_password);
@@ -540,7 +542,8 @@ int user_lookup_invitation_token(db_handle_t *db, const char *token,
  * Returns: 0 on success,
  *          1 if token invalid/expired/used,
  *          2 if email conflict (another user verified same email),
- *          -1 on error
+ *          -1 on error,
+ *          -2 if password below minimum length
  */
 int user_consume_invitation_token(db_handle_t *db, const char *token,
                                     const char *new_password);

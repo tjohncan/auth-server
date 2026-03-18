@@ -52,6 +52,9 @@ typedef struct {
     int secret_hash_min_iterations;
     int secret_hash_max_iterations;
 
+    /* Password policy */
+    int password_min_length;  /* Minimum password length (default 1, minimum 1) */
+
     /* OAuth2 token limits */
     int max_access_token_ttl_seconds;  /* Maximum TTL for client access tokens (default 60 days) */
 

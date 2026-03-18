@@ -1688,12 +1688,13 @@ int client_key_create(db_handle_t *db,
     char hash_hex[PASSWORD_HASH_HEX_MAX_LENGTH];
     int iterations;
 
-    if (crypto_password_hash(secret, strlen(secret),
+    int hash_rc = crypto_password_hash(secret, strlen(secret),
                             salt_hex, sizeof(salt_hex),
                             &iterations,
-                            hash_hex, sizeof(hash_hex)) != 0) {
+                            hash_hex, sizeof(hash_hex));
+    if (hash_rc != 0) {
         log_error("Failed to hash secret");
-        return -1;
+        return (hash_rc == -2) ? -2 : -1;
     }
 
     const char *sql;

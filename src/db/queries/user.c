@@ -220,13 +220,14 @@ int user_create(db_handle_t *db, const char *username,
     int iterations;
     char hash[PASSWORD_HASH_HEX_MAX_LENGTH];
 
-    if (crypto_password_hash(password, strlen(password),
+    int hash_rc = crypto_password_hash(password, strlen(password),
                             salt, sizeof(salt),
                             &iterations,
-                            hash, sizeof(hash)) != 0) {
+                            hash, sizeof(hash));
+    if (hash_rc != 0) {
         log_error("Failed to hash password");
         OPENSSL_cleanse(salt, sizeof(salt));
-        return -1;
+        return (hash_rc == -2) ? -2 : -1;
     }
 
     /* Encrypt username and compute hash */
@@ -1182,13 +1183,14 @@ int user_change_password(db_handle_t *db, long long user_account_pin,
     int new_iterations;
     char new_hash[PASSWORD_HASH_HEX_MAX_LENGTH];
 
-    if (crypto_password_hash(new_password, strlen(new_password),
+    int hash_rc = crypto_password_hash(new_password, strlen(new_password),
                             new_salt, sizeof(new_salt),
                             &new_iterations,
-                            new_hash, sizeof(new_hash)) != 0) {
+                            new_hash, sizeof(new_hash));
+    if (hash_rc != 0) {
         log_error("Failed to hash new password");
         OPENSSL_cleanse(new_salt, sizeof(new_salt));
-        return -1;
+        return (hash_rc == -2) ? -2 : -1;
     }
 
     /* Step 4: Update password in database */
@@ -1972,13 +1974,14 @@ int user_consume_password_reset_token(db_handle_t *db, const char *token,
     int iterations;
     char hash[PASSWORD_HASH_HEX_MAX_LENGTH];
 
-    if (crypto_password_hash(new_password, strlen(new_password),
+    int hash_rc = crypto_password_hash(new_password, strlen(new_password),
                             salt, sizeof(salt),
                             &iterations,
-                            hash, sizeof(hash)) != 0) {
+                            hash, sizeof(hash));
+    if (hash_rc != 0) {
         log_error("Failed to hash new password for reset");
         OPENSSL_cleanse(salt, sizeof(salt));
-        return -1;
+        return (hash_rc == -2) ? -2 : -1;
     }
 
     /* Step 3: Transaction — mark token used + update password */
@@ -2656,13 +2659,14 @@ int user_consume_invitation_token(db_handle_t *db, const char *token,
     int iterations;
     char hash[PASSWORD_HASH_HEX_MAX_LENGTH];
 
-    if (crypto_password_hash(new_password, strlen(new_password),
+    int hash_rc = crypto_password_hash(new_password, strlen(new_password),
                             salt, sizeof(salt),
                             &iterations,
-                            hash, sizeof(hash)) != 0) {
+                            hash, sizeof(hash));
+    if (hash_rc != 0) {
         log_error("Failed to hash password for invitation accept");
         OPENSSL_cleanse(salt, sizeof(salt));
-        return -1;
+        return (hash_rc == -2) ? -2 : -1;
     }
 
     /* Step 3: Transaction */

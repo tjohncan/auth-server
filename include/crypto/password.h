@@ -60,7 +60,7 @@ int crypto_password_init(const config_t *config);
  *   out_hash_hex    - Output buffer for hash (hex string)
  *   hash_hex_len    - Size of hash buffer (must be >= PASSWORD_HASH_HEX_MAX_LENGTH)
  *
- * Returns: 0 on success, negative on error
+ * Returns: 0 on success, -1 on error, -2 if password below minimum length
  *
  * Example:
  *   char salt[PASSWORD_SALT_HEX_MAX_LENGTH];
@@ -77,6 +77,9 @@ int crypto_password_hash(const char *password, size_t password_len,
                         char *out_salt_hex, size_t salt_hex_len,
                         int *out_iterations,
                         char *out_hash_hex, size_t hash_hex_len);
+
+/* Returns the configured minimum password length */
+int crypto_password_min_length(void);
 
 /*
  * Hash password with provided salt and iterations (low-level)

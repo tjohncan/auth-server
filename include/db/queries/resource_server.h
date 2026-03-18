@@ -212,7 +212,7 @@ typedef struct {
  * - Session auth: Verifies user is org admin
  * - Org key auth: Verifies specific key is active
  *
- * Returns: 0 on success, -1 on error
+ * Returns: 0 on success, -1 on error, -2 if secret below minimum length
  */
 int resource_server_key_create(db_handle_t *db,
                                 long long user_account_pin,

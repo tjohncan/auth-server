@@ -12,6 +12,7 @@
 static password_hash_algorithm_t g_algorithm;
 static int g_min_iterations;
 static int g_max_iterations;
+static int g_password_min_length;
 static int g_initialized = 0;
 
 int crypto_password_init(const config_t *config) {
@@ -28,6 +29,7 @@ int crypto_password_init(const config_t *config) {
     g_algorithm = config->secret_hashing_algorithm;
     g_min_iterations = config->secret_hash_min_iterations;
     g_max_iterations = config->secret_hash_max_iterations;
+    g_password_min_length = config->password_min_length;
     g_initialized = 1;
 
     log_info("Initialized password hashing: algorithm=%s, iterations=%d-%d",
@@ -35,6 +37,10 @@ int crypto_password_init(const config_t *config) {
              g_min_iterations, g_max_iterations);
 
     return 0;
+}
+
+int crypto_password_min_length(void) {
+    return g_password_min_length;
 }
 
 int crypto_password_hash(const char *password, size_t password_len,
@@ -55,6 +61,12 @@ int crypto_password_hash(const char *password, size_t password_len,
         hash_hex_len < PASSWORD_HASH_HEX_MAX_LENGTH) {
         log_error("Output buffer too small for password hash");
         return -1;
+    }
+
+    if ((int)password_len < g_password_min_length) {
+        log_info("Password rejected: length %zu below minimum %d",
+                 password_len, g_password_min_length);
+        return -2;
     }
 
     /* Delegate to configured algorithm */
