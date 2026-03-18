@@ -180,6 +180,11 @@ int mfa_method_get_by_id(db_handle_t *db,
     if (rc == DB_ROW) {
         /* Extract MFA method data */
         const unsigned char *id_blob = db_column_blob(stmt, 0);
+        if (!id_blob) {
+            log_error("NULL method ID in MFA lookup");
+            db_finalize(stmt);
+            return -1;
+        }
         memcpy(out_method->id, id_blob, 16);
 
         out_method->pin = db_column_int64(stmt, 1);
@@ -280,6 +285,7 @@ int mfa_method_list(db_handle_t *db,
         mfa_method_t *method = &methods[count];
 
         const unsigned char *id_blob = db_column_blob(stmt, 0);
+        if (!id_blob) continue;
         memcpy(method->id, id_blob, 16);
 
         method->pin = db_column_int64(stmt, 1);
@@ -667,6 +673,11 @@ int recovery_code_set_get_active(db_handle_t *db,
 
     if (rc == DB_ROW) {
         const unsigned char *id_blob = db_column_blob(stmt, 0);
+        if (!id_blob) {
+            log_error("NULL recovery code set ID");
+            db_finalize(stmt);
+            return -1;
+        }
         memcpy(out_set->id, id_blob, 16);
 
         out_set->user_account_pin = db_column_int64(stmt, 1);

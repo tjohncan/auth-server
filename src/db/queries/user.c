@@ -638,7 +638,8 @@ int user_get_management_ui_setups(db_handle_t *db, long long user_account_pin,
         const char *client_display_name = (const char *)db_column_text(stmt, 4);
         const char *rs_address = (const char *)db_column_text(stmt, 5);
 
-        /* Copy to struct */
+        /* Copy to struct (str_copy handles NULL; client_id must be checked) */
+        if (!client_id) continue;
         str_copy(setup.org_code_name, sizeof(setup.org_code_name), org_code_name);
         str_copy(setup.org_display_name, sizeof(setup.org_display_name), org_display_name);
         memcpy(setup.client_id, client_id, 16);
