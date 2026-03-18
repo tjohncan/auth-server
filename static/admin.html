@@ -482,7 +482,7 @@
             let toggleButton = '';
             if (profile.has_mfa) {
                 const toggleText = profile.require_mfa ? 'Disable MFA Requirement' : 'Enable MFA Requirement';
-                const toggleColor = profile.require_mfa ? '#6c757d' : '#28a745';
+                const toggleColor = profile.require_mfa ? '#555f55' : '#1e7a3a';
                 toggleButton = `
                     <button data-action="toggle-mfa-require" style="background: ${toggleColor}; color: white; border: none; padding: 8px 14px; border-radius: 4px; cursor: pointer; margin-top: 10px;">${toggleText}</button>
                 `;
@@ -493,7 +493,7 @@
                 const plStatus = profile.allow_passwordless_login ? 'Allowed' : 'Not allowed';
                 const plColor = profile.allow_passwordless_login ? '#28a745' : '#999';
                 const plToggleText = profile.allow_passwordless_login ? 'Disable Passwordless Access' : 'Allow Passwordless Access';
-                const plToggleColor = profile.allow_passwordless_login ? '#6c757d' : '#28a745';
+                const plToggleColor = profile.allow_passwordless_login ? '#555f55' : '#1e7a3a';
                 passwordlessBox = `
                     <div style="margin-top: 15px; padding: 12px; background: #1a1a1a; border: 1px solid #444; border-radius: 4px;">
                         <div><strong>Passwordless Access:</strong> <span style="color: ${plColor};">${plStatus}</span></div>
