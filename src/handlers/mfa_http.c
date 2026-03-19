@@ -41,10 +41,12 @@ static HttpResponse *require_session(const HttpRequest *req, db_handle_t *db,
     }
 
     if (oauth_session_get_by_token(db, session_token, out_session) != 0) {
+        OPENSSL_cleanse(session_token, strlen(session_token));
         free(session_token);
         return response_json_error(401, "Invalid or expired session");
     }
 
+    OPENSSL_cleanse(session_token, strlen(session_token));
     free(session_token);
     return NULL;
 }
@@ -317,6 +319,7 @@ HttpResponse *mfa_verify_handler(const HttpRequest *req, const RouteParams *para
             char *session_token = http_cookie_get_value(cookie_header, "session");
             if (session_token) {
                 oauth_session_set_mfa_completed(db, session_token);
+                OPENSSL_cleanse(session_token, strlen(session_token));
                 free(session_token);
             }
         }
@@ -384,6 +387,7 @@ HttpResponse *mfa_recover_handler(const HttpRequest *req, const RouteParams *par
             char *session_token = http_cookie_get_value(cookie_header, "session");
             if (session_token) {
                 oauth_session_set_mfa_completed(db, session_token);
+                OPENSSL_cleanse(session_token, strlen(session_token));
                 free(session_token);
             }
         }
@@ -493,6 +497,11 @@ HttpResponse *mfa_delete_method_handler(const HttpRequest *req, const RouteParam
     HttpResponse *auth_err = require_session(req, db, &session);
     if (auth_err) return auth_err;
 
+    /* Destructive MFA operation — require MFA completion first */
+    if (session.user_requires_mfa && !session.mfa_completed) {
+        return response_json_error(403, "MFA verification required");
+    }
+
     /* Get method ID from query string */
     if (!req->query_string) {
         return response_json_error(400, "id required");
@@ -547,6 +556,11 @@ HttpResponse *mfa_regenerate_recovery_codes_handler(const HttpRequest *req,
     oauth_session_info_t session;
     HttpResponse *auth_err = require_session(req, db, &session);
     if (auth_err) return auth_err;
+
+    /* Destructive MFA operation — require MFA completion first */
+    if (session.user_requires_mfa && !session.mfa_completed) {
+        return response_json_error(403, "MFA verification required");
+    }
 
     /* Regenerate recovery codes */
     char **codes = NULL;
@@ -605,6 +619,11 @@ HttpResponse *mfa_set_require_handler(const HttpRequest *req, const RouteParams 
     HttpResponse *auth_err = require_session(req, db, &session);
     if (auth_err) return auth_err;
 
+    /* Destructive MFA operation — require MFA completion first */
+    if (session.user_requires_mfa && !session.mfa_completed) {
+        return response_json_error(403, "MFA verification required");
+    }
+
     /* Parse JSON body */
     if (!req->body) {
         return response_json_error(400, "Request body required");
@@ -639,6 +658,7 @@ HttpResponse *mfa_set_require_handler(const HttpRequest *req, const RouteParams 
             char *session_token = http_cookie_get_value(cookie_header, "session");
             if (session_token) {
                 oauth_session_set_mfa_completed(db, session_token);
+                OPENSSL_cleanse(session_token, strlen(session_token));
                 free(session_token);
             }
         }
