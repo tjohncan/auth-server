@@ -679,11 +679,10 @@ static HttpResponse *response_template(int status, const char *name, ...) {
     va_list args;
     va_start(args, name);
 
-    /* Collect substitutions into array, then render */
-    const char *keys[16], *vals[16];
+    const char *keys[MAX_TEMPLATE_SUBS], *vals[MAX_TEMPLATE_SUBS];
     int n = 0;
     const char *key;
-    while ((key = va_arg(args, const char *)) != NULL && n < 16) {
+    while ((key = va_arg(args, const char *)) != NULL && n < MAX_TEMPLATE_SUBS) {
         keys[n] = key;
         vals[n] = va_arg(args, const char *);
         if (!vals[n]) break;
@@ -691,18 +690,7 @@ static HttpResponse *response_template(int status, const char *name, ...) {
     }
     va_end(args);
 
-    /* Build a single varargs call to template_render — since we can't
-     * forward varargs, call with explicit pairs up to the count we have */
-    char *html = NULL;
-    switch (n) {
-    case 0: html = template_render(name, NULL); break;
-    case 1: html = template_render(name, keys[0], vals[0], NULL); break;
-    case 2: html = template_render(name, keys[0], vals[0], keys[1], vals[1], NULL); break;
-    case 3: html = template_render(name, keys[0], vals[0], keys[1], vals[1], keys[2], vals[2], NULL); break;
-    case 4: html = template_render(name, keys[0], vals[0], keys[1], vals[1], keys[2], vals[2], keys[3], vals[3], NULL); break;
-    default: html = template_render(name, keys[0], vals[0], keys[1], vals[1], keys[2], vals[2], keys[3], vals[3], NULL); break;
-    }
-
+    char *html = template_render_pairs(name, keys, vals, n);
     if (!html) return NULL;
 
     HttpResponse *resp = http_response_new(status);

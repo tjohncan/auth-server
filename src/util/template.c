@@ -161,30 +161,28 @@ int template_init(const char *templates_dir) {
 
 /* -------------------------------------------------------------------- */
 
-char *template_render(const char *name, ...) {
+char *template_render_pairs(const char *name,
+                             const char **keys, const char **vals, int count) {
     Template *t = find_template(name);
     if (!t) {
         log_error("Template not found: %s", name);
         return NULL;
     }
 
-    /* Collect substitutions from varargs */
-    struct { const char *key; const char *val; size_t klen; size_t vlen; } subs[16];
-    int nsubs = 0;
-
-    va_list args;
-    va_start(args, name);
-    const char *key;
-    while ((key = va_arg(args, const char *)) != NULL && nsubs < 16) {
-        const char *val = va_arg(args, const char *);
-        if (!val) break;
-        subs[nsubs].key = key;
-        subs[nsubs].val = val;
-        subs[nsubs].klen = strlen(key);
-        subs[nsubs].vlen = strlen(val);
-        nsubs++;
+    /* Build substitution table with precomputed lengths */
+    struct { const char *key; const char *val; size_t klen; size_t vlen; } subs[MAX_TEMPLATE_SUBS];
+    if (count > MAX_TEMPLATE_SUBS) {
+        log_warn("Template '%s': %d substitutions exceeds limit of %d", name, count, MAX_TEMPLATE_SUBS);
+        count = MAX_TEMPLATE_SUBS;
     }
-    va_end(args);
+    int nsubs = count;
+
+    for (int i = 0; i < nsubs; i++) {
+        subs[i].key = keys[i];
+        subs[i].val = vals[i];
+        subs[i].klen = strlen(keys[i]);
+        subs[i].vlen = strlen(vals[i]);
+    }
 
     /* Pass 1: calculate output size */
     size_t out_size = 0;
@@ -254,6 +252,25 @@ char *template_render(const char *name, ...) {
     *w = '\0';
 
     return result;
+}
+
+char *template_render(const char *name, ...) {
+    const char *keys[MAX_TEMPLATE_SUBS], *vals[MAX_TEMPLATE_SUBS];
+    int n = 0;
+
+    va_list args;
+    va_start(args, name);
+    const char *key;
+    while ((key = va_arg(args, const char *)) != NULL && n < MAX_TEMPLATE_SUBS) {
+        const char *val = va_arg(args, const char *);
+        if (!val) break;
+        keys[n] = key;
+        vals[n] = val;
+        n++;
+    }
+    va_end(args);
+
+    return template_render_pairs(name, keys, vals, n);
 }
 
 /* -------------------------------------------------------------------- */

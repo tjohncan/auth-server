@@ -1,6 +1,8 @@
 #ifndef UTIL_TEMPLATE_H
 #define UTIL_TEMPLATE_H
 
+#define MAX_TEMPLATE_SUBS 4
+
 /*
  * In-memory template engine
  *
@@ -38,6 +40,14 @@ int template_init(const char *templates_dir);
  *   free(html);
  */
 char *template_render(const char *name, ...);
+
+/*
+ * Render a template with key-value arrays.
+ *
+ * Returns: heap-allocated string (caller frees), NULL on error.
+ */
+char *template_render_pairs(const char *name,
+                             const char **keys, const char **vals, int count);
 
 /*
  * Free all cached template buffers.
