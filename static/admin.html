@@ -2561,9 +2561,11 @@
                     </div>
                     <div id="customSecretField" style="display: none; margin-top: 15px;">
                         ${formField('Secret', 'secret', '', 'password')}
-                        <small style="color: #6c757d;">Leave empty to generate a random secret</small>
+                        <small style="color: #6c757d; display: block; margin-top: -15px;">Leave empty to generate a random secret</small>
                     </div>
+                    <div style="margin-top: 10px;">
                     ${formTextarea('Note', 'note', '', false, 2000)}
+                    </div>
                     <div style="display: flex; gap: 10px; margin-top: 20px;">
                         <button type="submit" style="flex: 1; background: #007bff; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Create Key</button>
                         <button type="button" data-action="close-modal" style="flex: 1; background: #6c757d; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Cancel</button>
@@ -2647,9 +2649,11 @@
                     </div>
                     <div id="customSecretFieldClient" style="display: none; margin-top: 15px;">
                         ${formField('Secret', 'secret', '', 'password')}
-                        <small style="color: #6c757d;">Leave empty to generate a random secret</small>
+                        <small style="color: #6c757d; display: block; margin-top: -15px;">Leave empty to generate a random secret</small>
                     </div>
+                    <div style="margin-top: 10px;">
                     ${formTextarea('Note', 'note', '', false, 2000)}
+                    </div>
                     <div style="display: flex; gap: 10px; margin-top: 20px;">
                         <button type="submit" style="flex: 1; background: #007bff; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Create Key</button>
                         <button type="button" data-action="close-modal" style="flex: 1; background: #6c757d; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer;">Cancel</button>
