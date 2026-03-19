@@ -383,12 +383,12 @@ int oauth_resource_server_authenticate(db_handle_t *db,
  *   active: boolean (required) - true if token is active
  *   If active=true, also includes:
  *     - scope: space-separated scopes
- *     - client_id: client PIN
+ *     - client_id: client UUID
  *     - token_type: "Bearer"
  *     - exp: expiration timestamp (Unix epoch)
  *     - iat: issued-at timestamp (Unix epoch)
- *     - sub: user account PIN (NULL for client_credentials tokens)
- *     - aud: resource server PIN
+ *     - sub: user account UUID (NULL for client_credentials tokens)
+ *     - aud: resource server UUID
  *
  * Parameters:
  *   db                     - Database handle
@@ -397,9 +397,9 @@ int oauth_resource_server_authenticate(db_handle_t *db,
  *   resource_server_pin    - Authenticated resource server PIN (must be target of token)
  *   out_active             - Output: 1 if token is active, 0 otherwise
  *   out_scope              - Output: scopes (caller must free, NULL if not active)
- *   out_client_pin         - Output: client PIN (0 if not active)
- *   out_user_account_pin   - Output: user PIN (0 if not active or no user context)
- *   out_resource_server_pin- Output: resource server PIN (0 if not active)
+ *   out_client_id           - Output: client UUID (zeroed if not active)
+ *   out_user_id             - Output: user UUID (zeroed if not active or no user context)
+ *   out_resource_server_id  - Output: resource server UUID (zeroed if not active)
  *   out_expires_at         - Output: expiration timestamp (0 if not active)
  *   out_issued_at          - Output: issued timestamp (0 if not active)
  *

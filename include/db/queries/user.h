@@ -279,7 +279,7 @@ int user_set_primary_email(db_handle_t *db, long long user_account_pin,
  * Change user password
  *
  * Verifies current password and updates to new password.
- * Uses crypto/password module for secure bcrypt hashing.
+ * Uses crypto/password module for secure hashing.
  *
  * Parameters:
  *   db                  - Database handle
