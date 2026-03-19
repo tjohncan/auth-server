@@ -234,6 +234,10 @@ int oauth_authorize(db_handle_t *db,
             log_error("Public client must provide PKCE code_challenge_method");
             return -1;
         }
+        if (strcmp(code_challenge_method, "S256") != 0) {
+            log_error("Public client must use S256 PKCE method, got: %s", code_challenge_method);
+            return -1;
+        }
     }
 
     /* Step 6: Get signing key for auth request JWTs */
@@ -336,6 +340,7 @@ int oauth_authorize(db_handle_t *db,
         out_response->state = str_dup(state);
         if (!out_response->state) {
             free(code_jwt);
+            out_response->code = NULL;
             log_error("Failed to duplicate state");
             return -1;
         }
