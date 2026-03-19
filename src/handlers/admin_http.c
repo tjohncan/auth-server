@@ -689,26 +689,23 @@ HttpResponse *admin_list_organization_keys_handler(const HttpRequest *req, const
     /* Dual authentication: localhost OR org key */
     int is_localhost_access = is_localhost(req);
     int is_org_key_access = 0;
-    long long auth_org_pin = 0;
-    char org_code_name_from_key[128] = "";
+    long long org_pin = 0;
 
     if (!is_localhost_access) {
         /* Try org key authentication */
         long long auth_key_pin;
-        if (try_org_key_auth(req, "list_organization_keys", &auth_org_pin, &auth_key_pin) == 0) {
+        if (try_org_key_auth(req, "list_organization_keys", &org_pin, &auth_key_pin) == 0) {
             if (org_code_name_param) {
                 /* Org code_name provided - verify it matches the key's org */
                 long long requested_org_pin;
                 if (organization_get_pin_by_code_name(db, org_code_name_param, &requested_org_pin) == 0) {
-                    if (auth_org_pin == requested_org_pin) {
+                    if (org_pin == requested_org_pin) {
                         is_org_key_access = 1;
                     }
                 }
             } else {
-                /* No org code_name provided - use the key's org */
-                if (organization_get_code_name_by_pin(db, auth_org_pin, org_code_name_from_key) == 0) {
-                    is_org_key_access = 1;
-                }
+                /* No org code_name provided - key's org is implicit */
+                is_org_key_access = 1;
             }
         }
     }
@@ -717,13 +714,15 @@ HttpResponse *admin_list_organization_keys_handler(const HttpRequest *req, const
         return response_json_error(403, "Forbidden - requires localhost or org key authentication");
     }
 
-    /* For localhost: organization_code_name is required */
-    if (is_localhost_access && !org_code_name_param) {
-        return response_json_error(400, "organization_code_name query parameter required for localhost access");
+    /* For localhost: organization_code_name is required, resolve to pin */
+    if (is_localhost_access) {
+        if (!org_code_name_param) {
+            return response_json_error(400, "organization_code_name query parameter required for localhost access");
+        }
+        if (organization_get_pin_by_code_name(db, org_code_name_param, &org_pin) != 0) {
+            return response_json_error(404, "Organization not found");
+        }
     }
-
-    /* Determine which org code_name to use */
-    const char *org_code_name = org_code_name_param ? org_code_name_param : org_code_name_from_key;
 
     /* Parse query parameters */
     int limit = parse_query_int(req->query_string, "limit", 20, 1, 100);
@@ -741,7 +740,7 @@ HttpResponse *admin_list_organization_keys_handler(const HttpRequest *req, const
     int count = 0;
     int total = 0;
 
-    if (admin_list_organization_keys(db, org_code_name, limit, offset, is_active_ptr, &keys, &count, &total) != 0) {
+    if (admin_list_organization_keys(db, org_pin, limit, offset, is_active_ptr, &keys, &count, &total) != 0) {
         return response_json_error(500, "Failed to list organization keys");
     }
 

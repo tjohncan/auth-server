@@ -950,13 +950,13 @@ int admin_make_org_admin(db_handle_t *db,
  * ========================================================================== */
 
 int admin_list_organization_keys(db_handle_t *db,
-                                  const char *organization_code_name,
+                                  long long organization_pin,
                                   int limit, int offset,
                                   const int *filter_is_active,
                                   admin_organization_key_t **out_keys,
                                   int *out_count,
                                   int *out_total) {
-    if (!db || !organization_code_name || !out_keys || !out_count) {
+    if (!db || !out_keys || !out_count) {
         log_error("Invalid arguments to admin_list_organization_keys");
         return -1;
     }
@@ -964,7 +964,7 @@ int admin_list_organization_keys(db_handle_t *db,
     organization_key_data_t *keys = NULL;
     int count = 0;
 
-    if (organization_key_list(db, organization_code_name, limit, offset, filter_is_active, &keys, &count, out_total) != 0) {
+    if (organization_key_list(db, organization_pin, limit, offset, filter_is_active, &keys, &count, out_total) != 0) {
         return -1;
     }
 

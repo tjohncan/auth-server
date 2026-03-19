@@ -634,44 +634,6 @@ int organization_get_pin_by_code_name(db_handle_t *db,
     return 0;
 }
 
-int organization_get_code_name_by_pin(db_handle_t *db,
-                                       long long organization_pin,
-                                       char *out_code_name) {
-    if (!db || !out_code_name) {
-        log_error("Invalid arguments to organization_get_code_name_by_pin");
-        return -1;
-    }
-
-    const char *sql =
-        "SELECT code_name FROM " TBL_ORGANIZATION " "
-        "WHERE pin = " P"1";
-
-    db_stmt_t *stmt = NULL;
-    if (db_prepare(db, &stmt, sql) != 0) {
-        log_error("Failed to prepare organization code name lookup query");
-        return -1;
-    }
-
-    db_bind_int64(stmt, 1, organization_pin);
-
-    int result = db_step(stmt);
-    if (result != DB_ROW) {
-        db_finalize(stmt);
-        return -1;  /* Not found */
-    }
-
-    const char *code_name = (const char *)db_column_text(stmt, 0);
-    if (!code_name) {
-        db_finalize(stmt);
-        return -1;
-    }
-
-    str_copy(out_code_name, 128, code_name);
-    db_finalize(stmt);
-
-    return 0;
-}
-
 int organization_key_get_organization_pin(db_handle_t *db,
                                            const unsigned char *key_id,
                                            long long *out_organization_pin) {
@@ -793,13 +755,13 @@ int organization_key_create(db_handle_t *db,
 }
 
 int organization_key_list(db_handle_t *db,
-                          const char *organization_code_name,
+                          long long organization_pin,
                           int limit, int offset,
                           const int *filter_is_active,
                           organization_key_data_t **out_keys,
                           int *out_count,
                           int *out_total) {
-    if (!db || !organization_code_name || !out_keys || !out_count) {
+    if (!db || !out_keys || !out_count) {
         log_error("Invalid arguments to organization_key_list");
         return -1;
     }
@@ -813,8 +775,7 @@ int organization_key_list(db_handle_t *db,
     int sql_len = snprintf(sql, sizeof(sql),
         "SELECT ok.id, ok.is_active, ok.generated_at, ok.note, COUNT(*) OVER() as total_count "
         "FROM " TBL_ORGANIZATION_KEY " ok "
-        "JOIN " TBL_ORGANIZATION " o ON ok.organization_pin = o.pin "
-        "WHERE o.code_name = " P"1");
+        "WHERE ok.organization_pin = " P"1");
 
     if (filter_is_active) {
         sql_len += snprintf(sql + sql_len, sizeof(sql) - sql_len,
@@ -838,7 +799,7 @@ int organization_key_list(db_handle_t *db,
 
     /* Bind parameters */
     int param = 1;
-    db_bind_text(stmt, param++, organization_code_name, -1);
+    db_bind_int64(stmt, param++, organization_pin);
 
     if (filter_is_active) {
         db_bind_int(stmt, param++, *filter_is_active);

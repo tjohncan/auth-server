@@ -180,23 +180,6 @@ int organization_get_pin_by_code_name(db_handle_t *db,
                                        long long *out_organization_pin);
 
 /*
- * Get organization code name by PIN
- *
- * Reverse lookup for authorization checks. Used when org key auth is used
- * without explicitly providing organization_code_name.
- *
- * Parameters:
- *   db                   - Database handle
- *   organization_pin     - Organization PIN
- *   out_code_name        - Output buffer (must be at least 128 bytes)
- *
- * Returns: 0 on success, -1 if not found or error
- */
-int organization_get_code_name_by_pin(db_handle_t *db,
-                                       long long organization_pin,
-                                       char *out_code_name);
-
-/*
  * Get organization PIN for a given key
  *
  * Lookup which organization owns a specific key. Used for authorization
@@ -246,7 +229,7 @@ int organization_key_create(db_handle_t *db,
  *
  * Parameters:
  *   db                   - Database handle
- *   organization_code_name - Organization code name
+ *   organization_pin     - Organization PIN
  *   limit                - Maximum results (0 = unlimited)
  *   offset               - Skip count
  *   filter_is_active     - Filter by status (NULL = all, &1 = active, &0 = inactive)
@@ -256,7 +239,7 @@ int organization_key_create(db_handle_t *db,
  * Returns: 0 on success, -1 on error
  */
 int organization_key_list(db_handle_t *db,
-                          const char *organization_code_name,
+                          long long organization_pin,
                           int limit, int offset,
                           const int *filter_is_active,
                           organization_key_data_t **out_keys,
