@@ -133,12 +133,12 @@ int parse_query_int(const char *query_string, const char *param_name,
 
     char *endptr;
     long parsed = strtol(param_value, &endptr, 10);
-    int value = (endptr == param_value) ? default_value : (int)parsed;
     free(param_value);
 
-    if (value < min_value) return min_value;
-    if (value > max_value) return max_value;
-    return value;
+    if (endptr == param_value) return default_value;
+    if (parsed < min_value) return min_value;
+    if (parsed > max_value) return max_value;
+    return (int)parsed;
 }
 
 int parse_query_bool(const char *query_string, const char *param_name, int *out_value) {
