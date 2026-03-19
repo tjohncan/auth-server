@@ -45,7 +45,9 @@ static int is_localhost(const HttpRequest *req) {
 
     /* Direct connection - check socket IP */
     const char *socket_ip = req->remote_ip;
-    return (strcmp(socket_ip, "127.0.0.1") == 0 || strcmp(socket_ip, "::1") == 0);
+    return (strcmp(socket_ip, "127.0.0.1") == 0 ||
+            strcmp(socket_ip, "::1") == 0 ||
+            strcmp(socket_ip, "::ffff:127.0.0.1") == 0);
 }
 
 /* ============================================================================
@@ -88,43 +90,28 @@ HttpResponse *admin_bootstrap_handler(const HttpRequest *req, const RouteParams 
     char *password = json_get_string(req->body, "password");
 
     /* Validate required fields */
+    HttpResponse *resp = NULL;
+    char validation_error[256];
+
     if (!username || !password) {
-        free(org_code_name);
-        free(org_display_name);
-        free(username);
-        if (password) OPENSSL_cleanse(password, strlen(password));
-        free(password);
-        return response_json_error(400, "username and password are required");
+        resp = response_json_error(400, "username and password are required");
+        goto cleanup;
     }
 
     /* Validate input formats */
-    char validation_error[256];
-
     if (validate_code_name(org_code_name, validation_error, sizeof(validation_error)) != 0) {
-        free(org_code_name);
-        free(org_display_name);
-        free(username);
-        OPENSSL_cleanse(password, strlen(password));
-        free(password);
-        return response_json_error(400, validation_error);
+        resp = response_json_error(400, validation_error);
+        goto cleanup;
     }
 
     if (validate_display_name(org_display_name, validation_error, sizeof(validation_error)) != 0) {
-        free(org_code_name);
-        free(org_display_name);
-        free(username);
-        OPENSSL_cleanse(password, strlen(password));
-        free(password);
-        return response_json_error(400, validation_error);
+        resp = response_json_error(400, validation_error);
+        goto cleanup;
     }
 
     if (validate_username(username, validation_error, sizeof(validation_error)) != 0) {
-        free(org_code_name);
-        free(org_display_name);
-        free(username);
-        OPENSSL_cleanse(password, strlen(password));
-        free(password);
-        return response_json_error(400, validation_error);
+        resp = response_json_error(400, validation_error);
+        goto cleanup;
     }
 
     /* Get config from global context */
@@ -133,53 +120,35 @@ HttpResponse *admin_bootstrap_handler(const HttpRequest *req, const RouteParams 
     /* Check if organization already exists (409 Conflict) */
     int org_ex = org_exists(db, org_code_name);
     if (org_ex < 0) {
-        free(org_code_name);
-        free(org_display_name);
-        free(username);
-        OPENSSL_cleanse(password, strlen(password));
-        free(password);
-        return response_json_error(500, "Failed to check organization existence");
+        resp = response_json_error(500, "Failed to check organization existence");
+        goto cleanup;
     } else if (org_ex == 1) {
         char error_msg[256];
         snprintf(error_msg, sizeof(error_msg),
                  "Organization '%s' already exists. Use a different org_code_name.",
                  org_code_name);
-        free(org_code_name);
-        free(org_display_name);
-        free(username);
-        OPENSSL_cleanse(password, strlen(password));
-        free(password);
-        return response_json_error(409, error_msg);
+        resp = response_json_error(409, error_msg);
+        goto cleanup;
     }
 
     /* Check if username already exists (409 Conflict) */
     int user_ex = user_username_exists(db, username);
     if (user_ex < 0) {
-        free(org_code_name);
-        free(org_display_name);
-        free(username);
-        OPENSSL_cleanse(password, strlen(password));
-        free(password);
-        return response_json_error(500, "Failed to check username existence");
+        resp = response_json_error(500, "Failed to check username existence");
+        goto cleanup;
     } else if (user_ex == 1) {
         char error_msg[256];
         snprintf(error_msg, sizeof(error_msg),
                  "Username '%s' already exists. Use a different username.",
                  username);
-        free(org_code_name);
-        free(org_display_name);
-        free(username);
-        OPENSSL_cleanse(password, strlen(password));
-        free(password);
-        return response_json_error(409, error_msg);
+        resp = response_json_error(409, error_msg);
+        goto cleanup;
     }
 
     /* Call bootstrap handler */
     int result = admin_bootstrap(db, g_config, org_code_name, org_display_name,
                                  username, password);
 
-    /* Build response before cleanup */
-    HttpResponse *resp;
     if (result != 0) {
         resp = response_json_error(500, "Bootstrap failed");
     } else {
@@ -190,11 +159,11 @@ HttpResponse *admin_bootstrap_handler(const HttpRequest *req, const RouteParams 
         resp = jsonbuf_to_response(jb, 200);
     }
 
-    /* Clean up */
+cleanup:
     free(org_code_name);
     free(org_display_name);
     free(username);
-    OPENSSL_cleanse(password, strlen(password));
+    if (password) OPENSSL_cleanse(password, strlen(password));
     free(password);
 
     return resp;
