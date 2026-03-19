@@ -1648,12 +1648,13 @@ int user_verify_email_token(db_handle_t *db, const char *token,
         return -1;
     }
 
-    /* Step 2: Mark token as used */
+    /* Step 2: Mark token as used (RETURNING detects concurrent consumption) */
     const char *use_sql =
         "UPDATE " TBL_EMAIL_VERIFICATION_TOKEN " "
         "SET is_used = " BOOL_TRUE ", used_at = " NOW ", updated_at = " NOW " "
         "WHERE token = " P"1 "
-        "AND is_used = " BOOL_FALSE;
+        "AND is_used = " BOOL_FALSE " "
+        "RETURNING is_used";
 
     db_stmt_t *use_stmt = NULL;
     if (db_prepare(db, &use_stmt, use_sql) != 0) {
@@ -1666,10 +1667,9 @@ int user_verify_email_token(db_handle_t *db, const char *token,
     rc = db_step(use_stmt);
     db_finalize(use_stmt);
 
-    if (rc != DB_DONE) {
-        log_error("Failed to mark verification token as used");
+    if (rc != DB_ROW) {
         db_execute_trusted(db, "ROLLBACK");
-        return -1;
+        return (rc == DB_DONE) ? 1 : -1;
     }
 
     /* Step 3: Mark email as verified */
@@ -1996,7 +1996,8 @@ int user_consume_password_reset_token(db_handle_t *db, const char *token,
         "UPDATE " TBL_PASSWORD_RESET_TOKEN " "
         "SET is_used = " BOOL_TRUE ", used_at = " NOW ", updated_at = " NOW " "
         "WHERE token = " P"1 "
-        "AND is_used = " BOOL_FALSE;
+        "AND is_used = " BOOL_FALSE " "
+        "RETURNING is_used";
 
     db_stmt_t *use_stmt = NULL;
     if (db_prepare(db, &use_stmt, use_sql) != 0) {
@@ -2011,12 +2012,11 @@ int user_consume_password_reset_token(db_handle_t *db, const char *token,
     rc = db_step(use_stmt);
     db_finalize(use_stmt);
 
-    if (rc != DB_DONE) {
-        log_error("Failed to mark password reset token as used");
+    if (rc != DB_ROW) {
         db_execute_trusted(db, "ROLLBACK");
         OPENSSL_cleanse(salt, sizeof(salt));
         OPENSSL_cleanse(hash, sizeof(hash));
-        return -1;
+        return (rc == DB_DONE) ? 1 : -1;
     }
 
     const char *update_sql =
