@@ -188,8 +188,10 @@ make EMAIL_SUPPORT=1
 docker build -f deployment/Dockerfile --build-arg EMAIL_SUPPORT=1 -t auth-server .
 ```
 
-The server sends email by piping a JSON payload to a configured command via fork/exec.
-This keeps email delivery a deployment concern — you choose the transport (CLI call, SMTP, HTTP API, etc.).
+The server sends email by forking a process that pipes a JSON payload to a configured command.
+Delivery is non-blocking (worker threads return immediately) with a 30-second timeout to prevent
+runaway children. This keeps email delivery a deployment concern — the deployer chooses the transport
+(CLI tool, SMTP relay, HTTP API, etc.).
 
 ### Setup
 

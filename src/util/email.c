@@ -1,42 +1,16 @@
+#define _POSIX_C_SOURCE 200809L
 #include "util/email.h"
+#include "util/json.h"
 #include "util/log.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 #include <unistd.h>
+#include <time.h>
 #include <sys/wait.h>
 
-/*
- * Escape a string for JSON output.
- * Writes escaped result to dst, returns chars written (excluding NUL).
- * Returns -1 if dst_size is insufficient.
- */
-static int json_escape(char *dst, size_t dst_size, const char *src) {
-    size_t i = 0;
-    for (; *src; src++) {
-        const char *esc;
-        switch (*src) {
-            case '"':  esc = "\\\""; break;
-            case '\\': esc = "\\\\"; break;
-            case '\n': esc = "\\n";  break;
-            case '\r': esc = "\\r";  break;
-            case '\t': esc = "\\t";  break;
-            default:   esc = NULL;   break;
-        }
-        if (esc) {
-            size_t len = strlen(esc);
-            if (i + len >= dst_size) return -1;
-            memcpy(dst + i, esc, len);
-            i += len;
-        } else {
-            if (i + 1 >= dst_size) return -1;
-            dst[i++] = *src;
-        }
-    }
-    if (i >= dst_size) return -1;
-    dst[i] = '\0';
-    return (int)i;
-}
+#define EMAIL_TIMEOUT_SECONDS 30
 
 int email_send(const config_t *config,
                const char *to,
@@ -54,94 +28,113 @@ int email_send(const config_t *config,
         return -1;
     }
 
-    /* JSON-escape all string fields */
-    char esc_to[512];
-    char esc_from[512];
-    char esc_from_name[512];
-    char esc_subject[1024];
-    char esc_body_text[8192];
-    char esc_body_html[16384];
-
-    if (json_escape(esc_to, sizeof(esc_to), to) < 0 ||
-        json_escape(esc_from, sizeof(esc_from), config->email_from ? config->email_from : "") < 0 ||
-        json_escape(esc_from_name, sizeof(esc_from_name), config->email_from_name ? config->email_from_name : "") < 0 ||
-        json_escape(esc_subject, sizeof(esc_subject), subject ? subject : "") < 0 ||
-        json_escape(esc_body_text, sizeof(esc_body_text), body_text ? body_text : "") < 0 ||
-        json_escape(esc_body_html, sizeof(esc_body_html), body_html ? body_html : "") < 0) {
-        log_error("Email content too large for buffer");
+    /* Build JSON payload with proper RFC 8259 escaping */
+    JsonBuf *jb = jsonbuf_new(2048);
+    if (!jb) {
+        log_error("Failed to allocate email JSON buffer");
         return -1;
     }
 
-    /* Build JSON payload */
-    char payload[32768];
-    int n = snprintf(payload, sizeof(payload),
-        "{\"to\":\"%s\",\"from\":\"%s\",\"from_name\":\"%s\","
-        "\"subject\":\"%s\",\"body_text\":\"%s\",\"body_html\":\"%s\"}",
-        esc_to, esc_from, esc_from_name,
-        esc_subject, esc_body_text, esc_body_html);
+    jsonbuf_appendf(jb, "{\"to\":\"");
+    jsonbuf_append_escaped(jb, to);
+    jsonbuf_appendf(jb, "\",\"from\":\"");
+    jsonbuf_append_escaped(jb, config->email_from ? config->email_from : "");
+    jsonbuf_appendf(jb, "\",\"from_name\":\"");
+    jsonbuf_append_escaped(jb, config->email_from_name ? config->email_from_name : "");
+    jsonbuf_appendf(jb, "\",\"subject\":\"");
+    jsonbuf_append_escaped(jb, subject ? subject : "");
+    jsonbuf_appendf(jb, "\",\"body_text\":\"");
+    jsonbuf_append_escaped(jb, body_text ? body_text : "");
+    jsonbuf_appendf(jb, "\",\"body_html\":\"");
+    jsonbuf_append_escaped(jb, body_html ? body_html : "");
+    jsonbuf_appendf(jb, "\"}");
 
-    if (n < 0 || (size_t)n >= sizeof(payload)) {
-        log_error("Email JSON payload too large");
+    if (jb->error) {
+        log_error("Failed to build email JSON payload");
+        jsonbuf_free(jb);
         return -1;
     }
 
-    /* Create pipe for stdin */
-    int pipefd[2];
-    if (pipe(pipefd) != 0) {
-        log_error("Failed to create pipe for email command");
-        return -1;
-    }
-
+    /* Fork a child process to handle delivery without blocking the worker.
+     * Parent returns immediately. Child manages the email command lifecycle
+     * with a timeout to prevent runaway processes. SIGCHLD = SIG_IGN in
+     * main.c ensures the child is auto-reaped by the kernel. */
     pid_t pid = fork();
     if (pid < 0) {
         log_error("Failed to fork for email command");
-        close(pipefd[0]);
-        close(pipefd[1]);
+        jsonbuf_free(jb);
         return -1;
     }
 
-    if (pid == 0) {
-        /* Child: redirect stdin from pipe read end */
+    if (pid != 0) {
+        /* Parent: free payload and return immediately */
+        jsonbuf_free(jb);
+        return 0;
+    }
+
+    /* ---- Child process (independent, can block freely) ---- */
+
+    /* Reset SIGCHLD so our waitpid works on the grandchild */
+    signal(SIGCHLD, SIG_DFL);
+
+    /* Create pipe for email command's stdin */
+    int pipefd[2];
+    if (pipe(pipefd) != 0) {
+        _exit(1);
+    }
+
+    pid_t email_pid = fork();
+    if (email_pid < 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        _exit(1);
+    }
+
+    if (email_pid == 0) {
+        /* Grandchild: exec email command */
         close(pipefd[1]);
         if (dup2(pipefd[0], STDIN_FILENO) < 0) {
             _exit(127);
         }
         close(pipefd[0]);
-
-        /* exec the configured command via shell */
         execl("/bin/sh", "sh", "-c", config->email_command, (char *)NULL);
         _exit(127);
     }
 
-    /* Parent: write payload to pipe write end */
+    /* Child: write payload to grandchild's stdin */
     close(pipefd[0]);
-
-    size_t payload_len = (size_t)n;
-    ssize_t written = write(pipefd[1], payload, payload_len);
+    if (write(pipefd[1], jb->buf, jb->len) < 0) {
+        log_warn("Failed to write email payload to pipe");
+    }
     close(pipefd[1]);
 
-    if (written < 0 || (size_t)written != payload_len) {
-        log_warn("Failed to write full payload to email command (wrote %zd of %zu)",
-                 written, payload_len);
-    }
-
-    /* Wait for child */
+    /* Wait for grandchild with timeout */
+    time_t deadline = time(NULL) + EMAIL_TIMEOUT_SECONDS;
     int status;
-    if (waitpid(pid, &status, 0) < 0) {
-        log_warn("Failed to wait for email command");
-        return -1;
+    pid_t result;
+
+    for (;;) {
+        result = waitpid(email_pid, &status, WNOHANG);
+        if (result != 0) break;
+        if (time(NULL) >= deadline) break;
+        struct timespec ts = {0, 100000000};
+        nanosleep(&ts, NULL);
     }
 
-    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+    if (result == 0) {
+        /* Timed out — kill the email command */
+        kill(email_pid, SIGKILL);
+        waitpid(email_pid, &status, 0);
+        log_warn("Email command timed out after %d seconds", EMAIL_TIMEOUT_SECONDS);
+    } else if (result > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0) {
         log_info("Email sent: %s", subject ? subject : "(no subject)");
-        return 0;
-    }
-
-    if (WIFEXITED(status)) {
+    } else if (result > 0 && WIFEXITED(status)) {
         log_warn("Email command exited with status %d", WEXITSTATUS(status));
-    } else {
+    } else if (result > 0) {
         log_warn("Email command terminated abnormally");
+    } else {
+        log_warn("Failed to wait for email command");
     }
 
-    return -1;
+    _exit(0);
 }

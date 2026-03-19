@@ -71,6 +71,11 @@ static void setup_signal_handlers(void) {
 
     /* Ignore SIGPIPE (broken pipe on write) */
     signal(SIGPIPE, SIG_IGN);
+
+#ifdef EMAIL_SUPPORT
+    /* Auto-reap child processes (email delivery forks without waitpid) */
+    signal(SIGCHLD, SIG_IGN);
+#endif
 }
 
 /*
