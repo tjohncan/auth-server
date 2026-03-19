@@ -185,7 +185,7 @@ int user_lookup_id_by_username(db_handle_t *db, const char *username,
         return 0;
     } else if (rc == DB_DONE) {
         db_finalize(stmt);
-        log_debug("User not found: username='%s'", username);
+        log_debug("User not found by username");
         return -1;
     } else {
         log_error("Error looking up user by username");
@@ -2211,14 +2211,22 @@ int user_lookup_passwordless_login_token(db_handle_t *db, const char *token,
     if (rc == DB_ROW) {
         const char *enc_email = db_column_text(stmt, 0);
         if (enc_email) {
-            decrypt_field(enc_email, out_result->email_address, sizeof(out_result->email_address));
+            if (decrypt_field(enc_email, out_result->email_address, sizeof(out_result->email_address)) != 0) {
+                log_error("Failed to decrypt email for passwordless login lookup");
+                db_finalize(stmt);
+                return -1;
+            }
         } else {
             out_result->email_address[0] = '\0';
         }
 
         const char *enc_username = db_column_text(stmt, 1);
         if (enc_username) {
-            decrypt_field(enc_username, out_result->username, sizeof(out_result->username));
+            if (decrypt_field(enc_username, out_result->username, sizeof(out_result->username)) != 0) {
+                log_error("Failed to decrypt username for passwordless login lookup");
+                db_finalize(stmt);
+                return -1;
+            }
         } else {
             out_result->username[0] = '\0';
         }
@@ -2306,7 +2314,8 @@ int user_consume_passwordless_login_token(db_handle_t *db, const char *token,
         "UPDATE " TBL_PASSWORDLESS_LOGIN_TOKEN " "
         "SET is_used = " BOOL_TRUE ", used_at = " NOW ", updated_at = " NOW " "
         "WHERE token = " P"1 "
-        "AND is_used = " BOOL_FALSE;
+        "AND is_used = " BOOL_FALSE " "
+        "RETURNING is_used";
 
     db_stmt_t *use_stmt = NULL;
     if (db_prepare(db, &use_stmt, use_sql) != 0) {
@@ -2319,10 +2328,9 @@ int user_consume_passwordless_login_token(db_handle_t *db, const char *token,
     rc = db_step(use_stmt);
     db_finalize(use_stmt);
 
-    if (rc != DB_DONE) {
-        log_error("Failed to mark passwordless login token as used");
+    if (rc != DB_ROW) {
         db_execute_trusted(db, "ROLLBACK");
-        return -1;
+        return (rc == DB_DONE) ? 1 : -1;
     }
 
     if (db_execute_trusted(db, "COMMIT") != 0) {
