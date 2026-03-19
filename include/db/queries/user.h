@@ -129,12 +129,12 @@ int user_make_org_admin(db_handle_t *db, const unsigned char *user_id,
  * Represents a valid management UI configuration that the user can access.
  */
 typedef struct {
-    char org_code_name[64];
+    char org_code_name[128];
     char org_display_name[256];
     unsigned char client_id[16];
-    char client_code_name[64];
+    char client_code_name[128];
     char client_display_name[256];
-    char resource_server_address[256];
+    char resource_server_address[512];
 } management_ui_setup_t;
 
 /*
