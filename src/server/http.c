@@ -531,18 +531,21 @@ char *http_response_serialize(const HttpResponse *resp, size_t *out_length) {
 
     /* Status line */
     int written = snprintf(p, remaining, HTTP_VERSION " %d %s\r\n", resp->status_code, resp->status_text);
+    if (written < 0 || (size_t)written >= remaining) { free(buffer); return NULL; }
     p += written;
     remaining -= written;
 
     /* Headers */
     for (int i = 0; i < resp->header_count; i++) {
         written = snprintf(p, remaining, "%s: %s\r\n", resp->headers[i].name, resp->headers[i].value);
+        if (written < 0 || (size_t)written >= remaining) { free(buffer); return NULL; }
         p += written;
         remaining -= written;
     }
 
     /* Blank line */
     written = snprintf(p, remaining, "\r\n");
+    if (written < 0 || (size_t)written >= remaining) { free(buffer); return NULL; }
     p += written;
 
     /* Body */
