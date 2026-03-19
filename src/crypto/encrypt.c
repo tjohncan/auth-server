@@ -27,7 +27,10 @@ static int key_initialized = 0;
 static int hkdf_derive(const unsigned char *prk, size_t prk_len,
                        const unsigned char *info, size_t info_len,
                        unsigned char *out_key, size_t key_len) {
-    (void)key_len;  /* Always AES_KEY_LENGTH (32) = one HMAC block */
+    if (key_len != AES_KEY_LENGTH) {
+        log_error("hkdf_derive: expected key_len %d, got %zu", AES_KEY_LENGTH, key_len);
+        return -1;
+    }
     unsigned char expand_input[64 + 1];  /* info + counter byte */
     if (info_len > 64) {
         log_error("HKDF info too long");
