@@ -838,7 +838,7 @@ HttpResponse *verify_email_page_handler(const HttpRequest *req,
                  "<strong>%s</strong>", escaped_username);
     } else {
         snprintf(username_display, sizeof(username_display),
-                 "<em style=\"color:#666;\">not set</em>");
+                 "<em class=\"text-muted\">not set</em>");
     }
 
     HttpResponse *resp = response_template(200, "pages/verify-email.html",
@@ -1421,12 +1421,12 @@ HttpResponse *passwordless_login_page_handler(const HttpRequest *req,
     char display_info[1280];
     if (escaped_username[0]) {
         snprintf(display_info, sizeof(display_info),
-                 "<p style=\"font-size:18px;margin-bottom:8px;\">%s</p>"
-                 "<p style=\"color:#888;margin-bottom:24px;\">%s</p>",
+                 "<p class=\"display-email\">%s</p>"
+                 "<p class=\"text-muted\">%s</p>",
                  escaped_email, escaped_username);
     } else {
         snprintf(display_info, sizeof(display_info),
-                 "<p style=\"font-size:18px;margin-bottom:24px;\">%s</p>",
+                 "<p class=\"display-email\">%s</p>",
                  escaped_email);
     }
 
@@ -1478,16 +1478,17 @@ HttpResponse *passwordless_login_handler(const HttpRequest *req,
     if (rc != 0) {
         HttpResponse *resp = http_response_new(400);
         http_response_set(resp, CONTENT_TYPE_HTML,
-            "<!DOCTYPE html><html><head>"
+            "<!DOCTYPE html><html lang=\"en\"><head>"
             "<meta charset=\"UTF-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
+            "<meta name=\"color-scheme\" content=\"dark\">"
             "<title>Login Failed</title>"
             "<link rel=\"stylesheet\" href=\"/css/base.css\">"
-            "<style>.reset-container{width:100%%;max-width:400px;margin-top:40px;}"
-            "h1{margin-bottom:24px;font-size:28px;}</style>"
-            "</head><body><div class=\"reset-container\">"
+            "<link rel=\"stylesheet\" href=\"/css/templates.css\">"
+            "</head><body><div class=\"page-container\">"
             "<h1>Login Failed</h1>"
             "<p>This login link is invalid, expired, or has already been used.</p>"
-            "<p style=\"margin-top:24px;\"><a href=\"/request-passwordless-login\">"
+            "<p class=\"back-link\"><a href=\"/request-passwordless-login\">"
             "Request a new login link</a></p>"
             "</div></body></html>");
         return resp;

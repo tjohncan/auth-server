@@ -388,10 +388,8 @@ static void apply_templates(const config_t *config) {
             /* Build footer HTML */
             char mothership_html[1280];
             snprintf(mothership_html, sizeof(mothership_html),
-                "<div style=\"margin-top:40px;padding-top:16px;"
-                "border-top:1px solid #333;font-size:14px;\">"
-                "<a href=\"%s\" style=\"color:#aa66aa;text-decoration:none;\">"
-                "&#8627; %s</a></div>",
+                "<div class=\"mothership\">"
+                "<a href=\"%s\">&#8627; %s</a></div>",
                 escaped_url, escaped_display);
 
             template_replace(index, "<!-- MOTHERSHIP -->", mothership_html);

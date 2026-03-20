@@ -2240,7 +2240,7 @@ Returns an HTML page stating the link is invalid, expired, or already used.
 
 ## JavaScript Client Library
 
-A drop-in OAuth2 client library is available at `/js/oauth-client.js` for easy integration with web applications.
+A drop-in OAuth2 client library is available at `/library/oauth-client.js` for easy integration with web applications.
 
 ### Features
 
@@ -2253,7 +2253,7 @@ A drop-in OAuth2 client library is available at `/js/oauth-client.js` for easy i
 ### Quick Start
 
 ```html
-<script src="https://auth.example.com/js/oauth-client.js"></script>
+<script src="https://auth.example.com/library/oauth-client.js"></script>
 <script>
   const client = new OAuthClient({
     authUrl: 'https://auth.example.com',
@@ -2277,7 +2277,7 @@ A drop-in OAuth2 client library is available at `/js/oauth-client.js` for easy i
 
 ### Documentation
 
-Full API documentation available at [static/js/README.md](static/js/README.md) 
+Full API documentation available at [static/library/README.md](static/library/README.md)
 or see the management console (`admin.html`) for a complete working example.
 
 ### Reference Implementation

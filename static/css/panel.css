@@ -1,0 +1,66 @@
+/* Shared tabbed panel styles (sandbox and provision) */
+
+.container { max-width: 960px; padding: 0; }
+
+.auth-section {
+    background: #111; border: 1px solid #333; border-radius: 4px;
+    padding: 16px; margin-bottom: 24px;
+}
+.auth-label {
+    font-size: 12px; color: #888; text-transform: uppercase;
+    letter-spacing: 0.5px; margin-bottom: 12px;
+}
+.subtitle { color: #888; margin-top: -10px; margin-bottom: 24px; }
+
+.tabs { display: flex; gap: 0; border-bottom: 1px solid #444; margin-bottom: 24px; overflow-x: auto; }
+
+.tab-btn {
+    background: none; border: none; border-bottom: 2px solid transparent;
+    color: #888; padding: 10px 14px;
+    white-space: nowrap;
+}
+.tab-btn:hover { color: silver; }
+.tab-btn.active { color: #dcdcdc; border-bottom-color: #87ceeb; }
+
+.panel { display: none; }
+.panel.active { display: block; }
+
+.desc { color: #aaa; margin-bottom: 20px; line-height: 1.5; }
+
+.field { margin-bottom: 14px; }
+.field label { margin-bottom: 4px; color: #ccc; }
+.field .req { color: #c66; }
+.field textarea { resize: vertical; min-height: 60px; font-family: monospace; font-size: 13px; }
+.field select { cursor: pointer; }
+.field:last-child { margin-bottom: 0; }
+.field .hint { font-size: 12px; color: #666; margin-top: 2px; }
+
+.run-btn {
+    background: #1a3a4a; color: #87ceeb; border: 1px solid #87ceeb;
+    padding: 10px 24px; margin-top: 4px;
+}
+.run-btn:hover { background: #1a4a5a; border-color: #87ceeb; }
+.run-btn:active { background: #152f3c; }
+
+.result { margin-top: 20px; display: none; }
+.result-block { margin-bottom: 16px; }
+.result-label { font-size: 12px; color: #888; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+.result pre {
+    background: #0d0d0d; border: 1px solid #333; border-radius: 4px;
+    font-size: 13px; line-height: 1.4; margin: 0;
+}
+
+.status-ok { color: #7fffd4; }
+.status-err { color: #ff6b6b; }
+
+.copy-section { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.copy-btn {
+    background: #222; color: #87ceeb; border: 1px solid #444;
+    padding: 4px 12px; font-size: 12px;
+}
+.copy-btn:hover { background: #333; }
+.copy-btn:active { background: #1a1a1a; }
+
+.note { background: #111; border-left: 3px solid #87ceeb; padding: 10px 14px; margin-bottom: 20px; font-size: 12px; color: #aaa; line-height: 1.5; }
+
+.field-error { color: #ff6b6b; font-size: 12px; margin-bottom: 14px; display: none; }

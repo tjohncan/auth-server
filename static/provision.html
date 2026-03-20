@@ -1,76 +1,20 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self'; font-src 'self'; connect-src 'self'; form-action 'self'; manifest-src 'self'; base-uri 'self';">
+    <meta name="color-scheme" content="dark">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'; form-action 'self'; manifest-src 'self'; base-uri 'self';">
     <title>User Provisioning</title>
     <link rel="stylesheet" href="/css/base.css">
+    <link rel="stylesheet" href="/css/panel.css">
+    <script src="/js/panel.js" defer></script>
+    <script src="/js/provision.js" defer></script>
     <link rel="icon" type="image/svg+xml" href="/favicon/favicon.svg">
     <link rel="icon" type="image/png" sizes="32x32" href="/favicon/favicon-32x32.png">
     <link rel="icon" type="image/png" sizes="16x16" href="/favicon/favicon-16x16.png">
     <link rel="apple-touch-icon" sizes="180x180" href="/favicon/apple-touch-icon.png">
     <link rel="manifest" href="/favicon/site.webmanifest">
-    <style>
-        .container { max-width: 960px; padding: 0; }
-        .subtitle { color: #888; margin-top: -10px; margin-bottom: 24px; }
-        .auth-section {
-            background: #111; border: 1px solid #333; border-radius: 4px;
-            padding: 16px; margin-bottom: 24px;
-        }
-        .auth-label {
-            font-size: 12px; color: #888; text-transform: uppercase;
-            letter-spacing: 0.5px; margin-bottom: 12px;
-        }
-        .tabs { display: flex; gap: 0; border-bottom: 1px solid #444; margin-bottom: 24px; overflow-x: auto; }
-        .tab-btn {
-            background: none; border: none; border-bottom: 2px solid transparent;
-            color: #888; padding: 10px 14px; cursor: pointer; font-size: 14px;
-            white-space: nowrap; font-family: inherit;
-        }
-        .tab-btn:hover { color: silver; }
-        .tab-btn.active { color: #dcdcdc; border-bottom-color: #87ceeb; }
-        .panel { display: none; }
-        .panel.active { display: block; }
-        .desc { color: #aaa; margin-bottom: 20px; line-height: 1.5; }
-        .field { margin-bottom: 14px; }
-        .field label { display: block; margin-bottom: 4px; font-size: 13px; color: #ccc; }
-        .field .req { color: #c66; }
-        .field input[type="text"],
-        .field input[type="password"],
-        .field input[type="number"] {
-            width: 100%; box-sizing: border-box;
-            background: #1a1a1a; color: silver; border: 1px solid #666;
-            padding: 8px; border-radius: 4px; font-size: 14px; font-family: inherit;
-        }
-        .field input:focus { outline: none; border-color: #87ceeb; }
-        .field .hint { font-size: 12px; color: #666; margin-top: 2px; }
-        .run-btn {
-            background: #1a3a4a; color: #87ceeb; border: 1px solid #87ceeb;
-            padding: 10px 24px; border-radius: 4px; cursor: pointer; font-size: 14px;
-            margin-top: 4px; font-family: inherit;
-        }
-        .run-btn:hover { background: #1a4a5a; }
-        .result { margin-top: 20px; display: none; }
-        .result-block { margin-bottom: 16px; }
-        .result-label { font-size: 12px; color: #888; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
-        .result pre {
-            background: #0d0d0d; border: 1px solid #333; border-radius: 4px;
-            padding: 12px; overflow-x: auto; font-size: 13px; line-height: 1.4;
-            color: #7fffd4; margin: 0;
-        }
-        .status-ok { color: #7fffd4; }
-        .status-err { color: #ff6b6b; }
-        .copy-section { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
-        .copy-btn {
-            background: #222; color: #87ceeb; border: 1px solid #444;
-            padding: 4px 12px; border-radius: 3px; cursor: pointer; font-size: 12px;
-            font-family: inherit;
-        }
-        .copy-btn:hover { background: #333; }
-        .note { background: #111; border-left: 3px solid #87ceeb; padding: 10px 14px; margin-bottom: 20px; font-size: 13px; color: #aaa; line-height: 1.5; }
-        .field-error { color: #ff6b6b; font-size: 13px; margin-bottom: 14px; display: none; }
-    </style>
 </head>
 <body>
 <div class="container">
@@ -88,7 +32,7 @@
             <label>Resource Server Key ID <span class="req">*</span></label>
             <input type="text" id="rs-key-id" placeholder="32-character hex UUID">
         </div>
-        <div class="field" style="margin-bottom: 0;">
+        <div class="field">
             <label>Resource Server Secret <span class="req">*</span></label>
             <input type="password" id="rs-secret" placeholder="Resource server key secret">
         </div>
@@ -181,237 +125,18 @@
         </div>
         <div class="field">
             <label>Limit</label>
-            <input type="number" id="list-limit" placeholder="Default 20, max 100">
+            <input type="number" id="list-limit" placeholder="Default 20, max 100" min="1" max="100">
         </div>
         <div class="field">
             <label>Offset</label>
-            <input type="number" id="list-offset" placeholder="Default 0">
+            <input type="number" id="list-offset" placeholder="Default 0" min="0">
         </div>
         <div id="list-error" class="field-error"></div>
         <button class="run-btn" data-action="run-list">List Users</button>
         <div id="list-result" class="result"></div>
     </div>
 
-    <p style="margin-top: 40px;"><a href="/">&#8592; Home</a></p>
+    <p class="back-link"><a href="/">&#8592; Home</a></p>
 </div>
-
-<script>
-'use strict';
-
-/* Helpers */
-function $(id) { return document.getElementById(id); }
-function val(id) { return $(id).value.trim(); }
-function esc(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
-
-/* State */
-var copyStore = {};
-
-/* Tab switching */
-function switchPanel(name) {
-    document.querySelectorAll('.panel').forEach(function(p) { p.style.display = 'none'; p.classList.remove('active'); });
-    document.querySelectorAll('.tab-btn').forEach(function(b) { b.classList.remove('active'); });
-    $('panel-' + name).style.display = 'block';
-    $('panel-' + name).classList.add('active');
-    $('tab-' + name).classList.add('active');
-}
-
-/* Validation */
-function requireFields(pairs) {
-    for (var i = 0; i < pairs.length; i++) {
-        if (!val(pairs[i][0])) return pairs[i][1] + ' is required';
-    }
-    return null;
-}
-
-function requireAuth() {
-    return requireFields([
-        ['rs-id', 'Resource Server ID'],
-        ['rs-key-id', 'Resource Server Key ID'],
-        ['rs-secret', 'Resource Server Secret']
-    ]);
-}
-
-function showError(prefix, msg) {
-    var el = $(prefix + '-error');
-    if (msg) { el.textContent = msg; el.style.display = 'block'; }
-    else { el.style.display = 'none'; }
-}
-
-/* Shared auth fields */
-function authFields() {
-    return {
-        resource_server_id: val('rs-id'),
-        resource_server_key_id: val('rs-key-id'),
-        resource_server_secret: val('rs-secret')
-    };
-}
-
-/* API call — JSON body */
-async function apiJson(method, url, body) {
-    var res = await fetch(url, {
-        method: method,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-    });
-    var text = await res.text();
-    var json = null;
-    try { json = JSON.parse(text); } catch (e) {}
-    return { status: res.status, json: json, text: text };
-}
-
-/* Display result */
-function showResult(panelId, method, url, body, status, responseText, json) {
-    var container = $(panelId + '-result');
-
-    /* Mask secret in request display */
-    var displayBody = JSON.parse(JSON.stringify(body));
-    displayBody.resource_server_secret = '****';
-
-    var reqDisplay = method + ' ' + url + '\nContent-Type: application/json\n\n' + JSON.stringify(displayBody, null, 2);
-
-    var resBody = json ? JSON.stringify(json, null, 2) : responseText;
-    var statusClass = status < 400 ? 'status-ok' : 'status-err';
-
-    var html = '<div class="result-block">' +
-        '<div class="result-label">Request</div>' +
-        '<pre>' + esc(reqDisplay) + '</pre>' +
-        '</div>' +
-        '<div class="result-block">' +
-        '<div class="result-label">Response <span class="' + statusClass + '">' + status + '</span></div>' +
-        '<pre>' + esc(resBody) + '</pre>' +
-        '</div>';
-
-    /* Copy buttons */
-    var copies = [];
-    if (json) {
-        if (json.user_id) copies.push(['Copy User ID', json.user_id]);
-        if (json.invitation && json.invitation.url) copies.push(['Copy Invitation URL', json.invitation.url]);
-    }
-    if (copies.length) {
-        html += '<div class="copy-section">';
-        for (var i = 0; i < copies.length; i++) {
-            var key = panelId + '-' + i;
-            copyStore[key] = copies[i][1];
-            html += '<button class="copy-btn" data-action="copy" data-key="' + key + '">' + copies[i][0] + '</button>';
-        }
-        html += '</div>';
-    }
-
-    container.innerHTML = html;
-    container.style.display = 'block';
-}
-
-/* Panel handlers */
-async function runProvision() {
-    var err = requireAuth();
-    if (!err && !val('prov-username') && !val('prov-email'))
-        err = 'Username or email is required';
-    showError('prov', err);
-    if (err) return;
-
-    var body = authFields();
-    if (val('prov-username')) body.username = val('prov-username');
-    if (val('prov-email')) body.email = val('prov-email');
-
-    var r = await apiJson('POST', '/api/rs/users', body);
-    showResult('prov', 'POST', '/api/rs/users', body, r.status, r.text, r.json);
-
-    if (r.json && r.json.user_id) {
-        $('lookup-user-id').value = r.json.user_id;
-        $('link-user-id').value = r.json.user_id;
-        $('unlink-user-id').value = r.json.user_id;
-    }
-}
-
-async function runLookup() {
-    var err = requireAuth();
-    if (!err && !val('lookup-user-id') && !val('lookup-username') && !val('lookup-email'))
-        err = 'At least one of User ID, username, or email is required';
-    showError('lookup', err);
-    if (err) return;
-
-    var body = authFields();
-    if (val('lookup-user-id')) body.user_id = val('lookup-user-id');
-    if (val('lookup-username')) body.username = val('lookup-username');
-    if (val('lookup-email')) body.email = val('lookup-email');
-
-    var r = await apiJson('POST', '/api/rs/users/lookup', body);
-    showResult('lookup', 'POST', '/api/rs/users/lookup', body, r.status, r.text, r.json);
-
-    if (r.json && r.json.user_id) {
-        $('link-user-id').value = r.json.user_id;
-        $('unlink-user-id').value = r.json.user_id;
-    }
-}
-
-async function runLink() {
-    var err = requireAuth() || requireFields([['link-user-id', 'User ID'], ['link-client-id', 'Client ID']]);
-    showError('link', err);
-    if (err) return;
-
-    var body = authFields();
-    body.user_id = val('link-user-id');
-    body.client_id = val('link-client-id');
-
-    var r = await apiJson('POST', '/api/rs/client-users', body);
-    showResult('link', 'POST', '/api/rs/client-users', body, r.status, r.text, r.json);
-
-    if (r.status < 400) {
-        $('list-client-id').value = val('link-client-id');
-        $('unlink-client-id').value = val('link-client-id');
-        $('unlink-user-id').value = val('link-user-id');
-    }
-}
-
-async function runUnlink() {
-    var err = requireAuth() || requireFields([['unlink-user-id', 'User ID'], ['unlink-client-id', 'Client ID']]);
-    showError('unlink', err);
-    if (err) return;
-
-    var body = authFields();
-    body.user_id = val('unlink-user-id');
-    body.client_id = val('unlink-client-id');
-
-    var r = await apiJson('DELETE', '/api/rs/client-users', body);
-    showResult('unlink', 'DELETE', '/api/rs/client-users', body, r.status, r.text, r.json);
-}
-
-async function runList() {
-    var err = requireAuth() || requireFields([['list-client-id', 'Client ID']]);
-    showError('list', err);
-    if (err) return;
-
-    var body = authFields();
-    body.client_id = val('list-client-id');
-    if (val('list-limit')) body.limit = parseInt(val('list-limit'), 10);
-    if (val('list-offset')) body.offset = parseInt(val('list-offset'), 10);
-
-    var r = await apiJson('POST', '/api/rs/client-users/list', body);
-    showResult('list', 'POST', '/api/rs/client-users/list', body, r.status, r.text, r.json);
-}
-
-/* Delegated click handler */
-document.addEventListener('click', function(e) {
-    var btn = e.target.closest('[data-action]');
-    if (!btn) return;
-    switch (btn.dataset.action) {
-        case 'switch-panel': switchPanel(btn.dataset.panel); break;
-        case 'run-provision': runProvision(); break;
-        case 'run-lookup': runLookup(); break;
-        case 'run-link': runLink(); break;
-        case 'run-unlink': runUnlink(); break;
-        case 'run-list': runList(); break;
-        case 'copy':
-            var value = copyStore[btn.dataset.key];
-            if (value) {
-                navigator.clipboard.writeText(value);
-                var orig = btn.textContent;
-                btn.textContent = 'Copied!';
-                setTimeout(function() { btn.textContent = orig; }, 1500);
-            }
-            break;
-    }
-});
-</script>
 </body>
 </html>

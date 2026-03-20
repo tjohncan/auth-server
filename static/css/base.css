@@ -1,5 +1,7 @@
 /* Default theme for auth server */
 
+/* ---- Element defaults ---- */
+
 body {
     background-color: black;
     color: silver;
@@ -8,88 +10,26 @@ body {
     line-height: 1.6;
 }
 
-/* Links */
-a {
-    color: #87ceeb; /* skyblue */
+a { color: #87ceeb; }
+a:visited { color: #87ceeb; }
+a:hover { color: #add8e6; }
+
+h1 {
+    font-size: 28px;
+    margin-bottom: 32px;
 }
 
-a:visited {
-    color: #87ceeb; /* match unvisited */
+h1, h2, h3 {
+    color: #dcdcdc;
 }
 
-a:hover {
-    color: #add8e6; /* lightblue */
-}
-
-/* Buttons */
-button {
-    background-color: #333;
-    color: silver;
-    border: 1px solid #666;
-    padding: 8px 16px;
-    cursor: pointer;
-    border-radius: 4px;
-    font-size: 14px;
-}
-
-button:hover {
-    background-color: #444;
-    border-color: #888;
-}
-
-button:active {
-    background-color: #222;
-}
-
-button:disabled {
-    background-color: #2a2a2a;
-    color: #666;
-    border-color: #444;
-    cursor: not-allowed;
-    opacity: 0.6;
-}
-
-/* Forms */
-input[type="text"],
-input[type="password"],
-input[type="email"] {
-    background-color: #1a1a1a;
-    color: silver;
-    border: 1px solid #666;
-    padding: 8px;
-    border-radius: 4px;
-    font-size: 14px;
-}
-
-input:focus {
-    outline: none;
-    border-color: #87ceeb;
-}
-
-/* Overlays (for picker) */
-.overlay {
-    background: rgba(0, 0, 0, 0.85);
-}
-
-.card {
-    background-color: #1a1a1a;
-    border: 1px solid #666;
-}
-
-/* Lists */
 ul {
     list-style-type: square;
 }
 
-/* Headers */
-h1, h2, h3 {
-    color: #dcdcdc; /* gainsboro - slightly brighter than silver */
-}
-
-/* Code/pre blocks (for future API docs) */
 pre, code {
     background-color: #1a1a1a;
-    color: #7fffd4; /* aquamarine */
+    color: #7fffd4;
     padding: 2px 4px;
     border-radius: 3px;
 }
@@ -99,3 +39,162 @@ pre {
     overflow-x: auto;
     border: 1px solid #444;
 }
+
+/* ---- Buttons ---- */
+
+button {
+    background-color: #333;
+    color: silver;
+    border: 1px solid #666;
+    padding: 8px 16px;
+    cursor: pointer;
+    border-radius: 4px;
+    font-size: 14px;
+    font-family: inherit;
+}
+
+button[type="submit"] {
+    width: 100%;
+    padding: 14px;
+    font-size: 16px;
+    font-weight: 600;
+    color: white;
+    border: none;
+}
+
+button:hover { background-color: #444; border-color: #888; }
+button:active { background-color: #222; }
+
+button:disabled {
+    background-color: #2a2a2a;
+    color: #666;
+    border-color: #444;
+    cursor: not-allowed;
+    opacity: 0.6;
+}
+
+.btn-blue { background: #007bff; color: white; border: none; }
+.btn-blue:hover { background: #0056b3; }
+.btn-blue:active { background: #004494; }
+.btn-blue:disabled { background: #555; }
+
+.btn-green { background: #28a745; color: white; border: none; }
+.btn-green:hover { background: #218838; }
+.btn-green:active { background: #1e7e34; }
+
+.btn-red { background: #dc3545; color: white; border: none; }
+.btn-red:hover { background: #c82333; }
+.btn-red:active { background: #b21f2d; }
+
+.btn-gray { background: #6c757d; color: white; border: none; }
+.btn-gray:hover { background: #5a6268; }
+.btn-gray:active { background: #4e555b; }
+
+.btn-sm { padding: 6px 12px; font-size: 12px; }
+.btn-lg { padding: 10px 20px; }
+.btn-xl { padding: 10px 30px; }
+
+/* ---- Forms ---- */
+
+input[type="text"],
+input[type="password"],
+input[type="email"],
+input[type="number"],
+textarea,
+select {
+    width: 100%;
+    box-sizing: border-box;
+    background-color: #1a1a1a;
+    color: silver;
+    border: 1px solid #666;
+    padding: 8px;
+    border-radius: 4px;
+    font-size: 14px;
+    font-family: inherit;
+}
+
+input:focus,
+textarea:focus,
+select:focus {
+    outline: none;
+    border-color: #87ceeb;
+}
+
+.form-field label {
+    display: block;
+    margin-bottom: 8px;
+    font-size: 14px;
+    font-weight: 500;
+}
+
+.form-field {
+    margin-bottom: 24px;
+}
+
+/* ---- Components ---- */
+
+.status-message {
+    margin-top: 20px;
+    padding: 12px;
+    border-radius: 4px;
+    text-align: center;
+    font-size: 14px;
+}
+
+.status-message.success {
+    background: #1a2a1a;
+    border: 1px solid #3a3;
+    color: #6c6;
+}
+
+.status-message.error {
+    background: #3a1a1a;
+    border: 1px solid #c33;
+    color: #ff6b6b;
+}
+
+.page-container {
+    width: 100%;
+    max-width: 400px;
+    margin-top: 40px;
+}
+
+/* ---- Layout utilities ---- */
+
+.flex-between { display: flex; justify-content: space-between; align-items: center; }
+.flex-between-top { display: flex; justify-content: space-between; align-items: start; }
+.flex-center { display: flex; align-items: center; gap: 8px; }
+.flex-row { display: flex; gap: 8px; }
+.flex-fill { flex: 1; }
+
+.mt-xs { margin-top: 4px; }
+.mt-sm { margin-top: 8px; }
+.mt-md { margin-top: 10px; }
+.mt-lg { margin-top: 20px; }
+.mb-xs { margin-bottom: 6px; }
+.mb-md { margin-bottom: 15px; }
+.mb-lg { margin-bottom: 20px; }
+.ml-sm { margin-left: 8px; }
+.ml-md { margin-left: 10px; }
+.mr-sm { margin-right: 8px; }
+.mr-md { margin-right: 10px; }
+
+.text-md { font-size: 14px; }
+.text-sm { font-size: 12px; }
+.text-muted { color: #888; }
+.text-error { color: #dc3545; }
+.text-warning { color: #daa520; }
+.text-italic { font-style: italic; }
+.text-center { text-align: center; }
+
+.hidden { display: none; }
+.back-link { margin-top: 24px; font-size: 14px; }
+.nowrap { white-space: nowrap; }
+.no-margin { margin: 0; }
+.no-shrink { min-width: 0; }
+.clickable { cursor: pointer; }
+.pre-line { white-space: pre-line; }
+.plain-list { list-style: none; padding: 0; }
+.link-nav { color: #aa66aa; text-decoration: none; }
+.link-nav:visited { color: #aa66aa; }
+.link-nav:hover { color: #cc88cc; }

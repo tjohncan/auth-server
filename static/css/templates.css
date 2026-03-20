@@ -1,0 +1,51 @@
+/* Shared styles for server-rendered template pages */
+
+/* Input overrides (larger for user-facing forms) */
+input[type="password"],
+input[type="email"] {
+    padding: 12px 16px;
+    font-size: 16px;
+    border-color: #444;
+}
+
+/* Buttons */
+.form-field ~ button[type="submit"] {
+    margin-top: 8px;
+}
+
+/* Info boxes */
+.info {
+    margin-bottom: 24px;
+    padding: 16px;
+    border: 1px solid #444;
+    border-radius: 4px;
+}
+
+.info p {
+    margin: 4px 0;
+    font-size: 14px;
+    color: #ccc;
+}
+
+.info strong {
+    color: #fff;
+}
+
+/* Error display (password validation) */
+#error {
+    margin-top: 12px;
+    padding: 12px;
+    border-radius: 4px;
+    text-align: center;
+    font-size: 14px;
+    background: #3a1a1a;
+    border: 1px solid #c33;
+    color: #ff6b6b;
+    display: none;
+}
+
+/* Utility */
+.text-success { color: #28a745; }
+.text-uid { font-family: monospace; font-size: 12px; }
+.page-hint { margin-top: 16px; }
+.display-email { font-size: 18px; margin-bottom: 24px; }

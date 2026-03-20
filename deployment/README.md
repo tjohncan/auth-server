@@ -96,7 +96,11 @@ curl https://auth.yourdomain.com/health
 
 ```bash
 # View logs
-docker compose logs -f auth-server
+docker compose logs -f auth-server --tail 10
+
+# View logs (filtered — hide health checks, static assets, routine 200s)
+docker logs auth-server 2>&1 | grep -v -E \
+  "GET /health|Sending 200 response|Accepted connection|GET /(css|js|favicon|images)/"
 
 # Restart
 docker compose restart

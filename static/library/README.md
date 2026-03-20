@@ -18,7 +18,7 @@ Drop-in JavaScript library for OAuth2 authorization code flow with PKCE (S256).
 ### 1. Include the library
 
 ```html
-<script src="/js/oauth-client.js"></script>
+<script src="/library/oauth-client.js"></script>
 ```
 
 ### 2. Initialize client

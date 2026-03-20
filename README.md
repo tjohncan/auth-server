@@ -13,7 +13,7 @@ and multi-tenant setup/administration wizards.
 
 - **[API Reference](api/README.md)** — All HTTP endpoints (admin, OAuth2, user, MFA)
 - **[Database Schema](sql/README.md)** — Tables, relationships, design principles
-- **[OAuth2 Client Library](static/js/README.md)** — Drop-in JavaScript client with PKCE
+- **[OAuth2 Client Library](static/library/README.md)** — Drop-in JavaScript client with PKCE
 - **[Deployment Guide](deployment/README.md)** — Docker, nginx, cloud load balancer setup
 
 ## Deployment

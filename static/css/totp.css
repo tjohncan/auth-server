@@ -1,0 +1,25 @@
+/* TOTP digit input styles (shared by login and admin) */
+
+.totp-container {
+    display: flex;
+    gap: 10px;
+    justify-content: center;
+}
+
+.totp-container input.totp-digit {
+    width: 50px;
+    height: 60px;
+    font-size: 24px;
+    text-align: center;
+    padding: 0;
+    font-weight: 600;
+    caret-color: transparent;
+}
+
+.totp-container input.totp-digit::selection {
+    background: transparent;
+}
+
+.totp-container input.totp-digit:focus {
+    box-shadow: 0 0 0 3px rgba(135, 206, 235, 0.4);
+}
