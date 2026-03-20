@@ -805,7 +805,7 @@ void event_loop_stop(EventLoop *loop) {
 static void *worker_thread_func(void *arg) {
     EventLoop *loop = (EventLoop *)arg;
 
-    log_info("Worker thread %d started (tid=%lu)", loop->worker_index, pthread_self());
+    log_info("Worker thread %d started (tid=%lu)", loop->worker_index, (unsigned long)pthread_self());
 
     /* Bind database connection to this thread */
     db_handle_t *db = db_pool_get_connection_by_index(loop->worker_index);
@@ -822,7 +822,7 @@ static void *worker_thread_func(void *arg) {
     if (loop->config.on_worker_exit)
         loop->config.on_worker_exit();
 
-    log_info("Worker thread %d stopped (tid=%lu)", loop->worker_index, pthread_self());
+    log_info("Worker thread %d stopped (tid=%lu)", loop->worker_index, (unsigned long)pthread_self());
     return NULL;
 }
 
