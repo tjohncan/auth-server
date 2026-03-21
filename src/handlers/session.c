@@ -4,6 +4,7 @@
 #include "crypto/random.h"
 #include "util/log.h"
 #include "util/data.h"
+#include <openssl/crypto.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -19,6 +20,7 @@ int session_authenticate_and_create(db_handle_t *db,
                                      int session_ttl_seconds,
                                      char **out_session_token,
                                      long long *out_user_pin) {
+    /* username may be an email address (routed by @ detection below) */
     if (!db || !username || !password || !out_session_token || !out_user_pin) {
         log_error("Invalid arguments to session_authenticate_and_create");
         return -1;
@@ -27,13 +29,20 @@ int session_authenticate_and_create(db_handle_t *db,
     /* Step 1: Verify password and get user PIN and ID */
     long long user_pin = 0;
     unsigned char user_id[16];
-    int valid = user_verify_password(db, username, password, &user_pin, user_id);
+    int valid;
+
+#ifdef EMAIL_SUPPORT
+    if (strchr(username, '@'))
+        valid = user_verify_password_by_email(db, username, password, &user_pin, user_id);
+    else
+#endif
+        valid = user_verify_password(db, username, password, &user_pin, user_id);
 
     if (valid != 1) {
         if (valid == 0) {
-            log_info("Authentication failed for username='%s' (invalid credentials)", username);
+            log_info("Authentication failed (invalid credentials)");
         } else {
-            log_error("Error verifying password for username='%s'", username);
+            log_error("Error verifying password");
         }
         return -1;
     }
@@ -53,6 +62,7 @@ int session_authenticate_and_create(db_handle_t *db,
     int token_len = crypto_random_token(session_token, token_buf_size, SESSION_TOKEN_BYTES);
     if (token_len <= 0) {
         log_error("Failed to generate session token");
+        OPENSSL_cleanse(session_token, token_buf_size);
         free(session_token);
         return -1;
     }
@@ -67,6 +77,7 @@ int session_authenticate_and_create(db_handle_t *db,
 
     if (rc != 0) {
         log_error("Failed to create session for user_id=%s", user_id_hex);
+        OPENSSL_cleanse(session_token, token_buf_size);
         free(session_token);
         return -1;
     }

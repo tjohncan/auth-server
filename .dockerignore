@@ -17,6 +17,7 @@ auth-server
 # Documentation (not needed in container)
 *.md
 *.txt
+!templates/emails/*.txt
 
 # Deployment config (not needed inside the image)
 deployment/

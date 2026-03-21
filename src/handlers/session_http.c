@@ -9,21 +9,92 @@
 #include "db/queries/user.h"
 #include "db/queries/oauth.h"
 #include "db/queries/mfa.h"
+#include "crypto/password.h"
+#include "crypto/random.h"
 #include "util/data.h"
 #include "util/log.h"
 #include "util/str.h"
 #include "util/json.h"
 #include "util/validation.h"
+#include "util/template.h"
+#ifdef EMAIL_SUPPORT
+#include "util/email.h"
+#endif
 #include <openssl/crypto.h>
+#include <stdarg.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+
+/* Cleanse and free a heap-allocated sensitive string */
+static void cleanse_free(char *s) {
+    if (s) {
+        OPENSSL_cleanse(s, strlen(s));
+        free(s);
+    }
+}
+
+/* Simple HTML error response with CSP meta tag */
+static HttpResponse *response_html_error(int status_code, const char *message) {
+    HttpResponse *resp = http_response_new(status_code);
+    if (!resp) return NULL;
+    char body[512];
+    snprintf(body, sizeof(body),
+        "<!DOCTYPE html><html lang=\"en\"><head>"
+        "<meta charset=\"UTF-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
+        "<meta name=\"color-scheme\" content=\"dark\">"
+        "<meta http-equiv=\"Content-Security-Policy\" "
+        "content=\"default-src 'none'; style-src 'self';\">"
+        "</head><body><p>%s</p></body></html>", message);
+    http_response_set(resp, CONTENT_TYPE_HTML, body);
+    return resp;
+}
 
 /* Default session TTL: 7 days */
 #define DEFAULT_SESSION_TTL_SECONDS (7 * 24 * 60 * 60)
 
 /* Cookie name for session token */
 #define SESSION_COOKIE_NAME "session"
+
+/* Session token size: 32 bytes (256 bits) — matches session.c */
+#define SESSION_TOKEN_BYTES 32
+
+/* ============================================================================
+ * Auth Helper
+ * ========================================================================== */
+
+/*
+ * require_authenticated_session - Validate session cookie and MFA completion
+ *
+ * Returns NULL on success (session populated), or error response on failure.
+ */
+static HttpResponse *require_authenticated_session(const HttpRequest *req,
+                                                    db_handle_t *db,
+                                                    oauth_session_info_t *out_session) {
+    const char *cookie_header = http_request_get_header(req, "Cookie");
+    char *session_token = NULL;
+    if (cookie_header) {
+        session_token = http_cookie_get_value(cookie_header, SESSION_COOKIE_NAME);
+    }
+
+    if (!session_token) {
+        return response_json_error(401, "Authentication required");
+    }
+
+    if (oauth_session_get_by_token(db, session_token, out_session) != 0) {
+        cleanse_free(session_token);
+        return response_json_error(401, "Invalid or expired session");
+    }
+
+    cleanse_free(session_token);
+
+    if (out_session->user_requires_mfa && !out_session->mfa_completed) {
+        return response_json_error(403, "MFA verification required");
+    }
+
+    return NULL;
+}
 
 /* ============================================================================
  * Login Handler
@@ -67,8 +138,7 @@ HttpResponse *login_handler(const HttpRequest *req, const RouteParams *params) {
 
     if (!username || !password) {
         free(username);
-        if (password) OPENSSL_cleanse(password, strlen(password));
-        free(password);
+        cleanse_free(password);
         return response_json_error(400, "username and password required");
     }
 
@@ -86,12 +156,10 @@ HttpResponse *login_handler(const HttpRequest *req, const RouteParams *params) {
     );
 
     free(username);
-    OPENSSL_cleanse(password, strlen(password));
-    free(password);
+    cleanse_free(password);
 
     if (rc != 0) {
-        /* Authentication failed */
-        return response_json_error(401, "Invalid username or password");
+        return response_json_error(401, "Invalid credentials");
     }
 
     /* Build Set-Cookie header */
@@ -103,7 +171,8 @@ HttpResponse *login_handler(const HttpRequest *req, const RouteParams *params) {
     /* Get user profile to check MFA preference */
     user_profile_t profile;
     if (user_get_profile(db, user_pin, &profile) != 0) {
-        free(session_token);
+        cleanse_free(session_token);
+        OPENSSL_cleanse(cookie_header, sizeof(cookie_header));
         return response_json_error(500, "Failed to retrieve user profile");
     }
 
@@ -111,7 +180,8 @@ HttpResponse *login_handler(const HttpRequest *req, const RouteParams *params) {
     mfa_method_t *mfa_methods = NULL;
     int mfa_count = 0;
     if (mfa_method_list(db, user_pin, 1, &mfa_methods, &mfa_count) != 0) {
-        free(session_token);
+        cleanse_free(session_token);
+        OPENSSL_cleanse(cookie_header, sizeof(cookie_header));
         return response_json_error(500, "Failed to retrieve MFA methods");
     }
 
@@ -132,22 +202,26 @@ HttpResponse *login_handler(const HttpRequest *req, const RouteParams *params) {
             jsonbuf_appendf(jb, "\"}");
         }
         jsonbuf_appendf(jb, "]}");
+        OPENSSL_cleanse(mfa_methods, mfa_count * sizeof(*mfa_methods));
         free(mfa_methods);
         resp = jsonbuf_to_response(jb, 200);
     } else {
+        OPENSSL_cleanse(mfa_methods, mfa_count * sizeof(*mfa_methods));
         free(mfa_methods);
         resp = response_json_ok("{\"message\":\"Login successful\"}");
     }
 
     if (!resp) {
-        free(session_token);
+        cleanse_free(session_token);
+        OPENSSL_cleanse(cookie_header, sizeof(cookie_header));
         log_error("Failed to create HTTP response");
         return response_json_error(500, "Internal server error");
     }
 
     http_response_set_header(resp, "Set-Cookie", cookie_header);
 
-    free(session_token);
+    cleanse_free(session_token);
+    OPENSSL_cleanse(cookie_header, sizeof(cookie_header));
 
     return resp;
 }
@@ -230,10 +304,10 @@ HttpResponse *management_setups_handler(const HttpRequest *req, const RouteParam
     /* Get session info */
     oauth_session_info_t session;
     if (oauth_session_get_by_token(db, session_token, &session) != 0) {
-        free(session_token);
+        cleanse_free(session_token);
         return response_json_error(401, "Invalid or expired session");
     }
-    free(session_token);
+    cleanse_free(session_token);
 
     /* Get management UI setups */
     management_ui_setup_t *setups = NULL;
@@ -279,35 +353,15 @@ HttpResponse *management_setups_handler(const HttpRequest *req, const RouteParam
 HttpResponse *profile_handler(const HttpRequest *req, const RouteParams *params) {
     (void)params;
 
-    /* Get database connection */
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
         log_error("Failed to get database connection");
         return response_json_error(500, "Internal server error");
     }
 
-    /* Parse session cookie */
-    const char *cookie_header = http_request_get_header(req, "Cookie");
-    char *session_token = NULL;
-    if (cookie_header) {
-        session_token = http_cookie_get_value(cookie_header, "session");
-    }
-
-    if (!session_token) {
-        return response_json_error(401, "Authentication required");
-    }
-
-    /* Get session info */
     oauth_session_info_t session;
-    if (oauth_session_get_by_token(db, session_token, &session) != 0) {
-        free(session_token);
-        return response_json_error(401, "Invalid or expired session");
-    }
-    free(session_token);
-
-    if (session.user_requires_mfa && !session.mfa_completed) {
-        return response_json_error(403, "MFA verification required");
-    }
+    HttpResponse *auth_err = require_authenticated_session(req, db, &session);
+    if (auth_err) return auth_err;
 
     /* Get user profile */
     user_profile_t profile;
@@ -323,9 +377,11 @@ HttpResponse *profile_handler(const HttpRequest *req, const RouteParams *params)
     JsonBuf *jb = jsonbuf_new(2048);
     jsonbuf_appendf(jb, "{\"user_id\":\"%s\",\"username\":\"", user_id_hex);
     jsonbuf_append_escaped(jb, profile.username);
-    jsonbuf_appendf(jb, "\",\"has_mfa\":%s,\"require_mfa\":%s}",
+    jsonbuf_appendf(jb, "\",\"has_mfa\":%s,\"require_mfa\":%s,"
+                    "\"allow_passwordless_login\":%s}",
                     profile.has_mfa ? "true" : "false",
-                    profile.require_mfa ? "true" : "false");
+                    profile.require_mfa ? "true" : "false",
+                    profile.allow_passwordless_login ? "true" : "false");
 
     return jsonbuf_to_response(jb, 200);
 }
@@ -339,35 +395,15 @@ HttpResponse *profile_handler(const HttpRequest *req, const RouteParams *params)
 HttpResponse *emails_handler(const HttpRequest *req, const RouteParams *params) {
     (void)params;
 
-    /* Get database connection */
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
         log_error("Failed to get database connection");
         return response_json_error(500, "Internal server error");
     }
 
-    /* Parse session cookie */
-    const char *cookie_header = http_request_get_header(req, "Cookie");
-    char *session_token = NULL;
-    if (cookie_header) {
-        session_token = http_cookie_get_value(cookie_header, "session");
-    }
-
-    if (!session_token) {
-        return response_json_error(401, "Authentication required");
-    }
-
-    /* Get session info */
     oauth_session_info_t session;
-    if (oauth_session_get_by_token(db, session_token, &session) != 0) {
-        free(session_token);
-        return response_json_error(401, "Invalid or expired session");
-    }
-    free(session_token);
-
-    if (session.user_requires_mfa && !session.mfa_completed) {
-        return response_json_error(403, "MFA verification required");
-    }
+    HttpResponse *auth_err = require_authenticated_session(req, db, &session);
+    if (auth_err) return auth_err;
 
     int limit = parse_query_int(req->query_string, "limit", 20, 1, 100);
     int offset = parse_query_int(req->query_string, "offset", 0, 0, 9999);
@@ -411,35 +447,15 @@ HttpResponse *change_password_handler(const HttpRequest *req, const RouteParams 
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
-    /* Get database connection */
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
         log_error("Failed to get database connection");
         return response_json_error(500, "Internal server error");
     }
 
-    /* Parse session cookie */
-    const char *cookie_header = http_request_get_header(req, "Cookie");
-    char *session_token = NULL;
-    if (cookie_header) {
-        session_token = http_cookie_get_value(cookie_header, "session");
-    }
-
-    if (!session_token) {
-        return response_json_error(401, "Authentication required");
-    }
-
-    /* Get session info */
     oauth_session_info_t session;
-    if (oauth_session_get_by_token(db, session_token, &session) != 0) {
-        free(session_token);
-        return response_json_error(401, "Invalid or expired session");
-    }
-    free(session_token);
-
-    if (session.user_requires_mfa && !session.mfa_completed) {
-        return response_json_error(403, "MFA verification required");
-    }
+    HttpResponse *auth_err = require_authenticated_session(req, db, &session);
+    if (auth_err) return auth_err;
 
     /* Parse JSON body */
     if (!req->body) {
@@ -472,6 +488,11 @@ HttpResponse *change_password_handler(const HttpRequest *req, const RouteParams 
     } else if (result == 0) {
         /* Invalid current password */
         return response_json_error(401, "Current password is incorrect");
+    } else if (result == -2) {
+        char msg[128];
+        snprintf(msg, sizeof(msg),
+                 "Password must be at least %d characters", crypto_password_min_length());
+        return response_json_error(400, msg);
     } else {
         /* Error */
         return response_json_error(500, "Failed to change password");
@@ -489,35 +510,15 @@ HttpResponse *change_username_handler(const HttpRequest *req, const RouteParams 
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
-    /* Get database connection */
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
         log_error("Failed to get database connection");
         return response_json_error(500, "Internal server error");
     }
 
-    /* Parse session cookie */
-    const char *cookie_header = http_request_get_header(req, "Cookie");
-    char *session_token = NULL;
-    if (cookie_header) {
-        session_token = http_cookie_get_value(cookie_header, "session");
-    }
-
-    if (!session_token) {
-        return response_json_error(401, "Authentication required");
-    }
-
-    /* Get session info */
     oauth_session_info_t session;
-    if (oauth_session_get_by_token(db, session_token, &session) != 0) {
-        free(session_token);
-        return response_json_error(401, "Invalid or expired session");
-    }
-    free(session_token);
-
-    if (session.user_requires_mfa && !session.mfa_completed) {
-        return response_json_error(403, "MFA verification required");
-    }
+    HttpResponse *auth_err = require_authenticated_session(req, db, &session);
+    if (auth_err) return auth_err;
 
     /* Parse JSON body */
     if (!req->body) {
@@ -550,6 +551,1034 @@ HttpResponse *change_username_handler(const HttpRequest *req, const RouteParams 
     }
 }
 
+/*
+ * POST /api/user/emails
+ *
+ * Adds a new email address to the authenticated user's account.
+ * The email is added as unverified and non-primary.
+ */
+HttpResponse *add_email_handler(const HttpRequest *req, const RouteParams *params) {
+    (void)params;
+    HttpResponse *ct_err = require_content_type(req, "application/json");
+    if (ct_err) return ct_err;
+
+    db_handle_t *db = db_pool_get_connection();
+    if (!db) {
+        log_error("Failed to get database connection");
+        return response_json_error(500, "Internal server error");
+    }
+
+    oauth_session_info_t session;
+    HttpResponse *auth_err = require_authenticated_session(req, db, &session);
+    if (auth_err) return auth_err;
+
+    if (!req->body) {
+        return response_json_error(400, "Request body required");
+    }
+
+    char *email = json_get_string(req->body, "email");
+    if (!email) {
+        return response_json_error(400, "email required");
+    }
+
+    char validation_error[256];
+    if (validate_email(email, validation_error, sizeof(validation_error)) != 0) {
+        free(email);
+        return response_json_error(400, validation_error);
+    }
+
+    int exists = user_email_exists(db, email, session.user_account_pin);
+    if (exists < 0) {
+        free(email);
+        return response_json_error(500, "Failed to check email");
+    } else if (exists == 1) {
+        free(email);
+        return response_json_error(409, "Email already taken");
+    }
+
+    if (user_add_email(db, session.user_account_pin, email) != 0) {
+        free(email);
+        return response_json_error(500, "Failed to add email");
+    }
+
+    free(email);
+    return response_json_ok("{\"message\":\"Email added\"}");
+}
+
+/*
+ * DELETE /api/user/emails
+ *
+ * Removes an email address from the authenticated user's account.
+ * Idempotent: returns success even if the email was already gone.
+ */
+HttpResponse *delete_email_handler(const HttpRequest *req, const RouteParams *params) {
+    (void)params;
+    HttpResponse *ct_err = require_content_type(req, "application/json");
+    if (ct_err) return ct_err;
+
+    db_handle_t *db = db_pool_get_connection();
+    if (!db) {
+        log_error("Failed to get database connection");
+        return response_json_error(500, "Internal server error");
+    }
+
+    oauth_session_info_t session;
+    HttpResponse *auth_err = require_authenticated_session(req, db, &session);
+    if (auth_err) return auth_err;
+
+    if (!req->body) {
+        return response_json_error(400, "Request body required");
+    }
+
+    char *email = json_get_string(req->body, "email");
+    if (!email) {
+        return response_json_error(400, "email required");
+    }
+
+    int result = user_delete_email(db, session.user_account_pin, email);
+    free(email);
+
+    if (result < 0) {
+        return response_json_error(500, "Failed to delete email");
+    }
+
+    return response_json_ok("{\"message\":\"Email deleted\"}");
+}
+
+/*
+ * POST /api/user/emails/set-primary
+ *
+ * Sets an email address as the primary email for the authenticated user.
+ */
+HttpResponse *set_primary_email_handler(const HttpRequest *req, const RouteParams *params) {
+    (void)params;
+    HttpResponse *ct_err = require_content_type(req, "application/json");
+    if (ct_err) return ct_err;
+
+    db_handle_t *db = db_pool_get_connection();
+    if (!db) {
+        log_error("Failed to get database connection");
+        return response_json_error(500, "Internal server error");
+    }
+
+    oauth_session_info_t session;
+    HttpResponse *auth_err = require_authenticated_session(req, db, &session);
+    if (auth_err) return auth_err;
+
+    if (!req->body) {
+        return response_json_error(400, "Request body required");
+    }
+
+    char *email = json_get_string(req->body, "email");
+
+    int result = user_set_primary_email(db, session.user_account_pin, email);
+    free(email);  /* safe if NULL */
+
+    if (result == 1) {
+        return response_json_error(404, "Email not found");
+    } else if (result < 0) {
+        return response_json_error(500, "Failed to set primary email");
+    }
+
+    return response_json_ok("{\"message\":\"Primary email updated\"}");
+}
+
+/* ============================================================================
+ * Template Helper
+ * ========================================================================== */
+
+/*
+ * Render a template and return it as an HTML response.
+ * Takes ownership of the rendered buffer via http_response_set_body_owned.
+ * Returns NULL if the template is not found.
+ */
+static HttpResponse *response_template(int status, const char *name, ...) {
+    va_list args;
+    va_start(args, name);
+
+    const char *keys[MAX_TEMPLATE_SUBS], *vals[MAX_TEMPLATE_SUBS];
+    int n = 0;
+    const char *key;
+    while ((key = va_arg(args, const char *)) != NULL && n < MAX_TEMPLATE_SUBS) {
+        keys[n] = key;
+        vals[n] = va_arg(args, const char *);
+        if (!vals[n]) break;
+        n++;
+    }
+    va_end(args);
+
+    char *html = template_render_pairs(name, keys, vals, n);
+    if (!html) return NULL;
+
+    HttpResponse *resp = http_response_new(status);
+    http_response_set_header(resp, "Content-Type", CONTENT_TYPE_HTML);
+    http_response_set_body_owned(resp, html, strlen(html));
+    return resp;
+}
+
+#ifdef EMAIL_SUPPORT
+
+/* ============================================================================
+ * Email Verification Handlers
+ * ========================================================================== */
+
+/*
+ * POST /email-verification-token
+ *
+ * Creates a verification token and sends a verification email.
+ * Requires valid session cookie.
+ *
+ * Request body:
+ *   {"email":"user@example.com"}
+ */
+HttpResponse *create_email_verification_token_handler(const HttpRequest *req,
+                                                       const RouteParams *params) {
+    (void)params;
+    HttpResponse *ct_err = require_content_type(req, "application/json");
+    if (ct_err) return ct_err;
+
+    db_handle_t *db = db_pool_get_connection();
+    if (!db) {
+        log_error("Failed to get database connection");
+        return response_json_error(500, "Internal server error");
+    }
+
+    oauth_session_info_t session;
+    HttpResponse *auth_err = require_authenticated_session(req, db, &session);
+    if (auth_err) return auth_err;
+
+    if (!req->body) {
+        return response_json_error(400, "Request body required");
+    }
+
+    char *email = json_get_string(req->body, "email");
+    if (!email) {
+        return response_json_error(400, "email required");
+    }
+
+    char validation_error[256];
+    if (validate_email(email, validation_error, sizeof(validation_error)) != 0) {
+        free(email);
+        return response_json_error(400, validation_error);
+    }
+
+    extern const config_t *g_config;
+
+    char token[44];
+    int result = user_create_email_verification_token(
+        db, session.user_account_pin, email,
+        g_config->email_verification_token_ttl_seconds,
+        http_request_get_client_ip(req, NULL),
+        token);
+
+    if (result != 0) {
+        OPENSSL_cleanse(token, sizeof(token));
+        free(email);
+        if (result == 1) {
+            return response_json_error(400, "Unable to send verification email");
+        }
+        return response_json_error(500, "Failed to create verification token");
+    }
+
+    /* Build verification URL */
+    char verify_url[512];
+    if (strcmp(g_config->host, "localhost") == 0) {
+        snprintf(verify_url, sizeof(verify_url),
+                 "http://localhost:%d/verify-email?token=%s",
+                 g_config->port, token);
+    } else {
+        snprintf(verify_url, sizeof(verify_url),
+                 "https://%s/verify-email?token=%s",
+                 g_config->host, token);
+    }
+    OPENSSL_cleanse(token, sizeof(token));
+
+    /* Send verification email */
+    char *body_text = template_render("emails/verify.txt", "URL", verify_url, NULL);
+    char *body_html = template_render("emails/verify.html", "URL", verify_url, NULL);
+    OPENSSL_cleanse(verify_url, sizeof(verify_url));
+
+    if (body_text && body_html)
+        email_send(g_config, email, "Verify your email address", body_text, body_html);
+
+    cleanse_free(body_text);
+    cleanse_free(body_html);
+
+    free(email);
+    return response_json_ok("{\"message\":\"Verification email sent\"}");
+}
+
+/*
+ * GET /verify-email?token=...
+ *
+ * Public endpoint (no auth). Renders confirmation page showing the email
+ * address and username so the user can confirm before verifying.
+ */
+HttpResponse *verify_email_page_handler(const HttpRequest *req,
+                                         const RouteParams *params) {
+    (void)params;
+
+    db_handle_t *db = db_pool_get_connection();
+    if (!db) {
+        log_error("Failed to get database connection");
+        return response_html_error(500, "Internal server error");
+    }
+
+    char *token = http_query_get_param(req->query_string, "token");
+    if (!token) {
+        return response_html_error(400, "Missing token");
+    }
+
+    email_verification_result_t result;
+    int rc = user_lookup_email_verification_token(db, token, &result);
+
+    if (rc != 0) {
+        cleanse_free(token);
+        HttpResponse *resp = response_template(400, "pages/verify-email-invalid.html", NULL);
+        return resp ? resp : response_json_error(400, "Invalid token");
+    }
+
+    char escaped_email[512];
+    str_html_escape(escaped_email, sizeof(escaped_email), result.email_address);
+
+    char user_id_hex[33];
+    bytes_to_hex(result.user_id, 16, user_id_hex, sizeof(user_id_hex));
+
+    char username_display[640];
+    if (result.username[0] != '\0') {
+        char escaped_username[512];
+        str_html_escape(escaped_username, sizeof(escaped_username), result.username);
+        snprintf(username_display, sizeof(username_display),
+                 "<strong>%s</strong>", escaped_username);
+    } else {
+        snprintf(username_display, sizeof(username_display),
+                 "<em class=\"text-muted\">not set</em>");
+    }
+
+    HttpResponse *resp = response_template(200, "pages/verify-email.html",
+        "EMAIL", escaped_email,
+        "USERNAME_DISPLAY", username_display,
+        "USER_ID", user_id_hex,
+        "TOKEN", token,
+        NULL);
+    cleanse_free(token);
+    return resp ? resp : response_json_error(500, "Template error");
+}
+
+/*
+ * POST /verify-email
+ *
+ * Public endpoint (no auth). Consumes the token and marks the email verified.
+ * Expects form-encoded body: token=...
+ */
+HttpResponse *verify_email_handler(const HttpRequest *req,
+                                    const RouteParams *params) {
+    (void)params;
+
+    db_handle_t *db = db_pool_get_connection();
+    if (!db) {
+        log_error("Failed to get database connection");
+        return response_html_error(500, "Internal server error");
+    }
+
+    /* Parse token from form body */
+    char *token = NULL;
+    if (req->body) {
+        token = http_query_get_param(req->body, "token");
+    }
+
+    if (!token) {
+        return response_html_error(400, "Missing token");
+    }
+
+    email_verification_result_t result;
+    int rc = user_verify_email_token(db, token, &result);
+    cleanse_free(token);
+
+    if (rc != 0) {
+        HttpResponse *resp = response_template(400, "pages/verify-email-error.html", NULL);
+        return resp ? resp : response_json_error(400, "Verification failed");
+    }
+
+    char escaped_email[512];
+    str_html_escape(escaped_email, sizeof(escaped_email), result.email_address);
+
+    HttpResponse *resp = response_template(200, "pages/verify-email-success.html",
+        "EMAIL", escaped_email, NULL);
+    return resp ? resp : response_json_error(500, "Template error");
+}
+
+/*
+ * GET /request-password-reset
+ *
+ * Renders a page with an email input form for requesting a password reset.
+ */
+HttpResponse *request_password_reset_page_handler(const HttpRequest *req,
+                                                    const RouteParams *params) {
+    (void)req;
+    (void)params;
+
+    HttpResponse *resp = response_template(200, "pages/request-password-reset.html", NULL);
+    return resp ? resp : response_json_error(500, "Template error");
+}
+
+/*
+ * POST /request-password-reset
+ *
+ * Creates a password reset token and sends a reset email.
+ * Always returns 200 to prevent user enumeration.
+ *
+ * Request body: {"email":"user@example.com"}
+ */
+HttpResponse *request_password_reset_handler(const HttpRequest *req,
+                                               const RouteParams *params) {
+    (void)params;
+    HttpResponse *ct_err = require_content_type(req, "application/json");
+    if (ct_err) return ct_err;
+
+    db_handle_t *db = db_pool_get_connection();
+    if (!db) {
+        log_error("Failed to get database connection");
+        return response_json_error(500, "Internal server error");
+    }
+
+    if (!req->body) {
+        return response_json_error(400, "Request body required");
+    }
+
+    char *email = json_get_string(req->body, "email");
+    if (!email) {
+        return response_json_error(400, "email required");
+    }
+
+    char validation_error[256];
+    if (validate_email(email, validation_error, sizeof(validation_error)) != 0) {
+        free(email);
+        return response_json_error(400, validation_error);
+    }
+
+    extern const config_t *g_config;
+
+    char token[44];
+    int result = user_create_password_reset_token(
+        db, email,
+        g_config->password_reset_token_ttl_seconds,
+        http_request_get_client_ip(req, NULL),
+        token);
+
+    if (result == 0) {
+        /* Token created — send email */
+        char reset_url[512];
+        if (strcmp(g_config->host, "localhost") == 0) {
+            snprintf(reset_url, sizeof(reset_url),
+                     "http://localhost:%d/reset-password?token=%s",
+                     g_config->port, token);
+        } else {
+            snprintf(reset_url, sizeof(reset_url),
+                     "https://%s/reset-password?token=%s",
+                     g_config->host, token);
+        }
+        OPENSSL_cleanse(token, sizeof(token));
+
+        char *body_text = template_render("emails/reset.txt", "URL", reset_url, NULL);
+        char *body_html = template_render("emails/reset.html", "URL", reset_url, NULL);
+        OPENSSL_cleanse(reset_url, sizeof(reset_url));
+
+        if (body_text && body_html)
+            email_send(g_config, email, "Password Reset", body_text, body_html);
+
+        cleanse_free(body_text);
+        cleanse_free(body_html);
+    } else {
+        OPENSSL_cleanse(token, sizeof(token));
+    }
+
+    free(email);
+
+    /* Always return success to prevent enumeration */
+    return response_json_ok(
+        "{\"message\":\"If that email belongs to a verified account, "
+        "a reset link has been sent. Check your inbox.\"}");
+}
+
+/*
+ * GET /reset-password?token=...
+ *
+ * Public endpoint (no auth). Validates the token and renders
+ * a "Set New Password" page with password input.
+ */
+HttpResponse *reset_password_page_handler(const HttpRequest *req,
+                                            const RouteParams *params) {
+    (void)params;
+
+    db_handle_t *db = db_pool_get_connection();
+    if (!db) {
+        log_error("Failed to get database connection");
+        return response_html_error(500, "Internal server error");
+    }
+
+    char *token = http_query_get_param(req->query_string, "token");
+    if (!token) {
+        return response_html_error(400, "Missing token");
+    }
+
+    int rc = user_lookup_password_reset_token(db, token);
+
+    if (rc != 0) {
+        cleanse_free(token);
+        HttpResponse *resp = response_template(400, "pages/reset-password-invalid.html", NULL);
+        return resp ? resp : response_json_error(400, "Invalid token");
+    }
+
+    char min_len[12];
+    snprintf(min_len, sizeof(min_len), "%d", crypto_password_min_length());
+    HttpResponse *resp = response_template(200, "pages/reset-password.html",
+        "TOKEN", token, "MIN_LENGTH", min_len, NULL);
+    cleanse_free(token);
+    return resp ? resp : response_json_error(500, "Template error");
+}
+
+/*
+ * POST /reset-password
+ *
+ * Public endpoint (no auth). Consumes the token and sets the new password.
+ * Expects form-encoded body: token=...&password=...
+ */
+HttpResponse *reset_password_handler(const HttpRequest *req,
+                                       const RouteParams *params) {
+    (void)params;
+
+    db_handle_t *db = db_pool_get_connection();
+    if (!db) {
+        log_error("Failed to get database connection");
+        return response_html_error(500, "Internal server error");
+    }
+
+    char *token = NULL;
+    char *password_enc = NULL;
+    if (req->body) {
+        token = http_query_get_param(req->body, "token");
+        password_enc = http_query_get_param(req->body, "password");
+    }
+
+    if (!token || !password_enc) {
+        cleanse_free(token);
+        cleanse_free(password_enc);
+        return response_html_error(400, "Missing token or password");
+    }
+
+    /* URL-decode password (form-encoded) */
+    char password[256];
+    if (str_url_decode(password, sizeof(password), password_enc) < 0) {
+        cleanse_free(token);
+        cleanse_free(password_enc);
+        return response_html_error(400, "Invalid request");
+    }
+    cleanse_free(password_enc);
+
+    int rc = user_consume_password_reset_token(db, token, password);
+    OPENSSL_cleanse(password, sizeof(password));
+    cleanse_free(token);
+
+    if (rc == -2) {
+        char msg[128];
+        snprintf(msg, sizeof(msg),
+                 "Password must be at least %d characters.", crypto_password_min_length());
+        HttpResponse *resp = response_template(400, "pages/reset-password-error.html",
+            "MESSAGE", msg, NULL);
+        return resp ? resp : response_json_error(400, msg);
+    }
+    if (rc != 0) {
+        HttpResponse *resp = response_template(400, "pages/reset-password-error.html",
+            "MESSAGE", "This password reset link is invalid, expired, or has already been used.",
+            NULL);
+        return resp ? resp : response_json_error(400, "Reset failed");
+    }
+
+    HttpResponse *resp = response_template(200, "pages/reset-password-success.html", NULL);
+    return resp ? resp : response_json_error(500, "Template error");
+}
+
+#endif /* EMAIL_SUPPORT */
+
+/* ============================================================================
+ * Invitation Handlers
+ * ========================================================================== */
+
+/*
+ * GET /accept-invitation?token=...
+ *
+ * Public endpoint (no auth). Validates invitation token and renders
+ * password-set form showing username and/or email.
+ */
+HttpResponse *accept_invitation_page_handler(const HttpRequest *req,
+                                               const RouteParams *params) {
+    (void)params;
+
+    db_handle_t *db = db_pool_get_connection();
+    if (!db) {
+        log_error("Failed to get database connection");
+        return response_html_error(500, "Internal server error");
+    }
+
+    char *token = http_query_get_param(req->query_string, "token");
+    if (!token) {
+        return response_html_error(400, "Missing token");
+    }
+
+    /* Look up token */
+    invitation_token_lookup_t result;
+    int rc = user_lookup_invitation_token(db, token, &result);
+
+    if (rc != 0) {
+        cleanse_free(token);
+        HttpResponse *resp = response_template(400, "pages/accept-invitation-invalid.html", NULL);
+        return resp ? resp : response_json_error(400, "Invalid token");
+    }
+
+    /* Build account info HTML */
+    char account_info[1024];
+    account_info[0] = '\0';
+    int pos = 0;
+
+    if (result.username[0]) {
+        char escaped[512];
+        str_html_escape(escaped, sizeof(escaped), result.username);
+        pos += snprintf(account_info + pos, sizeof(account_info) - pos,
+                        "<p>Username: <strong>%s</strong></p>", escaped);
+    }
+
+    if (result.email_address[0]) {
+        char escaped[512];
+        str_html_escape(escaped, sizeof(escaped), result.email_address);
+        pos += snprintf(account_info + pos, sizeof(account_info) - pos,
+                        "<p>Email: <strong>%s</strong></p>", escaped);
+    }
+
+    char min_len[12];
+    snprintf(min_len, sizeof(min_len), "%d", crypto_password_min_length());
+    HttpResponse *resp = response_template(200, "pages/accept-invitation.html",
+        "TOKEN", token,
+        "ACCOUNT_INFO", account_info,
+        "MIN_LENGTH", min_len,
+        NULL);
+    cleanse_free(token);
+    return resp ? resp : response_json_error(500, "Template error");
+}
+
+/*
+ * POST /accept-invitation
+ *
+ * Public endpoint (no auth). Consumes the invitation token and sets password.
+ * Expects form-encoded body: token=...&password=...
+ */
+HttpResponse *accept_invitation_handler(const HttpRequest *req,
+                                          const RouteParams *params) {
+    (void)params;
+
+    db_handle_t *db = db_pool_get_connection();
+    if (!db) {
+        log_error("Failed to get database connection");
+        return response_html_error(500, "Internal server error");
+    }
+
+    char *token = NULL;
+    char *password_enc = NULL;
+    if (req->body) {
+        token = http_query_get_param(req->body, "token");
+        password_enc = http_query_get_param(req->body, "password");
+    }
+
+    if (!token || !password_enc) {
+        cleanse_free(token);
+        cleanse_free(password_enc);
+        return response_html_error(400, "Missing token or password");
+    }
+
+    /* URL-decode password (form-encoded) */
+    char password[256];
+    if (str_url_decode(password, sizeof(password), password_enc) < 0) {
+        cleanse_free(token);
+        cleanse_free(password_enc);
+        return response_html_error(400, "Invalid request");
+    }
+    cleanse_free(password_enc);
+
+    int rc = user_consume_invitation_token(db, token, password);
+    OPENSSL_cleanse(password, sizeof(password));
+    cleanse_free(token);
+
+    if (rc == -2) {
+        char msg[128];
+        snprintf(msg, sizeof(msg),
+                 "Password must be at least %d characters.", crypto_password_min_length());
+        HttpResponse *resp = response_template(400, "pages/accept-invitation-error.html",
+            "MESSAGE", msg, NULL);
+        return resp ? resp : response_json_error(400, msg);
+    }
+
+    if (rc == 2) {
+        HttpResponse *resp = response_template(400, "pages/accept-invitation-error.html",
+            "MESSAGE", "This email address is already verified by another account. "
+                       "You may already have an account — try logging in.",
+            NULL);
+        return resp ? resp : response_json_error(400, "Email conflict");
+    }
+
+    if (rc != 0) {
+        HttpResponse *resp = response_template(400, "pages/accept-invitation-invalid.html", NULL);
+        return resp ? resp : response_json_error(400, "Invalid invitation");
+    }
+
+    HttpResponse *resp = response_template(200, "pages/accept-invitation-success.html", NULL);
+    return resp ? resp : response_json_error(500, "Template error");
+}
+
+#ifdef EMAIL_SUPPORT
+
+/* ============================================================================
+ * Passwordless Login Handlers
+ * ========================================================================== */
+
+/*
+ * GET /request-passwordless-login
+ *
+ * Renders a page with an email input form for requesting a passwordless login link.
+ * Carries return_to from query param into a hidden form field.
+ */
+HttpResponse *request_passwordless_login_page_handler(const HttpRequest *req,
+                                                        const RouteParams *params) {
+    (void)params;
+
+    /* Extract return_to from query string (authorize query params, or empty) */
+    char *return_to = NULL;
+    if (req->query_string)
+        return_to = http_query_get_param(req->query_string, "return_to");
+
+    char escaped_return_to[2048];
+    escaped_return_to[0] = '\0';
+    if (return_to && return_to[0]) {
+        str_html_escape(escaped_return_to, sizeof(escaped_return_to), return_to);
+    }
+    free(return_to);
+
+    HttpResponse *resp = response_template(200, "pages/request-passwordless-login.html",
+        "RETURN_TO", escaped_return_to, NULL);
+    return resp ? resp : response_json_error(500, "Template error");
+}
+
+/*
+ * POST /request-passwordless-login
+ *
+ * Creates a passwordless login token and sends a login email.
+ * Always returns 200 to prevent user enumeration.
+ *
+ * Request body: {"email":"user@example.com","return_to":"client_id=...&..."}
+ */
+HttpResponse *request_passwordless_login_handler(const HttpRequest *req,
+                                                   const RouteParams *params) {
+    (void)params;
+    HttpResponse *ct_err = require_content_type(req, "application/json");
+    if (ct_err) return ct_err;
+
+    db_handle_t *db = db_pool_get_connection();
+    if (!db) {
+        log_error("Failed to get database connection");
+        return response_json_error(500, "Internal server error");
+    }
+
+    if (!req->body) {
+        return response_json_error(400, "Request body required");
+    }
+
+    char *email = json_get_string(req->body, "email");
+    if (!email) {
+        return response_json_error(400, "email required");
+    }
+
+    char validation_error[256];
+    if (validate_email(email, validation_error, sizeof(validation_error)) != 0) {
+        free(email);
+        return response_json_error(400, validation_error);
+    }
+
+    /* Extract and validate return_to (authorize query string, no path) */
+    char *return_to = json_get_string(req->body, "return_to");
+    if (return_to) {
+        /* Reject if it contains newlines or is unreasonably long */
+        if (strlen(return_to) > 2000 || strchr(return_to, '\n') || strchr(return_to, '\r')) {
+            free(return_to);
+            return_to = NULL;
+        }
+    }
+
+    extern const config_t *g_config;
+
+    char token[44];
+    int result = user_create_passwordless_login_token(
+        db, email,
+        g_config->passwordless_login_token_ttl_seconds,
+        http_request_get_client_ip(req, NULL),
+        return_to, token);
+
+    if (result == 0) {
+        char login_url[512];
+        if (strcmp(g_config->host, "localhost") == 0) {
+            snprintf(login_url, sizeof(login_url),
+                     "http://localhost:%d/passwordless-login?token=%s",
+                     g_config->port, token);
+        } else {
+            snprintf(login_url, sizeof(login_url),
+                     "https://%s/passwordless-login?token=%s",
+                     g_config->host, token);
+        }
+        OPENSSL_cleanse(token, sizeof(token));
+
+        char *body_text = template_render("emails/passwordless.txt", "URL", login_url, NULL);
+        char *body_html = template_render("emails/passwordless.html", "URL", login_url, NULL);
+        OPENSSL_cleanse(login_url, sizeof(login_url));
+
+        if (body_text && body_html)
+            email_send(g_config, email, "Temporary Access Link", body_text, body_html);
+
+        cleanse_free(body_text);
+        cleanse_free(body_html);
+    } else {
+        OPENSSL_cleanse(token, sizeof(token));
+    }
+
+    free(email);
+    free(return_to);
+
+    return response_json_ok(
+        "{\"message\":\"If that email belongs to a verified account "
+        "with passwordless login enabled, a login link has been sent. "
+        "Check your inbox.\"}");
+}
+
+/*
+ * GET /passwordless-login?token=...
+ *
+ * Public endpoint (no auth). Validates the token and renders
+ * a confirmation page: "Log in as user@example.com?"
+ */
+HttpResponse *passwordless_login_page_handler(const HttpRequest *req,
+                                                const RouteParams *params) {
+    (void)params;
+
+    db_handle_t *db = db_pool_get_connection();
+    if (!db) {
+        log_error("Failed to get database connection");
+        return response_html_error(500, "Internal server error");
+    }
+
+    char *token = http_query_get_param(req->query_string, "token");
+    if (!token) {
+        return response_html_error(400, "Missing token");
+    }
+
+    passwordless_login_lookup_t lookup;
+    int rc = user_lookup_passwordless_login_token(db, token, &lookup);
+
+    if (rc != 0) {
+        cleanse_free(token);
+        HttpResponse *resp = response_template(400, "pages/passwordless-login-invalid.html", NULL);
+        return resp ? resp : response_json_error(400, "Invalid token");
+    }
+
+    char escaped_email[512];
+    char escaped_username[512];
+    char escaped_token[128];
+    str_html_escape(escaped_email, sizeof(escaped_email), lookup.email_address);
+    str_html_escape(escaped_username, sizeof(escaped_username), lookup.username);
+    str_html_escape(escaped_token, sizeof(escaped_token), token);
+    cleanse_free(token);
+
+    char display_info[1280];
+    if (escaped_username[0]) {
+        snprintf(display_info, sizeof(display_info),
+                 "<p class=\"display-email\">%s</p>"
+                 "<p class=\"text-muted\">%s</p>",
+                 escaped_email, escaped_username);
+    } else {
+        snprintf(display_info, sizeof(display_info),
+                 "<p class=\"display-email\">%s</p>",
+                 escaped_email);
+    }
+
+    HttpResponse *resp = response_template(200, "pages/passwordless-login.html",
+        "DISPLAY_INFO", display_info,
+        "TOKEN", escaped_token,
+        NULL);
+    OPENSSL_cleanse(escaped_token, sizeof(escaped_token));
+    return resp ? resp : response_json_error(500, "Template error");
+}
+
+/*
+ * POST /passwordless-login
+ *
+ * Public endpoint (no auth). Consumes the token, creates a session,
+ * sets the session cookie, and redirects to return_to or /.
+ * Expects form-encoded body: token=...
+ */
+HttpResponse *passwordless_login_handler(const HttpRequest *req,
+                                           const RouteParams *params) {
+    (void)params;
+
+    db_handle_t *db = db_pool_get_connection();
+    if (!db) {
+        log_error("Failed to get database connection");
+        return response_html_error(500, "Internal server error");
+    }
+
+    char *token = NULL;
+    if (req->body)
+        token = http_query_get_param(req->body, "token");
+
+    if (!token) {
+        return response_html_error(400, "Missing token");
+    }
+
+    long long user_pin = 0;
+    unsigned char user_id[16];
+    char return_to[2048];
+    int rc = user_consume_passwordless_login_token(db, token, &user_pin, user_id,
+                                                    return_to, sizeof(return_to));
+    cleanse_free(token);
+
+    if (rc != 0) {
+        HttpResponse *resp = http_response_new(400);
+        http_response_set(resp, CONTENT_TYPE_HTML,
+            "<!DOCTYPE html><html lang=\"en\"><head>"
+            "<meta charset=\"UTF-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
+            "<meta name=\"color-scheme\" content=\"dark\">"
+            "<title>Login Failed</title>"
+            "<link rel=\"stylesheet\" href=\"/css/base.css\">"
+            "<link rel=\"stylesheet\" href=\"/css/templates.css\">"
+            "</head><body><div class=\"page-container\">"
+            "<h1>Login Failed</h1>"
+            "<p>This login link is invalid, expired, or has already been used.</p>"
+            "<p class=\"back-link\"><a href=\"/request-passwordless-login\">"
+            "Request a new login link</a></p>"
+            "</div></body></html>");
+        return resp;
+    }
+
+    /* Generate session token */
+    size_t token_buf_size = crypto_token_encoded_size(SESSION_TOKEN_BYTES);
+    char *session_token = malloc(token_buf_size);
+    if (!session_token) {
+        log_error("Failed to allocate session token");
+        return response_json_error(500, "Internal server error");
+    }
+
+    if (crypto_random_token(session_token, token_buf_size, SESSION_TOKEN_BYTES) <= 0) {
+        log_error("Failed to generate session token");
+        OPENSSL_cleanse(session_token, token_buf_size);
+        free(session_token);
+        return response_json_error(500, "Internal server error");
+    }
+
+    /* Create session */
+    unsigned char session_id[16];
+    rc = oauth_session_create(db, user_pin, user_id, session_token,
+                              "passwordless",
+                              http_request_get_client_ip(req, NULL),
+                              http_request_get_header(req, "User-Agent"),
+                              DEFAULT_SESSION_TTL_SECONDS,
+                              session_id);
+
+    if (rc != 0) {
+        log_error("Failed to create session for passwordless login");
+        OPENSSL_cleanse(session_token, token_buf_size);
+        free(session_token);
+        return response_json_error(500, "Internal server error");
+    }
+
+    /* Build Set-Cookie header */
+    char cookie_header[512];
+    snprintf(cookie_header, sizeof(cookie_header),
+             "%s=%s; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=%d",
+             SESSION_COOKIE_NAME, session_token, DEFAULT_SESSION_TTL_SECONDS);
+    OPENSSL_cleanse(session_token, token_buf_size);
+    free(session_token);
+
+    /* Determine redirect location */
+    char location[2560];
+    if (return_to[0]) {
+        snprintf(location, sizeof(location), "/authorize?%s", return_to);
+    } else {
+        str_copy(location, sizeof(location), "/");
+    }
+
+    HttpResponse *resp = http_response_new(303);
+    http_response_set_header(resp, "Set-Cookie", cookie_header);
+    OPENSSL_cleanse(cookie_header, sizeof(cookie_header));
+    http_response_set_header(resp, "Location", location);
+    http_response_set(resp, CONTENT_TYPE_HTML,
+        "<!DOCTYPE html><html lang=\"en\"><head>"
+        "<meta charset=\"UTF-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
+        "<meta name=\"color-scheme\" content=\"dark\">"
+        "<meta http-equiv=\"Content-Security-Policy\" "
+        "content=\"default-src 'none'; style-src 'self';\">"
+        "</head><body><p>Redirecting...</p></body></html>");
+    return resp;
+}
+
+/*
+ * POST /api/user/passwordless-login
+ *
+ * Toggles allow_passwordless_login for the authenticated user.
+ * Requires at least one verified email to enable.
+ */
+HttpResponse *passwordless_login_toggle_handler(const HttpRequest *req,
+                                                 const RouteParams *params) {
+    (void)params;
+
+    db_handle_t *db = db_pool_get_connection();
+    if (!db) {
+        log_error("Failed to get database connection");
+        return response_json_error(500, "Internal server error");
+    }
+
+    oauth_session_info_t session;
+    HttpResponse *auth_err = require_authenticated_session(req, db, &session);
+    if (auth_err) return auth_err;
+
+    if (!req->body) {
+        return response_json_error(400, "Request body required");
+    }
+
+    int enabled = 0;
+    if (json_get_bool(req->body, "enabled", &enabled) != 0) {
+        return response_json_error(400, "enabled field required (true or false)");
+    }
+
+    /* Can only enable if user has at least one verified email */
+    if (enabled) {
+        int has_verified = 0;
+        if (user_has_verified_email(db, session.user_account_pin, &has_verified) != 0) {
+            return response_json_error(500, "Failed to check email status");
+        }
+        if (!has_verified) {
+            return response_json_error(400,
+                "Cannot enable passwordless login without a verified email address");
+        }
+    }
+
+    if (user_update_allow_passwordless_login(db, session.user_account_pin, enabled) != 0) {
+        return response_json_error(500, "Failed to update passwordless login setting");
+    }
+
+    return response_json_ok(
+        enabled ? "{\"message\":\"Passwordless login enabled\"}"
+                : "{\"message\":\"Passwordless login disabled\"}");
+}
+
+#endif /* EMAIL_SUPPORT */
+
 HttpResponse *logout_handler(const HttpRequest *req, const RouteParams *params) {
     (void)params;
 
@@ -573,7 +1602,7 @@ HttpResponse *logout_handler(const HttpRequest *req, const RouteParams *params) 
 
     /* Close session in database */
     int result = oauth_session_close(db, session_token);
-    free(session_token);
+    cleanse_free(session_token);
 
     if (result != 0) {
         return response_json_error(500, "Failed to close session");

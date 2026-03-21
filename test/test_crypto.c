@@ -1065,6 +1065,145 @@ int main(void) {
     }
     log_info("Output format: PASS\n");
 
+    /* ====================================================================
+     * TOTP RFC 6238 Test Vector
+     * ==================================================================== */
+
+    log_info("=== TOTP RFC 6238 Test Vector ===\n");
+
+    /* RFC 6238 Appendix B: SHA-1 with ASCII secret "12345678901234567890"
+     * Base32: GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ (20 bytes = 32 base32 chars)
+     * Time = 59, step = 30 → counter = 1
+     * RFC 8-digit result: 94287082
+     * 6-digit result: 94287082 % 1000000 = 287082 */
+    log_info("Test: TOTP code matches RFC 6238 test vector");
+    const char *rfc_totp_secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+    char rfc_totp_code[8];
+
+    if (crypto_totp_generate_code(rfc_totp_secret, 59, rfc_totp_code, sizeof(rfc_totp_code)) != 0) {
+        log_error("Failed to generate TOTP code for RFC vector");
+        return 1;
+    }
+
+    log_info("Generated: %s, Expected: 287082", rfc_totp_code);
+    if (strcmp(rfc_totp_code, "287082") != 0) {
+        log_error("TOTP RFC 6238 test vector mismatch!");
+        return 1;
+    }
+    log_info("RFC 6238 test vector: PASS\n");
+
+    /* ====================================================================
+     * Auth Request JWT Round-Trip
+     * ==================================================================== */
+
+    log_info("=== Auth Request JWT (Stateless Authorization Code) Tests ===\n");
+
+    /* Generate HMAC secret (raw bytes + base64url encoding) */
+    log_info("Test: Auth request JWT encode/decode round-trip");
+    unsigned char ar_secret[32];
+    if (crypto_random_bytes(ar_secret, sizeof(ar_secret)) != 0) {
+        log_error("Failed to generate secret for auth request JWT test");
+        return 1;
+    }
+
+    char ar_secret_b64[64];
+    crypto_base64url_encode(ar_secret, sizeof(ar_secret), ar_secret_b64, sizeof(ar_secret_b64));
+
+    /* Build claims with known UUIDs */
+    auth_request_claims_t ar_claims = {0};
+
+    /* Client UUID: 11111111-2222-3333-4444-555555555555 */
+    unsigned char test_client_id[16] = {
+        0x11,0x11,0x11,0x11, 0x22,0x22, 0x33,0x33,
+        0x44,0x44, 0x55,0x55,0x55,0x55,0x55,0x55
+    };
+
+    /* User UUID: aabbccdd-eeff-0011-2233-445566778899 */
+    unsigned char test_user_id[16] = {
+        0xaa,0xbb,0xcc,0xdd, 0xee,0xff, 0x00,0x11,
+        0x22,0x33, 0x44,0x55,0x66,0x77,0x88,0x99
+    };
+
+    memcpy(ar_claims.client_id, test_client_id, 16);
+    memcpy(ar_claims.user_account_id, test_user_id, 16);
+    strcpy(ar_claims.redirect_uri, "https://app.example.com/callback");
+    strcpy(ar_claims.scope, "openid profile email");
+    strcpy(ar_claims.code_challenge, "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
+    strcpy(ar_claims.code_challenge_method, "S256");
+    ar_claims.iat = time(NULL);
+    ar_claims.exp = ar_claims.iat + 60;
+    strcpy(ar_claims.nonce, "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4");
+
+    /* Encode */
+    char ar_token[JWT_MAX_TOKEN_LENGTH];
+    if (jwt_encode_auth_request(&ar_claims, ar_secret, sizeof(ar_secret),
+                                 ar_token, sizeof(ar_token)) != 0) {
+        log_error("Auth request JWT encoding failed");
+        return 1;
+    }
+
+    log_info("Auth request JWT created (length=%zu)", strlen(ar_token));
+
+    /* Decode with base64url-encoded secret */
+    auth_request_claims_t ar_decoded = {0};
+    if (jwt_decode_auth_request(ar_token, ar_secret_b64, NULL, &ar_decoded) != 0) {
+        log_error("Auth request JWT decoding failed");
+        return 1;
+    }
+
+    /* Verify binary UUIDs round-tripped correctly */
+    if (memcmp(ar_decoded.client_id, test_client_id, 16) != 0) {
+        log_error("Client ID UUID mismatch after round-trip");
+        return 1;
+    }
+
+    if (memcmp(ar_decoded.user_account_id, test_user_id, 16) != 0) {
+        log_error("User ID UUID mismatch after round-trip");
+        return 1;
+    }
+
+    /* Verify string fields */
+    assert(strcmp(ar_decoded.redirect_uri, ar_claims.redirect_uri) == 0);
+    assert(strcmp(ar_decoded.scope, ar_claims.scope) == 0);
+    assert(strcmp(ar_decoded.code_challenge, ar_claims.code_challenge) == 0);
+    assert(strcmp(ar_decoded.code_challenge_method, ar_claims.code_challenge_method) == 0);
+    assert(strcmp(ar_decoded.nonce, ar_claims.nonce) == 0);
+    assert(ar_decoded.iat == ar_claims.iat);
+    assert(ar_decoded.exp == ar_claims.exp);
+
+    log_info("All claims round-tripped correctly:");
+    log_info("  client_id UUID: verified");
+    log_info("  user_account_id UUID: verified");
+    log_info("  redirect_uri: %s", ar_decoded.redirect_uri);
+    log_info("  scope: %s", ar_decoded.scope);
+    log_info("  code_challenge: %s", ar_decoded.code_challenge);
+    log_info("  code_challenge_method: %s", ar_decoded.code_challenge_method);
+    log_info("  nonce: %s", ar_decoded.nonce);
+    log_info("Auth request JWT round-trip: PASS\n");
+
+    /* Test: Wrong secret rejects auth request JWT */
+    log_info("Test: Auth request JWT rejected with wrong secret");
+    unsigned char wrong_ar_secret[32];
+    crypto_random_bytes(wrong_ar_secret, sizeof(wrong_ar_secret));
+    char wrong_ar_secret_b64[64];
+    crypto_base64url_encode(wrong_ar_secret, sizeof(wrong_ar_secret),
+                            wrong_ar_secret_b64, sizeof(wrong_ar_secret_b64));
+
+    auth_request_claims_t wrong_decoded = {0};
+    if (jwt_decode_auth_request(ar_token, wrong_ar_secret_b64, NULL, &wrong_decoded) == 0) {
+        log_error("Auth request JWT accepted with wrong secret!");
+        return 1;
+    }
+    log_info("Wrong secret correctly rejected: PASS\n");
+
+    /* Test: Prior secret fallback */
+    log_info("Test: Auth request JWT decodes with prior secret fallback");
+    if (jwt_decode_auth_request(ar_token, wrong_ar_secret_b64, ar_secret_b64, &ar_decoded) != 0) {
+        log_error("Auth request JWT prior secret fallback failed");
+        return 1;
+    }
+    log_info("Prior secret fallback: PASS\n");
+
     log_info("==========================================================");
     log_info("=== All Tests Passed! ===");
     log_info("==========================================================");

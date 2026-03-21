@@ -34,6 +34,26 @@
  * SQLite and PostgreSQL both use double quotes for identifiers
  * Input identifier is trusted (from system catalogs), but we quote defensively
  */
+static void quote_literal(char *dest, size_t dest_size, const char *value) {
+    size_t i = 0, j = 0;
+    dest[j++] = '\'';
+
+    while (value[i] && j < dest_size - 2) {
+        if (value[i] == '\'') {
+            if (j < dest_size - 3) {
+                dest[j++] = '\'';
+                dest[j++] = '\'';
+            }
+        } else {
+            dest[j++] = value[i];
+        }
+        i++;
+    }
+
+    dest[j++] = '\'';
+    dest[j] = '\0';
+}
+
 static void quote_identifier(char *dest, size_t dest_size, const char *identifier) {
     size_t i = 0, j = 0;
     dest[j++] = '"';
@@ -168,10 +188,12 @@ static int get_column_defs_sqlite(db_handle_t *db, const char *table_name,
     int rc;
 
     /* Use pragma_table_info to get column definitions */
+    char quoted_name[MAX_TABLE_NAME_SIZE];
+    quote_literal(quoted_name, sizeof(quoted_name), table_name);
     char sql[512];
     snprintf(sql, sizeof(sql),
-            "SELECT name, type, cid FROM pragma_table_info('%s') ORDER BY cid;",
-            table_name);
+            "SELECT name, type, cid FROM pragma_table_info(%s) ORDER BY cid;",
+            quoted_name);
 
     rc = db_query(db, &result, "%s", sql);
     if (rc != 0) {
@@ -238,10 +260,13 @@ static int create_history_table_sqlite(db_handle_t *db, const char *base_table_n
     char history_table_name[MAX_TABLE_NAME_SIZE];
     snprintf(history_table_name, sizeof(history_table_name), "history__%s", base_table_name);
 
+    char quoted_history_name[MAX_TABLE_NAME_SIZE];
+    quote_literal(quoted_history_name, sizeof(quoted_history_name), history_table_name);
+
     db_result_t *check_result = NULL;
     rc = db_query(db, &check_result,
-                 "SELECT name FROM sqlite_master WHERE type='table' AND name='%s';",
-                 history_table_name);
+                 "SELECT name FROM sqlite_master WHERE type='table' AND name=%s;",
+                 quoted_history_name);
     if (rc == 0 && db_result_row_count(check_result) > 0) {
         log_info("History table already exists: %s (skipping)", history_table_name);
         db_result_free(check_result);
@@ -644,10 +669,12 @@ static int ensure_history_schema_postgresql(db_handle_t *db, const char *base_sc
     snprintf(history_schema, sizeof(history_schema), "%s_history", base_schema);
 
     /* Check if schema already exists (avoids NOTICE from IF NOT EXISTS) */
+    char quoted_history_schema[MAX_TABLE_NAME_SIZE];
+    quote_literal(quoted_history_schema, sizeof(quoted_history_schema), history_schema);
     char check_sql[256];
     snprintf(check_sql, sizeof(check_sql),
-             "SELECT 1 FROM information_schema.schemata WHERE schema_name = '%s';",
-             history_schema);
+             "SELECT 1 FROM information_schema.schemata WHERE schema_name = %s;",
+             quoted_history_schema);
 
     db_result_t *result = NULL;
     int rc = db_query(db, &result, "%s", check_sql);
@@ -662,8 +689,10 @@ static int ensure_history_schema_postgresql(db_handle_t *db, const char *base_sc
     }
     db_result_free(result);
 
+    char quoted_schema[MAX_TABLE_NAME_SIZE];
+    quote_identifier(quoted_schema, sizeof(quoted_schema), history_schema);
     char sql[256];
-    snprintf(sql, sizeof(sql), "CREATE SCHEMA IF NOT EXISTS %s;", history_schema);
+    snprintf(sql, sizeof(sql), "CREATE SCHEMA IF NOT EXISTS %s;", quoted_schema);
 
     rc = db_execute_direct(db, sql);
     if (rc != 0) {
@@ -696,11 +725,15 @@ static int create_history_table_postgresql(db_handle_t *db, const char *base_sch
 
     /* Check if history table already exists */
     db_result_t *check_result = NULL;
+    char quoted_hist_schema[MAX_TABLE_NAME_SIZE];
+    char quoted_base_table[MAX_TABLE_NAME_SIZE];
+    quote_literal(quoted_hist_schema, sizeof(quoted_hist_schema), history_schema);
+    quote_literal(quoted_base_table, sizeof(quoted_base_table), base_table_name);
     char check_sql[512];
     snprintf(check_sql, sizeof(check_sql),
             "SELECT 1 FROM information_schema.tables "
-            "WHERE table_schema = '%s' AND table_name = '%s';",
-            history_schema, base_table_name);
+            "WHERE table_schema = %s AND table_name = %s;",
+            quoted_hist_schema, quoted_base_table);
 
     rc = db_query(db, &check_result, "%s", check_sql);
     if (rc == 0 && db_result_row_count(check_result) > 0) {

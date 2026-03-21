@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="dark">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'; form-action 'self'; manifest-src 'self'; base-uri 'self';">
+    <title>User Provisioning</title>
+    <link rel="stylesheet" href="/css/base.css">
+    <link rel="stylesheet" href="/css/panel.css">
+    <script src="/js/panel.js" defer></script>
+    <script src="/js/provision.js" defer></script>
+    <link rel="icon" type="image/svg+xml" href="/favicon/favicon.svg">
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon/favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon/favicon-16x16.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="/favicon/apple-touch-icon.png">
+    <link rel="manifest" href="/favicon/site.webmanifest">
+</head>
+<body>
+<div class="container">
+    <h1>User Provisioning</h1>
+    <p class="subtitle">Resource server API for user management</p>
+
+    <!-- Shared RS Credentials -->
+    <div class="auth-section">
+        <div class="auth-label">Resource Server Credentials</div>
+        <div class="field">
+            <label>Resource Server ID <span class="req">*</span></label>
+            <input type="text" id="rs-id" placeholder="32-character hex UUID">
+        </div>
+        <div class="field">
+            <label>Resource Server Key ID <span class="req">*</span></label>
+            <input type="text" id="rs-key-id" placeholder="32-character hex UUID">
+        </div>
+        <div class="field">
+            <label>Resource Server Secret <span class="req">*</span></label>
+            <input type="password" id="rs-secret" placeholder="Resource server key secret">
+        </div>
+    </div>
+
+    <div class="tabs">
+        <button class="tab-btn active" id="tab-provision" data-action="switch-panel" data-panel="provision">Invite</button>
+        <button class="tab-btn" id="tab-lookup" data-action="switch-panel" data-panel="lookup">Lookup</button>
+        <button class="tab-btn" id="tab-link" data-action="switch-panel" data-panel="link">Link Client</button>
+        <button class="tab-btn" id="tab-unlink" data-action="switch-panel" data-panel="unlink">Unlink Client</button>
+        <button class="tab-btn" id="tab-list" data-action="switch-panel" data-panel="list">List Users</button>
+    </div>
+
+    <!-- Panel 1: Provision User -->
+    <div id="panel-provision" class="panel active">
+        <p class="desc">Find or create a user by username and/or email. If the user exists, their info is returned. If not, a new account is created with an invitation token for setting up a password.</p>
+        <div class="note">At least one of username or email is required. If both match different existing users, an ambiguous-match error is returned.</div>
+        <div class="field">
+            <label>Username</label>
+            <input type="text" id="prov-username" placeholder="Unique username">
+        </div>
+        <div class="field">
+            <label>Email</label>
+            <input type="text" id="prov-email" placeholder="user@example.com">
+        </div>
+        <div id="prov-error" class="field-error"></div>
+        <button class="run-btn" data-action="run-provision">Invite User</button>
+        <div id="prov-result" class="result"></div>
+    </div>
+
+    <!-- Panel 2: Lookup User -->
+    <div id="panel-lookup" class="panel">
+        <p class="desc">Look up an existing user by user ID, username, or email. Read-only — does not create users or generate invitations.</p>
+        <div class="note">User ID is the preferred lookup key for post-invitation operations.</div>
+        <div class="field">
+            <label>User ID</label>
+            <input type="text" id="lookup-user-id" placeholder="32-character hex UUID">
+        </div>
+        <div class="field">
+            <label>Username</label>
+            <input type="text" id="lookup-username" placeholder="Exact username match">
+        </div>
+        <div class="field">
+            <label>Email</label>
+            <input type="text" id="lookup-email" placeholder="Verified email match only">
+        </div>
+        <div id="lookup-error" class="field-error"></div>
+        <button class="run-btn" data-action="run-lookup">Lookup User</button>
+        <div id="lookup-result" class="result"></div>
+    </div>
+
+    <!-- Panel 3: Link Client -->
+    <div id="panel-link" class="panel">
+        <p class="desc">Link a user to a client application. Idempotent — linking an already-linked user succeeds silently. The client must belong to this resource server.</p>
+        <div class="field">
+            <label>User ID <span class="req">*</span></label>
+            <input type="text" id="link-user-id" placeholder="32-character hex UUID">
+        </div>
+        <div class="field">
+            <label>Client ID <span class="req">*</span></label>
+            <input type="text" id="link-client-id" placeholder="32-character hex UUID">
+        </div>
+        <div id="link-error" class="field-error"></div>
+        <button class="run-btn" data-action="run-link">Link User</button>
+        <div id="link-result" class="result"></div>
+    </div>
+
+    <!-- Panel 4: Unlink Client -->
+    <div id="panel-unlink" class="panel">
+        <p class="desc">Remove a user's link to a client application. Idempotent — unlinking a non-linked user succeeds silently.</p>
+        <div class="field">
+            <label>User ID <span class="req">*</span></label>
+            <input type="text" id="unlink-user-id" placeholder="32-character hex UUID">
+        </div>
+        <div class="field">
+            <label>Client ID <span class="req">*</span></label>
+            <input type="text" id="unlink-client-id" placeholder="32-character hex UUID">
+        </div>
+        <div id="unlink-error" class="field-error"></div>
+        <button class="run-btn" data-action="run-unlink">Unlink User</button>
+        <div id="unlink-result" class="result"></div>
+    </div>
+
+    <!-- Panel 5: List Users -->
+    <div id="panel-list" class="panel">
+        <p class="desc">List all users linked to a client application. Returns paginated results with user IDs, usernames, and active status.</p>
+        <div class="field">
+            <label>Client ID <span class="req">*</span></label>
+            <input type="text" id="list-client-id" placeholder="32-character hex UUID">
+        </div>
+        <div class="field">
+            <label>Limit</label>
+            <input type="number" id="list-limit" placeholder="Default 20, max 100" min="1" max="100">
+        </div>
+        <div class="field">
+            <label>Offset</label>
+            <input type="number" id="list-offset" placeholder="Default 0" min="0">
+        </div>
+        <div id="list-error" class="field-error"></div>
+        <button class="run-btn" data-action="run-list">List Users</button>
+        <div id="list-result" class="result"></div>
+    </div>
+
+    <p class="back-link"><a href="/">&#8592; Home</a></p>
+</div>
+</body>
+</html>

@@ -1,0 +1,36 @@
+/* Login page styles */
+
+input[type="text"],
+input[type="password"],
+select {
+    padding: 12px 16px;
+    font-size: 16px;
+    border-color: #444;
+}
+
+button[type="submit"] {
+    margin-top: 8px;
+}
+
+.help-text {
+    margin-top: 24px;
+    font-size: 14px;
+    text-align: center;
+}
+
+.help-text + .help-text {
+    margin-top: 12px;
+}
+
+.recovery-input {
+    font-family: monospace;
+    letter-spacing: 2px;
+}
+
+.mfa-prompt {
+    margin-bottom: 24px;
+}
+
+.totp-container {
+    margin-bottom: 8px;
+}

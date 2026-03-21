@@ -13,7 +13,9 @@
  */
 
 /* SHA-256 produces 32-byte (256-bit) output */
+#ifndef SHA256_DIGEST_LENGTH
 #define SHA256_DIGEST_LENGTH  32
+#endif
 #define SHA256_HEX_LENGTH     65  /* 32 bytes * 2 + null terminator */
 
 /*

@@ -9,6 +9,16 @@
 #include <limits.h>
 #include <openssl/crypto.h>
 
+/* Email defaults */
+#ifdef EMAIL_SUPPORT
+#define DEFAULT_PASSWORD_RESET_TOKEN_TTL_SECONDS 3600       /* 1 hour */
+#define DEFAULT_EMAIL_VERIFICATION_TOKEN_TTL_SECONDS 86400  /* 24 hours */
+#define DEFAULT_PASSWORDLESS_LOGIN_TOKEN_TTL_SECONDS 600    /* 10 minutes */
+#endif
+
+/* Invitation token default (not gated by EMAIL_SUPPORT) */
+#define DEFAULT_INVITATION_TOKEN_TTL_SECONDS 259200  /* 72 hours */
+
 /* Default values */
 #define DEFAULT_HOST "localhost"
 #define DEFAULT_PORT 8080
@@ -384,6 +394,17 @@ static void set_config_value(config_t *config, const char *key, const char *valu
         }
     }
 
+    /* Password policy */
+    else if (strcmp(key, "password_min_length") == 0) {
+        int len = 0;
+        if (parse_int(value, &len) != 0 || len < 1) {
+            log_warn("Invalid password_min_length '%s', must be >= 1. Keeping current: %d",
+                    value, config->password_min_length);
+        } else {
+            config->password_min_length = len;
+        }
+    }
+
     /* OAuth2 token limits */
     else if (strcmp(key, "max_access_token_ttl_seconds") == 0) {
         int ttl = 0;
@@ -403,6 +424,17 @@ static void set_config_value(config_t *config, const char *key, const char *valu
                     value, config->jwt_clock_skew_seconds);
         } else {
             config->jwt_clock_skew_seconds = skew;
+        }
+    }
+
+    /* Invitation token TTL */
+    else if (strcmp(key, "invitation_token_ttl_seconds") == 0) {
+        int ttl = 0;
+        if (parse_int(value, &ttl) != 0 || ttl < 60) {
+            log_warn("Invalid invitation_token_ttl_seconds '%s', must be >= 60. Keeping current: %d",
+                    value, config->invitation_token_ttl_seconds);
+        } else {
+            config->invitation_token_ttl_seconds = ttl;
         }
     }
 
@@ -515,7 +547,84 @@ static void set_config_value(config_t *config, const char *key, const char *valu
         } else {
             log_error("Failed to allocate memory for log_level_env");
         }
-    } else {
+    }
+#ifdef EMAIL_SUPPORT
+    /* Email delivery settings */
+    else if (strcmp(key, "email_command") == 0) {
+        new_value = str_dup(value);
+        if (new_value) {
+            free(config->email_command);
+            config->email_command = new_value;
+        } else {
+            log_error("Failed to allocate memory for email_command");
+        }
+    } else if (strcmp(key, "email_from") == 0) {
+        new_value = str_dup(value);
+        if (new_value) {
+            free(config->email_from);
+            config->email_from = new_value;
+        } else {
+            log_error("Failed to allocate memory for email_from");
+        }
+    } else if (strcmp(key, "email_from_name") == 0) {
+        new_value = str_dup(value);
+        if (new_value) {
+            free(config->email_from_name);
+            config->email_from_name = new_value;
+        } else {
+            log_error("Failed to allocate memory for email_from_name");
+        }
+    } else if (strcmp(key, "password_reset_token_ttl_seconds") == 0) {
+        int ttl = 0;
+        if (parse_int(value, &ttl) != 0 || ttl < 60) {
+            log_warn("Invalid password_reset_token_ttl_seconds '%s', must be >= 60. Keeping current: %d",
+                    value, config->password_reset_token_ttl_seconds);
+        } else {
+            config->password_reset_token_ttl_seconds = ttl;
+        }
+    } else if (strcmp(key, "email_verification_token_ttl_seconds") == 0) {
+        int ttl = 0;
+        if (parse_int(value, &ttl) != 0 || ttl < 60) {
+            log_warn("Invalid email_verification_token_ttl_seconds '%s', must be >= 60. Keeping current: %d",
+                    value, config->email_verification_token_ttl_seconds);
+        } else {
+            config->email_verification_token_ttl_seconds = ttl;
+        }
+    } else if (strcmp(key, "passwordless_login_token_ttl_seconds") == 0) {
+        int ttl = 0;
+        if (parse_int(value, &ttl) != 0 || ttl < 60) {
+            log_warn("Invalid passwordless_login_token_ttl_seconds '%s', must be >= 60. Keeping current: %d",
+                    value, config->passwordless_login_token_ttl_seconds);
+        } else {
+            config->passwordless_login_token_ttl_seconds = ttl;
+        }
+    } else if (strcmp(key, "email_command_env") == 0) {
+        new_value = str_dup(value);
+        if (new_value) {
+            free(config->email_command_env);
+            config->email_command_env = new_value;
+        } else {
+            log_error("Failed to allocate memory for email_command_env");
+        }
+    } else if (strcmp(key, "email_from_env") == 0) {
+        new_value = str_dup(value);
+        if (new_value) {
+            free(config->email_from_env);
+            config->email_from_env = new_value;
+        } else {
+            log_error("Failed to allocate memory for email_from_env");
+        }
+    } else if (strcmp(key, "email_from_name_env") == 0) {
+        new_value = str_dup(value);
+        if (new_value) {
+            free(config->email_from_name_env);
+            config->email_from_name_env = new_value;
+        } else {
+            log_error("Failed to allocate memory for email_from_name_env");
+        }
+    }
+#endif
+    else {
         log_warn("Unknown config key: '%s'", key);
     }
 }
@@ -810,6 +919,51 @@ static void apply_env_overrides(config_t *config) {
         }
     }
 
+#ifdef EMAIL_SUPPORT
+    /* EMAIL_COMMAND */
+    env_var_name = config->email_command_env ? config->email_command_env : "AUTH_EMAIL_COMMAND";
+    env_value = getenv(env_var_name);
+    if (env_value) {
+        char *new_value = str_dup(env_value);
+        if (new_value) {
+            free(config->email_command);
+            config->email_command = new_value;
+            log_info("Config override from %s", env_var_name);
+        } else {
+            log_error("Failed to allocate memory for %s override", env_var_name);
+        }
+    }
+
+    /* EMAIL_FROM */
+    env_var_name = config->email_from_env ? config->email_from_env : "AUTH_EMAIL_FROM";
+    env_value = getenv(env_var_name);
+    if (env_value) {
+        char *new_value = str_dup(env_value);
+        if (new_value) {
+            free(config->email_from);
+            config->email_from = new_value;
+            log_info("Config override from %s", env_var_name);
+        } else {
+            log_error("Failed to allocate memory for %s override", env_var_name);
+        }
+    }
+
+    /* EMAIL_FROM_NAME */
+    env_var_name = config->email_from_name_env ? config->email_from_name_env : "AUTH_EMAIL_FROM_NAME";
+    env_value = getenv(env_var_name);
+    if (env_value) {
+        char *new_value = str_dup(env_value);
+        if (new_value) {
+            free(config->email_from_name);
+            config->email_from_name = new_value;
+            log_info("Config override from %s", env_var_name);
+        } else {
+            log_error("Failed to allocate memory for %s override", env_var_name);
+        }
+    }
+
+#endif
+
     /* ENABLE_HISTORY_TABLES */
     env_value = getenv("AUTH_ENABLE_HISTORY_TABLES");
     if (env_value) {
@@ -883,12 +1037,16 @@ config_t *config_load(const char *config_file) {
     config->secret_hashing_algorithm = PASSWORD_HASH_ARGON2ID;  /* Default to Argon2id */
     config->secret_hash_min_iterations = 4;                     /* Default constant iterations */
     config->secret_hash_max_iterations = 4;
+    config->password_min_length = 1;
 
     /* OAuth2 token limits */
     config->max_access_token_ttl_seconds = DEFAULT_MAX_ACCESS_TOKEN_TTL_SECONDS;
 
     /* JWT settings */
     config->jwt_clock_skew_seconds = DEFAULT_JWT_CLOCK_SKEW_SECONDS;
+
+    /* Invitation token TTL */
+    config->invitation_token_ttl_seconds = DEFAULT_INVITATION_TOKEN_TTL_SECONDS;
 
     /* Database cleaner defaults */
     config->cleaner_enabled = DEFAULT_CLEANER_ENABLED;
@@ -914,6 +1072,19 @@ config_t *config_load(const char *config_file) {
 
     config->enable_history_tables = DEFAULT_ENABLE_HISTORY_TABLES;
 
+#ifdef EMAIL_SUPPORT
+    /* Email defaults (all NULL = not configured) */
+    config->email_command = NULL;
+    config->email_from = NULL;
+    config->email_from_name = NULL;
+    config->password_reset_token_ttl_seconds = DEFAULT_PASSWORD_RESET_TOKEN_TTL_SECONDS;
+    config->email_verification_token_ttl_seconds = DEFAULT_EMAIL_VERIFICATION_TOKEN_TTL_SECONDS;
+    config->passwordless_login_token_ttl_seconds = DEFAULT_PASSWORDLESS_LOGIN_TOKEN_TTL_SECONDS;
+    config->email_command_env = NULL;
+    config->email_from_env = NULL;
+    config->email_from_name_env = NULL;
+#endif
+
     /* Try to open config file */
     FILE *file = fopen(config_file, "r");
     if (!file) {
@@ -936,6 +1107,7 @@ config_t *config_load(const char *config_file) {
 
     /* Parse config file */
     char line[MAX_LINE_LENGTH];
+    char key[128], value[MAX_LINE_LENGTH];
     int line_num = 0;
 
     while (fgets(line, sizeof(line), file)) {
@@ -956,7 +1128,6 @@ config_t *config_load(const char *config_file) {
         }
 
         /* Parse key=value */
-        char key[128], value[MAX_LINE_LENGTH];
         if (parse_key_value(line, key, sizeof(key), value, sizeof(value)) == 0) {
             set_config_value(config, key, value);
         } else {
@@ -965,6 +1136,11 @@ config_t *config_load(const char *config_file) {
     }
 
     fclose(file);
+
+    /* Cleanse parse buffers (may contain db_password or encryption_key) */
+    OPENSSL_cleanse(line, sizeof(line));
+    OPENSSL_cleanse(value, sizeof(value));
+    OPENSSL_cleanse(key, sizeof(key));
 
     /* Apply environment variable overrides */
     apply_env_overrides(config);
@@ -975,6 +1151,17 @@ config_t *config_load(const char *config_file) {
                 "Setting max = min.",
                 config->secret_hash_max_iterations, config->secret_hash_min_iterations);
         config->secret_hash_max_iterations = config->secret_hash_min_iterations;
+    }
+
+    /* Algorithm-specific iteration limits */
+    int algo_max = (config->secret_hashing_algorithm == PASSWORD_HASH_ARGON2ID) ? 20 : 10000000;
+    if (config->secret_hash_max_iterations > algo_max) {
+        log_error("secret_hash_max_iterations (%d) exceeds maximum for %s (%d)",
+                config->secret_hash_max_iterations,
+                config->secret_hashing_algorithm == PASSWORD_HASH_ARGON2ID ? "argon2id" : "pbkdf2-sha256",
+                algo_max);
+        config_free(config);
+        return NULL;
     }
 
     log_info("Configuration loaded successfully");
@@ -1006,11 +1193,19 @@ static int pg_quote_append(char *dst, size_t dst_size, size_t pos, const char *v
 }
 
 int config_build_pg_connection_string(const config_t *config, char *out, size_t out_size) {
-    int n = snprintf(out, out_size, "host=%s port=%d dbname=", config->db_host, config->db_port);
+    int n = snprintf(out, out_size, "host=");
     if (n < 0 || (size_t)n >= out_size) return -1;
     size_t pos = (size_t)n;
 
-    int q = pg_quote_append(out, out_size, pos, config->db_name);
+    int q = pg_quote_append(out, out_size, pos, config->db_host);
+    if (q < 0) return -1;
+    pos += q;
+
+    n = snprintf(out + pos, out_size - pos, " port=%d dbname=", config->db_port);
+    if (n < 0 || (size_t)n >= out_size - pos) return -1;
+    pos += n;
+
+    q = pg_quote_append(out, out_size, pos, config->db_name);
     if (q < 0) return -1;
     pos += q;
 
@@ -1068,6 +1263,15 @@ void config_free(config_t *config) {
     free(config->mothership_url);
 
     free(config->encryption_key);
+
+#ifdef EMAIL_SUPPORT
+    free(config->email_command);
+    free(config->email_from);
+    free(config->email_from_name);
+    free(config->email_command_env);
+    free(config->email_from_env);
+    free(config->email_from_name_env);
+#endif
 
     free(config);
 }

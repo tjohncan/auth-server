@@ -8,38 +8,7 @@
 #include <strings.h>  /* strncasecmp */
 #include <sys/stat.h>
 #include <dirent.h>
-
-/*
- * html_escape - Escape a string for safe embedding in HTML
- *
- * Handles &, <, >, ", ' — covers both element content and attribute values.
- * Returns number of bytes written (excluding NUL), or 0 if buffer too small.
- */
-static size_t html_escape(char *dst, size_t dst_size, const char *src) {
-    size_t i = 0;
-    for (; *src; src++) {
-        const char *ent;
-        switch (*src) {
-            case '&':  ent = "&amp;";  break;
-            case '<':  ent = "&lt;";   break;
-            case '>':  ent = "&gt;";   break;
-            case '"':  ent = "&quot;"; break;
-            case '\'': ent = "&#39;";  break;
-            default:   ent = NULL;     break;
-        }
-        if (ent) {
-            size_t len = strlen(ent);
-            if (i + len >= dst_size) return 0;
-            memcpy(dst + i, ent, len);
-            i += len;
-        } else {
-            if (i + 1 >= dst_size) return 0;
-            dst[i++] = *src;
-        }
-    }
-    dst[i] = '\0';
-    return i;
-}
+#include <stdint.h>
 
 /* --------------------------------------------------------------------
  * In-memory static file cache
@@ -55,12 +24,15 @@ typedef struct {
     char   *content;        /* heap-allocated file content   */
     size_t  length;         /* content length in bytes       */
     const char *mime_type;  /* static string, never freed    */
+    int     hash_next;      /* chaining index, -1 = end      */
 } StaticFile;
 
 #define MAX_STATIC_FILES 128
+#define STATIC_HASH_SIZE 64
 
 static StaticFile static_files[MAX_STATIC_FILES];
 static int static_file_count = 0;
+static int static_hash_buckets[STATIC_HASH_SIZE];
 
 /* -------------------------------------------------------------------- */
 
@@ -97,10 +69,21 @@ static const char *get_mime_type(const char *path) {
 
 /* -------------------------------------------------------------------- */
 
+static uint32_t static_hash_path(const char *path) {
+    uint32_t h = 2166136261u;
+    while (*path) {
+        h ^= (uint8_t)*path++;
+        h *= 16777619;
+    }
+    return h % STATIC_HASH_SIZE;
+}
+
 static StaticFile *find_static_file(const char *path) {
-    for (int i = 0; i < static_file_count; i++) {
-        if (strcmp(static_files[i].path, path) == 0)
-            return &static_files[i];
+    int idx = static_hash_buckets[static_hash_path(path)];
+    while (idx >= 0) {
+        if (strcmp(static_files[idx].path, path) == 0)
+            return &static_files[idx];
+        idx = static_files[idx].hash_next;
     }
     return NULL;
 }
@@ -137,6 +120,7 @@ static void template_replace(StaticFile *sf,
     sf->length = new_len;
 }
 
+#ifndef EMAIL_SUPPORT
 /*
  * Remove everything between `start` and `end` markers (inclusive).
  */
@@ -167,6 +151,7 @@ static void template_remove_section(StaticFile *sf,
     sf->content = buf;
     sf->length = new_len;
 }
+#endif
 
 /* -------------------------------------------------------------------- */
 
@@ -273,11 +258,16 @@ static int cache_file(const char *fs_path, const char *url_path) {
     }
     content[bytes_read] = '\0';
 
-    StaticFile *sf = &static_files[static_file_count++];
+    int idx = static_file_count++;
+    StaticFile *sf = &static_files[idx];
     str_copy(sf->path, sizeof(sf->path), url_path);
     sf->content = content;
     sf->length = bytes_read;
     sf->mime_type = get_mime_type(fs_path);
+
+    uint32_t bucket = static_hash_path(url_path);
+    sf->hash_next = static_hash_buckets[bucket];
+    static_hash_buckets[bucket] = idx;
 
     return 0;
 }
@@ -351,9 +341,16 @@ static void apply_templates(const config_t *config) {
        appropriate text based on build configuration */
 #ifndef EMAIL_SUPPORT
     StaticFile *login = find_static_file("/login.html");
-    if (login)
+    if (login) {
         template_replace(login, "placeholder=\"Email or Username\"",
                                  "placeholder=\"Username\"");
+        template_remove_section(login,
+            "<!-- PASSWORD_RESET_LINK_START -->",
+            "<!-- PASSWORD_RESET_LINK_END -->");
+        template_remove_section(login,
+            "<!-- PASSWORDLESS_LOGIN_LINK_START -->",
+            "<!-- PASSWORDLESS_LOGIN_LINK_END -->");
+    }
 
     StaticFile *admin = find_static_file("/admin.html");
     if (admin) {
@@ -385,16 +382,14 @@ static void apply_templates(const config_t *config) {
             /* HTML-escape both the href and display text */
             char escaped_url[512];
             char escaped_display[512];
-            html_escape(escaped_url, sizeof(escaped_url), config->mothership_url);
-            html_escape(escaped_display, sizeof(escaped_display), display_clean);
+            str_html_escape(escaped_url, sizeof(escaped_url), config->mothership_url);
+            str_html_escape(escaped_display, sizeof(escaped_display), display_clean);
 
             /* Build footer HTML */
             char mothership_html[1280];
             snprintf(mothership_html, sizeof(mothership_html),
-                "<div style=\"margin-top:40px;padding-top:16px;"
-                "border-top:1px solid #333;font-size:14px;\">"
-                "<a href=\"%s\" style=\"color:#aa66aa;text-decoration:none;\">"
-                "&#8627; %s</a></div>",
+                "<div class=\"mothership\">"
+                "<a href=\"%s\">&#8627; %s</a></div>",
                 escaped_url, escaped_display);
 
             template_replace(index, "<!-- MOTHERSHIP -->", mothership_html);
@@ -421,6 +416,8 @@ void register_static_files(Router *router, const config_t *config) {
         return;
     }
 
+    memset(static_hash_buckets, -1, sizeof(static_hash_buckets));
+
     log_info("Scanning ./static/ for files to register...");
     int count = scan_and_register(router, "./static", "");
 
@@ -442,4 +439,5 @@ void static_files_cleanup(void) {
     for (int i = 0; i < static_file_count; i++)
         free(static_files[i].content);
     static_file_count = 0;
+    memset(static_hash_buckets, -1, sizeof(static_hash_buckets));
 }

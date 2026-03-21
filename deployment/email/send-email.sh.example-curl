@@ -1,0 +1,12 @@
+#!/bin/bash
+# Send email via HTTP API.
+# Adapt the URL, headers, and body to your provider (SendGrid, Mailgun, etc.).
+# Requires: EMAIL_API_KEY and EMAIL_API_URL environment variables.
+
+read -r payload
+
+# Pass the JSON payload directly — reshape if your provider expects a different schema
+curl -sf -X POST "$EMAIL_API_URL" \
+  -H "Authorization: Bearer $EMAIL_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "$payload"

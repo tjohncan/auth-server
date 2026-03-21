@@ -5,9 +5,10 @@
 # -----------------------------------------------------------------------------
 # Stage 1: Build
 # -----------------------------------------------------------------------------
-FROM alpine:3.19 AS builder
+FROM alpine:3 AS builder
 
 ARG DB_BACKEND=sqlite
+ARG EMAIL_SUPPORT=0
 
 RUN apk add --no-cache \
     gcc \
@@ -27,22 +28,28 @@ COPY src/ ./src/
 COPY include/ ./include/
 COPY vendor/ ./vendor/
 
-RUN make clean && make DB_BACKEND=${DB_BACKEND}
+RUN make clean && make DB_BACKEND=${DB_BACKEND} EMAIL_SUPPORT=${EMAIL_SUPPORT}
 
 # -----------------------------------------------------------------------------
 # Stage 2: Runtime
 # -----------------------------------------------------------------------------
-FROM alpine:3.19
+FROM alpine:3
 
 ARG DB_BACKEND=sqlite
+ARG EMAIL_SUPPORT=0
+ARG EXTRA_PACKAGES=
 
 RUN apk add --no-cache \
     openssl \
     argon2-libs \
     ca-certificates \
     wget \
+    bash \
     && if [ "$DB_BACKEND" = "postgresql" ]; then \
         apk add --no-cache libpq; \
+    fi \
+    && if [ -n "$EXTRA_PACKAGES" ]; then \
+        apk add --no-cache $EXTRA_PACKAGES; \
     fi \
     && addgroup -g 1000 authserver \
     && adduser -u 1000 -G authserver -s /bin/sh -D authserver \

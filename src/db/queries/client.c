@@ -5,6 +5,7 @@
 #include "util/log.h"
 #include "util/data.h"
 #include "util/str.h"
+#include <openssl/crypto.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -1687,12 +1688,15 @@ int client_key_create(db_handle_t *db,
     char hash_hex[PASSWORD_HASH_HEX_MAX_LENGTH];
     int iterations;
 
-    if (crypto_password_hash(secret, strlen(secret),
+    int hash_rc = crypto_password_hash(secret, strlen(secret),
                             salt_hex, sizeof(salt_hex),
                             &iterations,
-                            hash_hex, sizeof(hash_hex)) != 0) {
+                            hash_hex, sizeof(hash_hex));
+    if (hash_rc != 0) {
+        OPENSSL_cleanse(salt_hex, sizeof(salt_hex));
+        OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
         log_error("Failed to hash secret");
-        return -1;
+        return (hash_rc == -2) ? -2 : -1;
     }
 
     const char *sql;
@@ -1709,7 +1713,6 @@ int client_key_create(db_handle_t *db,
             "WHERE c.id = " P"2 "
             "AND ok.pin = " P"7 "
             "AND ok.is_active = " BOOL_TRUE " "
-            "AND c.is_active = " BOOL_TRUE " "
             "AND c.client_type = 'confidential' "
             "LIMIT 1";
     } else {
@@ -1724,13 +1727,14 @@ int client_key_create(db_handle_t *db,
             "WHERE c.id = " P"2 "
             "AND oa.user_account_pin = " P"7 "
             "AND ua.is_active = " BOOL_TRUE " "
-            "AND c.is_active = " BOOL_TRUE " "
             "AND c.client_type = 'confidential' "
             "LIMIT 1";
     }
 
     db_stmt_t *stmt = NULL;
     if (db_prepare(db, &stmt, sql) != 0) {
+        OPENSSL_cleanse(salt_hex, sizeof(salt_hex));
+        OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
         log_error("Failed to prepare client_key_create statement");
         return -1;
     }
@@ -1757,6 +1761,9 @@ int client_key_create(db_handle_t *db,
     /* Execute */
     int rc = db_step(stmt);
     db_finalize(stmt);
+
+    OPENSSL_cleanse(salt_hex, sizeof(salt_hex));
+    OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
 
     if (rc != DB_DONE) {
         log_error("Failed to insert client key (unauthorized, not confidential, or constraint violation)");
@@ -2050,6 +2057,8 @@ int client_key_verify(db_handle_t *db,
 
     /* Verify secret using timing-safe comparison */
     int valid = crypto_password_verify(secret, strlen(secret), salt, iterations, hash);
+    OPENSSL_cleanse(salt, sizeof(salt));
+    OPENSSL_cleanse(hash, sizeof(hash));
 
     /* If valid, return client pin if requested */
     if (valid == 1) {

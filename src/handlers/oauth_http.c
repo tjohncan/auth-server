@@ -24,6 +24,14 @@
 #include <openssl/bn.h>
 #include <openssl/evp.h>
 
+/* Cleanse and free a heap-allocated sensitive string */
+static void cleanse_free(char *s) {
+    if (s) {
+        OPENSSL_cleanse(s, strlen(s));
+        free(s);
+    }
+}
+
 /* ============================================================================
  * JSON/Form Parsing Helpers
  * ========================================================================== */
@@ -72,16 +80,19 @@ static char *form_get_param(const char *body, const char *key) {
     /* URL decode using safe utility function */
     char *value = malloc(len + 1);  /* Decoded is always <= original */
     if (!value) {
+        OPENSSL_cleanse(value_encoded, len);
         free(value_encoded);
         return NULL;
     }
 
     if (str_url_decode(value, len + 1, value_encoded) < 0) {
+        OPENSSL_cleanse(value_encoded, len);
         free(value_encoded);
         free(value);
         return NULL;
     }
 
+    OPENSSL_cleanse(value_encoded, len);
     free(value_encoded);
     return value;
 }
@@ -161,9 +172,9 @@ HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params) {
 
         if (!code || !redirect_uri) {
             free(grant_type);
-            free(code);
+            cleanse_free(code);
             free(redirect_uri);
-            free(code_verifier);
+            cleanse_free(code_verifier);
             free(resource);
             return response_json_error(400, "code and redirect_uri required");
         }
@@ -172,9 +183,9 @@ HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params) {
         int rc = oauth_exchange_authorization_code(db, client_id, code, redirect_uri,
                                                     code_verifier, resource, &token_resp);
 
-        free(code);
+        cleanse_free(code);
         free(redirect_uri);
-        free(code_verifier);
+        cleanse_free(code_verifier);
         free(resource);
 
         if (rc == 1) {
@@ -214,7 +225,7 @@ HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params) {
 
         if (!refresh_token) {
             free(grant_type);
-            free(refresh_token);
+            cleanse_free(refresh_token);
             free(scope);
             free(resource);
             return response_json_error(400, "refresh_token required");
@@ -223,7 +234,7 @@ HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params) {
         oauth_token_response_t token_resp;
         int rc = oauth_refresh_access_token(db, client_id, refresh_token, scope, resource, &token_resp);
 
-        free(refresh_token);
+        cleanse_free(refresh_token);
         free(scope);
         free(resource);
 
@@ -559,7 +570,7 @@ HttpResponse *authorize_handler(const HttpRequest *req, const RouteParams *param
                              session_token,
                              &auth_response);
 
-    free(session_token);
+    cleanse_free(session_token);
 
     /* After this point, redirect_uri is validated - use OAuth2 error redirects */
 
@@ -706,6 +717,9 @@ HttpResponse *authorize_handler(const HttpRequest *req, const RouteParams *param
 
     http_response_set_header(resp, "Location", location);
     http_response_set_body_str(resp, "");
+
+    OPENSSL_cleanse(encoded_code, sizeof(encoded_code));
+    OPENSSL_cleanse(location, sizeof(location));
 
     log_info("Authorization successful, redirecting to client");
     return resp;
@@ -954,7 +968,7 @@ HttpResponse *revoke_handler(const HttpRequest *req, const RouteParams *params) 
     char *token_type_hint = form_get_param(body, "token_type_hint");
 
     if (!token || !client_id_str || !client_key_id_str || !client_secret) {
-        free(token);
+        cleanse_free(token);
         free(client_id_str);
         free(client_key_id_str);
         if (client_secret) OPENSSL_cleanse(client_secret, strlen(client_secret));
@@ -966,7 +980,7 @@ HttpResponse *revoke_handler(const HttpRequest *req, const RouteParams *params) 
     /* Parse client_id UUID */
     unsigned char client_id[16];
     if (hex_to_bytes(client_id_str, client_id, 16) != 0) {
-        free(token);
+        cleanse_free(token);
         free(client_id_str);
         free(client_key_id_str);
         OPENSSL_cleanse(client_secret, strlen(client_secret));
@@ -979,7 +993,7 @@ HttpResponse *revoke_handler(const HttpRequest *req, const RouteParams *params) 
     /* Parse client_key_id UUID */
     unsigned char client_key_id[16];
     if (hex_to_bytes(client_key_id_str, client_key_id, 16) != 0) {
-        free(token);
+        cleanse_free(token);
         free(client_key_id_str);
         OPENSSL_cleanse(client_secret, strlen(client_secret));
         free(client_secret);
@@ -998,7 +1012,7 @@ HttpResponse *revoke_handler(const HttpRequest *req, const RouteParams *params) 
     free(client_secret);
 
     if (auth_result != 1) {
-        free(token);
+        cleanse_free(token);
         free(token_type_hint);
         log_warn("Client authentication failed for revoke request");
         /* Per RFC 7009: return 200 OK even on auth failure to prevent enumeration */
@@ -1012,7 +1026,7 @@ HttpResponse *revoke_handler(const HttpRequest *req, const RouteParams *params) 
     /* Revoke the token */
     int revoke_result = oauth_handler_revoke_token(db, token, token_type_hint, client_pin);
 
-    free(token);
+    cleanse_free(token);
     free(token_type_hint);
 
     if (revoke_result != 0) {
@@ -1083,7 +1097,7 @@ HttpResponse *introspect_handler(const HttpRequest *req, const RouteParams *para
     char *token_type_hint = form_get_param(body, "token_type_hint");
 
     if (!token || !resource_server_id_str || !resource_server_key_id_str || !resource_server_secret) {
-        free(token);
+        cleanse_free(token);
         free(resource_server_id_str);
         free(resource_server_key_id_str);
         if (resource_server_secret) OPENSSL_cleanse(resource_server_secret, strlen(resource_server_secret));
@@ -1095,7 +1109,7 @@ HttpResponse *introspect_handler(const HttpRequest *req, const RouteParams *para
     /* Parse resource_server_id UUID */
     unsigned char resource_server_id[16];
     if (hex_to_bytes(resource_server_id_str, resource_server_id, 16) != 0) {
-        free(token);
+        cleanse_free(token);
         free(resource_server_id_str);
         free(resource_server_key_id_str);
         OPENSSL_cleanse(resource_server_secret, strlen(resource_server_secret));
@@ -1108,7 +1122,7 @@ HttpResponse *introspect_handler(const HttpRequest *req, const RouteParams *para
     /* Parse resource_server_key_id UUID */
     unsigned char resource_server_key_id[16];
     if (hex_to_bytes(resource_server_key_id_str, resource_server_key_id, 16) != 0) {
-        free(token);
+        cleanse_free(token);
         free(resource_server_key_id_str);
         OPENSSL_cleanse(resource_server_secret, strlen(resource_server_secret));
         free(resource_server_secret);
@@ -1130,7 +1144,7 @@ HttpResponse *introspect_handler(const HttpRequest *req, const RouteParams *para
     free(resource_server_secret);
 
     if (auth_result != 1) {
-        free(token);
+        cleanse_free(token);
         free(token_type_hint);
         log_warn("Resource server authentication failed for introspect request");
         /* Return inactive per RFC 7662 (don't leak auth failures) */
@@ -1157,7 +1171,7 @@ HttpResponse *introspect_handler(const HttpRequest *req, const RouteParams *para
                                                             token_resource_server_id,
                                                             &expires_at, &issued_at);
 
-    free(token);
+    cleanse_free(token);
     free(token_type_hint);
 
     if (introspect_result != 0) {

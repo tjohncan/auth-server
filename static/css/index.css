@@ -1,0 +1,46 @@
+/* Landing page styles */
+
+a.nav-item {
+    display: block;
+    width: fit-content;
+    min-width: 25vw;
+    margin-bottom: 16px;
+    padding: 12px 16px;
+    border-left: 2px solid #444;
+    text-decoration: none;
+    color: inherit;
+}
+
+a.nav-item:hover { border-left-color: #87ceeb; }
+a.nav-item:visited { color: inherit; }
+
+.nav-item .title {
+    display: block;
+    font-size: 16px;
+    color: #87ceeb;
+}
+
+a.nav-item:visited .title { color: #87ceeb; }
+
+.nav-item .desc {
+    display: block;
+    margin: 4px 0 0;
+    color: #888;
+    font-size: 14px;
+}
+
+.endpoints, .mothership {
+    margin-top: 40px;
+    padding-top: 16px;
+    border-top: 1px solid #333;
+    font-size: 14px;
+}
+
+.endpoints { color: #666; line-height: 1.8; }
+.endpoints a { color: #666; text-decoration: none; }
+.endpoints a:visited { color: #666; }
+.endpoints a:hover { color: #87ceeb; }
+
+.mothership a { color: #aa66aa; text-decoration: none; }
+.mothership a:visited { color: #aa66aa; }
+.mothership a:hover { color: #cc88cc; }

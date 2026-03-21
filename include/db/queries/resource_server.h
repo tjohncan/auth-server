@@ -94,6 +94,7 @@ typedef struct {
     char address[512];
     char note[512];
     int is_active;
+    int allow_user_provisioning;
 } resource_server_data_t;
 
 /*
@@ -175,7 +176,8 @@ int resource_server_update(db_handle_t *db, const unsigned char *server_id,
                            long long user_account_pin,
                            long long organization_key_pin,
                            const char *display_name, const char *address,
-                           const char *note, const int *is_active);
+                           const char *note, const int *is_active,
+                           const int *allow_user_provisioning);
 
 /*
  * Resource Server Key data structure
@@ -195,7 +197,7 @@ typedef struct {
  *
  * Dual-auth capable: session user OR organization key.
  * Creates authentication key for resource server introspection endpoint.
- * Hashes secret with Argon2id before storage.
+ * Hashes secret with configured algorithm before storage.
  *
  * Parameters:
  *   db                   - Database handle
@@ -210,7 +212,7 @@ typedef struct {
  * - Session auth: Verifies user is org admin
  * - Org key auth: Verifies specific key is active
  *
- * Returns: 0 on success, -1 on error
+ * Returns: 0 on success, -1 on error, -2 if secret below minimum length
  */
 int resource_server_key_create(db_handle_t *db,
                                 long long user_account_pin,
@@ -293,5 +295,63 @@ int resource_server_key_verify(db_handle_t *db,
                                const unsigned char *key_id,
                                const char *secret,
                                long long *out_resource_server_pin);
+
+/*
+ * Check if resource server has user provisioning enabled
+ *
+ * Parameters:
+ *   db      - Database handle
+ *   rs_pin  - Resource server PIN (from key auth)
+ *
+ * Returns: 1 if allowed, 0 if not allowed, -1 on error
+ */
+int resource_server_provisioning_allowed(db_handle_t *db, long long rs_pin);
+
+/* RS client-user entry for list results */
+typedef struct {
+    unsigned char user_id[16];
+    char username[256];
+    int is_active;
+} rs_client_user_t;
+
+/*
+ * Resolve client UUID within RS scope
+ *
+ * Verifies the client is linked to this resource server via
+ * client_resource_server and returns the client_pin.
+ *
+ * Returns: 0 found (in scope), 1 not found or not in scope, -1 on error
+ */
+int rs_resolve_client(db_handle_t *db, long long resource_server_pin,
+                       const unsigned char *client_id,
+                       long long *out_client_pin);
+
+/*
+ * Link user to client (idempotent)
+ *
+ * Resolves user UUID to PIN internally.
+ *
+ * Returns: 0 on success (including already-linked), 1 user not found, -1 on error
+ */
+int rs_client_user_link(db_handle_t *db, long long client_pin,
+                         const unsigned char *user_id);
+
+/*
+ * Unlink user from client (idempotent)
+ *
+ * Returns: 0 on success (including no-op), -1 on error
+ */
+int rs_client_user_unlink(db_handle_t *db, long long client_pin,
+                           const unsigned char *user_id);
+
+/*
+ * List users linked to client
+ *
+ * Returns: 0 on success, -1 on error
+ */
+int rs_client_user_list(db_handle_t *db, long long client_pin,
+                         int limit, int offset,
+                         rs_client_user_t **out_users, int *out_count,
+                         int *out_total);
 
 #endif /* DB_QUERIES_RESOURCE_SERVER_H */

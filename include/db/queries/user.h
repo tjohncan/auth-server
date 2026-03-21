@@ -18,11 +18,17 @@
 int user_username_exists(db_handle_t *db, const char *username);
 
 /*
- * Check if email exists (case-insensitive)
+ * Check if email is taken (case-insensitive)
  *
- * Returns: 1 if exists, 0 if not exists, -1 on error
+ * Returns 1 (taken) if:
+ *   - The same user already has this email (verified or not), OR
+ *   - A different user has this email verified
+ *
+ * Pass user_account_pin = -1 for new user creation (skips same-user check).
+ *
+ * Returns: 1 if taken, 0 if available, -1 on error
  */
-int user_email_exists(db_handle_t *db, const char *email);
+int user_email_exists(db_handle_t *db, const char *email, long long user_account_pin);
 
 /*
  * Check if user exists by ID
@@ -60,7 +66,7 @@ int user_lookup_id_by_username(db_handle_t *db, const char *username,
  *
  * Transaction: Creates user_account + user_email in single transaction if email provided
  *
- * Returns: 0 on success, -1 on error
+ * Returns: 0 on success, -1 on error, -2 if password below minimum length
  */
 int user_create(db_handle_t *db, const char *username,
                 const char *email, const char *password,
@@ -88,6 +94,20 @@ int user_verify_password(db_handle_t *db, const char *username,
                          const char *password, long long *out_pin,
                          unsigned char *out_id);
 
+#ifdef EMAIL_SUPPORT
+/*
+ * Verify user password by verified email
+ *
+ * Looks up user by verified email address and verifies password hash.
+ * Same semantics as user_verify_password.
+ *
+ * Returns: 1 if password valid, 0 if invalid, -1 on error
+ */
+int user_verify_password_by_email(db_handle_t *db, const char *email,
+                                   const char *password, long long *out_pin,
+                                   unsigned char *out_id);
+#endif
+
 /*
  * Make user an admin of organization
  *
@@ -109,12 +129,12 @@ int user_make_org_admin(db_handle_t *db, const unsigned char *user_id,
  * Represents a valid management UI configuration that the user can access.
  */
 typedef struct {
-    char org_code_name[64];
+    char org_code_name[128];
     char org_display_name[256];
     unsigned char client_id[16];
-    char client_code_name[64];
+    char client_code_name[128];
     char client_display_name[256];
-    char resource_server_address[256];
+    char resource_server_address[512];
 } management_ui_setup_t;
 
 /*
@@ -151,6 +171,7 @@ typedef struct {
     char username[256];          /* Username (may be empty string if not set) */
     int has_mfa;                 /* 1 if user has at least one confirmed MFA method */
     int require_mfa;             /* 1 if user opted in to enforce MFA themselves */
+    int allow_passwordless_login; /* 1 if user allows passwordless login via email link */
 } user_profile_t;
 
 /*
@@ -224,10 +245,41 @@ int user_get_emails(db_handle_t *db, long long user_account_pin,
                     user_email_t **out_emails, int *out_count, int *out_total);
 
 /*
+ * Add email to user account
+ *
+ * Inserts a new unverified, non-primary email.
+ * Caller should check user_email_exists() first.
+ *
+ * Returns: 0 on success, -1 on error
+ */
+int user_add_email(db_handle_t *db, long long user_account_pin,
+                   const char *email);
+
+/*
+ * Delete email from user account (idempotent)
+ *
+ * Returns: 0 on success (including no-op), -1 on error
+ */
+int user_delete_email(db_handle_t *db, long long user_account_pin,
+                      const char *email);
+
+/*
+ * Set an email as primary for user account
+ *
+ * Clears current primary (if any) and sets the specified email
+ * in a transaction (two UPDATEs). Pass email = NULL to just
+ * clear the primary flag without setting a new one.
+ *
+ * Returns: 0 on success, 1 if email not found, -1 on error
+ */
+int user_set_primary_email(db_handle_t *db, long long user_account_pin,
+                           const char *email);
+
+/*
  * Change user password
  *
  * Verifies current password and updates to new password.
- * Uses crypto/password module for secure bcrypt hashing.
+ * Uses crypto/password module for secure hashing.
  *
  * Parameters:
  *   db                  - Database handle
@@ -238,7 +290,8 @@ int user_get_emails(db_handle_t *db, long long user_account_pin,
  *
  * Returns: 1 if password changed successfully,
  *          0 if current password is invalid,
- *          -1 on error
+ *          -1 on error,
+ *          -2 if new password below minimum length
  */
 int user_change_password(db_handle_t *db, long long user_account_pin,
                          const unsigned char *user_account_id,
@@ -263,5 +316,299 @@ int user_change_password(db_handle_t *db, long long user_account_pin,
 int user_change_username(db_handle_t *db, long long user_account_pin,
                          const unsigned char *user_account_id,
                          const char *new_username);
+
+/*
+ * Create email verification token
+ *
+ * Generates a random token and inserts into email_verification_token via
+ * INSERT-SELECT (resolves user_email.pin internally from natural keys).
+ * Rate-limited: fails if >= 5 active (unexpired, unused, unrevoked) tokens
+ * exist for this email.
+ *
+ * Parameters:
+ *   db                - Database handle
+ *   user_account_pin  - User account PIN (from session)
+ *   email             - Email address to verify
+ *   ttl_seconds       - Token lifetime in seconds
+ *   source_ip         - Client IP for audit trail (can be NULL)
+ *   out_token         - Output: token string (caller-provided buffer, >= 44 bytes)
+ *
+ * Returns: 0 on success (token created),
+ *          1 on failure (rate limited or email not found),
+ *          -1 on error
+ */
+int user_create_email_verification_token(db_handle_t *db,
+                                          long long user_account_pin,
+                                          const char *email,
+                                          int ttl_seconds,
+                                          const char *source_ip,
+                                          char *out_token);
+
+/* Verification result data (returned by lookup/verify token functions) */
+typedef struct {
+    unsigned char user_id[16]; /* User UUID */
+    char email_address[256];   /* Decrypted email that was verified */
+    char username[256];        /* Decrypted username (empty string if not set) */
+} email_verification_result_t;
+
+/*
+ * Look up email verification token (read-only)
+ *
+ * Validates token is usable (exists, not expired, not used, not revoked,
+ * user is active) and returns the email address + username for display
+ * on the confirmation page. Does NOT consume the token.
+ *
+ * Parameters:
+ *   db         - Database handle
+ *   token      - Token string from verification link
+ *   out_result - Output: email address + username
+ *
+ * Returns: 0 on success, 1 if token invalid/expired/used, -1 on error
+ */
+int user_lookup_email_verification_token(db_handle_t *db, const char *token,
+                                          email_verification_result_t *out_result);
+
+/*
+ * Verify email using token
+ *
+ * Single transaction:
+ *   1. Validate token (exists, not expired, not used, not revoked)
+ *   2. Mark token used
+ *   3. Mark email verified
+ *   4. Squatter cleanup: delete other users' unverified rows with same
+ *      email_hash (and their verification tokens — FK children first)
+ *
+ * Parameters:
+ *   db         - Database handle
+ *   token      - Token string from verification link
+ *   out_result - Output: email address + username (for confirmation page)
+ *
+ * Returns: 0 on success, 1 if token invalid/expired/used, -1 on error
+ */
+int user_verify_email_token(db_handle_t *db, const char *token,
+                             email_verification_result_t *out_result);
+
+/*
+ * Create password reset token
+ *
+ * Looks up user by verified email, generates token, inserts into
+ * password_reset_token. Rate-limited: fails if >= 5 tokens issued
+ * in last hour for this user.
+ *
+ * Returns: 0 on success, 1 on failure (not found/rate limited), -1 on error
+ */
+int user_create_password_reset_token(db_handle_t *db, const char *email,
+                                      int ttl_seconds, const char *source_ip,
+                                      char *out_token);
+
+/*
+ * Look up password reset token (read-only)
+ *
+ * Validates token is usable (exists, not expired, not used, not revoked,
+ * user is active).
+ *
+ * Returns: 0 if valid, 1 if invalid/expired/used, -1 on error
+ */
+int user_lookup_password_reset_token(db_handle_t *db, const char *token);
+
+/*
+ * Consume password reset token and set new password
+ *
+ * Single transaction: validate token, mark used, hash new password,
+ * update user_account.
+ *
+ * Returns: 0 on success, 1 if token invalid/expired/used,
+ *          -1 on error, -2 if password below minimum length
+ */
+int user_consume_password_reset_token(db_handle_t *db, const char *token,
+                                       const char *new_password);
+
+/*
+ * Create passwordless login token
+ *
+ * Looks up user by verified email where allow_passwordless_login is enabled.
+ * Rate-limited: fails if >= 5 tokens issued in last hour for this user.
+ *
+ * Parameters:
+ *   return_to  - OAuth authorize query string to redirect after login (can be NULL)
+ *
+ * Returns: 0 on success, 1 on failure (not found/not allowed/rate limited), -1 on error
+ */
+int user_create_passwordless_login_token(db_handle_t *db, const char *email,
+                                          int ttl_seconds, const char *source_ip,
+                                          const char *return_to, char *out_token);
+
+/* Passwordless login lookup result */
+typedef struct {
+    char email_address[256];
+    char username[256];
+} passwordless_login_lookup_t;
+
+/*
+ * Look up passwordless login token (read-only)
+ *
+ * Validates token is usable (exists, not expired, not used, user active,
+ * passwordless login still allowed) and returns email + username for display.
+ *
+ * Returns: 0 if valid, 1 if invalid/expired/used, -1 on error
+ */
+int user_lookup_passwordless_login_token(db_handle_t *db, const char *token,
+                                          passwordless_login_lookup_t *out_result);
+
+/*
+ * Consume passwordless login token
+ *
+ * Transaction: validate token, mark used, return user identity for session creation.
+ *
+ * Parameters:
+ *   out_user_pin  - Output: user account PIN
+ *   out_user_id   - Output: user UUID (16 bytes)
+ *   out_return_to - Output: return_to query string (caller-provided buffer, can be empty)
+ *   return_to_size - Size of out_return_to buffer
+ *
+ * Returns: 0 on success, 1 if token invalid/expired/used, -1 on error
+ */
+int user_consume_passwordless_login_token(db_handle_t *db, const char *token,
+                                           long long *out_user_pin,
+                                           unsigned char *out_user_id,
+                                           char *out_return_to, size_t return_to_size);
+
+/*
+ * Check if user has at least one verified email
+ *
+ * Returns: 0 on success (result in out_has_verified), -1 on error
+ */
+int user_has_verified_email(db_handle_t *db, long long user_account_pin,
+                             int *out_has_verified);
+
+/*
+ * Update user allow_passwordless_login flag
+ *
+ * Returns: 0 on success, -1 on error
+ */
+int user_update_allow_passwordless_login(db_handle_t *db,
+                                          long long user_account_pin,
+                                          int allow);
+
+/* Invitation token lookup result */
+typedef struct {
+    unsigned char user_id[16];
+    char username[256];
+    char email_address[256];    /* empty string if no email or email row deleted */
+    int email_is_verified;
+} invitation_token_lookup_t;
+
+/*
+ * Create invitation token
+ *
+ * Direct insert — no rate limiting (RS are trusted callers).
+ * Caller provides user_account_pin and optional user_email_pin
+ * from the RS provisioning flow.
+ *
+ * Parameters:
+ *   user_email_pin - Email PIN (0 for no email)
+ *   out_token      - Output: token string (caller buffer, >= 44 bytes)
+ *
+ * Returns: 0 on success, -1 on error
+ */
+int user_create_invitation_token(db_handle_t *db,
+                                  long long user_account_pin,
+                                  long long user_email_pin,
+                                  int ttl_seconds,
+                                  const char *source_ip,
+                                  char *out_token);
+
+/*
+ * Look up invitation token (read-only)
+ *
+ * Validates token is usable (exists, not expired, not used, user active)
+ * and returns display data for the accept-invitation page.
+ * LEFT JOINs user_email (nullable on invitation).
+ *
+ * Returns: 0 on success, 1 if token invalid/expired/used, -1 on error
+ */
+int user_lookup_invitation_token(db_handle_t *db, const char *token,
+                                  invitation_token_lookup_t *out_result);
+
+/*
+ * Consume invitation token (verify email + set password)
+ *
+ * Single transaction:
+ *   1. Validate token (exists, not expired, not used, user active)
+ *   2. Mark token used
+ *   3. If email present and not yet verified: verify + squatter cleanup
+ *   4. Hash and set password on user account
+ *
+ * Returns: 0 on success,
+ *          1 if token invalid/expired/used,
+ *          2 if email conflict (another user verified same email),
+ *          -1 on error,
+ *          -2 if password below minimum length
+ */
+int user_consume_invitation_token(db_handle_t *db, const char *token,
+                                    const char *new_password);
+
+/* User identity data (used by RS provisioning lookups) */
+typedef struct {
+    long long user_account_pin;
+    unsigned char user_id[16];
+    char username[256];
+    int is_active;
+} user_identity_t;
+
+/*
+ * Find user by username and/or verified email
+ *
+ * Identity matching for RS user provisioning:
+ *   - Username: exact match (case-insensitive)
+ *   - Email: verified email match only
+ *   - Both provided resolving to different users: ambiguous match
+ *
+ * Does not filter by is_active — returns all matching users.
+ *
+ * Returns: 0 found, 1 not found, 2 ambiguous match, -1 on error
+ */
+int user_find_by_identity(db_handle_t *db, const char *username,
+                           const char *email,
+                           user_identity_t *out_match);
+
+/*
+ * Create user account without password
+ *
+ * For RS provisioning — creates ACTIVE user with no password fields.
+ * Optionally creates unverified primary email.
+ * At least one of username or email must be provided.
+ *
+ * Parameters:
+ *   out_email_pin  - Output: email PIN (0 if no email created)
+ *
+ * Returns: 0 on success, -1 on error
+ */
+int user_create_no_password(db_handle_t *db, const char *username,
+                             const char *email,
+                             long long *out_user_pin,
+                             unsigned char *out_user_id,
+                             long long *out_email_pin);
+
+/*
+ * Get user by UUID
+ *
+ * Looks up user by UUID, returns basic identity data.
+ * Does not filter by is_active.
+ *
+ * Returns: 0 found, 1 not found, -1 on error
+ */
+int user_get_by_id(db_handle_t *db, const unsigned char *user_id,
+                    user_identity_t *out_info);
+
+/*
+ * Set user active/inactive
+ *
+ * Idempotent: setting the same state is a no-op.
+ * active: 1 = active, 0 = inactive
+ *
+ * Returns: 0 success, 1 not found, -1 on error
+ */
+int user_set_active(db_handle_t *db, const unsigned char *user_id, int active);
 
 #endif /* DB_QUERIES_USER_H */

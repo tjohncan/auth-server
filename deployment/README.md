@@ -96,7 +96,11 @@ curl https://auth.yourdomain.com/health
 
 ```bash
 # View logs
-docker compose logs -f auth-server
+docker compose logs -f auth-server --tail 10
+
+# View logs (filtered — hide health checks, static assets, routine 200s)
+docker logs auth-server 2>&1 | grep -v -E \
+  "GET /health|Sending 200 response|Accepted connection|GET /(css|js|favicon|images)/"
 
 # Restart
 docker compose restart
@@ -171,9 +175,96 @@ overridden by environment variables (useful for Docker and secrets management).
 | `AUTH_DB_OWNER_ROLE`  | `db_owner_role`  | Schema owner role        | (db_user)      |
 | `AUTH_ENCRYPTION_KEY` | `encryption_key` | Field encryption key     | `customize_me` |
 | `AUTH_LOG_LEVEL`      | `log_level`      | `debug/info/warn/error`  | `info`         |
+| `AUTH_EMAIL_COMMAND`  | `email_command`  | Email delivery script    | —              |
+| `AUTH_EMAIL_FROM`     | `email_from`     | Sender address           | —              |
+| `AUTH_EMAIL_FROM_NAME`| `email_from_name`| Sender display name      | —              |
 
 Environment variable names can be customized in `auth.conf` (e.g., `db_password_env = MY_SECRET`)
 to match your infrastructure's naming conventions.
+
+## Email Delivery (Optional)
+
+Email support is a compile-time feature. Build with `EMAIL_SUPPORT=1` to enable it:
+
+```bash
+make EMAIL_SUPPORT=1
+# or with Docker:
+docker build -f deployment/Dockerfile --build-arg EMAIL_SUPPORT=1 -t auth-server .
+```
+
+The server sends email by forking a process that pipes a JSON payload to a configured command.
+Delivery is non-blocking (worker threads return immediately) with a 30-second timeout to prevent
+runaway children. This keeps email delivery a deployment concern — the deployer chooses the transport
+(CLI tool, SMTP relay, HTTP API, etc.).
+
+### Setup
+
+1. **Copy an example script** from `deployment/email/` and make it executable:
+
+   ```bash
+   cp deployment/email/send-email.sh.example-noop deployment/email/send-email.sh
+   chmod +x deployment/email/send-email.sh
+   ```
+
+   Available examples:
+   - `example-noop` — logs to `/tmp/auth-server-email.log` (testing)
+   - `example-cli` — AWS SES via `aws ses send-email`
+   - `example-curl` — generic HTTP API
+   - `example-msmtp` — local SMTP via msmtp
+
+2. **Configure `auth.conf`:**
+
+   ```ini
+   email_command = ./deployment/email/send-email.sh
+   email_from = noreply@yourdomain.com
+   email_from_name = Auth System
+   ```
+
+3. **Test** with the standalone test binary:
+
+   ```bash
+   make EMAIL_SUPPORT=1 test-email
+   ./test-email you@example.com
+   ```
+
+### Docker
+
+Set `EMAIL_SUPPORT=1` in `deployment/.env`. If your email script needs additional packages
+(e.g., `aws-cli`), set `EXTRA_PACKAGES` in `.env` as well. The compose file volume-mounts
+`deployment/email/send-email.sh` into the container automatically.
+
+## Production Hardening
+
+### Secrets
+
+The default setup loads database credentials from `.env` into container environment variables.
+This is standard for single-server deployments. For higher-security environments, be aware that
+environment variables are visible via `docker inspect` and `/proc/1/environ` inside the container.
+Alternatives include Docker Swarm secrets or mounting a credentials file as a read-only volume.
+
+### Resource Limits
+
+To set memory, CPU, or other resource constraints without modifying the committed
+`docker-compose.yml`, create a `docker-compose.override.yml` (gitignored) in the same directory.
+Docker Compose automatically merges it with the base file.
+
+Example `docker-compose.override.yml`:
+
+```yaml
+services:
+  auth-server:
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '2.0'
+  nginx:
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.5'
+```
 
 ## Building the Image
 
@@ -192,6 +283,11 @@ deployment/
 ├── Dockerfile                         # Multi-stage build
 ├── docker-compose.yml                 # auth-server + nginx + certbot
 ├── .env.example                       # Environment variable template
+├── email/
+│   ├── send-email.sh.example-noop     # No-op logger (testing)
+│   ├── send-email.sh.example-cli      # AWS SES via CLI
+│   ├── send-email.sh.example-curl     # Generic HTTP API
+│   └── send-email.sh.example-msmtp    # Local SMTP via msmtp
 ├── nginx/
 │   ├── nginx.conf                     # Main nginx config (rate limiting, security headers)
 │   └── conf.d/

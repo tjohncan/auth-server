@@ -1,0 +1,14 @@
+#!/bin/bash
+# Send email via msmtp (local SMTP relay).
+# Requires: msmtp installed and configured (~/.msmtprc or /etc/msmtprc).
+
+read -r payload
+
+field() { echo "$payload" | jq -r ".$1 // empty"; }
+
+TO=$(field to)
+FROM=$(field from)
+SUBJECT=$(field subject)
+BODY=$(field body_text)
+
+printf "From: %s\nTo: %s\nSubject: %s\n\n%s" "$FROM" "$TO" "$SUBJECT" "$BODY" | msmtp "$TO"

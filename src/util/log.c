@@ -27,7 +27,7 @@ void log_init(LogLevel min_level) {
 static void get_timestamp(char *buffer, size_t size) {
     time_t now = time(NULL);
     struct tm tm_info;
-    localtime_r(&now, &tm_info);  /* Thread-safe version */
+    gmtime_r(&now, &tm_info);  /* Thread-safe, UTC — consistent with database timestamps */
     strftime(buffer, size, "%Y-%m-%d %H:%M:%S", &tm_info);
 }
 

@@ -281,13 +281,14 @@ int admin_update_resource_server(db_handle_t *db, long long user_account_pin,
                                   const char *display_name,
                                   const char *address,
                                   const char *note,
-                                  const int *is_active) {
+                                  const int *is_active,
+                                  const int *allow_user_provisioning) {
     if (!db || !server_id) {
         log_error("Invalid arguments to admin_update_resource_server");
         return -1;
     }
 
-    if (!display_name && !address && !note && !is_active) {
+    if (!display_name && !address && !note && !is_active && !allow_user_provisioning) {
         log_error("No fields to update in admin_update_resource_server");
         return -1;
     }
@@ -298,7 +299,7 @@ int admin_update_resource_server(db_handle_t *db, long long user_account_pin,
         return -1;
     }
 
-    if (resource_server_update(db, server_id, user_account_pin, organization_key_pin, display_name, address, note, is_active) != 0) {
+    if (resource_server_update(db, server_id, user_account_pin, organization_key_pin, display_name, address, note, is_active, allow_user_provisioning) != 0) {
         return -1;
     }
 
@@ -594,10 +595,9 @@ int admin_create_resource_server_key(db_handle_t *db,
         return -1;
     }
 
-    if (resource_server_key_create(db, user_account_pin, organization_key_pin,
-                                    resource_server_id, secret, note, out_key_id) != 0) {
-        return -1;
-    }
+    int rc = resource_server_key_create(db, user_account_pin, organization_key_pin,
+                                    resource_server_id, secret, note, out_key_id);
+    if (rc != 0) return rc;
 
     return 0;
 }
@@ -662,10 +662,9 @@ int admin_create_client_key(db_handle_t *db,
         return -1;
     }
 
-    if (client_key_create(db, user_account_pin, organization_key_pin,
-                          client_id, secret, note, out_key_id) != 0) {
-        return -1;
-    }
+    int rc = client_key_create(db, user_account_pin, organization_key_pin,
+                          client_id, secret, note, out_key_id);
+    if (rc != 0) return rc;
 
     return 0;
 }
@@ -893,7 +892,7 @@ int admin_create_user(db_handle_t *db,
 
     /* Check if email already exists */
     if (email) {
-        int exists = user_email_exists(db, email);
+        int exists = user_email_exists(db, email, -1);
         if (exists < 0) {
             return -1;
         } else if (exists == 1) {
@@ -951,13 +950,13 @@ int admin_make_org_admin(db_handle_t *db,
  * ========================================================================== */
 
 int admin_list_organization_keys(db_handle_t *db,
-                                  const char *organization_code_name,
+                                  long long organization_pin,
                                   int limit, int offset,
                                   const int *filter_is_active,
                                   admin_organization_key_t **out_keys,
                                   int *out_count,
                                   int *out_total) {
-    if (!db || !organization_code_name || !out_keys || !out_count) {
+    if (!db || !out_keys || !out_count) {
         log_error("Invalid arguments to admin_list_organization_keys");
         return -1;
     }
@@ -965,7 +964,7 @@ int admin_list_organization_keys(db_handle_t *db,
     organization_key_data_t *keys = NULL;
     int count = 0;
 
-    if (organization_key_list(db, organization_code_name, limit, offset, filter_is_active, &keys, &count, out_total) != 0) {
+    if (organization_key_list(db, organization_pin, limit, offset, filter_is_active, &keys, &count, out_total) != 0) {
         return -1;
     }
 

@@ -9,6 +9,7 @@
 #include "db/queries/resource_server.h"
 #include "db/queries/client.h"
 #include "db/queries/oauth.h"
+#include "crypto/password.h"
 #include "crypto/random.h"
 #include "util/log.h"
 #include "util/str.h"
@@ -75,6 +76,7 @@ static int get_authenticated_user_pin(const HttpRequest *req, long long *out_use
 
     oauth_session_info_t session;
     int result = oauth_session_get_by_token(db, session_token, &session);
+    OPENSSL_cleanse(session_token, strlen(session_token));
     free(session_token);
 
     if (result != 0) {
@@ -407,7 +409,9 @@ HttpResponse *admin_get_resource_servers_handler(const HttpRequest *req, const R
         jsonbuf_append_escaped(jb, server.address);
         jsonbuf_appendf(jb, "\",\"note\":\"");
         jsonbuf_append_escaped(jb, server.note);
-        jsonbuf_appendf(jb, "\",\"is_active\":%s}", server.is_active ? "true" : "false");
+        jsonbuf_appendf(jb, "\",\"is_active\":%s,\"allow_user_provisioning\":%s}",
+            server.is_active ? "true" : "false",
+            server.allow_user_provisioning ? "true" : "false");
 
         return jsonbuf_to_response(jb, 200);
     }
@@ -461,8 +465,9 @@ HttpResponse *admin_get_resource_servers_handler(const HttpRequest *req, const R
         jsonbuf_append_escaped(jb, servers[i].address);
         jsonbuf_appendf(jb, "\",\"note\":\"");
         jsonbuf_append_escaped(jb, servers[i].note);
-        jsonbuf_appendf(jb, "\",\"is_active\":%s}",
-                        servers[i].is_active ? "true" : "false");
+        jsonbuf_appendf(jb, "\",\"is_active\":%s,\"allow_user_provisioning\":%s}",
+                        servers[i].is_active ? "true" : "false",
+                        servers[i].allow_user_provisioning ? "true" : "false");
     }
 
     jsonbuf_appendf(jb, "],\"pagination\":{\"limit\":%d,\"offset\":%d,\"count\":%d,\"total\":%d}}",
@@ -622,6 +627,12 @@ HttpResponse *admin_update_resource_server_handler(const HttpRequest *req, const
         is_active = &is_active_val;
     }
 
+    int allow_user_provisioning_val;
+    int *allow_user_provisioning = NULL;
+    if (json_get_bool(req->body, "allow_user_provisioning", &allow_user_provisioning_val) == 0) {
+        allow_user_provisioning = &allow_user_provisioning_val;
+    }
+
     /* Validate input formats */
     char validation_error[256];
 
@@ -640,12 +651,12 @@ HttpResponse *admin_update_resource_server_handler(const HttpRequest *req, const
         return response_json_error(400, validation_error);
     }
 
-    if (!display_name && !address && !note && !is_active) {
+    if (!display_name && !address && !note && !is_active && !allow_user_provisioning) {
         free(display_name); free(address); free(note);
         return response_json_error(400, "At least one field must be provided for update");
     }
 
-    int result = admin_update_resource_server(db, ctx.user_account_pin, ctx.organization_key_pin, server_id, display_name, address, note, is_active);
+    int result = admin_update_resource_server(db, ctx.user_account_pin, ctx.organization_key_pin, server_id, display_name, address, note, is_active, allow_user_provisioning);
 
     free(display_name); free(address); free(note);
 
@@ -1081,7 +1092,7 @@ HttpResponse *admin_create_client_redirect_uri_handler(const HttpRequest *req, c
     /* Validate input formats */
     char validation_error[256];
 
-    if (validate_url_field(redirect_uri, "Redirect URI", validation_error, sizeof(validation_error)) != 0) {
+    if (validate_redirect_uri(redirect_uri, validation_error, sizeof(validation_error)) != 0) {
         free(client_id_str); free(redirect_uri); free(note);
         return response_json_error(400, validation_error);
     }
@@ -1495,6 +1506,13 @@ HttpResponse *admin_create_resource_server_key_handler(const HttpRequest *req, c
     if (user_secret) OPENSSL_cleanse(user_secret, strlen(user_secret));
     free(user_secret);
 
+    if (result == -2) {
+        OPENSSL_cleanse(generated_secret, sizeof(generated_secret));
+        char msg[128];
+        snprintf(msg, sizeof(msg),
+                 "Secret must be at least %d characters", crypto_password_min_length());
+        return response_json_error(400, msg);
+    }
     if (result != 0) {
         OPENSSL_cleanse(generated_secret, sizeof(generated_secret));
         return response_json_error(409, "Key creation failed");
@@ -1524,7 +1542,7 @@ HttpResponse *admin_create_resource_server_key_handler(const HttpRequest *req, c
  *
  * Query params:
  *   resource_server_id - Resource server UUID (hex, required)
- *   limit             - Max results (default 100, max 1000)
+ *   limit             - Max results (default 20, max 100)
  *   offset            - Skip N results (default 0)
  *   is_active         - Filter by active status (optional)
  */
@@ -1745,6 +1763,13 @@ HttpResponse *admin_create_client_key_handler(const HttpRequest *req, const Rout
     if (user_secret) OPENSSL_cleanse(user_secret, strlen(user_secret));
     free(user_secret);
 
+    if (result == -2) {
+        OPENSSL_cleanse(generated_secret, sizeof(generated_secret));
+        char msg[128];
+        snprintf(msg, sizeof(msg),
+                 "Secret must be at least %d characters", crypto_password_min_length());
+        return response_json_error(400, msg);
+    }
     if (result != 0) {
         OPENSSL_cleanse(generated_secret, sizeof(generated_secret));
         return response_json_error(409, "Key creation failed (client must be confidential)");
@@ -1774,7 +1799,7 @@ HttpResponse *admin_create_client_key_handler(const HttpRequest *req, const Rout
  *
  * Query params:
  *   client_id - Client UUID (hex, required)
- *   limit     - Max results (default 100, max 1000)
+ *   limit     - Max results (default 20, max 100)
  *   offset    - Skip N results (default 0)
  *   is_active - Filter by active status (optional)
  */

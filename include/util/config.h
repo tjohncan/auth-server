@@ -8,7 +8,7 @@
  * Configuration System
  *
  * Loads settings from config file + environment variables.
- * Config file format: INI-style [section] key=value
+ * Config file format: key = value (one per line, # comments)
  * Environment variables override config file values.
  */
 
@@ -52,11 +52,17 @@ typedef struct {
     int secret_hash_min_iterations;
     int secret_hash_max_iterations;
 
+    /* Password policy */
+    int password_min_length;  /* Minimum password length (default 1, minimum 1) */
+
     /* OAuth2 token limits */
     int max_access_token_ttl_seconds;  /* Maximum TTL for client access tokens (default 60 days) */
 
     /* JWT settings */
     int jwt_clock_skew_seconds;  /* Clock skew tolerance for JWT validation (default 0) */
+
+    /* Invitation token TTL (not gated by EMAIL_SUPPORT — RS provisioning always needs this) */
+    int invitation_token_ttl_seconds;  /* How long invitation tokens are valid (default 72 hours) */
 
     /* Database cleaner settings */
     int cleaner_enabled;                    /* Master switch: 0=off, 1=on */
@@ -91,6 +97,23 @@ typedef struct {
 
     /* Branding */
     char *mothership_url;  /* Optional parent/brand URL shown on index page */
+
+#ifdef EMAIL_SUPPORT
+    /* Email delivery */
+    char *email_command;     /* Shell command to exec for sending email (receives JSON on stdin) */
+    char *email_from;        /* Sender email address */
+    char *email_from_name;   /* Sender display name */
+
+    /* Email token TTLs */
+    int password_reset_token_ttl_seconds;        /* How long password reset tokens are valid (default 1 hour) */
+    int email_verification_token_ttl_seconds;    /* How long email verification tokens are valid (default 24 hours) */
+    int passwordless_login_token_ttl_seconds;    /* How long passwordless login tokens are valid (default 10 min) */
+
+    /* Email environment variable overrides */
+    char *email_command_env;
+    char *email_from_env;
+    char *email_from_name_env;
+#endif
 } config_t;
 
 /*

@@ -1,0 +1,340 @@
+/* Management console styles */
+
+/* ---- Page defaults ---- */
+
+h3, h4, div, span, strong {
+    overflow-wrap: break-word;
+}
+
+h4 {
+    margin-top: 0;
+}
+
+/* ---- Page structure ---- */
+
+#pickerOverlay {
+    display: none;
+    position: fixed;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    background: rgba(0,0,0,0.5);
+    z-index: 1000;
+    pointer-events: none;
+}
+
+.picker-card {
+    background: #1a1a1a;
+    margin: 100px auto;
+    padding: 40px;
+    max-width: 600px;
+    border-radius: 8px;
+    border: 1px solid #666;
+    pointer-events: auto;
+}
+
+.picker-item {
+    padding: 15px;
+    margin: 10px 0;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+}
+
+#dashboard {
+    display: none;
+    max-width: 960px;
+}
+
+.admin-toolbar {
+    padding: 10px;
+    background: #1a1a1a;
+    font-size: 12px;
+    color: silver;
+    border: 1px solid #666;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.logout-btn {
+    padding: 5px 15px;
+    white-space: nowrap;
+    margin-left: 15px;
+}
+
+/* ---- Tabs ---- */
+
+#tabBar {
+    display: none;
+    margin-bottom: 20px;
+    border-bottom: 1px solid #666;
+}
+
+.admin-tab {
+    padding: 10px 20px;
+    background: none;
+    color: #999;
+    border: none;
+    border-bottom: 2px solid transparent;
+    font-size: 14px;
+}
+
+.admin-tab.active {
+    color: white;
+    border-bottom-color: #007bff;
+}
+
+/* ---- Sections ---- */
+
+#userinfoResult { margin-top: 10px; }
+
+.section-heading { margin-top: 30px; }
+
+.section-divider {
+    border-top: 1px solid #444;
+    padding-top: 15px;
+    margin-top: 10px;
+}
+
+.section-divider-flex {
+    margin-top: 20px;
+    border-top: 1px solid #444;
+    padding-top: 15px;
+    display: flex;
+    gap: 10px;
+}
+
+/* ---- Cards and list items ---- */
+
+.detail-card {
+    border: 1px solid #666;
+    border-radius: 4px;
+    padding: 20px;
+    margin-bottom: 20px;
+}
+
+.detail-meta {
+    font-size: 14px;
+    line-height: 1.6;
+}
+
+.org-card {
+    border: 1px solid #666;
+    border-radius: 4px;
+    padding: 15px;
+    margin-bottom: 10px;
+}
+
+.list-item {
+    border: 1px solid #444;
+    border-radius: 4px;
+    padding: 12px;
+    margin-bottom: 8px;
+}
+
+/* ---- Status badges ---- */
+
+.badge-active { color: #28a745; white-space: nowrap; }
+.badge-active-sm { color: #28a745; font-size: 12px; white-space: nowrap; }
+.badge-inactive { color: #6c757d; white-space: nowrap; }
+.badge-inactive-sm { color: #6c757d; font-size: 12px; }
+.badge-primary { color: #007bff; font-size: 12px; margin-left: 8px; white-space: nowrap; }
+
+/* ---- Navigation ---- */
+
+.breadcrumb {
+    margin-bottom: 20px;
+    font-size: 14px;
+    color: #999;
+}
+
+/* ---- Buttons (admin-specific) ---- */
+
+.btn-xs { padding: 4px 8px; font-size: 12px; }
+
+.btn-toggle {
+    color: white;
+    border: none;
+    padding: 8px 14px;
+    margin-top: 10px;
+}
+
+.btn-link {
+    color: #aaa;
+    background: transparent;
+    border: 1px solid #555;
+    font-size: 12px;
+    padding: 3px 12px;
+}
+.btn-link:hover { background: #333; color: #fff; }
+.btn-link:active { background: #2a2a2a; }
+
+.btn-muted { background: #111; color: #666; border: 1px solid #333; }
+.btn-muted:hover { background: #222; }
+.btn-muted:active { background: #0a0a0a; }
+
+.btn-subtle { background: #333; color: #ccc; border: 1px solid #555; }
+.btn-subtle:hover { background: #444; }
+.btn-subtle:active { background: #2a2a2a; }
+
+.btn-teal { background: #17a2b8; color: white; border: none; }
+.btn-teal:hover { background: #138496; }
+.btn-teal:active { background: #0f6674; }
+
+/* ---- Forms (admin JS form builder) ---- */
+
+.form-label { display: block; margin-bottom: 5px; }
+.form-label-bold { display: block; margin-bottom: 5px; font-weight: bold; }
+
+.form-input {
+    width: 100%; padding: 8px;
+    background: #2a2a2a; border: 1px solid #666;
+    color: white; border-radius: 4px;
+}
+
+.form-hint { color: #6c757d; display: block; margin-top: -15px; }
+input.input-narrow { width: 100px; }
+.key-display { flex: 1; padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-family: monospace; font-size: 12px; }
+
+/* ---- Settings panels ---- */
+
+.settings-panel, .settings-panel-spaced {
+    padding: 12px;
+    background: #1a1a1a;
+    border: 1px solid #444;
+    border-radius: 4px;
+}
+.settings-panel { margin-top: 15px; }
+.settings-panel-spaced { margin-bottom: 15px; }
+
+/* ---- Modal dialogs ---- */
+
+.modal-overlay {
+    position: fixed;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    background: rgba(0,0,0,0.5);
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.modal-box {
+    background: #1a1a1a;
+    padding: 30px;
+    max-width: 600px;
+    width: 90%;
+    border-radius: 8px;
+    border: 1px solid #666;
+    max-height: 80vh;
+    overflow-y: auto;
+}
+
+.modal-message { margin: 0 0 20px; line-height: 1.5; }
+
+.modal-actions {
+    display: flex;
+    gap: 10px;
+    margin-top: 20px;
+}
+
+.modal-actions-end {
+    display: flex;
+    justify-content: flex-end;
+}
+
+.btn-modal {
+    flex: 1;
+    padding: 10px;
+}
+
+/* Copy button (inline, JS-created) */
+.copy-inline {
+    font-size: 11px;
+    color: #87ceeb;
+    background: transparent;
+    border: 1px solid #444;
+    padding: 2px 6px;
+    border-radius: 3px;
+    cursor: pointer;
+    margin-left: 6px;
+    user-select: none;
+}
+
+.copy-inline:hover {
+    background: #2a2a2a;
+    border-color: #87ceeb;
+}
+
+.copy-inline.copied {
+    color: #7fffd4;
+    border-color: #7fffd4;
+    cursor: default;
+}
+
+/* ---- MFA ---- */
+
+.totp-container {
+    margin: 20px 0;
+}
+
+.recovery-code { font-family: monospace; padding: 4px 0; color: #7fffd4; }
+
+.qr-container {
+    display: inline-block;
+    padding: 20px;
+    background: #2a2a2a;
+    border: 1px solid #444;
+    border-radius: 8px;
+}
+
+.secret-display {
+    display: block;
+    background: #1a1a1a;
+    border: 1px solid #444;
+    padding: 10px;
+    border-radius: 4px;
+    letter-spacing: 2px;
+    word-break: break-all;
+    margin-top: 8px;
+    font-size: 12px;
+}
+
+.details-toggle {
+    cursor: pointer;
+    color: #87ceeb;
+    font-size: 12px;
+    margin-bottom: 6px;
+}
+
+/* ---- Feedback ---- */
+
+.warning-box {
+    background: #2a2010;
+    border: 1px solid #665520;
+    border-radius: 4px;
+    padding: 15px;
+    margin-bottom: 15px;
+    color: #daa520;
+}
+
+.userinfo-panel {
+    padding: 12px;
+    background: #1a1a1a;
+    border: 1px solid #444;
+    border-radius: 4px;
+    font-size: 12px;
+    line-height: 1.8;
+}
+
+/* ---- Duration picker ---- */
+
+.duration-custom::-webkit-inner-spin-button,
+.duration-custom::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+
+.duration-custom {
+    -moz-appearance: textfield;
+}

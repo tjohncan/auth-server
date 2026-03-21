@@ -79,6 +79,15 @@ static char *generate_hmac_secret(void) {
 /*
  * Export EVP_PKEY to PEM string (private or public)
  */
+/* Cleanse BIO internal buffer and free (for private key export) */
+static void bio_cleanse_free(BIO *bio) {
+    BUF_MEM *bptr;
+    BIO_get_mem_ptr(bio, &bptr);
+    if (bptr && bptr->data && bptr->length > 0)
+        OPENSSL_cleanse(bptr->data, bptr->length);
+    BIO_free(bio);
+}
+
 static char *export_key_to_pem(EVP_PKEY *pkey, int is_private) {
     BIO *bio = BIO_new(BIO_s_mem());
     if (!bio) {
@@ -95,7 +104,7 @@ static char *export_key_to_pem(EVP_PKEY *pkey, int is_private) {
 
     if (!success) {
         log_error("Failed to write key to PEM format");
-        BIO_free(bio);
+        if (is_private) bio_cleanse_free(bio); else BIO_free(bio);
         return NULL;
     }
 
@@ -104,7 +113,7 @@ static char *export_key_to_pem(EVP_PKEY *pkey, int is_private) {
     long pem_len = BIO_get_mem_data(bio, &pem_data);
     if (pem_len <= 0) {
         log_error("Failed to get PEM data from BIO");
-        BIO_free(bio);
+        if (is_private) bio_cleanse_free(bio); else BIO_free(bio);
         return NULL;
     }
 
@@ -112,14 +121,14 @@ static char *export_key_to_pem(EVP_PKEY *pkey, int is_private) {
     char *result = malloc(pem_len + 1);
     if (!result) {
         log_error("Failed to allocate memory for PEM string");
-        BIO_free(bio);
+        if (is_private) bio_cleanse_free(bio); else BIO_free(bio);
         return NULL;
     }
 
     memcpy(result, pem_data, pem_len);
     result[pem_len] = '\0';
 
-    BIO_free(bio);
+    if (is_private) bio_cleanse_free(bio); else BIO_free(bio);
     return result;
 }
 
@@ -163,6 +172,7 @@ static int generate_es256_keypair(char **out_private_pem, char **out_public_pem)
 
     if (!*out_private_pem || !*out_public_pem) {
         log_error("Failed to export keypair to PEM");
+        if (*out_private_pem) OPENSSL_cleanse(*out_private_pem, strlen(*out_private_pem));
         free(*out_private_pem);
         free(*out_public_pem);
         *out_private_pem = NULL;
@@ -314,6 +324,9 @@ static int insert_new_key(db_handle_t *db, signing_key_type_t type,
 
 /*
  * Rotate key (move current -> prior, insert new -> current)
+ *
+ * WHERE clause includes the old key value for optimistic concurrency:
+ * if another worker already rotated, zero rows match and we harmlessly no-op.
  */
 static int rotate_key(db_handle_t *db, signing_key_type_t type,
                       const char *new_secret_or_priv, const char *new_public_key,
@@ -332,7 +345,9 @@ static int rotate_key(db_handle_t *db, signing_key_type_t type,
                  "prior_generated_at = current_generated_at, "
                  "current_secret = " P"2, "
                  "current_generated_at = " NOW " "
-                 "WHERE singleton = " BOOL_TRUE, table);
+                 "WHERE singleton = " BOOL_TRUE " "
+                 "AND current_secret = " P"1 "
+                 "RETURNING singleton", table);
 
         if (db_prepare(db, &stmt, sql) != 0) {
             log_error("Failed to prepare rotate HMAC key statement");
@@ -350,7 +365,9 @@ static int rotate_key(db_handle_t *db, signing_key_type_t type,
                  "current_private_key = " P"3, "
                  "current_public_key = " P"4, "
                  "current_generated_at = " NOW " "
-                 "WHERE singleton = " BOOL_TRUE, table);
+                 "WHERE singleton = " BOOL_TRUE " "
+                 "AND current_private_key = " P"1 "
+                 "RETURNING singleton", table);
 
         if (db_prepare(db, &stmt, sql) != 0) {
             log_error("Failed to prepare rotate ES256 key statement");
@@ -366,13 +383,14 @@ static int rotate_key(db_handle_t *db, signing_key_type_t type,
     int rc = db_step(stmt);
     db_finalize(stmt);
 
-    if (rc != DB_DONE) {
+    if (rc == DB_ROW) {
+        log_info("Rotated %s signing key",
+                 type == SIGNING_KEY_AUTH_REQUEST ? "auth_request_signing" : "access_token_signing");
+    } else if (rc != DB_DONE) {
         log_error("Failed to rotate signing key");
         return -1;
     }
 
-    log_info("Rotated %s signing key",
-             type == SIGNING_KEY_AUTH_REQUEST ? "auth_request_signing" : "access_token_signing");
     return 0;
 }
 
@@ -503,7 +521,7 @@ int signing_key_get_or_rotate(db_handle_t *db, signing_key_type_t type,
             }
         }
 
-        /* Commit rotation */
+        /* Commit and reload */
         if (db_execute_trusted(db, "COMMIT") != 0) {
             log_error("Failed to commit key rotation");
             OPENSSL_cleanse(new_secret_or_priv, strlen(new_secret_or_priv));
@@ -517,7 +535,6 @@ int signing_key_get_or_rotate(db_handle_t *db, signing_key_type_t type,
         free(new_secret_or_priv);
         free(new_public_key);
 
-        /* Reload rotated key */
         signing_key_free(key);
         key = load_key_from_db(db, type);
         if (!key) {

@@ -6,6 +6,7 @@
 #include "util/log.h"
 #include "util/data.h"
 #include "util/str.h"
+#include <openssl/crypto.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -1057,6 +1058,8 @@ int oauth_client_authenticate(db_handle_t *db,
     /* Verify secret against hash */
     int valid = crypto_password_verify(secret, strlen(secret),
                                         salt, iterations, hash);
+    OPENSSL_cleanse(salt, sizeof(salt));
+    OPENSSL_cleanse(hash, sizeof(hash));
 
     if (valid != 1) {
         char client_id_hex[33];
@@ -1252,6 +1255,8 @@ int oauth_resource_server_authenticate(db_handle_t *db,
     /* Verify secret against hash */
     int valid = crypto_password_verify(secret, strlen(secret),
                                         salt, iterations, hash);
+    OPENSSL_cleanse(salt, sizeof(salt));
+    OPENSSL_cleanse(hash, sizeof(hash));
 
     if (valid != 1) {
         char resource_server_id_hex[33];

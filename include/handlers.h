@@ -154,6 +154,12 @@ HttpResponse *admin_list_organization_keys_handler(const HttpRequest *req, const
 /* DELETE /api/admin/organization-keys - Revoke organization key (dual-auth) */
 HttpResponse *admin_revoke_organization_key_handler(const HttpRequest *req, const RouteParams *params);
 
+/* POST /api/admin/users/activate - Activate user account (localhost-only) */
+HttpResponse *server_activate_user_handler(const HttpRequest *req, const RouteParams *params);
+
+/* POST /api/admin/users/deactivate - Deactivate user account (localhost-only) */
+HttpResponse *server_deactivate_user_handler(const HttpRequest *req, const RouteParams *params);
+
 /* ============================================================================
  * Authentication Endpoints
  * ============================================================================ */
@@ -169,6 +175,63 @@ HttpResponse *profile_handler(const HttpRequest *req, const RouteParams *params)
 
 /* GET /api/user/emails - Get current user's email addresses */
 HttpResponse *emails_handler(const HttpRequest *req, const RouteParams *params);
+
+/* POST /api/user/emails - Add email to current user */
+HttpResponse *add_email_handler(const HttpRequest *req, const RouteParams *params);
+
+/* DELETE /api/user/emails - Remove email from current user */
+HttpResponse *delete_email_handler(const HttpRequest *req, const RouteParams *params);
+
+/* POST /api/user/emails/set-primary - Set primary email */
+HttpResponse *set_primary_email_handler(const HttpRequest *req, const RouteParams *params);
+
+#ifdef EMAIL_SUPPORT
+/* POST /email-verification-token - Create verification token and send email */
+HttpResponse *create_email_verification_token_handler(const HttpRequest *req, const RouteParams *params);
+
+/* GET /verify-email - Render verification confirmation page (public, no auth) */
+HttpResponse *verify_email_page_handler(const HttpRequest *req, const RouteParams *params);
+
+/* POST /verify-email - Consume token and verify email (public, no auth) */
+HttpResponse *verify_email_handler(const HttpRequest *req, const RouteParams *params);
+
+/* GET /request-password-reset - Render password reset request page */
+HttpResponse *request_password_reset_page_handler(const HttpRequest *req, const RouteParams *params);
+
+/* POST /request-password-reset - Create reset token and send email */
+HttpResponse *request_password_reset_handler(const HttpRequest *req, const RouteParams *params);
+
+/* GET /reset-password - Render set-new-password page (public, no auth) */
+HttpResponse *reset_password_page_handler(const HttpRequest *req, const RouteParams *params);
+
+/* POST /reset-password - Consume token and set new password (public, no auth) */
+HttpResponse *reset_password_handler(const HttpRequest *req, const RouteParams *params);
+
+/* GET /request-passwordless-login - Render passwordless login request page */
+HttpResponse *request_passwordless_login_page_handler(const HttpRequest *req, const RouteParams *params);
+
+/* POST /request-passwordless-login - Create token and send email */
+HttpResponse *request_passwordless_login_handler(const HttpRequest *req, const RouteParams *params);
+
+/* GET /passwordless-login - Render login confirmation page (public, no auth) */
+HttpResponse *passwordless_login_page_handler(const HttpRequest *req, const RouteParams *params);
+
+/* POST /passwordless-login - Consume token, create session, redirect (public, no auth) */
+HttpResponse *passwordless_login_handler(const HttpRequest *req, const RouteParams *params);
+
+/* POST /api/user/passwordless-login - Toggle allow_passwordless_login */
+HttpResponse *passwordless_login_toggle_handler(const HttpRequest *req, const RouteParams *params);
+#endif
+
+/* ============================================================================
+ * Invitation Endpoints (Public, No Auth)
+ * ============================================================================ */
+
+/* GET /accept-invitation - Render password-set form (public, no auth) */
+HttpResponse *accept_invitation_page_handler(const HttpRequest *req, const RouteParams *params);
+
+/* POST /accept-invitation - Consume token and set password */
+HttpResponse *accept_invitation_handler(const HttpRequest *req, const RouteParams *params);
 
 /* POST /api/user/password - Change current user's password */
 HttpResponse *change_password_handler(const HttpRequest *req, const RouteParams *params);
@@ -198,7 +261,7 @@ HttpResponse *mfa_recover_handler(const HttpRequest *req, const RouteParams *par
 /* GET /api/user/mfa/methods - List MFA methods */
 HttpResponse *mfa_list_methods_handler(const HttpRequest *req, const RouteParams *params);
 
-/* DELETE /api/user/mfa/methods/:id - Delete MFA method */
+/* DELETE /api/user/mfa/methods - Delete MFA method (method specified via query/body) */
 HttpResponse *mfa_delete_method_handler(const HttpRequest *req, const RouteParams *params);
 
 /* POST /api/user/mfa/recovery-codes/regenerate - Regenerate recovery codes */
@@ -267,6 +330,25 @@ HttpResponse *admin_delete_resource_server_key_handler(const HttpRequest *req, c
 HttpResponse *admin_create_client_key_handler(const HttpRequest *req, const RouteParams *params);
 HttpResponse *admin_get_client_keys_handler(const HttpRequest *req, const RouteParams *params);
 HttpResponse *admin_delete_client_key_handler(const HttpRequest *req, const RouteParams *params);
+
+/* ============================================================================
+ * RS User Provisioning API (RS Key Auth)
+ * ============================================================================ */
+
+/* POST /api/rs/users - Find-or-create user + generate invitation */
+HttpResponse *rs_provision_user_handler(const HttpRequest *req, const RouteParams *params);
+
+/* GET /api/rs/users - Look up user */
+HttpResponse *rs_lookup_user_handler(const HttpRequest *req, const RouteParams *params);
+
+/* POST /api/rs/client-users - Link user to client */
+HttpResponse *rs_link_client_user_handler(const HttpRequest *req, const RouteParams *params);
+
+/* DELETE /api/rs/client-users - Unlink user from client */
+HttpResponse *rs_unlink_client_user_handler(const HttpRequest *req, const RouteParams *params);
+
+/* GET /api/rs/client-users - List users linked to client */
+HttpResponse *rs_list_client_users_handler(const HttpRequest *req, const RouteParams *params);
 
 /* ============================================================================
  * Static File Serving

@@ -14,6 +14,7 @@
 #include "util/log.h"
 #include "util/json.h"
 #include "util/validation.h"
+#include <openssl/crypto.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -40,10 +41,12 @@ static HttpResponse *require_session(const HttpRequest *req, db_handle_t *db,
     }
 
     if (oauth_session_get_by_token(db, session_token, out_session) != 0) {
+        OPENSSL_cleanse(session_token, strlen(session_token));
         free(session_token);
         return response_json_error(401, "Invalid or expired session");
     }
 
+    OPENSSL_cleanse(session_token, strlen(session_token));
     free(session_token);
     return NULL;
 }
@@ -122,6 +125,8 @@ HttpResponse *mfa_totp_setup_handler(const HttpRequest *req, const RouteParams *
     free(display_name);
 
     if (rc != 0) {
+        OPENSSL_cleanse(secret, sizeof(secret));
+        OPENSSL_cleanse(qr_url, sizeof(qr_url));
         return response_json_error(500, "Failed to set up MFA");
     }
 
@@ -137,6 +142,8 @@ HttpResponse *mfa_totp_setup_handler(const HttpRequest *req, const RouteParams *
     jsonbuf_append_escaped(jb, qr_url);
     jsonbuf_appendf(jb, "\"}");
 
+    OPENSSL_cleanse(secret, sizeof(secret));
+    OPENSSL_cleanse(qr_url, sizeof(qr_url));
     return jsonbuf_to_response(jb, 200);
 }
 
@@ -213,6 +220,7 @@ HttpResponse *mfa_totp_confirm_handler(const HttpRequest *req, const RouteParams
     int rc = mfa_totp_confirm(db, session.user_account_pin,
                               method_id, code,
                               &recovery_codes, &recovery_count);
+    OPENSSL_cleanse(code, strlen(code));
     free(code);
 
     if (rc == 1) {
@@ -233,7 +241,7 @@ HttpResponse *mfa_totp_confirm_handler(const HttpRequest *req, const RouteParams
 
         jsonbuf_appendf(jb, "]}");
 
-        for (int i = 0; i < recovery_count; i++) free(recovery_codes[i]);
+        for (int i = 0; i < recovery_count; i++) { OPENSSL_cleanse(recovery_codes[i], strlen(recovery_codes[i])); free(recovery_codes[i]); }
         free(recovery_codes);
 
         return jsonbuf_to_response(jb, 200);
@@ -303,6 +311,7 @@ HttpResponse *mfa_verify_handler(const HttpRequest *req, const RouteParams *para
     int result = mfa_verify(db, session.user_account_pin, method_id, code,
                             http_request_get_client_ip(req, NULL),
                             http_request_get_header(req, "User-Agent"));
+    OPENSSL_cleanse(code, strlen(code));
     free(code);
 
     if (result == 1) {
@@ -312,6 +321,7 @@ HttpResponse *mfa_verify_handler(const HttpRequest *req, const RouteParams *para
             char *session_token = http_cookie_get_value(cookie_header, "session");
             if (session_token) {
                 oauth_session_set_mfa_completed(db, session_token);
+                OPENSSL_cleanse(session_token, strlen(session_token));
                 free(session_token);
             }
         }
@@ -370,6 +380,7 @@ HttpResponse *mfa_recover_handler(const HttpRequest *req, const RouteParams *par
 
     /* Verify recovery code */
     int result = mfa_recover(db, session.user_account_pin, recovery_code);
+    OPENSSL_cleanse(recovery_code, strlen(recovery_code));
     free(recovery_code);
 
     if (result == 1) {
@@ -379,6 +390,7 @@ HttpResponse *mfa_recover_handler(const HttpRequest *req, const RouteParams *par
             char *session_token = http_cookie_get_value(cookie_header, "session");
             if (session_token) {
                 oauth_session_set_mfa_completed(db, session_token);
+                OPENSSL_cleanse(session_token, strlen(session_token));
                 free(session_token);
             }
         }
@@ -455,6 +467,7 @@ HttpResponse *mfa_list_methods_handler(const HttpRequest *req, const RouteParams
 
     jsonbuf_appendf(jb, "]}");
 
+    OPENSSL_cleanse(methods, count * sizeof(*methods));
     free(methods);
 
     return jsonbuf_to_response(jb, 200);
@@ -487,6 +500,11 @@ HttpResponse *mfa_delete_method_handler(const HttpRequest *req, const RouteParam
     oauth_session_info_t session;
     HttpResponse *auth_err = require_session(req, db, &session);
     if (auth_err) return auth_err;
+
+    /* Destructive MFA operation — require MFA completion first */
+    if (session.user_requires_mfa && !session.mfa_completed) {
+        return response_json_error(403, "MFA verification required");
+    }
 
     /* Get method ID from query string */
     if (!req->query_string) {
@@ -543,6 +561,11 @@ HttpResponse *mfa_regenerate_recovery_codes_handler(const HttpRequest *req,
     HttpResponse *auth_err = require_session(req, db, &session);
     if (auth_err) return auth_err;
 
+    /* Destructive MFA operation — require MFA completion first */
+    if (session.user_requires_mfa && !session.mfa_completed) {
+        return response_json_error(403, "MFA verification required");
+    }
+
     /* Regenerate recovery codes */
     char **codes = NULL;
     int count = 0;
@@ -561,7 +584,7 @@ HttpResponse *mfa_regenerate_recovery_codes_handler(const HttpRequest *req,
 
     jsonbuf_appendf(jb, "]}");
 
-    for (int i = 0; i < count; i++) free(codes[i]);
+    for (int i = 0; i < count; i++) { OPENSSL_cleanse(codes[i], strlen(codes[i])); free(codes[i]); }
     free(codes);
 
     return jsonbuf_to_response(jb, 200);
@@ -600,6 +623,11 @@ HttpResponse *mfa_set_require_handler(const HttpRequest *req, const RouteParams 
     HttpResponse *auth_err = require_session(req, db, &session);
     if (auth_err) return auth_err;
 
+    /* Destructive MFA operation — require MFA completion first */
+    if (session.user_requires_mfa && !session.mfa_completed) {
+        return response_json_error(403, "MFA verification required");
+    }
+
     /* Parse JSON body */
     if (!req->body) {
         return response_json_error(400, "Request body required");
@@ -634,6 +662,7 @@ HttpResponse *mfa_set_require_handler(const HttpRequest *req, const RouteParams 
             char *session_token = http_cookie_get_value(cookie_header, "session");
             if (session_token) {
                 oauth_session_set_mfa_completed(db, session_token);
+                OPENSSL_cleanse(session_token, strlen(session_token));
                 free(session_token);
             }
         }

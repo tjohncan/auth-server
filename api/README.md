@@ -9,7 +9,12 @@ HTTP endpoints for the OAuth2 authentication server.
 3. [Organization Management API (Org-Key Auth)](#organization-management-api-org-key-auth)
 4. [OAuth2 Endpoints (Public)](#oauth2-endpoints-public)
 5. [User Account Endpoints (Session Auth)](#account-endpoints-session-auth)
-6. [MFA Endpoints (Session Auth)](#mfa-endpoints-session-auth)
+6. [Email Verification Endpoints](#email-verification-endpoints)
+7. [Password Reset Endpoints](#password-reset-endpoints)
+8. [Passwordless Login Endpoints](#passwordless-login-endpoints)
+9. [MFA Endpoints (Session Auth)](#mfa-endpoints-session-auth)
+10. [RS User Provisioning API (RS Key Auth)](#rs-user-provisioning-api-rs-key-auth)
+11. [Invitation Endpoints (Public)](#invitation-endpoints-public)
 
 ---
 
@@ -291,6 +296,80 @@ curl -X POST http://localhost:8080/api/admin/org-admins \
 
 ---
 
+### POST /api/admin/users/activate
+
+Activate a user account. Idempotent — activating an already-active user succeeds silently without touching the row.
+
+**Request Body**:
+```json
+{
+  "user_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"
+}
+```
+
+| Field   | Type   | Required | Description           |
+|---------|--------|----------|-----------------------|
+| user_id | string | Yes      | 32-character hex UUID |
+
+**Success Response** (200 OK):
+```json
+{
+  "message": "User activated"
+}
+```
+
+**Error Responses**:
+- **400** — missing or invalid user_id
+- **403** — not from localhost
+- **404** — user not found
+
+**Example**:
+```bash
+curl -X POST http://localhost:8080/api/admin/users/activate \
+  -H "Content-Type: application/json" \
+  -d '{"user_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"}'
+```
+
+---
+
+### POST /api/admin/users/deactivate
+
+Deactivate a user account. Idempotent — deactivating an already-inactive user succeeds silently without touching the row.
+
+Deactivated users cannot log in or create new sessions. Existing tokens are not revoked but will fail introspection and session checks (is_active is evaluated at use time).
+
+**Request Body**:
+```json
+{
+  "user_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"
+}
+```
+
+| Field   | Type   | Required | Description           |
+|---------|--------|----------|-----------------------|
+| user_id | string | Yes      | 32-character hex UUID |
+
+**Success Response** (200 OK):
+```json
+{
+  "message": "User deactivated"
+}
+```
+
+**Error Responses**:
+- **400** — missing or invalid user_id
+- **403** — not from localhost
+- **404** — user not found
+
+**Example**:
+```bash
+curl -X POST http://localhost:8080/api/admin/users/deactivate \
+  -H "Content-Type: application/json" \
+  -d '{"user_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"}'
+```
+
+---
+
 ### Complete Bootstrap Workflow
 
 ```bash
@@ -299,7 +378,6 @@ curl -X POST http://localhost:8080/api/admin/bootstrap \
   -H "Content-Type: application/json" \
   -d '{
     "username": "admin",
-    "email": "admin@example.com",
     "password": "MySecurePassword123!"
   }'
 
@@ -634,10 +712,22 @@ Standard OAuth2 endpoints for authentication and token management.
 
 User authentication endpoint. Creates browser session on successful login.
 
+The `username` field accepts either a username or a verified email address
+(when built with `EMAIL_SUPPORT=1`). If the value contains `@`, it is
+treated as an email lookup against verified addresses.
+
 **Request Body**:
 ```json
 {
   "username": "alice",
+  "password": "secret123"
+}
+```
+
+Or with email (requires `EMAIL_SUPPORT`):
+```json
+{
+  "username": "alice@example.com",
   "password": "secret123"
 }
 ```
@@ -671,7 +761,7 @@ When `mfa_required` is true, the session cookie is set but the session's `mfa_co
 **Error Response** (401 Unauthorized):
 ```json
 {
-  "error": "Invalid username or password"
+  "error": "Invalid credentials"
 }
 ```
 
@@ -1181,18 +1271,20 @@ Get current user's profile information.
   "user_id": "a1b2c3d4-0000-4aaa-944b-a1b2c3d4e5f6",
   "username": "alice",
   "has_mfa": true,
-  "require_mfa": false
+  "require_mfa": false,
+  "allow_passwordless_login": false
 }
 ```
 
 **Response Fields**:
 
-| Field       | Type    | Description                                        |
-|-------------|---------|----------------------------------------------------|
-| user_id     | string  | User UUID (never exposes internal PIN)             |
-| username    | string  | Username (empty string for email-only accounts)    |
-| has_mfa     | boolean | True if user has at least one confirmed MFA method |
-| require_mfa | boolean | True if user opted in to enforce MFA on themselves |
+| Field                    | Type    | Description                                        |
+|--------------------------|---------|----------------------------------------------------|
+| user_id                  | string  | User UUID (never exposes internal PIN)             |
+| username                 | string  | Username (empty string for email-only accounts)    |
+| has_mfa                  | boolean | True if user has at least one confirmed MFA method |
+| require_mfa              | boolean | True if user opted in to enforce MFA on themselves |
+| allow_passwordless_login | boolean | True if user allows login via emailed link         |
 
 **Error Response** (401 Unauthorized):
 ```json
@@ -1287,6 +1379,183 @@ curl "http://localhost:8080/api/user/emails?limit=10" \
 # Get next page (emails 10-19)
 curl "http://localhost:8080/api/user/emails?limit=10&offset=10" \
   -H "Cookie: session=<session_token>"
+```
+
+---
+
+### POST /api/user/emails
+
+Add an email address to the current user's account.
+
+**Authentication**: Session cookie required (MFA must be completed if enrolled)
+
+**Request Body**:
+```json
+{
+  "email": "alice.work@company.com"
+}
+```
+
+| Field | Type   | Required | Description                    |
+|-------|--------|----------|--------------------------------|
+| email | string | Yes      | Email address to add           |
+
+**Success Response** (200 OK):
+```json
+{
+  "message": "Email added"
+}
+```
+
+**Notes**:
+- New emails are added as non-primary and unverified
+- Rejects if the same user already has this email (verified or not)
+- Rejects if a different user has this email verified
+- Email format is validated server-side
+
+**Error Responses**:
+
+- **400 Bad Request** (missing or invalid email):
+```json
+{
+  "error": "email required"
+}
+```
+```json
+{
+  "error": "Invalid email format"
+}
+```
+
+- **401 Unauthorized** (not authenticated):
+```json
+{
+  "error": "Authentication required"
+}
+```
+
+- **409 Conflict** (email already taken):
+```json
+{
+  "error": "Email already taken"
+}
+```
+
+**Example**:
+```bash
+curl -X POST http://localhost:8080/api/user/emails \
+  -H "Cookie: session=<session_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "alice.work@company.com"}'
+```
+
+---
+
+### DELETE /api/user/emails
+
+Remove an email address from the current user's account.
+
+**Authentication**: Session cookie required (MFA must be completed if enrolled)
+
+**Request Body**:
+```json
+{
+  "email": "alice.work@company.com"
+}
+```
+
+| Field | Type   | Required | Description                    |
+|-------|--------|----------|--------------------------------|
+| email | string | Yes      | Email address to remove        |
+
+**Success Response** (200 OK):
+```json
+{
+  "message": "Email deleted"
+}
+```
+
+**Notes**:
+- Idempotent: returns success even if the email was already gone
+- No restriction on deleting primary emails (caller's responsibility)
+
+**Error Responses**:
+
+- **400 Bad Request** (missing email):
+```json
+{
+  "error": "email required"
+}
+```
+
+- **401 Unauthorized** (not authenticated):
+```json
+{
+  "error": "Authentication required"
+}
+```
+
+**Example**:
+```bash
+curl -X DELETE http://localhost:8080/api/user/emails \
+  -H "Cookie: session=<session_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "alice.work@company.com"}'
+```
+
+---
+
+### POST /api/user/emails/set-primary
+
+Set or clear the primary email for the current user.
+
+**Authentication**: Session cookie required (MFA must be completed if enrolled)
+
+**Request Body**:
+```json
+{
+  "email": "alice.work@company.com"
+}
+```
+
+| Field | Type        | Required | Description                                       |
+|-------|-------------|----------|---------------------------------------------------|
+| email | string/null | No       | Email address to make primary, or null to clear    |
+
+**Success Response** (200 OK):
+```json
+{
+  "message": "Primary email updated"
+}
+```
+
+**Notes**:
+- Atomically clears the previous primary and sets the new one in a transaction
+- Pass `null` (or omit `email`) to clear the primary flag without setting a new one
+- The email must belong to the current user
+
+**Error Responses**:
+
+- **401 Unauthorized** (not authenticated):
+```json
+{
+  "error": "Authentication required"
+}
+```
+
+- **404 Not Found** (email not on this account):
+```json
+{
+  "error": "Email not found"
+}
+```
+
+**Example**:
+```bash
+curl -X POST http://localhost:8080/api/user/emails/set-primary \
+  -H "Cookie: session=<session_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "alice.work@company.com"}'
 ```
 
 ---
@@ -1412,6 +1681,58 @@ curl -X POST http://localhost:8080/api/user/username \
 
 ---
 
+### POST /api/user/passwordless-login
+
+Toggle passwordless login (login via emailed link) for current user. Requires `EMAIL_SUPPORT`.
+
+**Authentication**: Session cookie required
+
+**Request Body**:
+```json
+{
+  "enabled": true
+}
+```
+
+**Success Response** (200 OK):
+```json
+{
+  "message": "Passwordless login enabled"
+}
+```
+
+**Error Responses**:
+
+- **400 Bad Request** (no verified email):
+```json
+{
+  "error": "Cannot enable passwordless login without a verified email address"
+}
+```
+
+- **401 Unauthorized** (not authenticated):
+```json
+{
+  "error": "Authentication required"
+}
+```
+
+**Notes**:
+- Enabling requires at least one verified email address on the account
+- Disabling always succeeds
+- When enabled, user can request a temporary login link sent to their verified email
+- The login page shows "Request Temporary Access Link" only when `EMAIL_SUPPORT` is compiled in
+
+**Example**:
+```bash
+curl -X POST http://localhost:8080/api/user/passwordless-login \
+  -H "Cookie: session=<session_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": true}'
+```
+
+---
+
 ### POST /logout
 
 Log out current user (close browser session).
@@ -1496,9 +1817,429 @@ curl "http://localhost:8080/api/user/management-setups?callback_url=http%3A%2F%2
 
 ---
 
+## Email Verification Endpoints
+
+Email verification flow for proving ownership of an email address.
+Available only when built with `EMAIL_SUPPORT=1`.
+
+The flow has three steps:
+1. User requests a verification email (authenticated)
+2. User clicks the link and sees a confirmation page (public)
+3. User confirms, consuming the token and marking the email verified (public)
+
+When an email is verified, any unverified copies of that email on other accounts
+are automatically cleaned up (squatter cleanup).
+
+---
+
+### POST /email-verification-token
+
+Request a verification email for one of the current user's email addresses.
+
+**Authentication**: Session cookie required (MFA must be completed if enrolled)
+
+**Request Body**:
+```json
+{
+  "email": "alice@example.com"
+}
+```
+
+| Field | Type   | Required | Description                              |
+|-------|--------|----------|------------------------------------------|
+| email | string | Yes      | Email address to verify (must be on account) |
+
+**Success Response** (200 OK):
+```json
+{
+  "message": "Verification email sent"
+}
+```
+
+**Notes**:
+- The email must belong to the current user's account
+- Sends an email containing a verification link to the address
+- Rate limited: maximum 5 verification emails per address per hour
+- Rate limit counts all tokens issued, regardless of whether they were used
+- Token TTL is configured via `email_verification_token_ttl_seconds`
+
+**Error Responses**:
+
+- **400 Bad Request** (missing, invalid, or rate limited):
+```json
+{
+  "error": "email required"
+}
+```
+```json
+{
+  "error": "Unable to send verification email"
+}
+```
+
+- **401 Unauthorized** (not authenticated):
+```json
+{
+  "error": "Authentication required"
+}
+```
+
+**Example**:
+```bash
+curl -X POST http://localhost:8080/email-verification-token \
+  -H "Cookie: session=<session_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "alice@example.com"}'
+```
+
+---
+
+### GET /verify-email
+
+Render the email verification confirmation page.
+
+**Authentication**: None (public endpoint)
+
+**Query Parameters**:
+
+| Parameter | Type   | Required | Description          |
+|-----------|--------|----------|----------------------|
+| token     | string | Yes      | Verification token   |
+
+**Success Response** (200 OK):
+
+Returns an HTML page displaying:
+- The email address being verified
+- The username associated with the account (or "not set" if none)
+- The user ID (hex)
+- A "Confirm Verification" button that submits a form POST
+
+This information helps the recipient identify who requested the verification,
+protecting against confused-inbox scenarios.
+
+**Error Response** (400 Bad Request):
+
+Returns an HTML page stating the link is invalid or expired.
+
+**Example**:
+```
+GET /verify-email?token=abc123...
+```
+
+---
+
+### POST /verify-email
+
+Consume a verification token and mark the email as verified.
+
+**Authentication**: None (public endpoint)
+
+**Request Body**: Form-encoded (`application/x-www-form-urlencoded`)
+
+| Field | Type   | Required | Description        |
+|-------|--------|----------|--------------------|
+| token | string | Yes      | Verification token |
+
+**Success Response** (200 OK):
+
+Returns an HTML page confirming the email has been verified,
+with a link back to the management console.
+
+**Behavior**:
+- Marks the token as used (cannot be reused)
+- Sets `is_verified = true` and `verified_at` on the email
+- Squatter cleanup: removes unverified copies of this email from other accounts,
+  along with their pending verification tokens
+
+**Error Response** (400 Bad Request):
+
+Returns an HTML page stating the link is invalid, expired, or already used.
+
+**Notes**:
+- This endpoint is submitted by the confirmation page's form — not called directly via API
+- The token must be valid, unexpired, unused, and unrevoked
+- The owning user account must be active
+
+---
+
+## Password Reset Endpoints
+
+Password reset flow for users who have forgotten their password.
+Available only when built with `EMAIL_SUPPORT=1`.
+
+The flow has three steps:
+1. User requests a password reset email (public, unauthenticated)
+2. User clicks the link and sees a "Set New Password" page (public)
+3. User submits a new password, consuming the token (public)
+
+---
+
+### GET /request-password-reset
+
+Render the password reset request page.
+
+**Authentication**: None (public endpoint)
+
+Returns an HTML page with an email input form. On submit, the form
+POSTs to `/request-password-reset` via JavaScript.
+
+**Example**:
+```
+GET /request-password-reset
+```
+
+---
+
+### POST /request-password-reset
+
+Request a password reset email.
+
+**Authentication**: None (public endpoint)
+
+**Request Body**:
+```json
+{
+  "email": "alice@example.com"
+}
+```
+
+| Field | Type   | Required | Description                     |
+|-------|--------|----------|---------------------------------|
+| email | string | Yes      | Email address of the account    |
+
+**Response** (200 OK — always, to prevent user enumeration):
+```json
+{
+  "message": "If that email belongs to a verified account, a reset link has been sent. Check your inbox."
+}
+```
+
+**Notes**:
+- Always returns 200 regardless of whether the email exists
+- Only verified email addresses can trigger a reset
+- Rate limited: maximum 5 reset tokens per user per hour
+- Token TTL is configured via `password_reset_token_ttl_seconds`
+- Sends an email containing a reset link to the address
+
+**Example**:
+```bash
+curl -X POST http://localhost:8080/request-password-reset \
+  -H "Content-Type: application/json" \
+  -d '{"email": "alice@example.com"}'
+```
+
+---
+
+### GET /reset-password
+
+Render the "Set New Password" page.
+
+**Authentication**: None (public endpoint)
+
+**Query Parameters**:
+
+| Parameter | Type   | Required | Description          |
+|-----------|--------|----------|----------------------|
+| token     | string | Yes      | Password reset token |
+
+**Success Response** (200 OK):
+
+Returns an HTML page with new password and confirm password fields,
+plus a submit button. Client-side JavaScript validates that passwords match.
+
+**Error Response** (400 Bad Request):
+
+Returns an HTML page stating the link is invalid or expired,
+with a link to request a new one.
+
+**Example**:
+```
+GET /reset-password?token=abc123...
+```
+
+---
+
+### POST /reset-password
+
+Consume a password reset token and set a new password.
+
+**Authentication**: None (public endpoint)
+
+**Request Body**: Form-encoded (`application/x-www-form-urlencoded`)
+
+| Field    | Type   | Required | Description        |
+|----------|--------|----------|--------------------|
+| token    | string | Yes      | Password reset token |
+| password | string | Yes      | New password       |
+
+**Success Response** (200 OK):
+
+Returns an HTML page confirming the password has been updated,
+with a link to the login page.
+
+**Behavior**:
+- Validates the token (must be valid, unexpired, unused, unrevoked, user active)
+- Marks the token as used
+- Hashes the new password and updates the user account
+- Both steps in a single transaction
+
+**Error Response** (400 Bad Request):
+
+Returns an HTML page stating the link is invalid, expired, or already used.
+
+**Notes**:
+- This endpoint is submitted by the reset page's form — not called directly via API
+- The password is URL-decoded from the form body
+
+---
+
+## Passwordless Login Endpoints
+
+Passwordless login flow for users with `allow_passwordless_login` enabled.
+Available only when built with `EMAIL_SUPPORT=1`.
+
+The flow has three steps:
+1. User requests a login email (public, unauthenticated)
+2. User clicks the link and sees a confirmation page (public)
+3. User confirms, consuming the token and creating a session (public)
+
+**OAuth redirect preservation**: When a user arrives at the login page via
+`/authorize?...`, the authorize query string is stored in the token row as
+`return_to`. After login, the user is redirected to `/authorize?{return_to}`
+to complete the OAuth flow. The `return_to` value never appears in the email link.
+
+---
+
+### GET /request-passwordless-login
+
+Render the passwordless login request page.
+
+**Authentication**: None (public endpoint)
+
+**Query Parameters**:
+
+| Parameter | Type   | Required | Description                                          |
+|-----------|--------|----------|------------------------------------------------------|
+| return_to | string | No       | Authorize query string to redirect after login       |
+
+Returns an HTML page with an email input form. On submit, the form
+POSTs to `/request-passwordless-login` via JavaScript.
+
+**Example**:
+```
+GET /request-passwordless-login
+GET /request-passwordless-login?return_to=client_id%3Dabc%26redirect_uri%3Dhttps...
+```
+
+---
+
+### POST /request-passwordless-login
+
+Request a passwordless login email.
+
+**Authentication**: None (public endpoint)
+
+**Request Body**:
+```json
+{
+  "email": "alice@example.com",
+  "return_to": "client_id=abc&redirect_uri=https://app.example.com/callback"
+}
+```
+
+| Field     | Type   | Required | Description                                    |
+|-----------|--------|----------|------------------------------------------------|
+| email     | string | Yes      | Email address of the account                   |
+| return_to | string | No       | Authorize query string for post-login redirect |
+
+**Response** (200 OK — always, to prevent user enumeration):
+```json
+{
+  "message": "If that email belongs to a verified account with passwordless login enabled, a login link has been sent. Check your inbox."
+}
+```
+
+**Notes**:
+- Always returns 200 regardless of whether the email exists or passwordless is enabled
+- Only verified email addresses on accounts with `allow_passwordless_login` can trigger a token
+- Rate limited: maximum 5 tokens per user per hour
+- Token TTL is configured via `passwordless_login_token_ttl_seconds` (default 600s / 10 min)
+- `return_to` is stored in the database, never included in the email link
+- `return_to` is validated: max 2000 chars, no newlines
+
+**Example**:
+```bash
+curl -X POST http://localhost:8080/request-passwordless-login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "alice@example.com"}'
+```
+
+---
+
+### GET /passwordless-login
+
+Render the login confirmation page.
+
+**Authentication**: None (public endpoint)
+
+**Query Parameters**:
+
+| Parameter | Type   | Required | Description              |
+|-----------|--------|----------|--------------------------|
+| token     | string | Yes      | Passwordless login token |
+
+**Success Response** (200 OK):
+
+Returns an HTML page showing the email address and username, with a
+"Log In" button. The user confirms their identity before the token is consumed.
+
+**Error Response** (400 Bad Request):
+
+Returns an HTML page stating the link is invalid or expired,
+with a link to request a new one.
+
+**Example**:
+```
+GET /passwordless-login?token=abc123...
+```
+
+---
+
+### POST /passwordless-login
+
+Consume a passwordless login token and create a session.
+
+**Authentication**: None (public endpoint)
+
+**Request Body**: Form-encoded (`application/x-www-form-urlencoded`)
+
+| Field | Type   | Required | Description              |
+|-------|--------|----------|--------------------------|
+| token | string | Yes      | Passwordless login token |
+
+**Success Response** (303 See Other):
+- Sets `session` cookie (HttpOnly, Secure, SameSite=Strict)
+- Redirects to `/authorize?{return_to}` if return_to was stored, otherwise `/`
+
+**Behavior**:
+- Validates the token (must be valid, unexpired, unused, user active, passwordless still allowed)
+- Marks the token as used (single transaction)
+- Creates a browser session with `authentication_method = "passwordless"`
+- MFA is still enforced after login if the user has MFA configured
+
+**Error Response** (400 Bad Request):
+
+Returns an HTML page stating the link is invalid, expired, or already used.
+
+**Notes**:
+- This endpoint is submitted by the confirmation page's form — not called directly via API
+- Session is created via `oauth_session_create` (not `session_authenticate_and_create`)
+
+---
+
 ## JavaScript Client Library
 
-A drop-in OAuth2 client library is available at `/js/oauth-client.js` for easy integration with web applications.
+A drop-in OAuth2 client library is available at `/library/oauth-client.js` for easy integration with web applications.
 
 ### Features
 
@@ -1511,7 +2252,7 @@ A drop-in OAuth2 client library is available at `/js/oauth-client.js` for easy i
 ### Quick Start
 
 ```html
-<script src="https://auth.example.com/js/oauth-client.js"></script>
+<script src="https://auth.example.com/library/oauth-client.js"></script>
 <script>
   const client = new OAuthClient({
     authUrl: 'https://auth.example.com',
@@ -1535,7 +2276,7 @@ A drop-in OAuth2 client library is available at `/js/oauth-client.js` for easy i
 
 ### Documentation
 
-Full API documentation available at [static/js/README.md](static/js/README.md) 
+Full API documentation available at [static/library/README.md](static/library/README.md)
 or see the management console (`admin.html`) for a complete working example.
 
 ### Reference Implementation
@@ -1815,3 +2556,342 @@ curl -X POST http://localhost:8080/api/user/mfa/require \
   -H "Content-Type: application/json" \
   -d '{"enabled": false}'
 ```
+
+---
+
+## RS User Provisioning API (RS Key Auth)
+
+Endpoints for resource servers to manage users programmatically.
+All endpoints require RS key authentication and `allow_user_provisioning = true` on the resource server.
+
+### Security Model
+
+- **Authentication**: RS key credentials in JSON body (same key pair used for `/introspect`)
+- **Authorization**: `allow_user_provisioning` must be enabled on the resource server
+- **Scope**: Client-user operations scoped to clients linked to the authenticated RS
+- **Content-Type**: `application/json` for all endpoints (including GET)
+- **Audience**: Resource server backends
+- **Browser aliases**: `POST /api/rs/users/lookup` and `POST /api/rs/client-users/list` are provided as POST alternatives to the GET endpoints, since browsers cannot send GET requests with a JSON body. Same handlers, identical behavior.
+
+### Auth Fields (required on all endpoints)
+
+```json
+{
+  "resource_server_id": "<hex uuid>",
+  "resource_server_key_id": "<hex uuid>",
+  "resource_server_secret": "<plaintext secret>"
+}
+```
+
+---
+
+### POST /api/rs/users
+
+Find or create a user. If user exists (by username or verified email), returns user info.
+If user doesn't exist, creates user (active, no password), creates invitation token, and optionally sends invitation email.
+
+At least one of `username` or `email` required. If both are provided and they match two different existing users, returns 409 (ambiguous).
+
+**Request Body**:
+```json
+{
+  "resource_server_id": "...",
+  "resource_server_key_id": "...",
+  "resource_server_secret": "...",
+  "username": "jdoe",
+  "email": "jdoe@example.com"
+}
+```
+
+**Success Response — existing user** (200 OK):
+```json
+{
+  "user_id": "a1b2c3...",
+  "username": "jdoe",
+  "is_active": true,
+  "emails": [
+    {"address": "jdoe@example.com", "is_verified": true, "is_primary": true}
+  ],
+  "created": false
+}
+```
+
+**Success Response — new user** (200 OK):
+```json
+{
+  "user_id": "d4e5f6...",
+  "username": "jdoe",
+  "is_active": true,
+  "emails": [
+    {"address": "jdoe@example.com", "is_verified": false, "is_primary": true}
+  ],
+  "created": true,
+  "invitation": {
+    "token": "abc123...",
+    "url": "https://host/accept-invitation?token=abc123..."
+  }
+}
+```
+
+**Error Responses**:
+- `400` — missing username and email
+- `401` — authentication failed
+- `403` — user provisioning not enabled
+- `409` — ambiguous match (username and email resolve to different users)
+
+**Notes**:
+- The `invitation` object is only present when `created` is `true`
+- When `EMAIL_SUPPORT=1`, an invitation email is automatically sent to the provided email address
+- The invitation URL is always returned regardless of `EMAIL_SUPPORT` so the RS can deliver it through its own channel
+- Created users have no password — they must use the invitation link to set one
+- Invitation tokens expire after `invitation_token_ttl_seconds` (default 72 hours)
+
+**Example**:
+```bash
+curl -X POST http://localhost:8080/api/rs/users \
+  -H "Content-Type: application/json" \
+  -d '{
+    "resource_server_id": "aabbccdd...",
+    "resource_server_key_id": "11223344...",
+    "resource_server_secret": "mysecret",
+    "username": "jdoe",
+    "email": "jdoe@example.com"
+  }'
+```
+
+---
+
+### GET /api/rs/users
+
+Look up a user without creating. Preferred lookup key is `user_id`; falls back to `username` and/or `email` identity matching.
+
+At least one identifier required.
+
+**Request Body**:
+```json
+{
+  "resource_server_id": "...",
+  "resource_server_key_id": "...",
+  "resource_server_secret": "...",
+  "user_id": "a1b2c3..."
+}
+```
+
+Or by identity:
+```json
+{
+  "resource_server_id": "...",
+  "resource_server_key_id": "...",
+  "resource_server_secret": "...",
+  "username": "jdoe",
+  "email": "jdoe@example.com"
+}
+```
+
+**Success Response** (200 OK):
+```json
+{
+  "user_id": "a1b2c3...",
+  "username": "jdoe",
+  "is_active": true,
+  "emails": [
+    {"address": "jdoe@example.com", "is_verified": true, "is_primary": true}
+  ]
+}
+```
+
+**Error Responses**:
+- `400` — no identifiers provided
+- `401` — authentication failed
+- `403` — user provisioning not enabled
+- `404` — user not found
+- `409` — ambiguous match
+
+**Example**:
+```bash
+curl -X GET http://localhost:8080/api/rs/users \
+  -H "Content-Type: application/json" \
+  -d '{
+    "resource_server_id": "aabbccdd...",
+    "resource_server_key_id": "11223344...",
+    "resource_server_secret": "mysecret",
+    "user_id": "a1b2c3d4e5f6..."
+  }'
+```
+
+---
+
+### POST /api/rs/client-users
+
+Link a user to a client. Idempotent — succeeds if already linked.
+
+The client must be linked to the authenticated resource server via `client_resource_server`.
+
+**Request Body**:
+```json
+{
+  "resource_server_id": "...",
+  "resource_server_key_id": "...",
+  "resource_server_secret": "...",
+  "client_id": "aabb...",
+  "user_id": "ccdd..."
+}
+```
+
+**Success Response** (200 OK):
+```json
+{"message": "User linked to client"}
+```
+
+**Error Responses**:
+- `400` — missing client_id or user_id
+- `401` — authentication failed
+- `403` — user provisioning not enabled
+- `404` — client not linked to this resource server, or user not found
+
+**Example**:
+```bash
+curl -X POST http://localhost:8080/api/rs/client-users \
+  -H "Content-Type: application/json" \
+  -d '{
+    "resource_server_id": "aabbccdd...",
+    "resource_server_key_id": "11223344...",
+    "resource_server_secret": "mysecret",
+    "client_id": "eeff0011...",
+    "user_id": "a1b2c3d4..."
+  }'
+```
+
+---
+
+### DELETE /api/rs/client-users
+
+Unlink a user from a client. Idempotent — succeeds even if not currently linked.
+
+**Request Body**:
+```json
+{
+  "resource_server_id": "...",
+  "resource_server_key_id": "...",
+  "resource_server_secret": "...",
+  "client_id": "aabb...",
+  "user_id": "ccdd..."
+}
+```
+
+**Success Response** (200 OK):
+```json
+{"message": "User unlinked from client"}
+```
+
+**Error Responses**:
+- `400` — missing client_id or user_id
+- `401` — authentication failed
+- `403` — user provisioning not enabled
+- `404` — client not linked to this resource server
+
+**Example**:
+```bash
+curl -X DELETE http://localhost:8080/api/rs/client-users \
+  -H "Content-Type: application/json" \
+  -d '{
+    "resource_server_id": "aabbccdd...",
+    "resource_server_key_id": "11223344...",
+    "resource_server_secret": "mysecret",
+    "client_id": "eeff0011...",
+    "user_id": "a1b2c3d4..."
+  }'
+```
+
+---
+
+### GET /api/rs/client-users
+
+List users linked to a client. Paginated.
+
+**Request Body**:
+```json
+{
+  "resource_server_id": "...",
+  "resource_server_key_id": "...",
+  "resource_server_secret": "...",
+  "client_id": "aabb...",
+  "limit": 20,
+  "offset": 0
+}
+```
+
+**Success Response** (200 OK):
+```json
+{
+  "users": [
+    {"user_id": "a1b2c3...", "username": "jdoe", "is_active": true},
+    {"user_id": "d4e5f6...", "username": "jsmith", "is_active": true}
+  ],
+  "pagination": {"limit": 20, "offset": 0, "count": 2, "total": 2}
+}
+```
+
+**Error Responses**:
+- `400` — missing client_id
+- `401` — authentication failed
+- `403` — user provisioning not enabled
+- `404` — client not linked to this resource server
+
+**Notes**:
+- `limit` defaults to 20, clamped to 1–100
+- `offset` defaults to 0
+
+**Example**:
+```bash
+curl -X GET http://localhost:8080/api/rs/client-users \
+  -H "Content-Type: application/json" \
+  -d '{
+    "resource_server_id": "aabbccdd...",
+    "resource_server_key_id": "11223344...",
+    "resource_server_secret": "mysecret",
+    "client_id": "eeff0011..."
+  }'
+```
+
+---
+
+## Invitation Endpoints (Public)
+
+Public endpoints for accepting user invitations created by the RS provisioning API.
+No authentication required — the invitation token serves as the credential.
+
+---
+
+### GET /accept-invitation
+
+Renders a password-set form. Validates the invitation token and displays the username and/or email associated with the invitation.
+
+**Query Parameters**:
+- `token` (required) — invitation token from the invitation URL
+
+**Success Response**: HTML page with password form
+
+**Error Response**: HTML page indicating invalid or expired token
+
+---
+
+### POST /accept-invitation
+
+Consumes the invitation token and sets the user's password. Also verifies the associated email address (if any) and performs squatter cleanup.
+
+**Request Body** (form-encoded):
+```
+token=<invitation_token>&password=<new_password>
+```
+
+**Success Response**: HTML page confirming account is ready with link to login
+
+**Error Responses**:
+- Invalid/expired token: HTML error page
+- Email conflict (another user verified same email): HTML error page with guidance to log in
+
+**Notes**:
+- Each invitation token can only be used once
+- On success, the user can log in with username + password or email + password
+- Email verification and password set happen atomically in the same transaction

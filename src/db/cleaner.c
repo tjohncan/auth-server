@@ -14,6 +14,7 @@
 #include <time.h>
 #include <pthread.h>
 #include <errno.h>
+#include <openssl/crypto.h>
 
 /* Maximum number of tables we can monitor */
 #define MAX_TABLES 64
@@ -23,6 +24,7 @@
 #define RETENTION_PASSWORDLESS_TOKEN_DAYS 1  /* 24 hours */
 #define RETENTION_EMAIL_VERIFICATION_DAYS 7
 #define RETENTION_PASSWORD_RESET_DAYS 7
+#define RETENTION_INVITATION_DAYS 7
 #define RETENTION_UNCONFIRMED_MFA_DAYS 7
 #define RETENTION_USED_RECOVERY_CODE_DAYS 30
 #define RETENTION_REVOKED_RECOVERY_SET_DAYS 30
@@ -422,6 +424,8 @@ static void cleaner_init(db_handle_t *db, cleaner_config_t *config) {
          RETENTION_EMAIL_VERIFICATION_DAYS, 0, 0},
         {TBL_PASSWORD_RESET_TOKEN, "Password reset tokens", "id", "expected_expiry", NULL,
          RETENTION_PASSWORD_RESET_DAYS, 0, 0},
+        {TBL_INVITATION_TOKEN, "Invitation tokens", "id", "expected_expiry", NULL,
+         RETENTION_INVITATION_DAYS, 0, 0},
 
         /* Tier 4: Low-volume cleanup */
         {TBL_USER_MFA, "Unconfirmed MFA methods", "pin", "created_at",
@@ -467,6 +471,8 @@ static void* cleaner_thread_main(void *arg) {
     db_handle_t *db = NULL;
     if (db_connect(&db, config->db_type, config->connection_string) != 0) {
         log_error("Cleaner: failed to create database connection");
+        if (config->connection_string)
+            OPENSSL_cleanse((char *)config->connection_string, strlen(config->connection_string));
         free((char *)config->connection_string);
         free(config);
         return NULL;
@@ -481,6 +487,8 @@ static void* cleaner_thread_main(void *arg) {
     if (g_num_active_cleaners == 0) {
         log_warn("Cleaner: no tables to monitor, exiting");
         db_disconnect(db);
+        if (config->connection_string)
+            OPENSSL_cleanse((char *)config->connection_string, strlen(config->connection_string));
         free((char *)config->connection_string);
         free(config);
         return NULL;
@@ -546,7 +554,7 @@ static void* cleaner_thread_main(void *arg) {
         }
     }
 
-    log_info("Cleaner: stopped (purged %d batches total)", total_purged);
+    log_info("Cleaner: stopped (purged %d batches since last hourly reset)", total_purged);
 
     /* Free dynamically discovered table names */
     for (int i = 0; i < g_num_active_cleaners; i++) {
@@ -556,6 +564,8 @@ static void* cleaner_thread_main(void *arg) {
     g_num_active_cleaners = 0;
 
     db_disconnect(db);
+    if (config->connection_string)
+        OPENSSL_cleanse((char *)config->connection_string, strlen(config->connection_string));
     free((char *)config->connection_string);
     free(config);
     return NULL;
@@ -574,6 +584,11 @@ int cleaner_start(cleaner_config_t *config, pthread_t *thread_out) {
         log_error("Cleaner: connection_string is NULL");
         return -1;
     }
+
+    /* Reset stop flag (allows restart after a previous stop) */
+    pthread_mutex_lock(&g_cleaner_mutex);
+    g_cleaner_stop_flag = 0;
+    pthread_mutex_unlock(&g_cleaner_mutex);
 
     /* Allocate config copy for thread (thread will free it) */
     cleaner_config_t *config_copy = malloc(sizeof(cleaner_config_t));

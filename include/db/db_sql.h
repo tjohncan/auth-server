@@ -1,6 +1,14 @@
 #ifndef DB_SQL_H
 #define DB_SQL_H
 
+#if !defined(DB_BACKEND_SQLITE) && !defined(DB_BACKEND_POSTGRESQL)
+    #error "Define DB_BACKEND_SQLITE or DB_BACKEND_POSTGRESQL"
+#endif
+
+#if defined(DB_BACKEND_SQLITE) && defined(DB_BACKEND_POSTGRESQL)
+    #error "Cannot define both DB_BACKEND_SQLITE and DB_BACKEND_POSTGRESQL"
+#endif
+
 /*
  * Database SQL Abstraction Layer
  *
@@ -145,6 +153,7 @@
 #define TBL_PASSWORDLESS_LOGIN_TOKEN  SESSION_ "passwordless_login_token"
 #define TBL_EMAIL_VERIFICATION_TOKEN  SESSION_ "email_verification_token"
 #define TBL_PASSWORD_RESET_TOKEN      SESSION_ "password_reset_token"
+#define TBL_INVITATION_TOKEN          SESSION_ "invitation_token"
 
 /* LOOKUP schema */
 #define TBL_GRANT_TYPE                LOOKUP_ "grant_type"

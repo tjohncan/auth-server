@@ -5,6 +5,7 @@
 #include "util/log.h"
 #include "util/data.h"
 #include <argon2.h>
+#include <openssl/crypto.h>
 #include <openssl/evp.h>
 
 /* Module-level state (initialized once at startup, read-only after init)
@@ -12,6 +13,7 @@
 static password_hash_algorithm_t g_algorithm;
 static int g_min_iterations;
 static int g_max_iterations;
+static int g_password_min_length;
 static int g_initialized = 0;
 
 int crypto_password_init(const config_t *config) {
@@ -28,6 +30,7 @@ int crypto_password_init(const config_t *config) {
     g_algorithm = config->secret_hashing_algorithm;
     g_min_iterations = config->secret_hash_min_iterations;
     g_max_iterations = config->secret_hash_max_iterations;
+    g_password_min_length = config->password_min_length;
     g_initialized = 1;
 
     log_info("Initialized password hashing: algorithm=%s, iterations=%d-%d",
@@ -35,6 +38,10 @@ int crypto_password_init(const config_t *config) {
              g_min_iterations, g_max_iterations);
 
     return 0;
+}
+
+int crypto_password_min_length(void) {
+    return g_password_min_length;
 }
 
 int crypto_password_hash(const char *password, size_t password_len,
@@ -55,6 +62,18 @@ int crypto_password_hash(const char *password, size_t password_len,
         hash_hex_len < PASSWORD_HASH_HEX_MAX_LENGTH) {
         log_error("Output buffer too small for password hash");
         return -1;
+    }
+
+    if ((int)password_len < g_password_min_length) {
+        log_info("Password rejected: length %zu below minimum %d",
+                 password_len, g_password_min_length);
+        return -2;
+    }
+
+    if (password_len > PASSWORD_MAX_LENGTH) {
+        log_info("Password rejected: length %zu exceeds maximum %d",
+                 password_len, PASSWORD_MAX_LENGTH);
+        return -2;
     }
 
     /* Delegate to configured algorithm */
@@ -89,6 +108,8 @@ int crypto_password_hash(const char *password, size_t password_len,
             );
 
             if (result != 0) {
+                OPENSSL_cleanse(salt, sizeof(salt));
+                OPENSSL_cleanse(hash, sizeof(hash));
                 log_error("Argon2 hash failed");
                 return -1;
             }
@@ -96,6 +117,8 @@ int crypto_password_hash(const char *password, size_t password_len,
             /* Convert hash to hex */
             bytes_to_hex(hash, sizeof(hash), out_hash_hex, hash_hex_len);
 
+            OPENSSL_cleanse(salt, sizeof(salt));
+            OPENSSL_cleanse(hash, sizeof(hash));
             return 0;
         }
 
@@ -125,6 +148,8 @@ int crypto_password_hash(const char *password, size_t password_len,
             );
 
             if (result != 1) {
+                OPENSSL_cleanse(salt, sizeof(salt));
+                OPENSSL_cleanse(hash, sizeof(hash));
                 log_error("PBKDF2 hash failed");
                 return -1;
             }
@@ -133,6 +158,8 @@ int crypto_password_hash(const char *password, size_t password_len,
             bytes_to_hex(salt, sizeof(salt), out_salt_hex, salt_hex_len);
             bytes_to_hex(hash, sizeof(hash), out_hash_hex, hash_hex_len);
 
+            OPENSSL_cleanse(salt, sizeof(salt));
+            OPENSSL_cleanse(hash, sizeof(hash));
             return 0;
         }
 
@@ -185,6 +212,10 @@ int crypto_password_verify(const char *password, size_t password_len,
     if (!g_initialized) {
         log_error("crypto_password module not initialized");
         return -1;
+    }
+
+    if (password_len > PASSWORD_MAX_LENGTH) {
+        return 0;  /* Oversized input cannot match any stored hash */
     }
 
     /* Delegate to configured algorithm */

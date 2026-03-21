@@ -16,6 +16,7 @@
 #include "server/http.h"
 #include "handlers.h"
 #include "util/str.h"
+#include "util/template.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -23,6 +24,7 @@
 #include <signal.h>
 #include <stdbool.h>
 #include <sys/types.h>
+#include <openssl/crypto.h>
 
 static void worker_thread_cleanup(void) {
     crypto_jwt_thread_cleanup();
@@ -70,6 +72,11 @@ static void setup_signal_handlers(void) {
 
     /* Ignore SIGPIPE (broken pipe on write) */
     signal(SIGPIPE, SIG_IGN);
+
+#ifdef EMAIL_SUPPORT
+    /* Auto-reap child processes (email delivery forks without waitpid) */
+    signal(SIGCHLD, SIG_IGN);
+#endif
 }
 
 /*
@@ -104,6 +111,7 @@ static int router_request_handler(Connection *conn,
 
     if (req.method == HTTP_UNKNOWN) {
         log_warn("[Connection %lu] Failed to parse HTTP request", conn->connection_id);
+        OPENSSL_cleanse(request_copy, request_len);
         free(request_copy);
 
         HttpResponse *error_resp = response_json_error(400, "Bad Request");
@@ -122,6 +130,7 @@ static int router_request_handler(Connection *conn,
     HttpResponse *resp = router_dispatch(router, &req);
 
     http_request_cleanup(&req);
+    OPENSSL_cleanse(request_copy, request_len);
     free(request_copy);
 
     if (!resp) {
@@ -282,6 +291,9 @@ int main(void) {
     }
     cleaner_started = true;
 
+    /* Connection string no longer needed — cleanse if it held credentials */
+    OPENSSL_cleanse(pg_conn_str, sizeof(pg_conn_str));
+
     /* Set global context for HTTP handlers */
     g_config = config;
 
@@ -333,10 +345,31 @@ int main(void) {
     router_add(router, HTTP_GET, "/api/admin/client-keys", admin_get_client_keys_handler);
     router_add(router, HTTP_DELETE, "/api/admin/client-keys", admin_delete_client_key_handler);
 
+    /* User activate/deactivate (localhost-only) */
+    router_add(router, HTTP_POST, "/api/admin/users/activate", server_activate_user_handler);
+    router_add(router, HTTP_POST, "/api/admin/users/deactivate", server_deactivate_user_handler);
+
     router_add(router, HTTP_POST, "/login", login_handler);
     router_add(router, HTTP_GET, "/api/user/management-setups", management_setups_handler);
     router_add(router, HTTP_GET, "/api/user/profile", profile_handler);
     router_add(router, HTTP_GET, "/api/user/emails", emails_handler);
+    router_add(router, HTTP_POST, "/api/user/emails", add_email_handler);
+    router_add(router, HTTP_DELETE, "/api/user/emails", delete_email_handler);
+    router_add(router, HTTP_POST, "/api/user/emails/set-primary", set_primary_email_handler);
+#ifdef EMAIL_SUPPORT
+    router_add(router, HTTP_POST, "/email-verification-token", create_email_verification_token_handler);
+    router_add(router, HTTP_GET, "/verify-email", verify_email_page_handler);
+    router_add(router, HTTP_POST, "/verify-email", verify_email_handler);
+    router_add(router, HTTP_GET, "/request-password-reset", request_password_reset_page_handler);
+    router_add(router, HTTP_POST, "/request-password-reset", request_password_reset_handler);
+    router_add(router, HTTP_GET, "/reset-password", reset_password_page_handler);
+    router_add(router, HTTP_POST, "/reset-password", reset_password_handler);
+    router_add(router, HTTP_GET, "/request-passwordless-login", request_passwordless_login_page_handler);
+    router_add(router, HTTP_POST, "/request-passwordless-login", request_passwordless_login_handler);
+    router_add(router, HTTP_GET, "/passwordless-login", passwordless_login_page_handler);
+    router_add(router, HTTP_POST, "/passwordless-login", passwordless_login_handler);
+    router_add(router, HTTP_POST, "/api/user/passwordless-login", passwordless_login_toggle_handler);
+#endif
     router_add(router, HTTP_POST, "/api/user/password", change_password_handler);
     router_add(router, HTTP_POST, "/api/user/username", change_username_handler);
     router_add(router, HTTP_POST, "/logout", logout_handler);
@@ -357,8 +390,26 @@ int main(void) {
     router_add(router, HTTP_GET, "/.well-known/jwks.json", jwks_handler);
     router_add(router, HTTP_GET, "/userinfo", userinfo_handler);
 
+    /* Invitation endpoints */
+    router_add(router, HTTP_GET, "/accept-invitation", accept_invitation_page_handler);
+    router_add(router, HTTP_POST, "/accept-invitation", accept_invitation_handler);
+
+    /* RS user provisioning API */
+    router_add(router, HTTP_POST, "/api/rs/users", rs_provision_user_handler);
+    router_add(router, HTTP_GET, "/api/rs/users", rs_lookup_user_handler);
+    router_add(router, HTTP_POST, "/api/rs/client-users", rs_link_client_user_handler);
+    router_add(router, HTTP_DELETE, "/api/rs/client-users", rs_unlink_client_user_handler);
+    router_add(router, HTTP_GET, "/api/rs/client-users", rs_list_client_users_handler);
+
+    /* POST aliases for GET endpoints (browsers cannot send GET with JSON body) */
+    router_add(router, HTTP_POST, "/api/rs/users/lookup", rs_lookup_user_handler);
+    router_add(router, HTTP_POST, "/api/rs/client-users/list", rs_list_client_users_handler);
+
     /* Register static files from ./static/ directory */
     register_static_files(router, config);
+
+    /* Load templates from ./templates/ directory */
+    template_init("./templates");
 
     /* Configure event loop (use resolved num_workers) */
     EventLoopConfig event_config = {
@@ -412,6 +463,7 @@ int main(void) {
     }
 
     static_files_cleanup();
+    template_cleanup();
     db_pool_shutdown();
     encrypt_cleanup();
     config_free(config);

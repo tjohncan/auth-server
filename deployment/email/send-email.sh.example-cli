@@ -1,0 +1,27 @@
+#!/bin/bash
+# Send email via AWS SES CLI.
+# Requires: aws cli configured with appropriate credentials and region.
+
+read -r payload
+
+# Extract fields using jq (handles JSON escapes correctly)
+field() { echo "$payload" | jq -r ".$1 // empty"; }
+
+TO=$(field to)
+FROM=$(field from)
+FROM_NAME=$(field from_name)
+SUBJECT=$(field subject)
+BODY_HTML=$(field body_html)
+
+SENDER="$FROM"
+[ -n "$FROM_NAME" ] && SENDER="$FROM_NAME <$FROM>"
+
+MSG=$(jq -n \
+  --arg subj "$SUBJECT" \
+  --arg html "$BODY_HTML" \
+  '{Subject:{Data:$subj,Charset:"UTF-8"},Body:{Html:{Data:$html,Charset:"UTF-8"}}}')
+
+aws ses send-email \
+  --from "$SENDER" \
+  --destination "ToAddresses=$TO" \
+  --message "$MSG"

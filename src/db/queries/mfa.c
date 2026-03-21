@@ -9,6 +9,7 @@
 #include "util/log.h"
 #include "util/data.h"
 #include "util/str.h"
+#include <openssl/crypto.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -179,6 +180,11 @@ int mfa_method_get_by_id(db_handle_t *db,
     if (rc == DB_ROW) {
         /* Extract MFA method data */
         const unsigned char *id_blob = db_column_blob(stmt, 0);
+        if (!id_blob) {
+            log_error("NULL method ID in MFA lookup");
+            db_finalize(stmt);
+            return -1;
+        }
         memcpy(out_method->id, id_blob, 16);
 
         out_method->pin = db_column_int64(stmt, 1);
@@ -268,6 +274,7 @@ int mfa_method_list(db_handle_t *db,
             mfa_method_t *new_methods = realloc(methods, capacity * sizeof(mfa_method_t));
             if (!new_methods) {
                 log_error("Failed to reallocate memory for MFA methods list");
+                OPENSSL_cleanse(methods, count * sizeof(mfa_method_t));
                 free(methods);
                 db_finalize(stmt);
                 return -1;
@@ -279,6 +286,7 @@ int mfa_method_list(db_handle_t *db,
         mfa_method_t *method = &methods[count];
 
         const unsigned char *id_blob = db_column_blob(stmt, 0);
+        if (!id_blob) continue;
         memcpy(method->id, id_blob, 16);
 
         method->pin = db_column_int64(stmt, 1);
@@ -309,6 +317,7 @@ int mfa_method_list(db_handle_t *db,
 
     if (rc != DB_DONE) {
         log_error("Error listing MFA methods");
+        OPENSSL_cleanse(methods, count * sizeof(mfa_method_t));
         free(methods);
         return -1;
     }
@@ -408,9 +417,11 @@ int mfa_method_delete(db_handle_t *db, const unsigned char *method_id) {
             /* Found active set - revoke it */
             if (recovery_code_set_revoke(db, active_set.id) != 0) {
                 log_error("Failed to revoke recovery codes");
+                OPENSSL_cleanse(&active_set, sizeof(active_set));
                 db_execute_trusted(db, "ROLLBACK");
                 return -1;
             }
+            OPENSSL_cleanse(&active_set, sizeof(active_set));
             log_info("Revoked recovery codes (no MFA methods remaining)");
         }
 
@@ -509,11 +520,13 @@ int recovery_code_set_create(db_handle_t *db,
 
     char salt_hex[65];
     bytes_to_hex(salt_bytes, sizeof(salt_bytes), salt_hex, sizeof(salt_hex));
+    OPENSSL_cleanse(salt_bytes, sizeof(salt_bytes));
 
     int hash_iterations = crypto_password_min_iterations();
 
     if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
         log_error("Failed to begin transaction");
+        OPENSSL_cleanse(salt_hex, sizeof(salt_hex));
         return -1;
     }
 
@@ -529,6 +542,7 @@ int recovery_code_set_create(db_handle_t *db,
     if (db_prepare(db, &revoke_stmt, revoke_sql) != 0) {
         log_error("Failed to prepare recovery code set revoke statement");
         db_execute_trusted(db, "ROLLBACK");
+        OPENSSL_cleanse(salt_hex, sizeof(salt_hex));
         return -1;
     }
 
@@ -540,6 +554,7 @@ int recovery_code_set_create(db_handle_t *db,
     if (rc != DB_DONE) {
         log_error("Failed to revoke existing recovery code set");
         db_execute_trusted(db, "ROLLBACK");
+        OPENSSL_cleanse(salt_hex, sizeof(salt_hex));
         return -1;
     }
 
@@ -553,6 +568,7 @@ int recovery_code_set_create(db_handle_t *db,
     if (db_prepare(db, &set_stmt, set_sql) != 0) {
         log_error("Failed to prepare recovery_code_set insert");
         db_execute_trusted(db, "ROLLBACK");
+        OPENSSL_cleanse(salt_hex, sizeof(salt_hex));
         return -1;
     }
 
@@ -567,6 +583,7 @@ int recovery_code_set_create(db_handle_t *db,
         log_error("Failed to insert recovery code set");
         db_finalize(set_stmt);
         db_execute_trusted(db, "ROLLBACK");
+        OPENSSL_cleanse(salt_hex, sizeof(salt_hex));
         return -1;
     }
 
@@ -583,6 +600,7 @@ int recovery_code_set_create(db_handle_t *db,
     if (db_prepare(db, &code_stmt, code_sql) != 0) {
         log_error("Failed to prepare recovery_code insert");
         db_execute_trusted(db, "ROLLBACK");
+        OPENSSL_cleanse(salt_hex, sizeof(salt_hex));
         return -1;
     }
 
@@ -594,6 +612,7 @@ int recovery_code_set_create(db_handle_t *db,
             log_error("Recovery code too short (must be at least 4 characters)");
             db_finalize(code_stmt);
             db_execute_trusted(db, "ROLLBACK");
+            OPENSSL_cleanse(salt_hex, sizeof(salt_hex));
             return -1;
         }
 
@@ -604,6 +623,7 @@ int recovery_code_set_create(db_handle_t *db,
             log_error("Failed to hash recovery code");
             db_finalize(code_stmt);
             db_execute_trusted(db, "ROLLBACK");
+            OPENSSL_cleanse(salt_hex, sizeof(salt_hex));
             return -1;
         }
 
@@ -614,11 +634,13 @@ int recovery_code_set_create(db_handle_t *db,
         db_bind_text(code_stmt, 3, last4, -1);
 
         rc = db_step(code_stmt);
+        OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
 
         if (rc != DB_DONE) {
             log_error("Failed to insert recovery code");
             db_finalize(code_stmt);
             db_execute_trusted(db, "ROLLBACK");
+            OPENSSL_cleanse(salt_hex, sizeof(salt_hex));
             return -1;
         }
 
@@ -626,6 +648,7 @@ int recovery_code_set_create(db_handle_t *db,
     }
 
     db_finalize(code_stmt);
+    OPENSSL_cleanse(salt_hex, sizeof(salt_hex));
 
     if (db_execute_trusted(db, "COMMIT") != 0) {
         log_error("Failed to commit transaction");
@@ -665,6 +688,11 @@ int recovery_code_set_get_active(db_handle_t *db,
 
     if (rc == DB_ROW) {
         const unsigned char *id_blob = db_column_blob(stmt, 0);
+        if (!id_blob) {
+            log_error("NULL recovery code set ID");
+            db_finalize(stmt);
+            return -1;
+        }
         memcpy(out_set->id, id_blob, 16);
 
         out_set->user_account_pin = db_column_int64(stmt, 1);
@@ -717,12 +745,14 @@ int recovery_code_verify(db_handle_t *db,
                                      set.salt, set.hash_iterations,
                                      hash_hex, sizeof(hash_hex)) != 0) {
         log_error("Failed to hash recovery code for verification");
+        OPENSSL_cleanse(&set, sizeof(set));
         return -1;
     }
 
     /* Begin transaction (need to check and mark as used atomically) */
     if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
         log_error("Failed to begin transaction");
+        OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
         return -1;
     }
 
@@ -739,23 +769,27 @@ int recovery_code_verify(db_handle_t *db,
     if (db_prepare(db, &select_stmt, select_sql) != 0) {
         log_error("Failed to prepare recovery code select");
         db_execute_trusted(db, "ROLLBACK");
+        OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
         return -1;
     }
 
     db_bind_blob(select_stmt, 1, set.id, 16);
     db_bind_text(select_stmt, 2, hash_hex, -1);
+    OPENSSL_cleanse(&set, sizeof(set));
 
     int rc = db_step(select_stmt);
 
     if (rc != DB_ROW) {
         db_finalize(select_stmt);
         db_execute_trusted(db, "ROLLBACK");
+        OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
         log_debug("Recovery code not found or already used");
         return 0;  /* Invalid */
     }
 
     long long code_pin = db_column_int64(select_stmt, 0);
     db_finalize(select_stmt);
+    OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
 
     /* Mark code as used */
     const char *update_sql =
@@ -858,10 +892,12 @@ int recovery_code_get_masked_list(db_handle_t *db,
     db_stmt_t *stmt = NULL;
     if (db_prepare(db, &stmt, sql) != 0) {
         log_error("Failed to prepare recovery_code_get_masked_list statement");
+        OPENSSL_cleanse(&set, sizeof(set));
         return -1;
     }
 
     db_bind_blob(stmt, 1, set.id, 16);
+    OPENSSL_cleanse(&set, sizeof(set));
 
     /* Collect masked codes */
     int count = 0;

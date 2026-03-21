@@ -1,0 +1,23 @@
+<!DOCTYPE html><html lang="en"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="dark">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'; form-action 'self'; manifest-src 'self'; base-uri 'self';">
+<title>Verify Email</title>
+<link rel="stylesheet" href="/css/base.css">
+<link rel="stylesheet" href="/css/templates.css">
+</head><body>
+<div class="page-container">
+<h1>Verify Email</h1>
+<div class="info">
+<p>Email: <strong>{{EMAIL}}</strong></p>
+<p>Username: {{USERNAME_DISPLAY}}</p>
+<p>User ID: <span class="text-muted text-uid">{{USER_ID}}</span></p>
+</div>
+<form method="POST" action="/verify-email">
+<input type="hidden" name="token" value="{{TOKEN}}">
+<button type="submit" class="btn-green">Confirm Verification</button>
+</form>
+<p class="page-hint text-muted">
+If you did not request this, close this page.</p>
+</div></body></html>

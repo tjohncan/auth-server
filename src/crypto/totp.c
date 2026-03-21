@@ -127,6 +127,7 @@ int crypto_totp_generate_secret(char *out_secret, size_t secret_size) {
     /* Encode to base32 */
     size_t encoded_len = base32_encode(random_bytes, sizeof(random_bytes),
                                       out_secret, secret_size);
+    OPENSSL_cleanse(random_bytes, sizeof(random_bytes));
     if (encoded_len == 0) {
         log_error("Failed to encode TOTP secret to base32");
         return -1;

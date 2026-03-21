@@ -205,7 +205,8 @@ int admin_update_resource_server(db_handle_t *db, long long user_account_pin,
                                   const char *display_name,
                                   const char *address,
                                   const char *note,
-                                  const int *is_active);
+                                  const int *is_active,
+                                  const int *allow_user_provisioning);
 
 /* ============================================================================
  * CLIENT OPERATIONS
@@ -497,7 +498,7 @@ typedef organization_key_data_t admin_organization_key_t;
  *
  * Parameters:
  *   db                   - Database handle
- *   organization_code_name - Organization code name
+ *   organization_pin     - Organization PIN
  *   limit                - Maximum results
  *   offset               - Skip count
  *   filter_is_active     - Filter by status (NULL = all)
@@ -507,7 +508,7 @@ typedef organization_key_data_t admin_organization_key_t;
  * Returns: 0 on success, -1 on error
  */
 int admin_list_organization_keys(db_handle_t *db,
-                                  const char *organization_code_name,
+                                  long long organization_pin,
                                   int limit, int offset,
                                   const int *filter_is_active,
                                   admin_organization_key_t **out_keys,

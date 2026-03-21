@@ -96,6 +96,7 @@ create table resource_server (
 , organization_pin integer not null
 , code_name text not null
 , display_name text not null
+, allow_user_provisioning integer not null default 0
 , address text not null
 , note text
 
@@ -104,6 +105,7 @@ create table resource_server (
 , constraint ck_resource_server_is_active check(is_active in (0, 1))
 , constraint ck_resource_server_code_name_len check(length(code_name) <= 100)
 , constraint ck_resource_server_display_name_len check(length(display_name) <= 200)
+, constraint ck_resource_server_allow_user_provisioning check(allow_user_provisioning in (0, 1))
 , constraint ck_resource_server_address_len check(length(address) <= 2000)
 , constraint ck_resource_server_note_len check(length(note) <= 2000)
 , constraint fk_resource_server_organization foreign key(organization_pin) references organization(pin)
@@ -246,10 +248,10 @@ create table client_redirect_uri (
 , note text
 
 , constraint uix_client_redirect_uri unique(client_pin, redirect_uri)
-, constraint fk_client_redirect_uri_client foreign key(client_pin) references client(pin)
 , constraint ck_redirect_uri_scheme check(lower(redirect_uri) like 'http://%' or lower(redirect_uri) like 'https://%')
 , constraint ck_client_redirect_uri_len check(length(redirect_uri) <= 2000)
 , constraint ck_client_redirect_uri_note_len check(length(note) <= 2000)
+, constraint fk_client_redirect_uri_client foreign key(client_pin) references client(pin)
 );
 
 create table client_resource_server (
@@ -282,15 +284,13 @@ create table user_account (
 , salt text
 , hash_iterations integer
 , secret_hash text
-, force_password_reset integer not null default 0
-, enable_passwordless_login integer not null default 0
+, allow_passwordless_login integer not null default 0
 , has_mfa integer not null default 0
 , require_mfa integer not null default 0
 
 , constraint uix_user_account_id unique(id)
 , constraint ck_user_account_is_active check(is_active in (0, 1))
-, constraint ck_user_account_force_password_reset check(force_password_reset in (0, 1))
-, constraint ck_user_account_enable_passwordless check(enable_passwordless_login in (0, 1))
+, constraint ck_user_account_allow_passwordless check(allow_passwordless_login in (0, 1))
 , constraint ck_user_account_mfa_flags check(
     (has_mfa = 0 and require_mfa = 0) or
     (has_mfa = 1 and require_mfa in (0, 1))
@@ -317,11 +317,15 @@ create table user_email (
 , is_verified integer not null default 0
 , verified_at text
 
-, constraint uix_user_email_email_hash unique(email_hash)
+, constraint uix_user_email_user_email unique(user_account_pin, email_hash)
 , constraint ck_user_email_is_primary check(is_primary in (0, 1))
 , constraint ck_user_email_is_verified check(is_verified in (0, 1))
 , constraint fk_user_email_user_account foreign key(user_account_pin) references user_account(pin)
 );
+
+create unique index uix_user_email_verified
+  on user_email(email_hash)
+  where is_verified = 1;
 
 create unique index uix_user_email_user_primary
   on user_email(user_account_pin)
@@ -572,12 +576,16 @@ create table passwordless_login_token (
 , is_used integer not null default 0
 , used_at text
 , source_ip text
+, return_to text
 
 , constraint pk_passwordless_login_token primary key(id)
 , constraint uix_passwordless_login_token_token unique(token)
 , constraint ck_passwordless_login_token_is_used check(is_used in (0, 1))
 , constraint fk_passwordless_login_token_user_account foreign key(user_account_pin) references user_account(pin)
 );
+
+create index idx_passwordless_login_token_rate_limit
+  on passwordless_login_token(user_account_pin, issued_at);
 
 create table email_verification_token (
   id blob not null
@@ -601,6 +609,9 @@ create table email_verification_token (
 , constraint fk_email_verification_token_user_email foreign key(user_email_pin) references user_email(pin)
 );
 
+create index idx_email_verification_token_rate_limit
+  on email_verification_token(user_email_pin, issued_at);
+
 create table password_reset_token (
   id blob not null
 , created_at text not null default (datetime('now'))
@@ -621,6 +632,30 @@ create table password_reset_token (
 , constraint ck_password_reset_token_is_used check(is_used in (0, 1))
 , constraint ck_password_reset_token_is_revoked check(is_revoked in (0, 1))
 , constraint fk_password_reset_token_user_account foreign key(user_account_pin) references user_account(pin)
+);
+
+create index idx_password_reset_token_rate_limit
+  on password_reset_token(user_account_pin, issued_at);
+
+create table invitation_token (
+  id blob not null
+, created_at text not null default (datetime('now'))
+, updated_at text not null default (datetime('now'))
+
+, user_account_pin integer not null
+, user_email_pin integer
+, token text not null
+, issued_at text not null
+, expected_expiry text not null
+, is_used integer not null default 0
+, used_at text
+, source_ip text
+
+, constraint pk_invitation_token primary key(id)
+, constraint uix_invitation_token_token unique(token)
+, constraint ck_invitation_token_is_used check(is_used in (0, 1))
+, constraint fk_invitation_token_user_account foreign key(user_account_pin) references user_account(pin)
+, constraint fk_invitation_token_user_email foreign key(user_email_pin) references user_email(pin)
 );
 
 -- ============================================================================
@@ -680,6 +715,9 @@ create table user_mfa_usage (
 , constraint ck_user_mfa_usage_success check(success in (0, 1))
 );
 
+create index idx_user_mfa_usage_rate_limit
+  on user_mfa_usage(user_mfa_pin, success, submitted_at);
+
 -- ============================================================================
 -- INDEXES - Database cleaner performance
 -- ============================================================================
@@ -708,6 +746,9 @@ create index idx_email_verification_token_expected_expiry
 create index idx_password_reset_token_expected_expiry
   on password_reset_token(expected_expiry);
 
+create index idx_invitation_token_expected_expiry
+  on invitation_token(expected_expiry);
+
 -- Usage log cleanup indexes
 create index idx_client_key_usage_authenticated_at
   on client_key_usage(authenticated_at);
@@ -720,9 +761,6 @@ create index idx_organization_key_usage_authenticated_at
 
 create index idx_user_mfa_usage_submitted_at
   on user_mfa_usage(submitted_at);
-
-create index idx_user_mfa_usage_rate_limit
-  on user_mfa_usage(user_mfa_pin, success, submitted_at);
 
 -- Composite indexes for purging with business logic filters
 -- (Leading with equality condition for better selectivity when deleting old rows)

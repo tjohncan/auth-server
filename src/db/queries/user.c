@@ -6,13 +6,19 @@
 #include "crypto/password.h"
 #include "crypto/encrypt.h"
 #include "crypto/hmac.h"
+#include "crypto/sha256.h"
 #include "util/log.h"
 #include "util/data.h"
 #include "util/str.h"
 #include "util/validation.h"
+#include <openssl/crypto.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* Token size: 32 random bytes = 43 chars base64url + null */
+#define VERIFICATION_TOKEN_BYTES 32
+#define VERIFICATION_TOKEN_BUF_SIZE 44
 
 int user_username_exists(db_handle_t *db, const char *username) {
     if (!db || !username) {
@@ -55,7 +61,7 @@ int user_username_exists(db_handle_t *db, const char *username) {
     }
 }
 
-int user_email_exists(db_handle_t *db, const char *email) {
+int user_email_exists(db_handle_t *db, const char *email, long long user_account_pin) {
     if (!db || !email) {
         log_error("Invalid arguments to user_email_exists");
         return -1;
@@ -72,7 +78,10 @@ int user_email_exists(db_handle_t *db, const char *email) {
 
     const char *sql =
         "SELECT 1 FROM " TBL_USER_EMAIL " "
-        "WHERE email_hash = " P"1 "
+        "WHERE user_account_pin = " P"1 AND email_hash = " P"2 "
+        "UNION ALL "
+        "SELECT 1 FROM " TBL_USER_EMAIL " "
+        "WHERE email_hash = " P"3 AND is_verified = " BOOL_TRUE " "
         "LIMIT 1";
 
     db_stmt_t *stmt = NULL;
@@ -81,15 +90,17 @@ int user_email_exists(db_handle_t *db, const char *email) {
         return -1;
     }
 
-    db_bind_text(stmt, 1, hash_hex, -1);
+    db_bind_int64(stmt, 1, user_account_pin);
+    db_bind_text(stmt, 2, hash_hex, -1);
+    db_bind_text(stmt, 3, hash_hex, -1);
 
     int rc = db_step(stmt);
     db_finalize(stmt);
 
     if (rc == DB_ROW) {
-        return 1;  /* Exists */
+        return 1;  /* Taken */
     } else if (rc == DB_DONE) {
-        return 0;  /* Does not exist */
+        return 0;  /* Available */
     } else {
         log_error("Error checking email existence");
         return -1;
@@ -174,7 +185,7 @@ int user_lookup_id_by_username(db_handle_t *db, const char *username,
         return 0;
     } else if (rc == DB_DONE) {
         db_finalize(stmt);
-        log_debug("User not found: username='%s'", username);
+        log_debug("User not found by username");
         return -1;
     } else {
         log_error("Error looking up user by username");
@@ -209,12 +220,14 @@ int user_create(db_handle_t *db, const char *username,
     int iterations;
     char hash[PASSWORD_HASH_HEX_MAX_LENGTH];
 
-    if (crypto_password_hash(password, strlen(password),
+    int hash_rc = crypto_password_hash(password, strlen(password),
                             salt, sizeof(salt),
                             &iterations,
-                            hash, sizeof(hash)) != 0) {
+                            hash, sizeof(hash));
+    if (hash_rc != 0) {
         log_error("Failed to hash password");
-        return -1;
+        OPENSSL_cleanse(salt, sizeof(salt));
+        return (hash_rc == -2) ? -2 : -1;
     }
 
     /* Encrypt username and compute hash */
@@ -223,12 +236,16 @@ int user_create(db_handle_t *db, const char *username,
     if (username) {
         if (encrypt_field(username, encrypted_username, sizeof(encrypted_username)) != 0) {
             log_error("Failed to encrypt username");
+            OPENSSL_cleanse(salt, sizeof(salt));
+            OPENSSL_cleanse(hash, sizeof(hash));
             return -1;
         }
         char lower_buf[256];
         str_to_lower(lower_buf, sizeof(lower_buf), username);
         if (hash_field(lower_buf, username_hash, sizeof(username_hash)) != 0) {
             log_error("Failed to hash username");
+            OPENSSL_cleanse(salt, sizeof(salt));
+            OPENSSL_cleanse(hash, sizeof(hash));
             return -1;
         }
     }
@@ -239,12 +256,16 @@ int user_create(db_handle_t *db, const char *username,
     if (email) {
         if (encrypt_field(email, encrypted_email, sizeof(encrypted_email)) != 0) {
             log_error("Failed to encrypt email");
+            OPENSSL_cleanse(salt, sizeof(salt));
+            OPENSSL_cleanse(hash, sizeof(hash));
             return -1;
         }
         char lower_buf[256];
         str_to_lower(lower_buf, sizeof(lower_buf), email);
         if (hash_field(lower_buf, email_hash, sizeof(email_hash)) != 0) {
             log_error("Failed to hash email");
+            OPENSSL_cleanse(salt, sizeof(salt));
+            OPENSSL_cleanse(hash, sizeof(hash));
             return -1;
         }
     }
@@ -253,6 +274,8 @@ int user_create(db_handle_t *db, const char *username,
     if (email) {
         if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
             log_error("Failed to begin transaction");
+            OPENSSL_cleanse(salt, sizeof(salt));
+            OPENSSL_cleanse(hash, sizeof(hash));
             return -1;
         }
     }
@@ -268,6 +291,8 @@ int user_create(db_handle_t *db, const char *username,
     if (db_prepare(db, &stmt, sql) != 0) {
         log_error("Failed to prepare user_create statement");
         if (email) db_execute_trusted(db, "ROLLBACK");
+        OPENSSL_cleanse(salt, sizeof(salt));
+        OPENSSL_cleanse(hash, sizeof(hash));
         return -1;
     }
 
@@ -291,11 +316,16 @@ int user_create(db_handle_t *db, const char *username,
         log_error("Failed to insert user_account");
         db_finalize(stmt);
         if (email) db_execute_trusted(db, "ROLLBACK");
+        OPENSSL_cleanse(salt, sizeof(salt));
+        OPENSSL_cleanse(hash, sizeof(hash));
         return -1;
     }
 
     long long user_pin = db_column_int64(stmt, 0);
     db_finalize(stmt);
+
+    OPENSSL_cleanse(salt, sizeof(salt));
+    OPENSSL_cleanse(hash, sizeof(hash));
 
     /* Insert user_email if provided */
     if (email) {
@@ -408,6 +438,8 @@ int user_verify_password(db_handle_t *db, const char *username,
     /* Verify password using crypto module */
     int valid = crypto_password_verify(password, strlen(password),
                                        salt, iterations, hash);
+    OPENSSL_cleanse(salt, sizeof(salt));
+    OPENSSL_cleanse(hash, sizeof(hash));
 
     /* If password valid, return pin and id if requested */
     if (valid == 1) {
@@ -421,6 +453,91 @@ int user_verify_password(db_handle_t *db, const char *username,
 
     return valid;  /* 1 if valid, 0 if invalid, -1 on error */
 }
+
+#ifdef EMAIL_SUPPORT
+int user_verify_password_by_email(db_handle_t *db, const char *email,
+                                   const char *password, long long *out_pin,
+                                   unsigned char *out_id) {
+    if (!db || !email || !password) {
+        log_error("Invalid arguments to user_verify_password_by_email");
+        return -1;
+    }
+
+    /* Compute HMAC hash for lookup */
+    char lower_buf[256];
+    str_to_lower(lower_buf, sizeof(lower_buf), email);
+    char hash_hex[HMAC_SHA256_HEX_LENGTH];
+    if (hash_field(lower_buf, hash_hex, sizeof(hash_hex)) != 0) {
+        log_error("Failed to hash email for password verification");
+        return -1;
+    }
+
+    const char *sql =
+        "SELECT ua.pin, ua.id, ua.salt, ua.hash_iterations, ua.secret_hash "
+        "FROM " TBL_USER_EMAIL " ue "
+        "JOIN " TBL_USER_ACCOUNT " ua ON ua.pin = ue.user_account_pin "
+        "WHERE ue.email_hash = " P"1 AND ue.is_verified = " BOOL_TRUE " "
+        "AND ua.is_active = " BOOL_TRUE " "
+        "LIMIT 1";
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        log_error("Failed to prepare user_verify_password_by_email statement");
+        return -1;
+    }
+
+    db_bind_text(stmt, 1, hash_hex, -1);
+
+    int rc = db_step(stmt);
+
+    if (rc != DB_ROW) {
+        db_finalize(stmt);
+        /* Dummy verification to equalize timing */
+        crypto_password_verify(password, strlen(password),
+                               "00000000000000000000000000000000",
+                               crypto_password_min_iterations(),
+                               "0000000000000000000000000000000000000000000000000000000000000000");
+        return 0;
+    }
+
+    long long pin = db_column_int64(stmt, 0);
+    const unsigned char *id = db_column_blob(stmt, 1);
+    const char *salt_ptr = (const char *)db_column_text(stmt, 2);
+    int iterations = db_column_int(stmt, 3);
+    const char *hash_ptr = (const char *)db_column_text(stmt, 4);
+
+    if (!id || !salt_ptr || !hash_ptr) {
+        log_error("NULL fields in user_account (email login)");
+        db_finalize(stmt);
+        return -1;
+    }
+
+    /* Copy column data before finalize */
+    unsigned char user_id[16];
+    memcpy(user_id, id, 16);
+    char salt[256], hash[256];
+    snprintf(salt, sizeof(salt), "%s", salt_ptr);
+    snprintf(hash, sizeof(hash), "%s", hash_ptr);
+
+    db_finalize(stmt);
+
+    int valid = crypto_password_verify(password, strlen(password),
+                                       salt, iterations, hash);
+    OPENSSL_cleanse(salt, sizeof(salt));
+    OPENSSL_cleanse(hash, sizeof(hash));
+
+    if (valid == 1) {
+        if (out_pin != NULL) {
+            *out_pin = pin;
+        }
+        if (out_id != NULL) {
+            memcpy(out_id, user_id, 16);
+        }
+    }
+
+    return valid;
+}
+#endif /* EMAIL_SUPPORT */
 
 int user_make_org_admin(db_handle_t *db, const unsigned char *user_id,
                         const char *org_code_name) {
@@ -523,7 +640,8 @@ int user_get_management_ui_setups(db_handle_t *db, long long user_account_pin,
         const char *client_display_name = (const char *)db_column_text(stmt, 4);
         const char *rs_address = (const char *)db_column_text(stmt, 5);
 
-        /* Copy to struct */
+        /* Copy to struct (str_copy handles NULL; client_id must be checked) */
+        if (!client_id) continue;
         str_copy(setup.org_code_name, sizeof(setup.org_code_name), org_code_name);
         str_copy(setup.org_display_name, sizeof(setup.org_display_name), org_display_name);
         memcpy(setup.client_id, client_id, 16);
@@ -576,7 +694,8 @@ int user_get_profile(db_handle_t *db, long long user_account_pin,
     }
 
     const char *sql =
-        "SELECT id, username, has_mfa, require_mfa FROM " TBL_USER_ACCOUNT " "
+        "SELECT id, username, has_mfa, require_mfa, allow_passwordless_login "
+        "FROM " TBL_USER_ACCOUNT " "
         "WHERE pin = " P"1 AND is_active = " BOOL_TRUE " "
         "LIMIT 1";
 
@@ -614,9 +733,10 @@ int user_get_profile(db_handle_t *db, long long user_account_pin,
             out_profile->username[0] = '\0';
         }
 
-        /* Extract MFA flags */
+        /* Extract flags */
         out_profile->has_mfa = db_column_int(stmt, 2);
         out_profile->require_mfa = db_column_int(stmt, 3);
+        out_profile->allow_passwordless_login = db_column_int(stmt, 4);
 
         db_finalize(stmt);
         return 0;
@@ -733,6 +853,273 @@ int user_get_emails(db_handle_t *db, long long user_account_pin,
     return 0;
 }
 
+int user_add_email(db_handle_t *db, long long user_account_pin,
+                   const char *email) {
+    if (!db || !email) {
+        log_error("Invalid arguments to user_add_email");
+        return -1;
+    }
+
+    /* Encrypt email and compute hash */
+    char encrypted_email[512];
+    if (encrypt_field(email, encrypted_email, sizeof(encrypted_email)) != 0) {
+        log_error("Failed to encrypt email");
+        return -1;
+    }
+
+    char lower_buf[256];
+    str_to_lower(lower_buf, sizeof(lower_buf), email);
+    char email_hash[HMAC_SHA256_HEX_LENGTH];
+    if (hash_field(lower_buf, email_hash, sizeof(email_hash)) != 0) {
+        log_error("Failed to hash email");
+        return -1;
+    }
+
+    const char *sql =
+        "INSERT INTO " TBL_USER_EMAIL " "
+        "(user_account_pin, email_address, email_hash) "
+        "VALUES (" P"1, " P"2, " P"3)";
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        log_error("Failed to prepare user_add_email statement");
+        return -1;
+    }
+
+    db_bind_int64(stmt, 1, user_account_pin);
+    db_bind_text(stmt, 2, encrypted_email, -1);
+    db_bind_text(stmt, 3, email_hash, -1);
+
+    int rc = db_step(stmt);
+    db_finalize(stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Failed to insert user_email");
+        return -1;
+    }
+
+    return 0;
+}
+
+int user_delete_email(db_handle_t *db, long long user_account_pin,
+                      const char *email) {
+    if (!db || !email) {
+        log_error("Invalid arguments to user_delete_email");
+        return -1;
+    }
+
+    char lower_buf[256];
+    str_to_lower(lower_buf, sizeof(lower_buf), email);
+    char email_hash[HMAC_SHA256_HEX_LENGTH];
+    if (hash_field(lower_buf, email_hash, sizeof(email_hash)) != 0) {
+        log_error("Failed to hash email for deletion");
+        return -1;
+    }
+
+    if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
+        log_error("Failed to begin transaction for email delete");
+        return -1;
+    }
+
+    /* Delete verification tokens first (FK child) */
+    const char *tokens_sql =
+        "DELETE FROM " TBL_EMAIL_VERIFICATION_TOKEN " "
+        "WHERE user_email_pin IN ("
+            "SELECT pin FROM " TBL_USER_EMAIL " "
+            "WHERE user_account_pin = " P"1 AND email_hash = " P"2"
+        ")";
+
+    db_stmt_t *t_stmt = NULL;
+    if (db_prepare(db, &t_stmt, tokens_sql) != 0) {
+        log_error("Failed to prepare verification token cleanup for email delete");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    db_bind_int64(t_stmt, 1, user_account_pin);
+    db_bind_text(t_stmt, 2, email_hash, -1);
+
+    int rc = db_step(t_stmt);
+    db_finalize(t_stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Failed to delete verification tokens for email");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    /* Delete invitation tokens (FK child) */
+    const char *invite_sql =
+        "DELETE FROM " TBL_INVITATION_TOKEN " "
+        "WHERE user_email_pin IN ("
+            "SELECT pin FROM " TBL_USER_EMAIL " "
+            "WHERE user_account_pin = " P"1 AND email_hash = " P"2"
+        ")";
+
+    db_stmt_t *inv_stmt = NULL;
+    if (db_prepare(db, &inv_stmt, invite_sql) != 0) {
+        log_error("Failed to prepare invitation token cleanup for email delete");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    db_bind_int64(inv_stmt, 1, user_account_pin);
+    db_bind_text(inv_stmt, 2, email_hash, -1);
+
+    rc = db_step(inv_stmt);
+    db_finalize(inv_stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Failed to delete invitation tokens for email");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    /* Delete the email row */
+    const char *sql =
+        "DELETE FROM " TBL_USER_EMAIL " "
+        "WHERE user_account_pin = " P"1 AND email_hash = " P"2";
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        log_error("Failed to prepare user_delete_email statement");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    db_bind_int64(stmt, 1, user_account_pin);
+    db_bind_text(stmt, 2, email_hash, -1);
+
+    rc = db_step(stmt);
+    db_finalize(stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Failed to delete user_email");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    if (db_execute_trusted(db, "COMMIT") != 0) {
+        log_error("Failed to commit email delete transaction");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    return 0;
+}
+
+int user_set_primary_email(db_handle_t *db, long long user_account_pin,
+                           const char *email) {
+    if (!db) {
+        log_error("Invalid arguments to user_set_primary_email");
+        return -1;
+    }
+
+    char email_hash[HMAC_SHA256_HEX_LENGTH];
+    int have_email = 0;
+
+    if (email) {
+        char lower_buf[256];
+        str_to_lower(lower_buf, sizeof(lower_buf), email);
+        if (hash_field(lower_buf, email_hash, sizeof(email_hash)) != 0) {
+            log_error("Failed to hash email for set primary");
+            return -1;
+        }
+
+        /* Verify email exists for this user */
+        const char *check_sql =
+            "SELECT 1 FROM " TBL_USER_EMAIL " "
+            "WHERE user_account_pin = " P"1 AND email_hash = " P"2 "
+            "LIMIT 1";
+
+        db_stmt_t *check_stmt = NULL;
+        if (db_prepare(db, &check_stmt, check_sql) != 0) {
+            log_error("Failed to prepare email check statement");
+            return -1;
+        }
+
+        db_bind_int64(check_stmt, 1, user_account_pin);
+        db_bind_text(check_stmt, 2, email_hash, -1);
+
+        int rc = db_step(check_stmt);
+        db_finalize(check_stmt);
+
+        if (rc == DB_DONE) {
+            return 1;  /* Not found */
+        } else if (rc != DB_ROW) {
+            log_error("Error checking email existence for set primary");
+            return -1;
+        }
+
+        have_email = 1;
+    }
+
+    /* Clear old primary, then set new — two statements in a transaction.
+     * A single CASE UPDATE would be elegant but SQLite checks its partial
+     * unique index (user_account_pin WHERE is_primary = 1) per-row, so
+     * the new row can be set TRUE before the old one is cleared.
+     * When email is NULL, only the clear step runs (unset primary). */
+    if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
+        log_error("Failed to begin transaction for set primary");
+        return -1;
+    }
+
+    const char *clear_sql =
+        "UPDATE " TBL_USER_EMAIL " "
+        "SET is_primary = " BOOL_FALSE ", updated_at = " NOW " "
+        "WHERE user_account_pin = " P"1 AND is_primary = " BOOL_TRUE;
+
+    db_stmt_t *clear_stmt = NULL;
+    if (db_prepare(db, &clear_stmt, clear_sql) != 0) {
+        log_error("Failed to prepare clear primary statement");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    db_bind_int64(clear_stmt, 1, user_account_pin);
+    int rc = db_step(clear_stmt);
+    db_finalize(clear_stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Failed to clear existing primary email");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    if (have_email) {
+        const char *set_sql =
+            "UPDATE " TBL_USER_EMAIL " "
+            "SET is_primary = " BOOL_TRUE ", updated_at = " NOW " "
+            "WHERE user_account_pin = " P"1 AND email_hash = " P"2";
+
+        db_stmt_t *set_stmt = NULL;
+        if (db_prepare(db, &set_stmt, set_sql) != 0) {
+            log_error("Failed to prepare set primary statement");
+            db_execute_trusted(db, "ROLLBACK");
+            return -1;
+        }
+
+        db_bind_int64(set_stmt, 1, user_account_pin);
+        db_bind_text(set_stmt, 2, email_hash, -1);
+        rc = db_step(set_stmt);
+        db_finalize(set_stmt);
+
+        if (rc != DB_DONE) {
+            log_error("Failed to set primary email");
+            db_execute_trusted(db, "ROLLBACK");
+            return -1;
+        }
+    }
+
+    if (db_execute_trusted(db, "COMMIT") != 0) {
+        log_error("Failed to commit set primary transaction");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    return 0;
+}
+
 int user_change_password(db_handle_t *db, long long user_account_pin,
                          const unsigned char *user_account_id,
                          const char *current_password,
@@ -783,6 +1170,8 @@ int user_change_password(db_handle_t *db, long long user_account_pin,
     /* Step 2: Verify current password */
     int valid = crypto_password_verify(current_password, strlen(current_password),
                                        salt, iterations, hash);
+    OPENSSL_cleanse(salt, sizeof(salt));
+    OPENSSL_cleanse(hash, sizeof(hash));
 
     if (valid != 1) {
         log_info("Current password verification failed for password change");
@@ -794,12 +1183,14 @@ int user_change_password(db_handle_t *db, long long user_account_pin,
     int new_iterations;
     char new_hash[PASSWORD_HASH_HEX_MAX_LENGTH];
 
-    if (crypto_password_hash(new_password, strlen(new_password),
+    int hash_rc = crypto_password_hash(new_password, strlen(new_password),
                             new_salt, sizeof(new_salt),
                             &new_iterations,
-                            new_hash, sizeof(new_hash)) != 0) {
+                            new_hash, sizeof(new_hash));
+    if (hash_rc != 0) {
         log_error("Failed to hash new password");
-        return -1;
+        OPENSSL_cleanse(new_salt, sizeof(new_salt));
+        return (hash_rc == -2) ? -2 : -1;
     }
 
     /* Step 4: Update password in database */
@@ -814,6 +1205,8 @@ int user_change_password(db_handle_t *db, long long user_account_pin,
     db_stmt_t *update_stmt = NULL;
     if (db_prepare(db, &update_stmt, update_sql) != 0) {
         log_error("Failed to prepare password update statement");
+        OPENSSL_cleanse(new_salt, sizeof(new_salt));
+        OPENSSL_cleanse(new_hash, sizeof(new_hash));
         return -1;
     }
 
@@ -824,6 +1217,9 @@ int user_change_password(db_handle_t *db, long long user_account_pin,
 
     rc = db_step(update_stmt);
     db_finalize(update_stmt);
+
+    OPENSSL_cleanse(new_salt, sizeof(new_salt));
+    OPENSSL_cleanse(new_hash, sizeof(new_hash));
 
     if (rc != DB_DONE) {
         log_error("Failed to update password");
@@ -974,5 +1370,1912 @@ int user_get_userinfo_by_id(db_handle_t *db, const unsigned char *user_id,
     }
 
     db_finalize(stmt);
+    return 0;
+}
+
+int user_create_email_verification_token(db_handle_t *db,
+                                          long long user_account_pin,
+                                          const char *email,
+                                          int ttl_seconds,
+                                          const char *source_ip,
+                                          char *out_token) {
+    if (!db || !email || !out_token) {
+        log_error("Invalid arguments to user_create_email_verification_token");
+        return -1;
+    }
+
+    /* Compute email hash for lookup */
+    char lower_buf[256];
+    str_to_lower(lower_buf, sizeof(lower_buf), email);
+    char email_hash[HMAC_SHA256_HEX_LENGTH];
+    if (hash_field(lower_buf, email_hash, sizeof(email_hash)) != 0) {
+        log_error("Failed to hash email for verification token");
+        return -1;
+    }
+
+    /* Generate UUID for token row */
+    unsigned char id[16];
+    if (crypto_random_bytes(id, sizeof(id)) != 0) {
+        log_error("Failed to generate UUID for verification token");
+        return -1;
+    }
+
+    /* Generate random token string */
+    char token[VERIFICATION_TOKEN_BUF_SIZE];
+    if (crypto_random_token(token, sizeof(token), VERIFICATION_TOKEN_BYTES) < 0) {
+        log_error("Failed to generate verification token");
+        return -1;
+    }
+
+    /* Format TTL as string for INTERVAL_SECONDS macro */
+    char ttl_str[16];
+    snprintf(ttl_str, sizeof(ttl_str), "%d", ttl_seconds);
+
+    /* INSERT-SELECT with rate limit guard:
+     * Inserts only if the email exists for this user AND fewer than 5
+     * active tokens exist. Uses RETURNING to detect success. */
+    const char *sql =
+        "INSERT INTO " TBL_EMAIL_VERIFICATION_TOKEN " "
+        "(id, user_email_pin, token, issued_at, expected_expiry, source_ip) "
+        "SELECT " P"1, E.pin, " P"2, " NOW ", " INTERVAL_SECONDS(P"3") ", " P"4 "
+        "FROM " TBL_USER_EMAIL " E "
+        "JOIN " TBL_USER_ACCOUNT " U ON U.pin = E.user_account_pin "
+        "WHERE E.user_account_pin = " P"5 AND E.email_hash = " P"6 "
+        "AND U.is_active = " BOOL_TRUE " "
+        "AND NOT EXISTS ("
+            "SELECT 1 FROM " TBL_EMAIL_VERIFICATION_TOKEN " T "
+            "WHERE T.user_email_pin = E.pin "
+            "AND T.issued_at > " SECONDS_AGO("3600") " "
+            "LIMIT 1 OFFSET 4"
+        ") "
+        "RETURNING id";
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        log_error("Failed to prepare verification token insert");
+        OPENSSL_cleanse(token, sizeof(token));
+        return -1;
+    }
+
+    /* Hash token for storage (plaintext returned to caller via out_token) */
+    char token_hash[SHA256_HEX_LENGTH];
+    if (crypto_sha256_hex(token, strlen(token), token_hash, sizeof(token_hash)) != 0) {
+        log_error("Failed to hash verification token");
+        OPENSSL_cleanse(token, sizeof(token));
+        db_finalize(stmt);
+        return -1;
+    }
+
+    db_bind_blob(stmt, 1, id, sizeof(id));
+    db_bind_text(stmt, 2, token_hash, -1);
+    db_bind_text(stmt, 3, ttl_str, -1);
+    if (source_ip) {
+        db_bind_text(stmt, 4, source_ip, -1);
+    } else {
+        db_bind_null(stmt, 4);
+    }
+    db_bind_int64(stmt, 5, user_account_pin);
+    db_bind_text(stmt, 6, email_hash, -1);
+
+    int rc = db_step(stmt);
+    db_finalize(stmt);
+
+    if (rc == DB_ROW) {
+        /* Token created — return plaintext to caller (hash stored in DB) */
+        memcpy(out_token, token, VERIFICATION_TOKEN_BUF_SIZE);
+        OPENSSL_cleanse(token, sizeof(token));
+        return 0;
+    }
+
+    OPENSSL_cleanse(token, sizeof(token));
+
+    if (rc == DB_DONE) {
+        /* No row inserted: email not found or rate limited */
+        return 1;
+    }
+
+    log_error("Failed to insert verification token");
+    return -1;
+}
+
+int user_lookup_email_verification_token(db_handle_t *db, const char *token,
+                                          email_verification_result_t *out_result) {
+    if (!db || !token || !out_result) {
+        log_error("Invalid arguments to user_lookup_email_verification_token");
+        return -1;
+    }
+
+    memset(out_result, 0, sizeof(*out_result));
+
+    const char *sql =
+        "SELECT E.email_address, U.username, U.id "
+        "FROM " TBL_EMAIL_VERIFICATION_TOKEN " T "
+        "JOIN " TBL_USER_EMAIL " E ON E.pin = T.user_email_pin "
+        "JOIN " TBL_USER_ACCOUNT " U ON U.pin = E.user_account_pin "
+        "WHERE T.token = " P"1 "
+        "AND T.is_used = " BOOL_FALSE " "
+        "AND T.is_revoked = " BOOL_FALSE " "
+        "AND T.expected_expiry > " NOW " "
+        "AND U.is_active = " BOOL_TRUE " "
+        "LIMIT 1";
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        log_error("Failed to prepare verification token lookup");
+        return -1;
+    }
+
+    char token_hash[SHA256_HEX_LENGTH];
+    if (crypto_sha256_hex(token, strlen(token), token_hash, sizeof(token_hash)) != 0) {
+        log_error("Failed to hash verification token for lookup");
+        db_finalize(stmt);
+        return -1;
+    }
+
+    db_bind_text(stmt, 1, token_hash, -1);
+
+    int rc = db_step(stmt);
+    if (rc != DB_ROW) {
+        db_finalize(stmt);
+        if (rc == DB_DONE) return 1;
+        log_error("Error looking up verification token");
+        return -1;
+    }
+
+    const char *encrypted_email = (const char *)db_column_text(stmt, 0);
+    if (encrypted_email) {
+        if (decrypt_field(encrypted_email, out_result->email_address,
+                          sizeof(out_result->email_address)) != 0) {
+            log_error("Failed to decrypt email for verification lookup");
+            db_finalize(stmt);
+            return -1;
+        }
+    }
+
+    const char *encrypted_username = (const char *)db_column_text(stmt, 1);
+    if (encrypted_username) {
+        if (decrypt_field(encrypted_username, out_result->username,
+                          sizeof(out_result->username)) != 0) {
+            log_error("Failed to decrypt username for verification lookup");
+            db_finalize(stmt);
+            return -1;
+        }
+    }
+
+    const unsigned char *id_blob = db_column_blob(stmt, 2);
+    int id_len = db_column_bytes(stmt, 2);
+    if (id_blob && id_len == 16) {
+        memcpy(out_result->user_id, id_blob, 16);
+    }
+
+    db_finalize(stmt);
+    return 0;
+}
+
+int user_verify_email_token(db_handle_t *db, const char *token,
+                             email_verification_result_t *out_result) {
+    if (!db || !token || !out_result) {
+        log_error("Invalid arguments to user_verify_email_token");
+        return -1;
+    }
+
+    memset(out_result, 0, sizeof(*out_result));
+
+    /* Hash token once for all queries in this function */
+    char token_hash[SHA256_HEX_LENGTH];
+    if (crypto_sha256_hex(token, strlen(token), token_hash, sizeof(token_hash)) != 0) {
+        log_error("Failed to hash verification token");
+        return -1;
+    }
+
+    /* Step 1: Look up token, join to email + user account */
+    const char *lookup_sql =
+        "SELECT T.user_email_pin, E.email_address, E.email_hash, "
+               "E.user_account_pin, U.username, U.id "
+        "FROM " TBL_EMAIL_VERIFICATION_TOKEN " T "
+        "JOIN " TBL_USER_EMAIL " E ON E.pin = T.user_email_pin "
+        "JOIN " TBL_USER_ACCOUNT " U ON U.pin = E.user_account_pin "
+        "WHERE T.token = " P"1 "
+        "AND T.is_used = " BOOL_FALSE " "
+        "AND T.is_revoked = " BOOL_FALSE " "
+        "AND T.expected_expiry > " NOW " "
+        "AND U.is_active = " BOOL_TRUE " "
+        "LIMIT 1";
+
+    db_stmt_t *lookup_stmt = NULL;
+    if (db_prepare(db, &lookup_stmt, lookup_sql) != 0) {
+        log_error("Failed to prepare verification token lookup");
+        return -1;
+    }
+
+    db_bind_text(lookup_stmt, 1, token_hash, -1);
+
+    int rc = db_step(lookup_stmt);
+    if (rc != DB_ROW) {
+        db_finalize(lookup_stmt);
+        if (rc == DB_DONE) return 1;  /* Token not found / expired / used */
+        log_error("Error looking up verification token");
+        return -1;
+    }
+
+    /* Extract data before finalize */
+    long long user_email_pin = db_column_int64(lookup_stmt, 0);
+    long long user_account_pin = db_column_int64(lookup_stmt, 3);
+
+    /* Decrypt email address */
+    const char *encrypted_email = (const char *)db_column_text(lookup_stmt, 1);
+    if (encrypted_email) {
+        if (decrypt_field(encrypted_email, out_result->email_address,
+                          sizeof(out_result->email_address)) != 0) {
+            log_error("Failed to decrypt email for verification");
+            db_finalize(lookup_stmt);
+            return -1;
+        }
+    }
+
+    /* Copy email_hash for squatter cleanup */
+    const char *email_hash_ptr = (const char *)db_column_text(lookup_stmt, 2);
+    char email_hash[HMAC_SHA256_HEX_LENGTH];
+    if (email_hash_ptr) {
+        snprintf(email_hash, sizeof(email_hash), "%s", email_hash_ptr);
+    } else {
+        email_hash[0] = '\0';
+    }
+
+    /* Decrypt username */
+    const char *encrypted_username = (const char *)db_column_text(lookup_stmt, 4);
+    if (encrypted_username) {
+        if (decrypt_field(encrypted_username, out_result->username,
+                          sizeof(out_result->username)) != 0) {
+            log_error("Failed to decrypt username for verification");
+            db_finalize(lookup_stmt);
+            return -1;
+        }
+    }
+
+    /* Extract user_id */
+    const unsigned char *id_blob = db_column_blob(lookup_stmt, 5);
+    int id_len = db_column_bytes(lookup_stmt, 5);
+    if (id_blob && id_len == 16) {
+        memcpy(out_result->user_id, id_blob, 16);
+    }
+
+    db_finalize(lookup_stmt);
+
+    /* Begin transaction for the mutation steps */
+    if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
+        log_error("Failed to begin verification transaction");
+        return -1;
+    }
+
+    /* Step 2: Mark token as used (RETURNING detects concurrent consumption) */
+    const char *use_sql =
+        "UPDATE " TBL_EMAIL_VERIFICATION_TOKEN " "
+        "SET is_used = " BOOL_TRUE ", used_at = " NOW ", updated_at = " NOW " "
+        "WHERE token = " P"1 "
+        "AND is_used = " BOOL_FALSE " "
+        "RETURNING is_used";
+
+    db_stmt_t *use_stmt = NULL;
+    if (db_prepare(db, &use_stmt, use_sql) != 0) {
+        log_error("Failed to prepare token use update");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    db_bind_text(use_stmt, 1, token_hash, -1);
+    rc = db_step(use_stmt);
+    db_finalize(use_stmt);
+
+    if (rc != DB_ROW) {
+        db_execute_trusted(db, "ROLLBACK");
+        return (rc == DB_DONE) ? 1 : -1;
+    }
+
+    /* Step 3: Mark email as verified */
+    const char *verify_sql =
+        "UPDATE " TBL_USER_EMAIL " "
+        "SET is_verified = " BOOL_TRUE ", verified_at = " NOW ", updated_at = " NOW " "
+        "WHERE pin = " P"1";
+
+    db_stmt_t *verify_stmt = NULL;
+    if (db_prepare(db, &verify_stmt, verify_sql) != 0) {
+        log_error("Failed to prepare email verify update");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    db_bind_int64(verify_stmt, 1, user_email_pin);
+    rc = db_step(verify_stmt);
+    db_finalize(verify_stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Failed to mark email as verified");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    /* Step 4: Squatter cleanup — delete verification tokens for other users'
+     * unverified rows with the same email_hash (FK children first) */
+    if (email_hash[0] != '\0') {
+        /* Delete squatter verification tokens (FK child of user_email) */
+        const char *cleanup_tokens_sql =
+            "DELETE FROM " TBL_EMAIL_VERIFICATION_TOKEN " "
+            "WHERE user_email_pin IN ("
+                "SELECT pin FROM " TBL_USER_EMAIL " "
+                "WHERE email_hash = " P"1 "
+                "AND user_account_pin != " P"2 "
+                "AND is_verified = " BOOL_FALSE
+            ")";
+
+        db_stmt_t *ct_stmt = NULL;
+        if (db_prepare(db, &ct_stmt, cleanup_tokens_sql) != 0) {
+            log_error("Failed to prepare squatter token cleanup");
+            db_execute_trusted(db, "ROLLBACK");
+            return -1;
+        }
+
+        db_bind_text(ct_stmt, 1, email_hash, -1);
+        db_bind_int64(ct_stmt, 2, user_account_pin);
+        rc = db_step(ct_stmt);
+        db_finalize(ct_stmt);
+
+        if (rc != DB_DONE) {
+            log_error("Failed to delete squatter verification tokens");
+            db_execute_trusted(db, "ROLLBACK");
+            return -1;
+        }
+
+        /* Delete squatter invitation tokens (FK child of user_email) */
+        const char *cleanup_invite_sql =
+            "DELETE FROM " TBL_INVITATION_TOKEN " "
+            "WHERE user_email_pin IN ("
+                "SELECT pin FROM " TBL_USER_EMAIL " "
+                "WHERE email_hash = " P"1 "
+                "AND user_account_pin != " P"2 "
+                "AND is_verified = " BOOL_FALSE
+            ")";
+
+        db_stmt_t *ci_stmt = NULL;
+        if (db_prepare(db, &ci_stmt, cleanup_invite_sql) != 0) {
+            log_error("Failed to prepare squatter invitation token cleanup");
+            db_execute_trusted(db, "ROLLBACK");
+            return -1;
+        }
+
+        db_bind_text(ci_stmt, 1, email_hash, -1);
+        db_bind_int64(ci_stmt, 2, user_account_pin);
+        rc = db_step(ci_stmt);
+        db_finalize(ci_stmt);
+
+        if (rc != DB_DONE) {
+            log_error("Failed to delete squatter invitation tokens");
+            db_execute_trusted(db, "ROLLBACK");
+            return -1;
+        }
+
+        /* Delete the squatter email rows themselves */
+        const char *cleanup_emails_sql =
+            "DELETE FROM " TBL_USER_EMAIL " "
+            "WHERE email_hash = " P"1 "
+            "AND user_account_pin != " P"2 "
+            "AND is_verified = " BOOL_FALSE;
+
+        db_stmt_t *ce_stmt = NULL;
+        if (db_prepare(db, &ce_stmt, cleanup_emails_sql) != 0) {
+            log_error("Failed to prepare squatter email cleanup");
+            db_execute_trusted(db, "ROLLBACK");
+            return -1;
+        }
+
+        db_bind_text(ce_stmt, 1, email_hash, -1);
+        db_bind_int64(ce_stmt, 2, user_account_pin);
+        rc = db_step(ce_stmt);
+        db_finalize(ce_stmt);
+
+        if (rc != DB_DONE) {
+            log_error("Failed to delete squatter email rows");
+            db_execute_trusted(db, "ROLLBACK");
+            return -1;
+        }
+    }
+
+    /* Commit */
+    if (db_execute_trusted(db, "COMMIT") != 0) {
+        log_error("Failed to commit verification transaction");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    log_info("Email verified for user_email_pin=%lld", user_email_pin);
+    return 0;
+}
+
+int user_create_password_reset_token(db_handle_t *db, const char *email,
+                                      int ttl_seconds, const char *source_ip,
+                                      char *out_token) {
+    if (!db || !email || !out_token) {
+        log_error("Invalid arguments to user_create_password_reset_token");
+        return -1;
+    }
+
+    /* Compute email hash for lookup */
+    char lower_buf[256];
+    str_to_lower(lower_buf, sizeof(lower_buf), email);
+    char email_hash[HMAC_SHA256_HEX_LENGTH];
+    if (hash_field(lower_buf, email_hash, sizeof(email_hash)) != 0) {
+        log_error("Failed to hash email for password reset token");
+        return -1;
+    }
+
+    unsigned char id[16];
+    if (crypto_random_bytes(id, sizeof(id)) != 0) {
+        log_error("Failed to generate UUID for password reset token");
+        return -1;
+    }
+
+    char token[VERIFICATION_TOKEN_BUF_SIZE];
+    if (crypto_random_token(token, sizeof(token), VERIFICATION_TOKEN_BYTES) < 0) {
+        log_error("Failed to generate password reset token");
+        return -1;
+    }
+
+    char ttl_str[16];
+    snprintf(ttl_str, sizeof(ttl_str), "%d", ttl_seconds);
+
+    /* INSERT-SELECT: resolve verified email → user_account_pin, rate limit */
+    const char *sql =
+        "INSERT INTO " TBL_PASSWORD_RESET_TOKEN " "
+        "(id, user_account_pin, token, issued_at, expected_expiry, source_ip) "
+        "SELECT " P"1, U.pin, " P"2, " NOW ", " INTERVAL_SECONDS(P"3") ", " P"4 "
+        "FROM " TBL_USER_EMAIL " E "
+        "JOIN " TBL_USER_ACCOUNT " U ON U.pin = E.user_account_pin "
+        "WHERE E.email_hash = " P"5 AND E.is_verified = " BOOL_TRUE " "
+        "AND U.is_active = " BOOL_TRUE " "
+        "AND NOT EXISTS ("
+            "SELECT 1 FROM " TBL_PASSWORD_RESET_TOKEN " T "
+            "WHERE T.user_account_pin = U.pin "
+            "AND T.issued_at > " SECONDS_AGO("3600") " "
+            "LIMIT 1 OFFSET 4"
+        ") "
+        "RETURNING id";
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        log_error("Failed to prepare password reset token insert");
+        OPENSSL_cleanse(token, sizeof(token));
+        return -1;
+    }
+
+    char token_hash[SHA256_HEX_LENGTH];
+    if (crypto_sha256_hex(token, strlen(token), token_hash, sizeof(token_hash)) != 0) {
+        log_error("Failed to hash password reset token");
+        OPENSSL_cleanse(token, sizeof(token));
+        db_finalize(stmt);
+        return -1;
+    }
+
+    db_bind_blob(stmt, 1, id, sizeof(id));
+    db_bind_text(stmt, 2, token_hash, -1);
+    db_bind_text(stmt, 3, ttl_str, -1);
+    if (source_ip) {
+        db_bind_text(stmt, 4, source_ip, -1);
+    } else {
+        db_bind_null(stmt, 4);
+    }
+    db_bind_text(stmt, 5, email_hash, -1);
+
+    int rc = db_step(stmt);
+    db_finalize(stmt);
+
+    if (rc == DB_ROW) {
+        memcpy(out_token, token, VERIFICATION_TOKEN_BUF_SIZE);
+        OPENSSL_cleanse(token, sizeof(token));
+        return 0;
+    }
+
+    OPENSSL_cleanse(token, sizeof(token));
+
+    if (rc == DB_DONE) {
+        return 1;  /* Not found or rate limited */
+    }
+
+    log_error("Failed to insert password reset token");
+    return -1;
+}
+
+int user_lookup_password_reset_token(db_handle_t *db, const char *token) {
+    if (!db || !token) {
+        log_error("Invalid arguments to user_lookup_password_reset_token");
+        return -1;
+    }
+
+    const char *sql =
+        "SELECT 1 "
+        "FROM " TBL_PASSWORD_RESET_TOKEN " T "
+        "JOIN " TBL_USER_ACCOUNT " U ON U.pin = T.user_account_pin "
+        "WHERE T.token = " P"1 "
+        "AND T.is_used = " BOOL_FALSE " "
+        "AND T.is_revoked = " BOOL_FALSE " "
+        "AND T.expected_expiry > " NOW " "
+        "AND U.is_active = " BOOL_TRUE " "
+        "LIMIT 1";
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        log_error("Failed to prepare password reset token lookup");
+        return -1;
+    }
+
+    char token_hash[SHA256_HEX_LENGTH];
+    if (crypto_sha256_hex(token, strlen(token), token_hash, sizeof(token_hash)) != 0) {
+        log_error("Failed to hash password reset token for lookup");
+        db_finalize(stmt);
+        return -1;
+    }
+
+    db_bind_text(stmt, 1, token_hash, -1);
+
+    int rc = db_step(stmt);
+    db_finalize(stmt);
+
+    if (rc == DB_ROW) return 0;
+    if (rc == DB_DONE) return 1;
+    log_error("Error looking up password reset token");
+    return -1;
+}
+
+int user_consume_password_reset_token(db_handle_t *db, const char *token,
+                                       const char *new_password) {
+    if (!db || !token || !new_password) {
+        log_error("Invalid arguments to user_consume_password_reset_token");
+        return -1;
+    }
+
+    char token_hash[SHA256_HEX_LENGTH];
+    if (crypto_sha256_hex(token, strlen(token), token_hash, sizeof(token_hash)) != 0) {
+        log_error("Failed to hash password reset token");
+        return -1;
+    }
+
+    /* Step 1: Look up token and get user_account_pin */
+    const char *lookup_sql =
+        "SELECT T.user_account_pin "
+        "FROM " TBL_PASSWORD_RESET_TOKEN " T "
+        "JOIN " TBL_USER_ACCOUNT " U ON U.pin = T.user_account_pin "
+        "WHERE T.token = " P"1 "
+        "AND T.is_used = " BOOL_FALSE " "
+        "AND T.is_revoked = " BOOL_FALSE " "
+        "AND T.expected_expiry > " NOW " "
+        "AND U.is_active = " BOOL_TRUE " "
+        "LIMIT 1";
+
+    db_stmt_t *lookup_stmt = NULL;
+    if (db_prepare(db, &lookup_stmt, lookup_sql) != 0) {
+        log_error("Failed to prepare password reset token lookup");
+        return -1;
+    }
+
+    db_bind_text(lookup_stmt, 1, token_hash, -1);
+
+    int rc = db_step(lookup_stmt);
+    if (rc != DB_ROW) {
+        db_finalize(lookup_stmt);
+        if (rc == DB_DONE) return 1;
+        log_error("Error looking up password reset token");
+        return -1;
+    }
+
+    long long user_account_pin = db_column_int64(lookup_stmt, 0);
+    db_finalize(lookup_stmt);
+
+    /* Step 2: Hash new password */
+    char salt[PASSWORD_SALT_HEX_MAX_LENGTH];
+    int iterations;
+    char hash[PASSWORD_HASH_HEX_MAX_LENGTH];
+
+    int hash_rc = crypto_password_hash(new_password, strlen(new_password),
+                            salt, sizeof(salt),
+                            &iterations,
+                            hash, sizeof(hash));
+    if (hash_rc != 0) {
+        log_error("Failed to hash new password for reset");
+        OPENSSL_cleanse(salt, sizeof(salt));
+        return (hash_rc == -2) ? -2 : -1;
+    }
+
+    /* Step 3: Transaction — mark token used + update password */
+    if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
+        log_error("Failed to begin password reset transaction");
+        OPENSSL_cleanse(salt, sizeof(salt));
+        OPENSSL_cleanse(hash, sizeof(hash));
+        return -1;
+    }
+
+    const char *use_sql =
+        "UPDATE " TBL_PASSWORD_RESET_TOKEN " "
+        "SET is_used = " BOOL_TRUE ", used_at = " NOW ", updated_at = " NOW " "
+        "WHERE token = " P"1 "
+        "AND is_used = " BOOL_FALSE " "
+        "RETURNING is_used";
+
+    db_stmt_t *use_stmt = NULL;
+    if (db_prepare(db, &use_stmt, use_sql) != 0) {
+        log_error("Failed to prepare token use update");
+        db_execute_trusted(db, "ROLLBACK");
+        OPENSSL_cleanse(salt, sizeof(salt));
+        OPENSSL_cleanse(hash, sizeof(hash));
+        return -1;
+    }
+
+    db_bind_text(use_stmt, 1, token_hash, -1);
+    rc = db_step(use_stmt);
+    db_finalize(use_stmt);
+
+    if (rc != DB_ROW) {
+        db_execute_trusted(db, "ROLLBACK");
+        OPENSSL_cleanse(salt, sizeof(salt));
+        OPENSSL_cleanse(hash, sizeof(hash));
+        return (rc == DB_DONE) ? 1 : -1;
+    }
+
+    const char *update_sql =
+        "UPDATE " TBL_USER_ACCOUNT " "
+        "SET salt = " P"1, "
+        "hash_iterations = " P"2, "
+        "secret_hash = " P"3, "
+        "updated_at = " NOW " "
+        "WHERE pin = " P"4 AND is_active = " BOOL_TRUE;
+
+    db_stmt_t *update_stmt = NULL;
+    if (db_prepare(db, &update_stmt, update_sql) != 0) {
+        log_error("Failed to prepare password update statement");
+        db_execute_trusted(db, "ROLLBACK");
+        OPENSSL_cleanse(salt, sizeof(salt));
+        OPENSSL_cleanse(hash, sizeof(hash));
+        return -1;
+    }
+
+    db_bind_text(update_stmt, 1, salt, -1);
+    db_bind_int(update_stmt, 2, iterations);
+    db_bind_text(update_stmt, 3, hash, -1);
+    db_bind_int64(update_stmt, 4, user_account_pin);
+
+    rc = db_step(update_stmt);
+    db_finalize(update_stmt);
+
+    OPENSSL_cleanse(salt, sizeof(salt));
+    OPENSSL_cleanse(hash, sizeof(hash));
+
+    if (rc != DB_DONE) {
+        log_error("Failed to update password");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    if (db_execute_trusted(db, "COMMIT") != 0) {
+        log_error("Failed to commit password reset transaction");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    log_info("Password reset completed for user_account_pin=%lld", user_account_pin);
+    return 0;
+}
+
+/* ============================================================================
+ * Passwordless Login Token Functions
+ * ========================================================================== */
+
+int user_create_passwordless_login_token(db_handle_t *db, const char *email,
+                                          int ttl_seconds, const char *source_ip,
+                                          const char *return_to, char *out_token) {
+    if (!db || !email || !out_token) {
+        log_error("Invalid arguments to user_create_passwordless_login_token");
+        return -1;
+    }
+
+    char lower_buf[256];
+    str_to_lower(lower_buf, sizeof(lower_buf), email);
+    char email_hash[HMAC_SHA256_HEX_LENGTH];
+    if (hash_field(lower_buf, email_hash, sizeof(email_hash)) != 0) {
+        log_error("Failed to hash email for passwordless login token");
+        return -1;
+    }
+
+    unsigned char id[16];
+    if (crypto_random_bytes(id, sizeof(id)) != 0) {
+        log_error("Failed to generate UUID for passwordless login token");
+        return -1;
+    }
+
+    char token[VERIFICATION_TOKEN_BUF_SIZE];
+    if (crypto_random_token(token, sizeof(token), VERIFICATION_TOKEN_BYTES) < 0) {
+        log_error("Failed to generate passwordless login token");
+        return -1;
+    }
+
+    char ttl_str[16];
+    snprintf(ttl_str, sizeof(ttl_str), "%d", ttl_seconds);
+
+    /* Encrypt plaintext email for storage */
+    char encrypted_email[512];
+    if (encrypt_field(email, encrypted_email, sizeof(encrypted_email)) != 0) {
+        log_error("Failed to encrypt email for passwordless login token");
+        OPENSSL_cleanse(token, sizeof(token));
+        return -1;
+    }
+
+    const char *sql =
+        "INSERT INTO " TBL_PASSWORDLESS_LOGIN_TOKEN " "
+        "(id, user_account_pin, email_address, token, issued_at, expected_expiry, source_ip, return_to) "
+        "SELECT " P"1" ", U.pin, " P"2" ", " P"3" ", "
+        NOW ", " INTERVAL_SECONDS(P"4") ", " P"5" ", " P"6 "
+        "FROM " TBL_USER_EMAIL " E "
+        "JOIN " TBL_USER_ACCOUNT " U ON U.pin = E.user_account_pin "
+        "WHERE E.email_hash = " P"7 AND E.is_verified = " BOOL_TRUE " "
+        "AND U.is_active = " BOOL_TRUE " "
+        "AND U.allow_passwordless_login = " BOOL_TRUE " "
+        "AND NOT EXISTS ("
+            "SELECT 1 FROM " TBL_PASSWORDLESS_LOGIN_TOKEN " T "
+            "WHERE T.user_account_pin = U.pin "
+            "AND T.issued_at > " SECONDS_AGO("3600") " "
+            "LIMIT 1 OFFSET 4"
+        ") "
+        "RETURNING id";
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        log_error("Failed to prepare passwordless login token insert");
+        OPENSSL_cleanse(token, sizeof(token));
+        return -1;
+    }
+
+    char token_hash[SHA256_HEX_LENGTH];
+    if (crypto_sha256_hex(token, strlen(token), token_hash, sizeof(token_hash)) != 0) {
+        log_error("Failed to hash passwordless login token");
+        OPENSSL_cleanse(token, sizeof(token));
+        db_finalize(stmt);
+        return -1;
+    }
+
+    db_bind_blob(stmt, 1, id, sizeof(id));
+    db_bind_text(stmt, 2, encrypted_email, -1);
+    db_bind_text(stmt, 3, token_hash, -1);
+    db_bind_text(stmt, 4, ttl_str, -1);
+    if (source_ip) {
+        db_bind_text(stmt, 5, source_ip, -1);
+    } else {
+        db_bind_null(stmt, 5);
+    }
+    if (return_to && return_to[0]) {
+        db_bind_text(stmt, 6, return_to, -1);
+    } else {
+        db_bind_null(stmt, 6);
+    }
+    db_bind_text(stmt, 7, email_hash, -1);
+
+    int rc = db_step(stmt);
+    db_finalize(stmt);
+
+    if (rc == DB_ROW) {
+        memcpy(out_token, token, VERIFICATION_TOKEN_BUF_SIZE);
+        OPENSSL_cleanse(token, sizeof(token));
+        return 0;
+    }
+
+    OPENSSL_cleanse(token, sizeof(token));
+
+    if (rc == DB_DONE) {
+        return 1;
+    }
+
+    log_error("Failed to insert passwordless login token");
+    return -1;
+}
+
+int user_lookup_passwordless_login_token(db_handle_t *db, const char *token,
+                                          passwordless_login_lookup_t *out_result) {
+    if (!db || !token || !out_result) {
+        log_error("Invalid arguments to user_lookup_passwordless_login_token");
+        return -1;
+    }
+
+    const char *sql =
+        "SELECT T.email_address, U.username "
+        "FROM " TBL_PASSWORDLESS_LOGIN_TOKEN " T "
+        "JOIN " TBL_USER_ACCOUNT " U ON U.pin = T.user_account_pin "
+        "WHERE T.token = " P"1 "
+        "AND T.is_used = " BOOL_FALSE " "
+        "AND T.expected_expiry > " NOW " "
+        "AND U.is_active = " BOOL_TRUE " "
+        "AND U.allow_passwordless_login = " BOOL_TRUE " "
+        "LIMIT 1";
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        log_error("Failed to prepare passwordless login token lookup");
+        return -1;
+    }
+
+    char token_hash[SHA256_HEX_LENGTH];
+    if (crypto_sha256_hex(token, strlen(token), token_hash, sizeof(token_hash)) != 0) {
+        log_error("Failed to hash passwordless login token for lookup");
+        db_finalize(stmt);
+        return -1;
+    }
+
+    db_bind_text(stmt, 1, token_hash, -1);
+
+    int rc = db_step(stmt);
+    if (rc == DB_ROW) {
+        const char *enc_email = db_column_text(stmt, 0);
+        if (enc_email) {
+            if (decrypt_field(enc_email, out_result->email_address, sizeof(out_result->email_address)) != 0) {
+                log_error("Failed to decrypt email for passwordless login lookup");
+                db_finalize(stmt);
+                return -1;
+            }
+        } else {
+            out_result->email_address[0] = '\0';
+        }
+
+        const char *enc_username = db_column_text(stmt, 1);
+        if (enc_username) {
+            if (decrypt_field(enc_username, out_result->username, sizeof(out_result->username)) != 0) {
+                log_error("Failed to decrypt username for passwordless login lookup");
+                db_finalize(stmt);
+                return -1;
+            }
+        } else {
+            out_result->username[0] = '\0';
+        }
+
+        db_finalize(stmt);
+        return 0;
+    }
+
+    db_finalize(stmt);
+    if (rc == DB_DONE) return 1;
+    log_error("Error looking up passwordless login token");
+    return -1;
+}
+
+int user_consume_passwordless_login_token(db_handle_t *db, const char *token,
+                                           long long *out_user_pin,
+                                           unsigned char *out_user_id,
+                                           char *out_return_to, size_t return_to_size) {
+    if (!db || !token || !out_user_pin || !out_user_id || !out_return_to) {
+        log_error("Invalid arguments to user_consume_passwordless_login_token");
+        return -1;
+    }
+
+    out_return_to[0] = '\0';
+
+    char token_hash[SHA256_HEX_LENGTH];
+    if (crypto_sha256_hex(token, strlen(token), token_hash, sizeof(token_hash)) != 0) {
+        log_error("Failed to hash passwordless login token");
+        return -1;
+    }
+
+    /* Step 1: Look up token and get user identity */
+    const char *lookup_sql =
+        "SELECT T.user_account_pin, U.id, T.return_to "
+        "FROM " TBL_PASSWORDLESS_LOGIN_TOKEN " T "
+        "JOIN " TBL_USER_ACCOUNT " U ON U.pin = T.user_account_pin "
+        "WHERE T.token = " P"1 "
+        "AND T.is_used = " BOOL_FALSE " "
+        "AND T.expected_expiry > " NOW " "
+        "AND U.is_active = " BOOL_TRUE " "
+        "AND U.allow_passwordless_login = " BOOL_TRUE " "
+        "LIMIT 1";
+
+    db_stmt_t *lookup_stmt = NULL;
+    if (db_prepare(db, &lookup_stmt, lookup_sql) != 0) {
+        log_error("Failed to prepare passwordless login token lookup");
+        return -1;
+    }
+
+    db_bind_text(lookup_stmt, 1, token_hash, -1);
+
+    int rc = db_step(lookup_stmt);
+    if (rc != DB_ROW) {
+        db_finalize(lookup_stmt);
+        if (rc == DB_DONE) return 1;
+        log_error("Error looking up passwordless login token");
+        return -1;
+    }
+
+    long long user_pin = db_column_int64(lookup_stmt, 0);
+
+    const void *id_blob = db_column_blob(lookup_stmt, 1);
+    int id_len = db_column_bytes(lookup_stmt, 1);
+    if (!id_blob || id_len != 16) {
+        db_finalize(lookup_stmt);
+        log_error("Invalid user_account_id in passwordless token lookup");
+        return -1;
+    }
+    memcpy(out_user_id, id_blob, 16);
+
+    const char *return_to_val = db_column_text(lookup_stmt, 2);
+    if (return_to_val) {
+        str_copy(out_return_to, return_to_size, return_to_val);
+    }
+
+    db_finalize(lookup_stmt);
+
+    /* Step 2: Transaction — mark token used */
+    if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
+        log_error("Failed to begin passwordless login transaction");
+        return -1;
+    }
+
+    const char *use_sql =
+        "UPDATE " TBL_PASSWORDLESS_LOGIN_TOKEN " "
+        "SET is_used = " BOOL_TRUE ", used_at = " NOW ", updated_at = " NOW " "
+        "WHERE token = " P"1 "
+        "AND is_used = " BOOL_FALSE " "
+        "RETURNING is_used";
+
+    db_stmt_t *use_stmt = NULL;
+    if (db_prepare(db, &use_stmt, use_sql) != 0) {
+        log_error("Failed to prepare passwordless token use update");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    db_bind_text(use_stmt, 1, token_hash, -1);
+    rc = db_step(use_stmt);
+    db_finalize(use_stmt);
+
+    if (rc != DB_ROW) {
+        db_execute_trusted(db, "ROLLBACK");
+        return (rc == DB_DONE) ? 1 : -1;
+    }
+
+    if (db_execute_trusted(db, "COMMIT") != 0) {
+        log_error("Failed to commit passwordless login transaction");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    *out_user_pin = user_pin;
+    return 0;
+}
+
+/* ============================================================================
+ * Passwordless Login Toggle Functions
+ * ========================================================================== */
+
+int user_has_verified_email(db_handle_t *db, long long user_account_pin,
+                             int *out_has_verified) {
+    if (!db || !out_has_verified) {
+        log_error("Invalid arguments to user_has_verified_email");
+        return -1;
+    }
+
+    const char *sql =
+        "SELECT 1 FROM " TBL_USER_EMAIL " "
+        "WHERE user_account_pin = " P"1 AND is_verified = " BOOL_TRUE " "
+        "LIMIT 1";
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        log_error("Failed to prepare user_has_verified_email statement");
+        return -1;
+    }
+
+    db_bind_int64(stmt, 1, user_account_pin);
+
+    int rc = db_step(stmt);
+    db_finalize(stmt);
+
+    if (rc == DB_ROW) {
+        *out_has_verified = 1;
+        return 0;
+    } else if (rc == DB_DONE) {
+        *out_has_verified = 0;
+        return 0;
+    }
+
+    log_error("Failed to check verified email");
+    return -1;
+}
+
+int user_update_allow_passwordless_login(db_handle_t *db,
+                                          long long user_account_pin,
+                                          int allow) {
+    if (!db) {
+        log_error("Invalid arguments to user_update_allow_passwordless_login");
+        return -1;
+    }
+
+    const char *sql =
+        "UPDATE " TBL_USER_ACCOUNT " "
+        "SET allow_passwordless_login = " P"1, updated_at = " NOW " "
+        "WHERE pin = " P"2 AND allow_passwordless_login != " P"1";
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        log_error("Failed to prepare user_update_allow_passwordless_login statement");
+        return -1;
+    }
+
+    db_bind_int(stmt, 1, allow ? 1 : 0);
+    db_bind_int64(stmt, 2, user_account_pin);
+
+    int rc = db_step(stmt);
+    db_finalize(stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Failed to update allow_passwordless_login flag");
+        return -1;
+    }
+
+    log_info("Updated allow_passwordless_login to %d", allow);
+    return 0;
+}
+
+/* ============================================================================
+ * Invitation Token Functions
+ * ========================================================================== */
+
+int user_create_invitation_token(db_handle_t *db,
+                                  long long user_account_pin,
+                                  long long user_email_pin,
+                                  int ttl_seconds,
+                                  const char *source_ip,
+                                  char *out_token) {
+    if (!db || !out_token) {
+        log_error("Invalid arguments to user_create_invitation_token");
+        return -1;
+    }
+
+    unsigned char id[16];
+    if (crypto_random_bytes(id, sizeof(id)) != 0) {
+        log_error("Failed to generate UUID for invitation token");
+        return -1;
+    }
+
+    char token[VERIFICATION_TOKEN_BUF_SIZE];
+    if (crypto_random_token(token, sizeof(token), VERIFICATION_TOKEN_BYTES) < 0) {
+        log_error("Failed to generate invitation token");
+        return -1;
+    }
+
+    char ttl_str[16];
+    snprintf(ttl_str, sizeof(ttl_str), "%d", ttl_seconds);
+
+    const char *sql =
+        "INSERT INTO " TBL_INVITATION_TOKEN " "
+        "(id, user_account_pin, user_email_pin, token, issued_at, "
+        "expected_expiry, source_ip) "
+        "VALUES (" P"1, " P"2, " P"3, " P"4, " NOW ", "
+        INTERVAL_SECONDS(P"5") ", " P"6)";
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        log_error("Failed to prepare invitation token insert");
+        OPENSSL_cleanse(token, sizeof(token));
+        return -1;
+    }
+
+    char token_hash[SHA256_HEX_LENGTH];
+    if (crypto_sha256_hex(token, strlen(token), token_hash, sizeof(token_hash)) != 0) {
+        log_error("Failed to hash invitation token");
+        OPENSSL_cleanse(token, sizeof(token));
+        db_finalize(stmt);
+        return -1;
+    }
+
+    db_bind_blob(stmt, 1, id, sizeof(id));
+    db_bind_int64(stmt, 2, user_account_pin);
+    if (user_email_pin > 0) {
+        db_bind_int64(stmt, 3, user_email_pin);
+    } else {
+        db_bind_null(stmt, 3);
+    }
+    db_bind_text(stmt, 4, token_hash, -1);
+    db_bind_text(stmt, 5, ttl_str, -1);
+    if (source_ip) {
+        db_bind_text(stmt, 6, source_ip, -1);
+    } else {
+        db_bind_null(stmt, 6);
+    }
+
+    int rc = db_step(stmt);
+    db_finalize(stmt);
+
+    if (rc == DB_DONE) {
+        memcpy(out_token, token, VERIFICATION_TOKEN_BUF_SIZE);
+        OPENSSL_cleanse(token, sizeof(token));
+        return 0;
+    }
+
+    OPENSSL_cleanse(token, sizeof(token));
+    log_error("Failed to insert invitation token");
+    return -1;
+}
+
+int user_lookup_invitation_token(db_handle_t *db, const char *token,
+                                  invitation_token_lookup_t *out_result) {
+    if (!db || !token || !out_result) {
+        log_error("Invalid arguments to user_lookup_invitation_token");
+        return -1;
+    }
+
+    memset(out_result, 0, sizeof(*out_result));
+
+    const char *sql =
+        "SELECT U.id, U.username, E.email_address, E.is_verified "
+        "FROM " TBL_INVITATION_TOKEN " T "
+        "JOIN " TBL_USER_ACCOUNT " U ON U.pin = T.user_account_pin "
+        "LEFT JOIN " TBL_USER_EMAIL " E ON E.pin = T.user_email_pin "
+        "WHERE T.token = " P"1 "
+        "AND T.is_used = " BOOL_FALSE " "
+        "AND T.expected_expiry > " NOW " "
+        "AND U.is_active = " BOOL_TRUE " "
+        "LIMIT 1";
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        log_error("Failed to prepare invitation token lookup");
+        return -1;
+    }
+
+    char token_hash[SHA256_HEX_LENGTH];
+    if (crypto_sha256_hex(token, strlen(token), token_hash, sizeof(token_hash)) != 0) {
+        log_error("Failed to hash invitation token for lookup");
+        db_finalize(stmt);
+        return -1;
+    }
+
+    db_bind_text(stmt, 1, token_hash, -1);
+
+    int rc = db_step(stmt);
+    if (rc != DB_ROW) {
+        db_finalize(stmt);
+        if (rc == DB_DONE) return 1;
+        log_error("Error looking up invitation token");
+        return -1;
+    }
+
+    const unsigned char *id_blob = db_column_blob(stmt, 0);
+    int id_len = db_column_bytes(stmt, 0);
+    if (id_blob && id_len == 16) {
+        memcpy(out_result->user_id, id_blob, 16);
+    }
+
+    const char *encrypted_username = (const char *)db_column_text(stmt, 1);
+    if (encrypted_username) {
+        if (decrypt_field(encrypted_username, out_result->username,
+                          sizeof(out_result->username)) != 0) {
+            log_error("Failed to decrypt username for invitation lookup");
+            db_finalize(stmt);
+            return -1;
+        }
+    }
+
+    const char *encrypted_email = (const char *)db_column_text(stmt, 2);
+    if (encrypted_email) {
+        if (decrypt_field(encrypted_email, out_result->email_address,
+                          sizeof(out_result->email_address)) != 0) {
+            log_error("Failed to decrypt email for invitation lookup");
+            db_finalize(stmt);
+            return -1;
+        }
+    }
+
+    out_result->email_is_verified = db_column_int(stmt, 3);
+
+    db_finalize(stmt);
+    return 0;
+}
+
+int user_consume_invitation_token(db_handle_t *db, const char *token,
+                                    const char *new_password) {
+    if (!db || !token || !new_password) {
+        log_error("Invalid arguments to user_consume_invitation_token");
+        return -1;
+    }
+
+    char token_hash[SHA256_HEX_LENGTH];
+    if (crypto_sha256_hex(token, strlen(token), token_hash, sizeof(token_hash)) != 0) {
+        log_error("Failed to hash invitation token");
+        return -1;
+    }
+
+    /* Step 1: Look up token + user + optional email */
+    const char *lookup_sql =
+        "SELECT T.user_account_pin, T.user_email_pin, "
+               "E.email_hash, E.is_verified "
+        "FROM " TBL_INVITATION_TOKEN " T "
+        "JOIN " TBL_USER_ACCOUNT " U ON U.pin = T.user_account_pin "
+        "LEFT JOIN " TBL_USER_EMAIL " E ON E.pin = T.user_email_pin "
+        "WHERE T.token = " P"1 "
+        "AND T.is_used = " BOOL_FALSE " "
+        "AND T.expected_expiry > " NOW " "
+        "AND U.is_active = " BOOL_TRUE " "
+        "LIMIT 1";
+
+    db_stmt_t *lookup_stmt = NULL;
+    if (db_prepare(db, &lookup_stmt, lookup_sql) != 0) {
+        log_error("Failed to prepare invitation token lookup for consume");
+        return -1;
+    }
+
+    db_bind_text(lookup_stmt, 1, token_hash, -1);
+
+    int rc = db_step(lookup_stmt);
+    if (rc != DB_ROW) {
+        db_finalize(lookup_stmt);
+        if (rc == DB_DONE) return 1;
+        log_error("Error looking up invitation token for consume");
+        return -1;
+    }
+
+    long long user_account_pin = db_column_int64(lookup_stmt, 0);
+    long long user_email_pin = db_column_int64(lookup_stmt, 1);
+
+    char email_hash[HMAC_SHA256_HEX_LENGTH];
+    email_hash[0] = '\0';
+    int needs_email_verification = 0;
+
+    const char *email_hash_ptr = (const char *)db_column_text(lookup_stmt, 2);
+    if (email_hash_ptr) {
+        snprintf(email_hash, sizeof(email_hash), "%s", email_hash_ptr);
+        if (!db_column_int(lookup_stmt, 3)) {
+            needs_email_verification = 1;
+        }
+    }
+
+    db_finalize(lookup_stmt);
+
+    /* Step 1.5: Check for email conflict before expensive password hash */
+    if (needs_email_verification) {
+        const char *conflict_sql =
+            "SELECT 1 FROM " TBL_USER_EMAIL " "
+            "WHERE email_hash = " P"1 "
+            "AND is_verified = " BOOL_TRUE " "
+            "AND user_account_pin != " P"2 "
+            "LIMIT 1";
+
+        db_stmt_t *conflict_stmt = NULL;
+        if (db_prepare(db, &conflict_stmt, conflict_sql) != 0) {
+            log_error("Failed to prepare email conflict check for invitation");
+            return -1;
+        }
+
+        db_bind_text(conflict_stmt, 1, email_hash, -1);
+        db_bind_int64(conflict_stmt, 2, user_account_pin);
+
+        rc = db_step(conflict_stmt);
+        db_finalize(conflict_stmt);
+
+        if (rc == DB_ROW) {
+            log_info("Invitation email conflict: another user verified this email");
+            return 2;
+        }
+        if (rc != DB_DONE) {
+            log_error("Error checking email conflict for invitation");
+            return -1;
+        }
+    }
+
+    /* Step 2: Hash new password */
+    char salt[PASSWORD_SALT_HEX_MAX_LENGTH];
+    int iterations;
+    char hash[PASSWORD_HASH_HEX_MAX_LENGTH];
+
+    int hash_rc = crypto_password_hash(new_password, strlen(new_password),
+                            salt, sizeof(salt),
+                            &iterations,
+                            hash, sizeof(hash));
+    if (hash_rc != 0) {
+        log_error("Failed to hash password for invitation accept");
+        OPENSSL_cleanse(salt, sizeof(salt));
+        return (hash_rc == -2) ? -2 : -1;
+    }
+
+    /* Step 3: Transaction */
+    if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
+        log_error("Failed to begin invitation consume transaction");
+        OPENSSL_cleanse(salt, sizeof(salt));
+        OPENSSL_cleanse(hash, sizeof(hash));
+        return -1;
+    }
+
+    /* Step 4: Mark token used */
+    const char *use_sql =
+        "UPDATE " TBL_INVITATION_TOKEN " "
+        "SET is_used = " BOOL_TRUE ", used_at = " NOW ", updated_at = " NOW " "
+        "WHERE token = " P"1 "
+        "AND is_used = " BOOL_FALSE;
+
+    db_stmt_t *use_stmt = NULL;
+    if (db_prepare(db, &use_stmt, use_sql) != 0) {
+        log_error("Failed to prepare invitation token use update");
+        db_execute_trusted(db, "ROLLBACK");
+        OPENSSL_cleanse(salt, sizeof(salt));
+        OPENSSL_cleanse(hash, sizeof(hash));
+        return -1;
+    }
+
+    db_bind_text(use_stmt, 1, token_hash, -1);
+    rc = db_step(use_stmt);
+    db_finalize(use_stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Failed to mark invitation token as used");
+        db_execute_trusted(db, "ROLLBACK");
+        OPENSSL_cleanse(salt, sizeof(salt));
+        OPENSSL_cleanse(hash, sizeof(hash));
+        return -1;
+    }
+
+    /* Step 5: Verify email if needed + squatter cleanup */
+    if (needs_email_verification) {
+        const char *verify_sql =
+            "UPDATE " TBL_USER_EMAIL " "
+            "SET is_verified = " BOOL_TRUE ", verified_at = " NOW ", "
+            "updated_at = " NOW " "
+            "WHERE pin = " P"1";
+
+        db_stmt_t *verify_stmt = NULL;
+        if (db_prepare(db, &verify_stmt, verify_sql) != 0) {
+            log_error("Failed to prepare email verify for invitation");
+            db_execute_trusted(db, "ROLLBACK");
+            OPENSSL_cleanse(salt, sizeof(salt));
+            OPENSSL_cleanse(hash, sizeof(hash));
+            return -1;
+        }
+
+        db_bind_int64(verify_stmt, 1, user_email_pin);
+        rc = db_step(verify_stmt);
+        db_finalize(verify_stmt);
+
+        if (rc != DB_DONE) {
+            log_error("Failed to verify email for invitation");
+            db_execute_trusted(db, "ROLLBACK");
+            OPENSSL_cleanse(salt, sizeof(salt));
+            OPENSSL_cleanse(hash, sizeof(hash));
+            return -1;
+        }
+
+        /* Squatter cleanup: delete other users' unverified rows with same email */
+        const char *cleanup_vt_sql =
+            "DELETE FROM " TBL_EMAIL_VERIFICATION_TOKEN " "
+            "WHERE user_email_pin IN ("
+                "SELECT pin FROM " TBL_USER_EMAIL " "
+                "WHERE email_hash = " P"1 "
+                "AND user_account_pin != " P"2 "
+                "AND is_verified = " BOOL_FALSE
+            ")";
+
+        db_stmt_t *cvt_stmt = NULL;
+        if (db_prepare(db, &cvt_stmt, cleanup_vt_sql) != 0) {
+            log_error("Failed to prepare squatter verification token cleanup");
+            db_execute_trusted(db, "ROLLBACK");
+            OPENSSL_cleanse(salt, sizeof(salt));
+            OPENSSL_cleanse(hash, sizeof(hash));
+            return -1;
+        }
+
+        db_bind_text(cvt_stmt, 1, email_hash, -1);
+        db_bind_int64(cvt_stmt, 2, user_account_pin);
+        rc = db_step(cvt_stmt);
+        db_finalize(cvt_stmt);
+
+        if (rc != DB_DONE) {
+            log_error("Failed to delete squatter verification tokens");
+            db_execute_trusted(db, "ROLLBACK");
+            OPENSSL_cleanse(salt, sizeof(salt));
+            OPENSSL_cleanse(hash, sizeof(hash));
+            return -1;
+        }
+
+        const char *cleanup_it_sql =
+            "DELETE FROM " TBL_INVITATION_TOKEN " "
+            "WHERE user_email_pin IN ("
+                "SELECT pin FROM " TBL_USER_EMAIL " "
+                "WHERE email_hash = " P"1 "
+                "AND user_account_pin != " P"2 "
+                "AND is_verified = " BOOL_FALSE
+            ")";
+
+        db_stmt_t *cit_stmt = NULL;
+        if (db_prepare(db, &cit_stmt, cleanup_it_sql) != 0) {
+            log_error("Failed to prepare squatter invitation token cleanup");
+            db_execute_trusted(db, "ROLLBACK");
+            OPENSSL_cleanse(salt, sizeof(salt));
+            OPENSSL_cleanse(hash, sizeof(hash));
+            return -1;
+        }
+
+        db_bind_text(cit_stmt, 1, email_hash, -1);
+        db_bind_int64(cit_stmt, 2, user_account_pin);
+        rc = db_step(cit_stmt);
+        db_finalize(cit_stmt);
+
+        if (rc != DB_DONE) {
+            log_error("Failed to delete squatter invitation tokens");
+            db_execute_trusted(db, "ROLLBACK");
+            OPENSSL_cleanse(salt, sizeof(salt));
+            OPENSSL_cleanse(hash, sizeof(hash));
+            return -1;
+        }
+
+        const char *cleanup_emails_sql =
+            "DELETE FROM " TBL_USER_EMAIL " "
+            "WHERE email_hash = " P"1 "
+            "AND user_account_pin != " P"2 "
+            "AND is_verified = " BOOL_FALSE;
+
+        db_stmt_t *ce_stmt = NULL;
+        if (db_prepare(db, &ce_stmt, cleanup_emails_sql) != 0) {
+            log_error("Failed to prepare squatter email cleanup");
+            db_execute_trusted(db, "ROLLBACK");
+            OPENSSL_cleanse(salt, sizeof(salt));
+            OPENSSL_cleanse(hash, sizeof(hash));
+            return -1;
+        }
+
+        db_bind_text(ce_stmt, 1, email_hash, -1);
+        db_bind_int64(ce_stmt, 2, user_account_pin);
+        rc = db_step(ce_stmt);
+        db_finalize(ce_stmt);
+
+        if (rc != DB_DONE) {
+            log_error("Failed to delete squatter email rows");
+            db_execute_trusted(db, "ROLLBACK");
+            OPENSSL_cleanse(salt, sizeof(salt));
+            OPENSSL_cleanse(hash, sizeof(hash));
+            return -1;
+        }
+    }
+
+    /* Step 6: Set password */
+    const char *update_sql =
+        "UPDATE " TBL_USER_ACCOUNT " "
+        "SET salt = " P"1, "
+        "hash_iterations = " P"2, "
+        "secret_hash = " P"3, "
+        "updated_at = " NOW " "
+        "WHERE pin = " P"4 AND is_active = " BOOL_TRUE;
+
+    db_stmt_t *update_stmt = NULL;
+    if (db_prepare(db, &update_stmt, update_sql) != 0) {
+        log_error("Failed to prepare password update for invitation");
+        db_execute_trusted(db, "ROLLBACK");
+        OPENSSL_cleanse(salt, sizeof(salt));
+        OPENSSL_cleanse(hash, sizeof(hash));
+        return -1;
+    }
+
+    db_bind_text(update_stmt, 1, salt, -1);
+    db_bind_int(update_stmt, 2, iterations);
+    db_bind_text(update_stmt, 3, hash, -1);
+    db_bind_int64(update_stmt, 4, user_account_pin);
+
+    rc = db_step(update_stmt);
+    db_finalize(update_stmt);
+
+    OPENSSL_cleanse(salt, sizeof(salt));
+    OPENSSL_cleanse(hash, sizeof(hash));
+
+    if (rc != DB_DONE) {
+        log_error("Failed to set password for invitation");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    /* Step 7: Commit */
+    if (db_execute_trusted(db, "COMMIT") != 0) {
+        log_error("Failed to commit invitation consume transaction");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    log_info("Invitation accepted for user_account_pin=%lld", user_account_pin);
+    return 0;
+}
+
+/* ============================================================================
+ * RS User Provisioning Functions
+ * ========================================================================== */
+
+int user_find_by_identity(db_handle_t *db, const char *username,
+                           const char *email,
+                           user_identity_t *out_match) {
+    if (!db || !out_match || (!username && !email)) {
+        log_error("Invalid arguments to user_find_by_identity");
+        return -1;
+    }
+
+    memset(out_match, 0, sizeof(*out_match));
+
+    int username_found = 0;
+    user_identity_t username_match;
+    memset(&username_match, 0, sizeof(username_match));
+
+    int email_found = 0;
+    user_identity_t email_match;
+    memset(&email_match, 0, sizeof(email_match));
+
+    /* Query 1: Username match */
+    if (username) {
+        char lower_buf[256];
+        str_to_lower(lower_buf, sizeof(lower_buf), username);
+        char hash_hex[HMAC_SHA256_HEX_LENGTH];
+        if (hash_field(lower_buf, hash_hex, sizeof(hash_hex)) != 0) {
+            log_error("Failed to hash username for identity match");
+            return -1;
+        }
+
+        const char *sql =
+            "SELECT pin, id, username, is_active "
+            "FROM " TBL_USER_ACCOUNT " "
+            "WHERE username_hash = " P"1 "
+            "LIMIT 1";
+
+        db_stmt_t *stmt = NULL;
+        if (db_prepare(db, &stmt, sql) != 0) {
+            log_error("Failed to prepare username identity match");
+            return -1;
+        }
+
+        db_bind_text(stmt, 1, hash_hex, -1);
+
+        int rc = db_step(stmt);
+        if (rc == DB_ROW) {
+            username_found = 1;
+            username_match.user_account_pin = db_column_int64(stmt, 0);
+
+            const unsigned char *id_blob = db_column_blob(stmt, 1);
+            int id_len = db_column_bytes(stmt, 1);
+            if (id_blob && id_len == 16) {
+                memcpy(username_match.user_id, id_blob, 16);
+            }
+
+            const char *encrypted = (const char *)db_column_text(stmt, 2);
+            if (encrypted) {
+                if (decrypt_field(encrypted, username_match.username,
+                                  sizeof(username_match.username)) != 0) {
+                    log_error("Failed to decrypt username in identity match");
+                    db_finalize(stmt);
+                    return -1;
+                }
+            }
+
+            username_match.is_active = db_column_int(stmt, 3);
+        } else if (rc != DB_DONE) {
+            db_finalize(stmt);
+            log_error("Error in username identity match query");
+            return -1;
+        }
+
+        db_finalize(stmt);
+    }
+
+    /* Query 2: Verified email match */
+    if (email) {
+        char lower_buf[256];
+        str_to_lower(lower_buf, sizeof(lower_buf), email);
+        char hash_hex[HMAC_SHA256_HEX_LENGTH];
+        if (hash_field(lower_buf, hash_hex, sizeof(hash_hex)) != 0) {
+            log_error("Failed to hash email for identity match");
+            return -1;
+        }
+
+        const char *sql =
+            "SELECT U.pin, U.id, U.username, U.is_active "
+            "FROM " TBL_USER_EMAIL " E "
+            "JOIN " TBL_USER_ACCOUNT " U ON U.pin = E.user_account_pin "
+            "WHERE E.email_hash = " P"1 AND E.is_verified = " BOOL_TRUE " "
+            "LIMIT 1";
+
+        db_stmt_t *stmt = NULL;
+        if (db_prepare(db, &stmt, sql) != 0) {
+            log_error("Failed to prepare email identity match");
+            return -1;
+        }
+
+        db_bind_text(stmt, 1, hash_hex, -1);
+
+        int rc = db_step(stmt);
+        if (rc == DB_ROW) {
+            email_found = 1;
+            email_match.user_account_pin = db_column_int64(stmt, 0);
+
+            const unsigned char *id_blob = db_column_blob(stmt, 1);
+            int id_len = db_column_bytes(stmt, 1);
+            if (id_blob && id_len == 16) {
+                memcpy(email_match.user_id, id_blob, 16);
+            }
+
+            const char *encrypted = (const char *)db_column_text(stmt, 2);
+            if (encrypted) {
+                if (decrypt_field(encrypted, email_match.username,
+                                  sizeof(email_match.username)) != 0) {
+                    log_error("Failed to decrypt username in email identity match");
+                    db_finalize(stmt);
+                    return -1;
+                }
+            }
+
+            email_match.is_active = db_column_int(stmt, 3);
+        } else if (rc != DB_DONE) {
+            db_finalize(stmt);
+            log_error("Error in email identity match query");
+            return -1;
+        }
+
+        db_finalize(stmt);
+    }
+
+    /* Resolve matches */
+    if (username_found && email_found) {
+        if (username_match.user_account_pin != email_match.user_account_pin) {
+            return 2;  /* Ambiguous: username and email belong to different users */
+        }
+        memcpy(out_match, &username_match, sizeof(*out_match));
+        return 0;
+    }
+
+    if (username_found) {
+        memcpy(out_match, &username_match, sizeof(*out_match));
+        return 0;
+    }
+
+    if (email_found) {
+        memcpy(out_match, &email_match, sizeof(*out_match));
+        return 0;
+    }
+
+    return 1;  /* Not found */
+}
+
+int user_create_no_password(db_handle_t *db, const char *username,
+                             const char *email,
+                             long long *out_user_pin,
+                             unsigned char *out_user_id,
+                             long long *out_email_pin) {
+    if (!db || (!username && !email) || !out_user_pin || !out_user_id || !out_email_pin) {
+        log_error("Invalid arguments to user_create_no_password");
+        return -1;
+    }
+
+    *out_email_pin = 0;
+
+    unsigned char id[16];
+    if (crypto_random_bytes(id, sizeof(id)) != 0) {
+        log_error("Failed to generate UUID for provisioned user");
+        return -1;
+    }
+
+    char encrypted_username[512];
+    char username_hash[HMAC_SHA256_HEX_LENGTH];
+    if (username) {
+        if (encrypt_field(username, encrypted_username, sizeof(encrypted_username)) != 0) {
+            log_error("Failed to encrypt username for provisioned user");
+            return -1;
+        }
+        char lower_buf[256];
+        str_to_lower(lower_buf, sizeof(lower_buf), username);
+        if (hash_field(lower_buf, username_hash, sizeof(username_hash)) != 0) {
+            log_error("Failed to hash username for provisioned user");
+            return -1;
+        }
+    }
+
+    char encrypted_email[512];
+    char email_hash_hex[HMAC_SHA256_HEX_LENGTH];
+    if (email) {
+        if (encrypt_field(email, encrypted_email, sizeof(encrypted_email)) != 0) {
+            log_error("Failed to encrypt email for provisioned user");
+            return -1;
+        }
+        char lower_buf[256];
+        str_to_lower(lower_buf, sizeof(lower_buf), email);
+        if (hash_field(lower_buf, email_hash_hex, sizeof(email_hash_hex)) != 0) {
+            log_error("Failed to hash email for provisioned user");
+            return -1;
+        }
+    }
+
+    /* Begin transaction if email provided (multi-table insert) */
+    if (email) {
+        if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
+            log_error("Failed to begin provisioned user creation transaction");
+            return -1;
+        }
+    }
+
+    /* Insert user_account with no password fields */
+    const char *sql =
+        "INSERT INTO " TBL_USER_ACCOUNT " (id, username, username_hash) "
+        "VALUES (" P"1, " P"2, " P"3) "
+        "RETURNING pin";
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        log_error("Failed to prepare provisioned user insert");
+        if (email) db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    db_bind_blob(stmt, 1, id, sizeof(id));
+    if (username) {
+        db_bind_text(stmt, 2, encrypted_username, -1);
+        db_bind_text(stmt, 3, username_hash, -1);
+    } else {
+        db_bind_null(stmt, 2);
+        db_bind_null(stmt, 3);
+    }
+
+    int rc = db_step(stmt);
+    if (rc != DB_ROW) {
+        log_error("Failed to insert provisioned user_account");
+        db_finalize(stmt);
+        if (email) db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    long long user_pin = db_column_int64(stmt, 0);
+    db_finalize(stmt);
+
+    /* Insert user_email if provided (unverified, primary) */
+    if (email) {
+        const char *email_sql =
+            "INSERT INTO " TBL_USER_EMAIL " "
+            "(user_account_pin, email_address, email_hash, is_primary) "
+            "VALUES (" P"1, " P"2, " P"3, " BOOL_TRUE ") "
+            "RETURNING pin";
+
+        db_stmt_t *email_stmt = NULL;
+        if (db_prepare(db, &email_stmt, email_sql) != 0) {
+            log_error("Failed to prepare provisioned user_email insert");
+            db_execute_trusted(db, "ROLLBACK");
+            return -1;
+        }
+
+        db_bind_int64(email_stmt, 1, user_pin);
+        db_bind_text(email_stmt, 2, encrypted_email, -1);
+        db_bind_text(email_stmt, 3, email_hash_hex, -1);
+
+        rc = db_step(email_stmt);
+        if (rc != DB_ROW) {
+            log_error("Failed to insert provisioned user_email");
+            db_finalize(email_stmt);
+            db_execute_trusted(db, "ROLLBACK");
+            return -1;
+        }
+
+        *out_email_pin = db_column_int64(email_stmt, 0);
+        db_finalize(email_stmt);
+
+        if (db_execute_trusted(db, "COMMIT") != 0) {
+            log_error("Failed to commit provisioned user creation");
+            db_execute_trusted(db, "ROLLBACK");
+            return -1;
+        }
+    }
+
+    *out_user_pin = user_pin;
+    memcpy(out_user_id, id, 16);
+
+    char id_hex[33];
+    bytes_to_hex(id, sizeof(id), id_hex, sizeof(id_hex));
+    log_info("Created provisioned user: id=%s", id_hex);
+    return 0;
+}
+
+int user_get_by_id(db_handle_t *db, const unsigned char *user_id,
+                    user_identity_t *out_info) {
+    if (!db || !user_id || !out_info) {
+        log_error("Invalid arguments to user_get_by_id");
+        return -1;
+    }
+
+    memset(out_info, 0, sizeof(*out_info));
+
+    const char *sql =
+        "SELECT pin, username, is_active "
+        "FROM " TBL_USER_ACCOUNT " "
+        "WHERE id = " P"1 "
+        "LIMIT 1";
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        log_error("Failed to prepare user_get_by_id");
+        return -1;
+    }
+
+    db_bind_blob(stmt, 1, user_id, 16);
+
+    int rc = db_step(stmt);
+    if (rc != DB_ROW) {
+        db_finalize(stmt);
+        if (rc == DB_DONE) return 1;
+        log_error("Error in user_get_by_id query");
+        return -1;
+    }
+
+    out_info->user_account_pin = db_column_int64(stmt, 0);
+    memcpy(out_info->user_id, user_id, 16);
+
+    const char *encrypted = (const char *)db_column_text(stmt, 1);
+    if (encrypted) {
+        if (decrypt_field(encrypted, out_info->username,
+                          sizeof(out_info->username)) != 0) {
+            log_error("Failed to decrypt username in user_get_by_id");
+            db_finalize(stmt);
+            return -1;
+        }
+    }
+
+    out_info->is_active = db_column_int(stmt, 2);
+
+    db_finalize(stmt);
+    return 0;
+}
+
+int user_set_active(db_handle_t *db, const unsigned char *user_id, int active) {
+    if (!db || !user_id) {
+        log_error("Invalid arguments to user_set_active");
+        return -1;
+    }
+
+    int val = active ? 1 : 0;
+
+    /* Check current state */
+    const char *check_sql =
+        "SELECT is_active FROM " TBL_USER_ACCOUNT " WHERE id = " P"1";
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, check_sql) != 0) {
+        log_error("Failed to prepare user_set_active check");
+        return -1;
+    }
+
+    db_bind_blob(stmt, 1, user_id, 16);
+
+    int rc = db_step(stmt);
+    if (rc != DB_ROW) {
+        db_finalize(stmt);
+        if (rc == DB_DONE) return 1; /* not found */
+        log_error("Error in user_set_active check");
+        return -1;
+    }
+
+    int current = db_column_int(stmt, 0);
+    db_finalize(stmt);
+
+    if (current == val) return 0; /* already in desired state */
+
+    /* Apply change */
+    const char *update_sql =
+        "UPDATE " TBL_USER_ACCOUNT " "
+        "SET is_active = " P"1, updated_at = " NOW " "
+        "WHERE id = " P"2 "
+        "AND is_active IS DISTINCT FROM " P"1";
+
+    stmt = NULL;
+    if (db_prepare(db, &stmt, update_sql) != 0) {
+        log_error("Failed to prepare user_set_active update");
+        return -1;
+    }
+
+    db_bind_int(stmt, 1, val);
+    db_bind_blob(stmt, 2, user_id, 16);
+
+    rc = db_step(stmt);
+    db_finalize(stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Error in user_set_active update");
+        return -1;
+    }
+
     return 0;
 }

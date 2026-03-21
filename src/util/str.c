@@ -61,6 +61,8 @@ The input/output `count` parameter is updated after execution, reflecting the nu
 
 */
 char **str_split(const char *str, char delim, int *count) {
+    if (!str || !count) return NULL;
+
     /* Determine number of output elements */
     int num_parts = 1;  /* Always at least 1 part (even if empty string) */
     for (const char *p = str; *p != '\0'; p++) {
@@ -203,6 +205,36 @@ void str_to_lower(char *dest, size_t dest_size, const char *src) {
         dest[i] = (char)tolower((unsigned char)src[i]);
     }
     dest[i] = '\0';
+}
+
+
+/*******/
+
+size_t str_html_escape(char *dst, size_t dst_size, const char *src) {
+    if (!dst || !src || dst_size == 0) return 0;
+    size_t i = 0;
+    for (; *src; src++) {
+        const char *ent;
+        switch (*src) {
+            case '&':  ent = "&amp;";  break;
+            case '<':  ent = "&lt;";   break;
+            case '>':  ent = "&gt;";   break;
+            case '"':  ent = "&quot;"; break;
+            case '\'': ent = "&#39;";  break;
+            default:   ent = NULL;     break;
+        }
+        if (ent) {
+            size_t len = strlen(ent);
+            if (i + len >= dst_size) return 0;
+            memcpy(dst + i, ent, len);
+            i += len;
+        } else {
+            if (i + 1 >= dst_size) return 0;
+            dst[i++] = *src;
+        }
+    }
+    dst[i] = '\0';
+    return i;
 }
 
 

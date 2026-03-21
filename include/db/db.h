@@ -8,8 +8,7 @@
  * Database Abstraction Layer
  *
  * Provides unified interface for SQLite and PostgreSQL.
- * Phase 1: SQLite only
- * Phase 2: Add PostgreSQL support via conditional compilation
+ * Backend selected at compile time via DB_BACKEND_SQLITE or DB_BACKEND_POSTGRESQL.
  */
 
 /* Forward declarations */

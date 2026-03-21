@@ -13,7 +13,7 @@ and multi-tenant setup/administration wizards.
 
 - **[API Reference](api/README.md)** — All HTTP endpoints (admin, OAuth2, user, MFA)
 - **[Database Schema](sql/README.md)** — Tables, relationships, design principles
-- **[OAuth2 Client Library](static/js/README.md)** — Drop-in JavaScript client with PKCE
+- **[OAuth2 Client Library](static/library/README.md)** — Drop-in JavaScript client with PKCE
 - **[Deployment Guide](deployment/README.md)** — Docker, nginx, cloud load balancer setup
 
 ## Deployment
@@ -98,6 +98,7 @@ Common helper functions.
 - **String** (`str.c`, `include/util/str.h`) - Safe string operations
 - **Logging** (`log.c`, `include/util/log.h`) - Thread-safe timestamped logging
 - **Config** (`config.c`, `include/util/config.h`) - Configuration file + environment variable parsing
+- **Template** (`template.c`, `include/util/template.h`) - In-memory template engine with {{placeholder}} substitution
 - **Data** (`data.c`, `include/util/data.h`) - Hex encoding/decoding utilities used by crypto modules
 - **Validation** (`validation.c`, `include/util/validation.h`) - Input validation for usernames, emails, and code names
 - **JSON** (`json.c`, `include/util/json.h`) - JSON parsing utilities (unescape, get_string, get_int, get_bool)
@@ -124,7 +125,7 @@ HTTP endpoint implementations.
 - `common.c` - JSON response helpers with injection protection
 - `health.c` - GET /health endpoint
 - `admin.c` - Business logic for administrative operations
-- `admin_http.c` - HTTP endpoints for localhost-only bootstrap admin API
+- `admin_http.c` - HTTP endpoints for localhost-only admin API (bootstrap, user moderation)
 - `admin_org_http.c` - HTTP endpoints for authenticated organization management API
 - `session.c` - Business logic for user authentication and session management
 - `session_http.c` - HTTP endpoints for login, logout, and user profile
@@ -132,11 +133,13 @@ HTTP endpoint implementations.
 - `oauth_http.c` - HTTP endpoints for OAuth2 flows (authorize, token, introspect, revoke)
 - `mfa.c` - Business logic for MFA enrollment, verification, and recovery
 - `mfa_http.c` - HTTP endpoints for MFA operations (TOTP setup/confirm, verify, recover)
+- `rs.c` - Resource servers invite users and manage their access to clients
+- `rs_http.c` - HTTP endpoints for the user provisioning API
 - `static.c` - Static file serving for management console
 
 ## Handler Architecture
 
-The application uses a three-layer handler architecture for separation of concerns:
+Each handler domain (admin, session, OAuth, MFA, user provisioning) follows the same three-layer pattern — query, business logic, HTTP:
 
 ### 1. Database Query Layer (`src/db/queries/`)
 Entity-based query functions for direct database operations.
@@ -249,6 +252,20 @@ HTTP endpoint for OAuth2 token operations.
 
 Examples:
 - `token_handler(req, params)` - POST /token
+
+### 8. RS User Provisioning Layer (`src/handlers/rs.c`, `rs_http.c`)
+User provisioning (invitations, admission to clients) is a power and responsibility of resource servers (via resource server keys).
+
+- **Files**: `rs.c` (business logic), `rs_http.c` (HTTP layer), `rs.h` (header)
+- **Responsibility**: User find-or-create, invitation tokens, client-user link/unlink/list
+- **Authentication**: RS key credentials in JSON body (same keys used for `/introspect`)
+- **Authorization**: `allow_user_provisioning` flag on resource server, client scope via `client_resource_server`
+- **Design**: Shared `rs_authenticate()` helper, `rs_user_info_t` result struct with dynamic emails array
+
+Examples:
+- `rs_provision_user_handler(req, params)` - POST /api/rs/users
+- `rs_lookup_user_handler(req, params)` - GET /api/rs/users
+- `rs_link_client_user_handler(req, params)` - POST /api/rs/client-users
 
 ## Cryptographic Infrastructure
 
@@ -364,6 +381,7 @@ src/
 │   ├── str.c
 │   ├── log.c
 │   ├── config.c
+│   ├── template.c
 │   ├── data.c
 │   ├── validation.c
 │   └── json.c
@@ -379,6 +397,8 @@ src/
 │   ├── oauth_http.c
 │   ├── mfa.c
 │   ├── mfa_http.c
+│   ├── rs.c
+│   ├── rs_http.c
 │   └── static.c
 └── main.c              # Server entry point
 
@@ -417,6 +437,7 @@ include/
 │   ├── str.h
 │   ├── log.h
 │   ├── config.h
+│   ├── template.h
 │   ├── data.h
 │   ├── validation.h
 │   └── json.h
@@ -424,7 +445,8 @@ include/
 │   ├── admin.h
 │   ├── session.h
 │   ├── oauth.h
-│   └── mfa.h
+│   ├── mfa.h
+│   └── rs.h
 └── handlers.h
 
 test/
@@ -432,12 +454,13 @@ test/
 ├── test_router.c       # Router unit tests
 ├── test_str.c          # String utilities unit tests
 ├── test_db.c           # Database integration test
-└── test_crypto.c       # Crypto test (random, password hashing, hmac, jwt)
+├── test_crypto.c       # Crypto test (random, password hashing, hmac, jwt)
+└── test_email.c   # Infrastructure/deployment convenience check; not in standard "make test" battery 
 
 data/  # Git-ignored default home for SQLite database
 
 static/  # website files (HTML, JS, images) for login and admin pages
-templates/  # email composition
+templates/  # email composition and transient pages
 
 vendor/
 ├── setup_notes.txt     # Commands to fetch SQLite amalgamation
@@ -474,6 +497,7 @@ vendor/
 - `make test-db` - Database integration test
 - `make test-crypto` - Crypto tests (random generation, password hashing, hmac, jwt)
 - `make test` - All of the above!
+- `make test-email` - Deliver a test email through the deployed "send script" (optional infrastructure)
 
 ## Linux-Specific Features
 
@@ -494,6 +518,11 @@ See **[sql/README.md](sql/README.md)** for full schema documentation. Key design
 - Organizations own resource servers (APIs) and clients (applications)
 - Cross-tenant mix-ups prevented via composite foreign keys
 
+**User Sovereignty**
+- Users are independent entities — once created, no organization or resource server can modify, delete, or impersonate them
+- Resource servers can invite users and control access to their own clients, but cannot alter user credentials or profile
+- Account-level moderation (activate/deactivate) is reserved for the server administrator (localhost-only)
+
 **Stateless Authorization Codes**
 - Authorization codes are signed JWTs containing all required state
 - Minimal database footprint: one row per code for replay detection only
@@ -513,4 +542,4 @@ See **[sql/README.md](sql/README.md)** for full schema documentation. Key design
 - We love speed and hate waste
 - Correctness over convenience: never settle for less than our achievable best!
 - Accept dependencies only when DIY feels dumb or dangerous
-- Vibe: ace-tight, military-grade, production-ready (for low-impact 0-user systems)
+- Vibe: ace-tight, military-grade, production-ready

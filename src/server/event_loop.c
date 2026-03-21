@@ -21,6 +21,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <time.h>
+#include <openssl/crypto.h>
 
 /* ============================================================================
  * Constants and Defaults
@@ -244,7 +245,11 @@ static void connection_destroy(Connection *conn) {
         close(conn->fd);
     }
 
+    if (conn->read_buffer)
+        OPENSSL_cleanse(conn->read_buffer, conn->read_buffer_size);
     free(conn->read_buffer);
+    if (conn->write_buffer)
+        OPENSSL_cleanse(conn->write_buffer, conn->write_buffer_size);
     free(conn->write_buffer);
     /* Note: userdata points to shared context (router), not connection-owned memory */
     free(conn);
@@ -805,7 +810,7 @@ void event_loop_stop(EventLoop *loop) {
 static void *worker_thread_func(void *arg) {
     EventLoop *loop = (EventLoop *)arg;
 
-    log_info("Worker thread %d started (tid=%lu)", loop->worker_index, pthread_self());
+    log_info("Worker thread %d started (tid=%lu)", loop->worker_index, (unsigned long)pthread_self());
 
     /* Bind database connection to this thread */
     db_handle_t *db = db_pool_get_connection_by_index(loop->worker_index);
@@ -822,7 +827,7 @@ static void *worker_thread_func(void *arg) {
     if (loop->config.on_worker_exit)
         loop->config.on_worker_exit();
 
-    log_info("Worker thread %d stopped (tid=%lu)", loop->worker_index, pthread_self());
+    log_info("Worker thread %d stopped (tid=%lu)", loop->worker_index, (unsigned long)pthread_self());
     return NULL;
 }
 

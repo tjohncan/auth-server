@@ -153,4 +153,18 @@ void str_to_lower(char *dest, size_t dest_size, const char *src);
 void *memmem_nocase(const void *haystack, size_t haystack_len,
                     const void *needle, size_t needle_len);
 
+/*
+ * str_html_escape - Escape a string for safe embedding in HTML
+ *
+ * Escapes &, <, >, ", ' — covers both element content and attribute values.
+ *
+ * Parameters:
+ *   dst      - Destination buffer
+ *   dst_size - Size of destination buffer
+ *   src      - Source string to escape
+ *
+ * Returns: Number of bytes written (excluding NUL), or 0 if buffer too small
+ */
+size_t str_html_escape(char *dst, size_t dst_size, const char *src);
+
 #endif /* STR_H */

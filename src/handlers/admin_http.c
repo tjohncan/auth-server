@@ -7,6 +7,7 @@
 #include "db/db_pool.h"
 #include "db/queries/user.h"
 #include "db/queries/org.h"
+#include "crypto/password.h"
 #include "crypto/random.h"
 #include "util/config.h"
 #include "util/log.h"
@@ -44,7 +45,9 @@ static int is_localhost(const HttpRequest *req) {
 
     /* Direct connection - check socket IP */
     const char *socket_ip = req->remote_ip;
-    return (strcmp(socket_ip, "127.0.0.1") == 0 || strcmp(socket_ip, "::1") == 0);
+    return (strcmp(socket_ip, "127.0.0.1") == 0 ||
+            strcmp(socket_ip, "::1") == 0 ||
+            strcmp(socket_ip, "::ffff:127.0.0.1") == 0);
 }
 
 /* ============================================================================
@@ -87,43 +90,28 @@ HttpResponse *admin_bootstrap_handler(const HttpRequest *req, const RouteParams 
     char *password = json_get_string(req->body, "password");
 
     /* Validate required fields */
+    HttpResponse *resp = NULL;
+    char validation_error[256];
+
     if (!username || !password) {
-        free(org_code_name);
-        free(org_display_name);
-        free(username);
-        if (password) OPENSSL_cleanse(password, strlen(password));
-        free(password);
-        return response_json_error(400, "username and password are required");
+        resp = response_json_error(400, "username and password are required");
+        goto cleanup;
     }
 
     /* Validate input formats */
-    char validation_error[256];
-
     if (validate_code_name(org_code_name, validation_error, sizeof(validation_error)) != 0) {
-        free(org_code_name);
-        free(org_display_name);
-        free(username);
-        OPENSSL_cleanse(password, strlen(password));
-        free(password);
-        return response_json_error(400, validation_error);
+        resp = response_json_error(400, validation_error);
+        goto cleanup;
     }
 
     if (validate_display_name(org_display_name, validation_error, sizeof(validation_error)) != 0) {
-        free(org_code_name);
-        free(org_display_name);
-        free(username);
-        OPENSSL_cleanse(password, strlen(password));
-        free(password);
-        return response_json_error(400, validation_error);
+        resp = response_json_error(400, validation_error);
+        goto cleanup;
     }
 
     if (validate_username(username, validation_error, sizeof(validation_error)) != 0) {
-        free(org_code_name);
-        free(org_display_name);
-        free(username);
-        OPENSSL_cleanse(password, strlen(password));
-        free(password);
-        return response_json_error(400, validation_error);
+        resp = response_json_error(400, validation_error);
+        goto cleanup;
     }
 
     /* Get config from global context */
@@ -132,53 +120,35 @@ HttpResponse *admin_bootstrap_handler(const HttpRequest *req, const RouteParams 
     /* Check if organization already exists (409 Conflict) */
     int org_ex = org_exists(db, org_code_name);
     if (org_ex < 0) {
-        free(org_code_name);
-        free(org_display_name);
-        free(username);
-        OPENSSL_cleanse(password, strlen(password));
-        free(password);
-        return response_json_error(500, "Failed to check organization existence");
+        resp = response_json_error(500, "Failed to check organization existence");
+        goto cleanup;
     } else if (org_ex == 1) {
         char error_msg[256];
         snprintf(error_msg, sizeof(error_msg),
                  "Organization '%s' already exists. Use a different org_code_name.",
                  org_code_name);
-        free(org_code_name);
-        free(org_display_name);
-        free(username);
-        OPENSSL_cleanse(password, strlen(password));
-        free(password);
-        return response_json_error(409, error_msg);
+        resp = response_json_error(409, error_msg);
+        goto cleanup;
     }
 
     /* Check if username already exists (409 Conflict) */
     int user_ex = user_username_exists(db, username);
     if (user_ex < 0) {
-        free(org_code_name);
-        free(org_display_name);
-        free(username);
-        OPENSSL_cleanse(password, strlen(password));
-        free(password);
-        return response_json_error(500, "Failed to check username existence");
+        resp = response_json_error(500, "Failed to check username existence");
+        goto cleanup;
     } else if (user_ex == 1) {
         char error_msg[256];
         snprintf(error_msg, sizeof(error_msg),
                  "Username '%s' already exists. Use a different username.",
                  username);
-        free(org_code_name);
-        free(org_display_name);
-        free(username);
-        OPENSSL_cleanse(password, strlen(password));
-        free(password);
-        return response_json_error(409, error_msg);
+        resp = response_json_error(409, error_msg);
+        goto cleanup;
     }
 
     /* Call bootstrap handler */
     int result = admin_bootstrap(db, g_config, org_code_name, org_display_name,
                                  username, password);
 
-    /* Build response before cleanup */
-    HttpResponse *resp;
     if (result != 0) {
         resp = response_json_error(500, "Bootstrap failed");
     } else {
@@ -189,11 +159,11 @@ HttpResponse *admin_bootstrap_handler(const HttpRequest *req, const RouteParams 
         resp = jsonbuf_to_response(jb, 200);
     }
 
-    /* Clean up */
+cleanup:
     free(org_code_name);
     free(org_display_name);
     free(username);
-    OPENSSL_cleanse(password, strlen(password));
+    if (password) OPENSSL_cleanse(password, strlen(password));
     free(password);
 
     return resp;
@@ -610,12 +580,19 @@ HttpResponse *admin_create_organization_key_handler(const HttpRequest *req, cons
 
     /* Create organization key */
     unsigned char key_id[16];
-    if (organization_key_create(db, org_code_name, secret_to_use, note, key_id) != 0) {
+    int result = organization_key_create(db, org_code_name, secret_to_use, note, key_id);
+    if (result != 0) {
         free(org_code_name);
         if (user_secret) OPENSSL_cleanse(user_secret, strlen(user_secret));
         free(user_secret);
         OPENSSL_cleanse(generated_secret, sizeof(generated_secret));
         free(note);
+        if (result == -2) {
+            char msg[128];
+            snprintf(msg, sizeof(msg),
+                     "Secret must be at least %d characters", crypto_password_min_length());
+            return response_json_error(400, msg);
+        }
         return response_json_error(500, "Failed to create organization key");
     }
 
@@ -663,50 +640,58 @@ HttpResponse *admin_list_organization_keys_handler(const HttpRequest *req, const
     }
 
     /* Get organization_code_name from query string (optional for org key auth) */
+    char *org_code_name_enc = NULL;
+    char org_code_name_param_buf[128];
     char *org_code_name_param = NULL;
     if (req->query_string) {
-        org_code_name_param = http_query_get_param(req->query_string, "organization_code_name");
+        org_code_name_enc = http_query_get_param(req->query_string, "organization_code_name");
+        if (org_code_name_enc) {
+            if (str_url_decode(org_code_name_param_buf, sizeof(org_code_name_param_buf), org_code_name_enc) < 0) {
+                free(org_code_name_enc);
+                return response_json_error(400, "Invalid URL encoding in organization_code_name");
+            }
+            free(org_code_name_enc);
+            org_code_name_param = org_code_name_param_buf;
+        }
     }
 
     /* Dual authentication: localhost OR org key */
     int is_localhost_access = is_localhost(req);
     int is_org_key_access = 0;
-    long long auth_org_pin = 0;
-    char org_code_name_from_key[128] = "";
+    long long org_pin = 0;
 
     if (!is_localhost_access) {
         /* Try org key authentication */
         long long auth_key_pin;
-        if (try_org_key_auth(req, "list_organization_keys", &auth_org_pin, &auth_key_pin) == 0) {
+        if (try_org_key_auth(req, "list_organization_keys", &org_pin, &auth_key_pin) == 0) {
             if (org_code_name_param) {
                 /* Org code_name provided - verify it matches the key's org */
                 long long requested_org_pin;
                 if (organization_get_pin_by_code_name(db, org_code_name_param, &requested_org_pin) == 0) {
-                    if (auth_org_pin == requested_org_pin) {
+                    if (org_pin == requested_org_pin) {
                         is_org_key_access = 1;
                     }
                 }
             } else {
-                /* No org code_name provided - use the key's org */
-                if (organization_get_code_name_by_pin(db, auth_org_pin, org_code_name_from_key) == 0) {
-                    is_org_key_access = 1;
-                }
+                /* No org code_name provided - key's org is implicit */
+                is_org_key_access = 1;
             }
         }
     }
 
     if (!is_localhost_access && !is_org_key_access) {
-        free(org_code_name_param);
         return response_json_error(403, "Forbidden - requires localhost or org key authentication");
     }
 
-    /* For localhost: organization_code_name is required */
-    if (is_localhost_access && !org_code_name_param) {
-        return response_json_error(400, "organization_code_name query parameter required for localhost access");
+    /* For localhost: organization_code_name is required, resolve to pin */
+    if (is_localhost_access) {
+        if (!org_code_name_param) {
+            return response_json_error(400, "organization_code_name query parameter required for localhost access");
+        }
+        if (organization_get_pin_by_code_name(db, org_code_name_param, &org_pin) != 0) {
+            return response_json_error(404, "Organization not found");
+        }
     }
-
-    /* Determine which org code_name to use */
-    const char *org_code_name = org_code_name_param ? org_code_name_param : org_code_name_from_key;
 
     /* Parse query parameters */
     int limit = parse_query_int(req->query_string, "limit", 20, 1, 100);
@@ -724,12 +709,9 @@ HttpResponse *admin_list_organization_keys_handler(const HttpRequest *req, const
     int count = 0;
     int total = 0;
 
-    if (admin_list_organization_keys(db, org_code_name, limit, offset, is_active_ptr, &keys, &count, &total) != 0) {
-        free(org_code_name_param);
+    if (admin_list_organization_keys(db, org_pin, limit, offset, is_active_ptr, &keys, &count, &total) != 0) {
         return response_json_error(500, "Failed to list organization keys");
     }
-
-    free(org_code_name_param);
 
     /* Build JSON response */
     JsonBuf *jb = jsonbuf_new(4096 + count * 512);
@@ -816,4 +798,54 @@ HttpResponse *admin_revoke_organization_key_handler(const HttpRequest *req, cons
     }
 
     return response_json_ok("{\"message\":\"Organization key revoked successfully\"}");
+}
+
+/* ============================================================================
+ * POST /api/admin/users/activate
+ * POST /api/admin/users/deactivate
+ * ========================================================================== */
+
+static HttpResponse *set_user_active(const HttpRequest *req, int active) {
+    HttpResponse *ct_err = require_content_type(req, "application/json");
+    if (ct_err) return ct_err;
+
+    if (!is_localhost(req))
+        return response_json_error(403, "Server admin endpoints only accessible from localhost");
+
+    db_handle_t *db = db_pool_get_connection();
+    if (!db) {
+        log_error("Failed to get database connection");
+        return response_json_error(500, "Internal server error");
+    }
+
+    char *user_id_str = json_get_string(req->body ? req->body : "", "user_id");
+    if (!user_id_str)
+        return response_json_error(400, "user_id required");
+
+    unsigned char user_id[16];
+    if (hex_to_bytes(user_id_str, user_id, 16) != 0) {
+        free(user_id_str);
+        return response_json_error(400, "Invalid user_id format");
+    }
+    free(user_id_str);
+
+    int rc = user_set_active(db, user_id, active);
+    if (rc == 1) return response_json_error(404, "User not found");
+    if (rc != 0) return response_json_error(500, "Internal error");
+
+    return response_json_ok(active
+        ? "{\"message\":\"User activated\"}"
+        : "{\"message\":\"User deactivated\"}");
+}
+
+HttpResponse *server_activate_user_handler(const HttpRequest *req,
+                                            const RouteParams *params) {
+    (void)params;
+    return set_user_active(req, 1);
+}
+
+HttpResponse *server_deactivate_user_handler(const HttpRequest *req,
+                                              const RouteParams *params) {
+    (void)params;
+    return set_user_active(req, 0);
 }

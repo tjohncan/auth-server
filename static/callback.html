@@ -1,12 +1,14 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self'; font-src 'self'; connect-src 'self'; form-action 'self'; manifest-src 'self'; base-uri 'self';">
+    <meta name="color-scheme" content="dark">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'; form-action 'self'; manifest-src 'self'; base-uri 'self';">
     <title>Authenticating...</title>
     <link rel="stylesheet" href="/css/base.css">
-    <script src="/js/oauth-client.js"></script>
+    <script src="/library/oauth-client.js" defer></script>
+    <script src="/js/callback.js" defer></script>
     <link rel="icon" type="image/svg+xml" href="/favicon/favicon.svg">
     <link rel="icon" type="image/png" sizes="32x32" href="/favicon/favicon-32x32.png">
     <link rel="icon" type="image/png" sizes="16x16" href="/favicon/favicon-16x16.png">
@@ -16,61 +18,5 @@
 <body>
     <h1>Authenticating...</h1>
     <div id="status">Processing authorization code...</div>
-
-    <script>
-        function escapeHtml(text) {
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-        }
-
-        async function handleCallback() {
-            const statusEl = document.getElementById('status');
-
-            // Get client_id from state parameter
-            // State format is "clientId.randomValue" (not base64-encoded JSON)
-            const params = new URLSearchParams(window.location.search);
-            const state = params.get('state');
-
-            if (!state) {
-                statusEl.textContent = 'Error: Missing state parameter';
-                return;
-            }
-
-            // Extract client_id from state (format: "clientId.randomValue")
-            const stateParts = state.split('.');
-            if (stateParts.length !== 2) {
-                statusEl.textContent = 'Error: Invalid state format';
-                return;
-            }
-            const clientId = stateParts[0];
-
-            // Create OAuth client instance
-            const client = new OAuthClient({
-                authUrl: window.location.origin,
-                clientId: clientId,
-                redirectUri: window.location.origin + '/callback',
-                scope: 'openid'
-            });
-
-            statusEl.textContent = 'Exchanging code for tokens...';
-
-            try {
-                await client.handleCallback();
-
-                const adminUrl = `/admin?client_id=${clientId}`;
-                window.location.replace(adminUrl);
-                setTimeout(() => {
-                    statusEl.innerHTML = `<p><a href="${escapeHtml(adminUrl)}">Continue to Management Console</a></p>`;
-                }, 1000);
-            } catch (err) {
-                statusEl.innerHTML = '<p>Error: ' + escapeHtml(err.message) + '</p>' +
-                    '<p style="margin-top: 20px; color: #999;">If you need to update your profile or security settings, ' +
-                    'visit the <a href="/admin">Management Console</a>.</p>';
-            }
-        }
-
-        handleCallback();
-    </script>
 </body>
 </html>

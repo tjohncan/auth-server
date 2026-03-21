@@ -45,6 +45,10 @@ secret_hashing_algorithm = argon2id
 secret_hash_min_iterations = 4
 secret_hash_max_iterations = 4
 
+# Password policy
+# Minimum password length (default 1, minimum 1)
+# password_min_length = 8
+
 # OAuth2 token limits
 # Maximum TTL for client access tokens (in seconds)
 # Must be >= access token rotation interval to prevent double-rotation invalidation
@@ -77,6 +81,24 @@ retention_history_days = 90
 retention_sessions_grace_days = 8
 retention_tokens_grace_days = 8
 
+# invitation_token_ttl_seconds = 259200
+
 # Mothership (optional parent/brand link on index page)
 # mothership_url = https://{your}.{sponsor}
 # mothership_url_env = AUTH_MOTHERSHIP_URL
+
+# Email Delivery (requires EMAIL_SUPPORT=1 build flag)
+# Command to execute for sending email — receives JSON payload on stdin, exit 0 = success
+# See deployment/email/ for example scripts
+# email_command = ./deployment/email/send-email.sh
+# (ensure the script has execute permission: chmod +x)
+# email_from = noreply@example.com
+# email_from_name = Auth Server
+#
+# email_command_env = AUTH_EMAIL_COMMAND
+# email_from_env = AUTH_EMAIL_FROM
+# email_from_name_env = AUTH_EMAIL_FROM_NAME
+#
+# email_verification_token_ttl_seconds = 86400
+# password_reset_token_ttl_seconds = 3600
+# passwordless_login_token_ttl_seconds = 600
