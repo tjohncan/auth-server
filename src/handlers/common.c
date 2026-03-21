@@ -28,6 +28,8 @@ HttpResponse *response_json_ok(const char *json) {
     HttpResponse *resp = http_response_new(200);
     if (resp) {
         http_response_set(resp, CONTENT_TYPE_JSON, json);
+        http_response_set_header(resp, "Cache-Control", "no-store");
+        http_response_set_header(resp, "Pragma", "no-cache");
     }
     return resp;
 }
@@ -43,6 +45,8 @@ HttpResponse *response_json_error(int status_code, const char *message) {
 
         snprintf(json, sizeof(json), "{\"error\":\"%s\"}", escaped);
         http_response_set(resp, CONTENT_TYPE_JSON, json);
+        http_response_set_header(resp, "Cache-Control", "no-store");
+        http_response_set_header(resp, "Pragma", "no-cache");
     }
     return resp;
 }
@@ -96,7 +100,7 @@ char *http_cookie_get_value(const char *cookie_header, const char *name) {
     /* Find exact cookie name match (not substring of another cookie name) */
     while ((p = strstr(p, search)) != NULL) {
         /* Verify we're at start of header or after "; " separator */
-        if (p == cookie_header || (*(p - 1) == ' ' && p >= cookie_header + 2 && *(p - 2) == ';')) {
+        if (p == cookie_header || (*(p - 1) == ' ' && p >= cookie_header + 2 && *(p - 2) == ';') || (*(p - 1) == ';')) {
             cookie = p;
             break;
         }
@@ -133,9 +137,10 @@ int parse_query_int(const char *query_string, const char *param_name,
 
     char *endptr;
     long parsed = strtol(param_value, &endptr, 10);
+    int no_digits = (endptr == param_value);
     free(param_value);
 
-    if (endptr == param_value) return default_value;
+    if (no_digits) return default_value;
     if (parsed < min_value) return min_value;
     if (parsed > max_value) return max_value;
     return (int)parsed;

@@ -76,6 +76,7 @@ static int get_authenticated_user_pin(const HttpRequest *req, long long *out_use
 
     oauth_session_info_t session;
     int result = oauth_session_get_by_token(db, session_token, &session);
+    OPENSSL_cleanse(session_token, strlen(session_token));
     free(session_token);
 
     if (result != 0) {

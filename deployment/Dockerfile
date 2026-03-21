@@ -5,7 +5,7 @@
 # -----------------------------------------------------------------------------
 # Stage 1: Build
 # -----------------------------------------------------------------------------
-FROM alpine:3.19 AS builder
+FROM alpine:3 AS builder
 
 ARG DB_BACKEND=sqlite
 ARG EMAIL_SUPPORT=0
@@ -33,7 +33,7 @@ RUN make clean && make DB_BACKEND=${DB_BACKEND} EMAIL_SUPPORT=${EMAIL_SUPPORT}
 # -----------------------------------------------------------------------------
 # Stage 2: Runtime
 # -----------------------------------------------------------------------------
-FROM alpine:3.19
+FROM alpine:3
 
 ARG DB_BACKEND=sqlite
 ARG EMAIL_SUPPORT=0

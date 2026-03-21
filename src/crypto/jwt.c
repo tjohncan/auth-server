@@ -4,6 +4,7 @@
 #include "util/log.h"
 #include "util/data.h"
 #include "util/str.h"
+#include "util/json.h"
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
@@ -27,36 +28,8 @@ void jwt_set_clock_skew_seconds(int seconds) {
 
 /* Helper: Escape JSON string (quotes and backslashes) */
 static int json_escape_string(const char *input, char *output, size_t output_len) {
-    size_t out_pos = 0;
-
-    for (const char *p = input; *p != '\0'; p++) {
-        /* Need space for escaped char + null terminator */
-        if (out_pos + 3 >= output_len) {
-            return -1;  /* Buffer too small */
-        }
-
-        if (*p == '"' || *p == '\\') {
-            output[out_pos++] = '\\';
-            output[out_pos++] = *p;
-        } else if (*p == '\n') {
-            output[out_pos++] = '\\';
-            output[out_pos++] = 'n';
-        } else if (*p == '\r') {
-            output[out_pos++] = '\\';
-            output[out_pos++] = 'r';
-        } else if (*p == '\t') {
-            output[out_pos++] = '\\';
-            output[out_pos++] = 't';
-        } else if ((unsigned char)*p < 32) {
-            /* Control characters (shouldn't appear in OAuth2 claims) */
-            return -1;  /* Reject invalid characters */
-        } else {
-            output[out_pos++] = *p;
-        }
-    }
-
-    output[out_pos] = '\0';
-    return 0;
+    size_t written = json_escape(output, output_len, input);
+    return (written < output_len) ? 0 : -1;
 }
 
 /* Helper: Unescape JSON string */
@@ -481,6 +454,7 @@ static EVP_PKEY *get_cached_private_key(const char *pem_string) {
     if (entry->pkey)
         EVP_PKEY_free(entry->pkey);
 
+    OPENSSL_cleanse(entry->pem, sizeof(entry->pem));
     str_copy(entry->pem, sizeof(entry->pem), pem_string);
     entry->pkey = pkey;
     return pkey;
@@ -497,6 +471,7 @@ void crypto_jwt_thread_cleanup(void) {
         EVP_PKEY_free(es256_priv_cache.pkey);
         es256_priv_cache.pkey = NULL;
     }
+    OPENSSL_cleanse(es256_priv_cache.pem, sizeof(es256_priv_cache.pem));
 }
 
 /*

@@ -220,6 +220,7 @@ HttpResponse *mfa_totp_confirm_handler(const HttpRequest *req, const RouteParams
     int rc = mfa_totp_confirm(db, session.user_account_pin,
                               method_id, code,
                               &recovery_codes, &recovery_count);
+    OPENSSL_cleanse(code, strlen(code));
     free(code);
 
     if (rc == 1) {
@@ -310,6 +311,7 @@ HttpResponse *mfa_verify_handler(const HttpRequest *req, const RouteParams *para
     int result = mfa_verify(db, session.user_account_pin, method_id, code,
                             http_request_get_client_ip(req, NULL),
                             http_request_get_header(req, "User-Agent"));
+    OPENSSL_cleanse(code, strlen(code));
     free(code);
 
     if (result == 1) {
@@ -378,6 +380,7 @@ HttpResponse *mfa_recover_handler(const HttpRequest *req, const RouteParams *par
 
     /* Verify recovery code */
     int result = mfa_recover(db, session.user_account_pin, recovery_code);
+    OPENSSL_cleanse(recovery_code, strlen(recovery_code));
     free(recovery_code);
 
     if (result == 1) {
@@ -464,6 +467,7 @@ HttpResponse *mfa_list_methods_handler(const HttpRequest *req, const RouteParams
 
     jsonbuf_appendf(jb, "]}");
 
+    OPENSSL_cleanse(methods, count * sizeof(*methods));
     free(methods);
 
     return jsonbuf_to_response(jb, 200);

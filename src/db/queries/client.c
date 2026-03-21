@@ -1693,6 +1693,8 @@ int client_key_create(db_handle_t *db,
                             &iterations,
                             hash_hex, sizeof(hash_hex));
     if (hash_rc != 0) {
+        OPENSSL_cleanse(salt_hex, sizeof(salt_hex));
+        OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
         log_error("Failed to hash secret");
         return (hash_rc == -2) ? -2 : -1;
     }
@@ -1731,6 +1733,8 @@ int client_key_create(db_handle_t *db,
 
     db_stmt_t *stmt = NULL;
     if (db_prepare(db, &stmt, sql) != 0) {
+        OPENSSL_cleanse(salt_hex, sizeof(salt_hex));
+        OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
         log_error("Failed to prepare client_key_create statement");
         return -1;
     }
@@ -1757,6 +1761,9 @@ int client_key_create(db_handle_t *db,
     /* Execute */
     int rc = db_step(stmt);
     db_finalize(stmt);
+
+    OPENSSL_cleanse(salt_hex, sizeof(salt_hex));
+    OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
 
     if (rc != DB_DONE) {
         log_error("Failed to insert client key (unauthorized, not confidential, or constraint violation)");

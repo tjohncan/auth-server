@@ -711,6 +711,8 @@ int organization_key_create(db_handle_t *db,
                             &iterations,
                             hash_hex, sizeof(hash_hex));
     if (hash_rc != 0) {
+        OPENSSL_cleanse(salt_hex, sizeof(salt_hex));
+        OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
         log_error("Failed to hash secret");
         return (hash_rc == -2) ? -2 : -1;
     }
@@ -718,6 +720,8 @@ int organization_key_create(db_handle_t *db,
     /* Generate UUID for key */
     unsigned char key_id[16];
     if (crypto_random_bytes(key_id, sizeof(key_id)) != 0) {
+        OPENSSL_cleanse(salt_hex, sizeof(salt_hex));
+        OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
         log_error("Failed to generate key UUID");
         return -1;
     }
@@ -730,6 +734,8 @@ int organization_key_create(db_handle_t *db,
 
     db_stmt_t *stmt = NULL;
     if (db_prepare(db, &stmt, insert_sql) != 0) {
+        OPENSSL_cleanse(salt_hex, sizeof(salt_hex));
+        OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
         log_error("Failed to prepare organization key insert");
         return -1;
     }
@@ -743,6 +749,9 @@ int organization_key_create(db_handle_t *db,
 
     int rc = db_step(stmt);
     db_finalize(stmt);
+
+    OPENSSL_cleanse(salt_hex, sizeof(salt_hex));
+    OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
 
     if (rc != DB_DONE) {
         log_error("Failed to insert organization key");

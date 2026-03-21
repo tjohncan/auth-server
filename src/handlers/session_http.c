@@ -26,6 +26,31 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+/* Cleanse and free a heap-allocated sensitive string */
+static void cleanse_free(char *s) {
+    if (s) {
+        OPENSSL_cleanse(s, strlen(s));
+        free(s);
+    }
+}
+
+/* Simple HTML error response with CSP meta tag */
+static HttpResponse *response_html_error(int status_code, const char *message) {
+    HttpResponse *resp = http_response_new(status_code);
+    if (!resp) return NULL;
+    char body[512];
+    snprintf(body, sizeof(body),
+        "<!DOCTYPE html><html lang=\"en\"><head>"
+        "<meta charset=\"UTF-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
+        "<meta name=\"color-scheme\" content=\"dark\">"
+        "<meta http-equiv=\"Content-Security-Policy\" "
+        "content=\"default-src 'none'; style-src 'self';\">"
+        "</head><body><p>%s</p></body></html>", message);
+    http_response_set(resp, CONTENT_TYPE_HTML, body);
+    return resp;
+}
+
 /* Default session TTL: 7 days */
 #define DEFAULT_SESSION_TTL_SECONDS (7 * 24 * 60 * 60)
 
@@ -58,13 +83,11 @@ static HttpResponse *require_authenticated_session(const HttpRequest *req,
     }
 
     if (oauth_session_get_by_token(db, session_token, out_session) != 0) {
-        OPENSSL_cleanse(session_token, strlen(session_token));
-        free(session_token);
+        cleanse_free(session_token);
         return response_json_error(401, "Invalid or expired session");
     }
 
-    OPENSSL_cleanse(session_token, strlen(session_token));
-    free(session_token);
+    cleanse_free(session_token);
 
     if (out_session->user_requires_mfa && !out_session->mfa_completed) {
         return response_json_error(403, "MFA verification required");
@@ -115,8 +138,7 @@ HttpResponse *login_handler(const HttpRequest *req, const RouteParams *params) {
 
     if (!username || !password) {
         free(username);
-        if (password) OPENSSL_cleanse(password, strlen(password));
-        free(password);
+        cleanse_free(password);
         return response_json_error(400, "username and password required");
     }
 
@@ -134,8 +156,7 @@ HttpResponse *login_handler(const HttpRequest *req, const RouteParams *params) {
     );
 
     free(username);
-    OPENSSL_cleanse(password, strlen(password));
-    free(password);
+    cleanse_free(password);
 
     if (rc != 0) {
         return response_json_error(401, "Invalid credentials");
@@ -150,8 +171,7 @@ HttpResponse *login_handler(const HttpRequest *req, const RouteParams *params) {
     /* Get user profile to check MFA preference */
     user_profile_t profile;
     if (user_get_profile(db, user_pin, &profile) != 0) {
-        OPENSSL_cleanse(session_token, strlen(session_token));
-        free(session_token);
+        cleanse_free(session_token);
         OPENSSL_cleanse(cookie_header, sizeof(cookie_header));
         return response_json_error(500, "Failed to retrieve user profile");
     }
@@ -160,8 +180,7 @@ HttpResponse *login_handler(const HttpRequest *req, const RouteParams *params) {
     mfa_method_t *mfa_methods = NULL;
     int mfa_count = 0;
     if (mfa_method_list(db, user_pin, 1, &mfa_methods, &mfa_count) != 0) {
-        OPENSSL_cleanse(session_token, strlen(session_token));
-        free(session_token);
+        cleanse_free(session_token);
         OPENSSL_cleanse(cookie_header, sizeof(cookie_header));
         return response_json_error(500, "Failed to retrieve MFA methods");
     }
@@ -183,16 +202,17 @@ HttpResponse *login_handler(const HttpRequest *req, const RouteParams *params) {
             jsonbuf_appendf(jb, "\"}");
         }
         jsonbuf_appendf(jb, "]}");
+        OPENSSL_cleanse(mfa_methods, mfa_count * sizeof(*mfa_methods));
         free(mfa_methods);
         resp = jsonbuf_to_response(jb, 200);
     } else {
+        OPENSSL_cleanse(mfa_methods, mfa_count * sizeof(*mfa_methods));
         free(mfa_methods);
         resp = response_json_ok("{\"message\":\"Login successful\"}");
     }
 
     if (!resp) {
-        OPENSSL_cleanse(session_token, strlen(session_token));
-        free(session_token);
+        cleanse_free(session_token);
         OPENSSL_cleanse(cookie_header, sizeof(cookie_header));
         log_error("Failed to create HTTP response");
         return response_json_error(500, "Internal server error");
@@ -200,8 +220,7 @@ HttpResponse *login_handler(const HttpRequest *req, const RouteParams *params) {
 
     http_response_set_header(resp, "Set-Cookie", cookie_header);
 
-    OPENSSL_cleanse(session_token, strlen(session_token));
-    free(session_token);
+    cleanse_free(session_token);
     OPENSSL_cleanse(cookie_header, sizeof(cookie_header));
 
     return resp;
@@ -285,12 +304,10 @@ HttpResponse *management_setups_handler(const HttpRequest *req, const RouteParam
     /* Get session info */
     oauth_session_info_t session;
     if (oauth_session_get_by_token(db, session_token, &session) != 0) {
-        OPENSSL_cleanse(session_token, strlen(session_token));
-        free(session_token);
+        cleanse_free(session_token);
         return response_json_error(401, "Invalid or expired session");
     }
-    OPENSSL_cleanse(session_token, strlen(session_token));
-    free(session_token);
+    cleanse_free(session_token);
 
     /* Get management UI setups */
     management_ui_setup_t *setups = NULL;
@@ -755,6 +772,7 @@ HttpResponse *create_email_verification_token_handler(const HttpRequest *req,
         token);
 
     if (result != 0) {
+        OPENSSL_cleanse(token, sizeof(token));
         free(email);
         if (result == 1) {
             return response_json_error(400, "Unable to send verification email");
@@ -773,16 +791,18 @@ HttpResponse *create_email_verification_token_handler(const HttpRequest *req,
                  "https://%s/verify-email?token=%s",
                  g_config->host, token);
     }
+    OPENSSL_cleanse(token, sizeof(token));
 
     /* Send verification email */
     char *body_text = template_render("emails/verify.txt", "URL", verify_url, NULL);
     char *body_html = template_render("emails/verify.html", "URL", verify_url, NULL);
+    OPENSSL_cleanse(verify_url, sizeof(verify_url));
 
     if (body_text && body_html)
         email_send(g_config, email, "Verify your email address", body_text, body_html);
 
-    free(body_text);
-    free(body_html);
+    cleanse_free(body_text);
+    cleanse_free(body_html);
 
     free(email);
     return response_json_ok("{\"message\":\"Verification email sent\"}");
@@ -801,25 +821,19 @@ HttpResponse *verify_email_page_handler(const HttpRequest *req,
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
         log_error("Failed to get database connection");
-        HttpResponse *resp = http_response_new(500);
-        http_response_set(resp, CONTENT_TYPE_HTML,
-            "<!DOCTYPE html><html><body><p>Internal server error</p></body></html>");
-        return resp;
+        return response_html_error(500, "Internal server error");
     }
 
     char *token = http_query_get_param(req->query_string, "token");
     if (!token) {
-        HttpResponse *resp = http_response_new(400);
-        http_response_set(resp, CONTENT_TYPE_HTML,
-            "<!DOCTYPE html><html><body><p>Missing token</p></body></html>");
-        return resp;
+        return response_html_error(400, "Missing token");
     }
 
     email_verification_result_t result;
     int rc = user_lookup_email_verification_token(db, token, &result);
 
     if (rc != 0) {
-        free(token);
+        cleanse_free(token);
         HttpResponse *resp = response_template(400, "pages/verify-email-invalid.html", NULL);
         return resp ? resp : response_json_error(400, "Invalid token");
     }
@@ -847,7 +861,7 @@ HttpResponse *verify_email_page_handler(const HttpRequest *req,
         "USER_ID", user_id_hex,
         "TOKEN", token,
         NULL);
-    free(token);
+    cleanse_free(token);
     return resp ? resp : response_json_error(500, "Template error");
 }
 
@@ -864,10 +878,7 @@ HttpResponse *verify_email_handler(const HttpRequest *req,
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
         log_error("Failed to get database connection");
-        HttpResponse *resp = http_response_new(500);
-        http_response_set(resp, CONTENT_TYPE_HTML,
-            "<!DOCTYPE html><html><body><p>Internal server error</p></body></html>");
-        return resp;
+        return response_html_error(500, "Internal server error");
     }
 
     /* Parse token from form body */
@@ -877,15 +888,12 @@ HttpResponse *verify_email_handler(const HttpRequest *req,
     }
 
     if (!token) {
-        HttpResponse *resp = http_response_new(400);
-        http_response_set(resp, CONTENT_TYPE_HTML,
-            "<!DOCTYPE html><html><body><p>Missing token</p></body></html>");
-        return resp;
+        return response_html_error(400, "Missing token");
     }
 
     email_verification_result_t result;
     int rc = user_verify_email_token(db, token, &result);
-    free(token);
+    cleanse_free(token);
 
     if (rc != 0) {
         HttpResponse *resp = response_template(400, "pages/verify-email-error.html", NULL);
@@ -970,15 +978,19 @@ HttpResponse *request_password_reset_handler(const HttpRequest *req,
                      "https://%s/reset-password?token=%s",
                      g_config->host, token);
         }
+        OPENSSL_cleanse(token, sizeof(token));
 
         char *body_text = template_render("emails/reset.txt", "URL", reset_url, NULL);
         char *body_html = template_render("emails/reset.html", "URL", reset_url, NULL);
+        OPENSSL_cleanse(reset_url, sizeof(reset_url));
 
         if (body_text && body_html)
             email_send(g_config, email, "Password Reset", body_text, body_html);
 
-        free(body_text);
-        free(body_html);
+        cleanse_free(body_text);
+        cleanse_free(body_html);
+    } else {
+        OPENSSL_cleanse(token, sizeof(token));
     }
 
     free(email);
@@ -1002,24 +1014,18 @@ HttpResponse *reset_password_page_handler(const HttpRequest *req,
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
         log_error("Failed to get database connection");
-        HttpResponse *resp = http_response_new(500);
-        http_response_set(resp, CONTENT_TYPE_HTML,
-            "<!DOCTYPE html><html><body><p>Internal server error</p></body></html>");
-        return resp;
+        return response_html_error(500, "Internal server error");
     }
 
     char *token = http_query_get_param(req->query_string, "token");
     if (!token) {
-        HttpResponse *resp = http_response_new(400);
-        http_response_set(resp, CONTENT_TYPE_HTML,
-            "<!DOCTYPE html><html><body><p>Missing token</p></body></html>");
-        return resp;
+        return response_html_error(400, "Missing token");
     }
 
     int rc = user_lookup_password_reset_token(db, token);
 
     if (rc != 0) {
-        free(token);
+        cleanse_free(token);
         HttpResponse *resp = response_template(400, "pages/reset-password-invalid.html", NULL);
         return resp ? resp : response_json_error(400, "Invalid token");
     }
@@ -1028,7 +1034,7 @@ HttpResponse *reset_password_page_handler(const HttpRequest *req,
     snprintf(min_len, sizeof(min_len), "%d", crypto_password_min_length());
     HttpResponse *resp = response_template(200, "pages/reset-password.html",
         "TOKEN", token, "MIN_LENGTH", min_len, NULL);
-    free(token);
+    cleanse_free(token);
     return resp ? resp : response_json_error(500, "Template error");
 }
 
@@ -1045,10 +1051,7 @@ HttpResponse *reset_password_handler(const HttpRequest *req,
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
         log_error("Failed to get database connection");
-        HttpResponse *resp = http_response_new(500);
-        http_response_set(resp, CONTENT_TYPE_HTML,
-            "<!DOCTYPE html><html><body><p>Internal server error</p></body></html>");
-        return resp;
+        return response_html_error(500, "Internal server error");
     }
 
     char *token = NULL;
@@ -1059,31 +1062,23 @@ HttpResponse *reset_password_handler(const HttpRequest *req,
     }
 
     if (!token || !password_enc) {
-        free(token);
-        free(password_enc);
-        HttpResponse *resp = http_response_new(400);
-        http_response_set(resp, CONTENT_TYPE_HTML,
-            "<!DOCTYPE html><html><body><p>Missing token or password</p></body></html>");
-        return resp;
+        cleanse_free(token);
+        cleanse_free(password_enc);
+        return response_html_error(400, "Missing token or password");
     }
 
     /* URL-decode password (form-encoded) */
     char password[256];
     if (str_url_decode(password, sizeof(password), password_enc) < 0) {
-        free(token);
-        OPENSSL_cleanse(password_enc, strlen(password_enc));
-        free(password_enc);
-        HttpResponse *resp = http_response_new(400);
-        http_response_set(resp, CONTENT_TYPE_HTML,
-            "<!DOCTYPE html><html><body><p>Invalid request</p></body></html>");
-        return resp;
+        cleanse_free(token);
+        cleanse_free(password_enc);
+        return response_html_error(400, "Invalid request");
     }
-    OPENSSL_cleanse(password_enc, strlen(password_enc));
-    free(password_enc);
+    cleanse_free(password_enc);
 
     int rc = user_consume_password_reset_token(db, token, password);
-    OPENSSL_cleanse(password, strlen(password));
-    free(token);
+    OPENSSL_cleanse(password, sizeof(password));
+    cleanse_free(token);
 
     if (rc == -2) {
         char msg[128];
@@ -1123,18 +1118,12 @@ HttpResponse *accept_invitation_page_handler(const HttpRequest *req,
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
         log_error("Failed to get database connection");
-        HttpResponse *resp = http_response_new(500);
-        http_response_set(resp, CONTENT_TYPE_HTML,
-            "<!DOCTYPE html><html><body><p>Internal server error</p></body></html>");
-        return resp;
+        return response_html_error(500, "Internal server error");
     }
 
     char *token = http_query_get_param(req->query_string, "token");
     if (!token) {
-        HttpResponse *resp = http_response_new(400);
-        http_response_set(resp, CONTENT_TYPE_HTML,
-            "<!DOCTYPE html><html><body><p>Missing token</p></body></html>");
-        return resp;
+        return response_html_error(400, "Missing token");
     }
 
     /* Look up token */
@@ -1142,7 +1131,7 @@ HttpResponse *accept_invitation_page_handler(const HttpRequest *req,
     int rc = user_lookup_invitation_token(db, token, &result);
 
     if (rc != 0) {
-        free(token);
+        cleanse_free(token);
         HttpResponse *resp = response_template(400, "pages/accept-invitation-invalid.html", NULL);
         return resp ? resp : response_json_error(400, "Invalid token");
     }
@@ -1173,7 +1162,7 @@ HttpResponse *accept_invitation_page_handler(const HttpRequest *req,
         "ACCOUNT_INFO", account_info,
         "MIN_LENGTH", min_len,
         NULL);
-    free(token);
+    cleanse_free(token);
     return resp ? resp : response_json_error(500, "Template error");
 }
 
@@ -1190,10 +1179,7 @@ HttpResponse *accept_invitation_handler(const HttpRequest *req,
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
         log_error("Failed to get database connection");
-        HttpResponse *resp = http_response_new(500);
-        http_response_set(resp, CONTENT_TYPE_HTML,
-            "<!DOCTYPE html><html><body><p>Internal server error</p></body></html>");
-        return resp;
+        return response_html_error(500, "Internal server error");
     }
 
     char *token = NULL;
@@ -1204,31 +1190,23 @@ HttpResponse *accept_invitation_handler(const HttpRequest *req,
     }
 
     if (!token || !password_enc) {
-        free(token);
-        free(password_enc);
-        HttpResponse *resp = http_response_new(400);
-        http_response_set(resp, CONTENT_TYPE_HTML,
-            "<!DOCTYPE html><html><body><p>Missing token or password</p></body></html>");
-        return resp;
+        cleanse_free(token);
+        cleanse_free(password_enc);
+        return response_html_error(400, "Missing token or password");
     }
 
     /* URL-decode password (form-encoded) */
     char password[256];
     if (str_url_decode(password, sizeof(password), password_enc) < 0) {
-        free(token);
-        OPENSSL_cleanse(password_enc, strlen(password_enc));
-        free(password_enc);
-        HttpResponse *resp = http_response_new(400);
-        http_response_set(resp, CONTENT_TYPE_HTML,
-            "<!DOCTYPE html><html><body><p>Invalid request</p></body></html>");
-        return resp;
+        cleanse_free(token);
+        cleanse_free(password_enc);
+        return response_html_error(400, "Invalid request");
     }
-    OPENSSL_cleanse(password_enc, strlen(password_enc));
-    free(password_enc);
+    cleanse_free(password_enc);
 
     int rc = user_consume_invitation_token(db, token, password);
-    OPENSSL_cleanse(password, strlen(password));
-    free(token);
+    OPENSSL_cleanse(password, sizeof(password));
+    cleanse_free(token);
 
     if (rc == -2) {
         char msg[128];
@@ -1354,15 +1332,19 @@ HttpResponse *request_passwordless_login_handler(const HttpRequest *req,
                      "https://%s/passwordless-login?token=%s",
                      g_config->host, token);
         }
+        OPENSSL_cleanse(token, sizeof(token));
 
         char *body_text = template_render("emails/passwordless.txt", "URL", login_url, NULL);
         char *body_html = template_render("emails/passwordless.html", "URL", login_url, NULL);
+        OPENSSL_cleanse(login_url, sizeof(login_url));
 
         if (body_text && body_html)
             email_send(g_config, email, "Temporary Access Link", body_text, body_html);
 
-        free(body_text);
-        free(body_html);
+        cleanse_free(body_text);
+        cleanse_free(body_html);
+    } else {
+        OPENSSL_cleanse(token, sizeof(token));
     }
 
     free(email);
@@ -1387,25 +1369,19 @@ HttpResponse *passwordless_login_page_handler(const HttpRequest *req,
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
         log_error("Failed to get database connection");
-        HttpResponse *resp = http_response_new(500);
-        http_response_set(resp, CONTENT_TYPE_HTML,
-            "<!DOCTYPE html><html><body><p>Internal server error</p></body></html>");
-        return resp;
+        return response_html_error(500, "Internal server error");
     }
 
     char *token = http_query_get_param(req->query_string, "token");
     if (!token) {
-        HttpResponse *resp = http_response_new(400);
-        http_response_set(resp, CONTENT_TYPE_HTML,
-            "<!DOCTYPE html><html><body><p>Missing token</p></body></html>");
-        return resp;
+        return response_html_error(400, "Missing token");
     }
 
     passwordless_login_lookup_t lookup;
     int rc = user_lookup_passwordless_login_token(db, token, &lookup);
 
     if (rc != 0) {
-        free(token);
+        cleanse_free(token);
         HttpResponse *resp = response_template(400, "pages/passwordless-login-invalid.html", NULL);
         return resp ? resp : response_json_error(400, "Invalid token");
     }
@@ -1416,7 +1392,7 @@ HttpResponse *passwordless_login_page_handler(const HttpRequest *req,
     str_html_escape(escaped_email, sizeof(escaped_email), lookup.email_address);
     str_html_escape(escaped_username, sizeof(escaped_username), lookup.username);
     str_html_escape(escaped_token, sizeof(escaped_token), token);
-    free(token);
+    cleanse_free(token);
 
     char display_info[1280];
     if (escaped_username[0]) {
@@ -1434,6 +1410,7 @@ HttpResponse *passwordless_login_page_handler(const HttpRequest *req,
         "DISPLAY_INFO", display_info,
         "TOKEN", escaped_token,
         NULL);
+    OPENSSL_cleanse(escaped_token, sizeof(escaped_token));
     return resp ? resp : response_json_error(500, "Template error");
 }
 
@@ -1451,10 +1428,7 @@ HttpResponse *passwordless_login_handler(const HttpRequest *req,
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
         log_error("Failed to get database connection");
-        HttpResponse *resp = http_response_new(500);
-        http_response_set(resp, CONTENT_TYPE_HTML,
-            "<!DOCTYPE html><html><body><p>Internal server error</p></body></html>");
-        return resp;
+        return response_html_error(500, "Internal server error");
     }
 
     char *token = NULL;
@@ -1462,10 +1436,7 @@ HttpResponse *passwordless_login_handler(const HttpRequest *req,
         token = http_query_get_param(req->body, "token");
 
     if (!token) {
-        HttpResponse *resp = http_response_new(400);
-        http_response_set(resp, CONTENT_TYPE_HTML,
-            "<!DOCTYPE html><html><body><p>Missing token</p></body></html>");
-        return resp;
+        return response_html_error(400, "Missing token");
     }
 
     long long user_pin = 0;
@@ -1473,7 +1444,7 @@ HttpResponse *passwordless_login_handler(const HttpRequest *req,
     char return_to[2048];
     int rc = user_consume_passwordless_login_token(db, token, &user_pin, user_id,
                                                     return_to, sizeof(return_to));
-    free(token);
+    cleanse_free(token);
 
     if (rc != 0) {
         HttpResponse *resp = http_response_new(400);
@@ -1546,7 +1517,13 @@ HttpResponse *passwordless_login_handler(const HttpRequest *req,
     OPENSSL_cleanse(cookie_header, sizeof(cookie_header));
     http_response_set_header(resp, "Location", location);
     http_response_set(resp, CONTENT_TYPE_HTML,
-        "<!DOCTYPE html><html><body><p>Redirecting...</p></body></html>");
+        "<!DOCTYPE html><html lang=\"en\"><head>"
+        "<meta charset=\"UTF-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
+        "<meta name=\"color-scheme\" content=\"dark\">"
+        "<meta http-equiv=\"Content-Security-Policy\" "
+        "content=\"default-src 'none'; style-src 'self';\">"
+        "</head><body><p>Redirecting...</p></body></html>");
     return resp;
 }
 
@@ -1625,8 +1602,7 @@ HttpResponse *logout_handler(const HttpRequest *req, const RouteParams *params) 
 
     /* Close session in database */
     int result = oauth_session_close(db, session_token);
-    OPENSSL_cleanse(session_token, strlen(session_token));
-    free(session_token);
+    cleanse_free(session_token);
 
     if (result != 0) {
         return response_json_error(500, "Failed to close session");

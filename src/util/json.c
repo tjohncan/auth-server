@@ -44,7 +44,9 @@ void json_unescape(char *str) {
                     if (cp >= 0x20 && cp <= 0x7E) {
                         *write++ = (char)cp;  /* Printable ASCII */
                     }
-                    /* else: control chars, null, non-ASCII — silently dropped */
+                    /* Non-ASCII \uXXXX silently dropped (accented chars, etc.).
+                     * Literal UTF-8 bytes in the JSON are preserved as-is.
+                     * Only affects clients that encode non-ASCII as \uXXXX escapes. */
                     break;
                 }
                 default:
@@ -195,6 +197,11 @@ int json_get_int(const char *json, const char *key, int *out_value) {
     char *endptr;
     long val = strtol(value_start, &endptr, 10);
     if (endptr == value_start) return -1;  /* No digits found */
+
+    /* Verify delimiter after number (reject "123abc") */
+    char c = *endptr;
+    if (c != ',' && c != '}' && c != ']' && c != ' ' &&
+        c != '\t' && c != '\n' && c != '\r' && c != '\0') return -1;
 
     if (val < INT_MIN || val > INT_MAX) return -1;  /* Overflow */
     *out_value = (int)val;

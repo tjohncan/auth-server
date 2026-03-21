@@ -1,5 +1,13 @@
 // ===== Organization Management =====
 
+// Parse an optional integer form field (empty -> null, "0" -> 0, "-1" -> -1)
+function optInt(formData, name) {
+    const v = formData.get(name);
+    if (v === '' || v === null) return null;
+    const n = parseInt(v, 10);
+    return isNaN(n) ? null : n;
+}
+
 // Navigation state
 const orgMgmt = {
     view: 'org-list',
@@ -54,12 +62,14 @@ document.addEventListener('change', (e) => {
     if (!input) return;
     if (select.value === 'custom') {
         input.classList.remove('hidden');
+        input.setAttribute('min', '1');
         if (unit) unit.classList.remove('hidden');
         input.value = '';
         input.focus();
     } else {
         input.value = select.value;
         input.classList.add('hidden');
+        input.removeAttribute('min');
         if (unit) unit.classList.add('hidden');
     }
 });
@@ -199,7 +209,7 @@ async function renderOrgList(container) {
                             ${org.note ? `<div class="text-sm mt-sm">${escapeHtml(org.note)}</div>` : ''}
                         </div>
                         <div class="ml-md">
-                            <button data-action="navigate-to-org" data-id="${org.id}" class="btn-gray">Details \u2192</button>
+                            <button data-action="navigate-to-org" data-id="${org.id}" class="btn-gray">Details</button>
                         </div>
                     </div>
                 </div>
@@ -271,7 +281,7 @@ async function renderOrgDetail(container) {
                             <span class="text-muted text-sm ml-md">${escapeHtml(rs.code_name)}</span>
                             <span class="ml-md">${statusBadge}</span>
                         </div>
-                        <button data-action="navigate-to-rs" data-id="${rs.id}" class="btn-gray btn-sm ml-sm">Details \u2192</button>
+                        <button data-action="navigate-to-rs" data-id="${rs.id}" class="btn-gray btn-sm ml-sm">Details</button>
                     </div>
                 </div>
             `;
@@ -309,7 +319,7 @@ async function renderOrgDetail(container) {
                             <span class="text-muted text-sm ml-md">${escapeHtml(client.code_name)}</span>
                             <span class="ml-md">${statusBadge}</span>
                         </div>
-                        <button data-action="navigate-to-client" data-id="${client.id}" class="btn-gray btn-sm ml-sm">Details \u2192</button>
+                        <button data-action="navigate-to-client" data-id="${client.id}" class="btn-gray btn-sm ml-sm">Details</button>
                     </div>
                 </div>
             `;
@@ -657,6 +667,8 @@ async function createClient(orgId) {
         const isPublic = clientConfig.value === 'public';
         authCodeFields.style.display = isPublic ? 'block' : 'none';
         confidentialFields.style.display = isPublic ? 'none' : 'block';
+        confidentialFields.querySelectorAll('input, select').forEach(el => el.disabled = isPublic);
+        authCodeFields.querySelectorAll('input, select').forEach(el => el.disabled = !isPublic);
     }
     clientConfig.addEventListener('change', toggleFields);
     toggleFields();
@@ -675,11 +687,11 @@ async function createClient(orgId) {
             };
             if (grant_type === 'authorization_code') {
                 createData.issue_refresh_tokens = formData.get('issue_refresh_tokens') === 'on';
-                createData.refresh_token_ttl_seconds = parseInt(formData.get('refresh_token_ttl_seconds')) || null;
-                createData.maximum_session_seconds = parseInt(formData.get('maximum_session_seconds')) || null;
+                createData.refresh_token_ttl_seconds = optInt(formData, 'refresh_token_ttl_seconds');
+                createData.maximum_session_seconds = optInt(formData, 'maximum_session_seconds');
                 createData.require_mfa = formData.get('require_mfa') === 'on';
             } else {
-                createData.secret_rotation_seconds = parseInt(formData.get('secret_rotation_seconds')) || null;
+                createData.secret_rotation_seconds = optInt(formData, 'secret_rotation_seconds');
             }
             await apiPost('/admin/clients', createData);
             close(); renderOrgManagement();
@@ -720,11 +732,11 @@ async function editClient(clientId) {
             };
             if (client.grant_type === 'authorization_code') {
                 updateData.issue_refresh_tokens = formData.get('issue_refresh_tokens') === 'on';
-                updateData.refresh_token_ttl_seconds = parseInt(formData.get('refresh_token_ttl_seconds')) || null;
-                updateData.maximum_session_seconds = parseInt(formData.get('maximum_session_seconds'));
+                updateData.refresh_token_ttl_seconds = optInt(formData, 'refresh_token_ttl_seconds');
+                updateData.maximum_session_seconds = optInt(formData, 'maximum_session_seconds');
                 updateData.require_mfa = formData.get('require_mfa') === 'on';
             } else {
-                updateData.secret_rotation_seconds = parseInt(formData.get('secret_rotation_seconds'));
+                updateData.secret_rotation_seconds = optInt(formData, 'secret_rotation_seconds');
             }
             await apiPut(`/admin/clients?id=${clientId}`, updateData);
             close(); renderOrgManagement();
@@ -961,7 +973,7 @@ function showSecretModal(keyId, secret, entityId, keyType) {
             const orig = btn.textContent;
             btn.textContent = '\u2713 Copied!';
             setTimeout(() => { btn.textContent = orig; }, 2000);
-        });
+        }).catch(() => { btn.textContent = 'Failed.'; });
     };
 
     modal.querySelector('[data-action="copy-secret"]').onclick = function(e) {
@@ -971,7 +983,7 @@ function showSecretModal(keyId, secret, entityId, keyType) {
             const orig = btn.textContent;
             btn.textContent = '\u2713 Copied!';
             setTimeout(() => { btn.textContent = orig; }, 2000);
-        });
+        }).catch(() => { btn.textContent = 'Failed.'; });
     };
 
     modal.querySelector('[data-action="download-json"]').onclick = function(e) {

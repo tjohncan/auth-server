@@ -19,6 +19,14 @@
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
 
+/* Cleanse and free a heap-allocated sensitive string */
+static void cleanse_free(char *s) {
+    if (s) {
+        OPENSSL_cleanse(s, strlen(s));
+        free(s);
+    }
+}
+
 /* Token sizes (before base64url encoding) */
 #define ACCESS_TOKEN_BYTES 32   /* 256 bits */
 #define REFRESH_TOKEN_BYTES 32  /* 256 bits */
@@ -28,14 +36,8 @@
 
 void oauth_token_response_free(oauth_token_response_t *resp) {
     if (!resp) return;
-    if (resp->access_token) {
-        OPENSSL_cleanse(resp->access_token, strlen(resp->access_token));
-        free(resp->access_token);
-    }
-    if (resp->refresh_token) {
-        OPENSSL_cleanse(resp->refresh_token, strlen(resp->refresh_token));
-        free(resp->refresh_token);
-    }
+    cleanse_free(resp->access_token);
+    cleanse_free(resp->refresh_token);
     free(resp->scope);
     memset(resp, 0, sizeof(*resp));
 }
@@ -154,7 +156,7 @@ static int validate_scope_subset(const char *requested, const char *allowed) {
 
 void oauth_authorize_response_free(oauth_authorize_response_t *resp) {
     if (!resp) return;
-    free(resp->code);
+    cleanse_free(resp->code);
     free(resp->state);
     memset(resp, 0, sizeof(*resp));
 }
@@ -311,7 +313,7 @@ int oauth_authorize(db_handle_t *db,
                                  secret_len,
                                  code_jwt, JWT_MAX_TOKEN_LENGTH) != 0) {
         OPENSSL_cleanse(secret_bytes, sizeof(secret_bytes));
-        free(code_jwt);
+        OPENSSL_cleanse(code_jwt, JWT_MAX_TOKEN_LENGTH); free(code_jwt);
         log_error("Failed to encode authorization code JWT");
         return -1;
     }
@@ -328,7 +330,7 @@ int oauth_authorize(db_handle_t *db,
                                 code_challenge_method ? code_challenge_method : "",
                                 AUTHORIZATION_CODE_TTL_SECONDS,
                                 auth_code_id) != 0) {
-        free(code_jwt);
+        OPENSSL_cleanse(code_jwt, JWT_MAX_TOKEN_LENGTH); free(code_jwt);
         log_error("Failed to create authorization code record");
         return -1;
     }
@@ -339,7 +341,7 @@ int oauth_authorize(db_handle_t *db,
     if (state) {
         out_response->state = str_dup(state);
         if (!out_response->state) {
-            free(code_jwt);
+            OPENSSL_cleanse(code_jwt, JWT_MAX_TOKEN_LENGTH); free(code_jwt);
             out_response->code = NULL;
             log_error("Failed to duplicate state");
             return -1;
@@ -473,6 +475,7 @@ int oauth_exchange_authorization_code(db_handle_t *db,
 
     if (consume_rc == 1) {
         /* Replay attack detected - code already exchanged */
+        signing_key_free(signing_key);
         db_execute_trusted(db, "ROLLBACK");
 
         /* Revoke all tokens derived from this authorization code */
@@ -490,6 +493,7 @@ int oauth_exchange_authorization_code(db_handle_t *db,
 
     if (consume_rc != 0) {
         /* Not found, expired, or error */
+        signing_key_free(signing_key);
         db_execute_trusted(db, "ROLLBACK");
         log_error("Failed to consume authorization code from DB");
         return -1;
@@ -547,7 +551,7 @@ int oauth_exchange_authorization_code(db_handle_t *db,
 
     if (jwt_encode_es256(&claims, signing_key_active_private(signing_key),
                          access_token, JWT_MAX_TOKEN_LENGTH) != 0) {
-        free(access_token);
+        OPENSSL_cleanse(access_token, JWT_MAX_TOKEN_LENGTH); free(access_token);
         signing_key_free(signing_key);
         db_execute_trusted(db, "ROLLBACK");
         log_error("Failed to generate ES256 JWT access token");
@@ -564,7 +568,7 @@ int oauth_exchange_authorization_code(db_handle_t *db,
                                    access_token, auth_claims.scope,
                                    client.access_token_ttl_seconds,
                                    access_token_id) != 0) {
-        free(access_token);
+        OPENSSL_cleanse(access_token, JWT_MAX_TOKEN_LENGTH); free(access_token);
         db_execute_trusted(db, "ROLLBACK");
         log_error("Failed to create access token");
         return -1;
@@ -576,15 +580,15 @@ int oauth_exchange_authorization_code(db_handle_t *db,
         size_t refresh_token_size = crypto_token_encoded_size(REFRESH_TOKEN_BYTES);
         refresh_token = malloc(refresh_token_size);
         if (!refresh_token) {
-            free(access_token);
+            OPENSSL_cleanse(access_token, JWT_MAX_TOKEN_LENGTH); free(access_token);
             db_execute_trusted(db, "ROLLBACK");
             log_error("Failed to allocate refresh token");
             return -1;
         }
 
         if (crypto_random_token(refresh_token, refresh_token_size, REFRESH_TOKEN_BYTES) <= 0) {
-            free(access_token);
-            free(refresh_token);
+            OPENSSL_cleanse(access_token, JWT_MAX_TOKEN_LENGTH); free(access_token);
+            cleanse_free(refresh_token);
             db_execute_trusted(db, "ROLLBACK");
             log_error("Failed to generate refresh token");
             return -1;
@@ -595,8 +599,8 @@ int oauth_exchange_authorization_code(db_handle_t *db,
                                         db_code_data.id, refresh_token, auth_claims.scope,
                                         client.refresh_token_ttl_seconds,
                                         refresh_token_id) != 0) {
-            free(access_token);
-            free(refresh_token);
+            OPENSSL_cleanse(access_token, JWT_MAX_TOKEN_LENGTH); free(access_token);
+            cleanse_free(refresh_token);
             db_execute_trusted(db, "ROLLBACK");
             log_error("Failed to create refresh token");
             return -1;
@@ -605,8 +609,8 @@ int oauth_exchange_authorization_code(db_handle_t *db,
 
     /* Commit transaction */
     if (db_execute_trusted(db, "COMMIT") != 0) {
-        free(access_token);
-        free(refresh_token);
+        OPENSSL_cleanse(access_token, JWT_MAX_TOKEN_LENGTH); free(access_token);
+        cleanse_free(refresh_token);
         log_error("Failed to commit transaction");
         return -1;
     }
@@ -680,7 +684,7 @@ int oauth_refresh_access_token(db_handle_t *db,
     }
 
     if (crypto_random_token(new_refresh_token, new_refresh_token_size, REFRESH_TOKEN_BYTES) <= 0) {
-        free(new_refresh_token);
+        cleanse_free(new_refresh_token);
         signing_key_free(signing_key);
         db_execute_trusted(db, "ROLLBACK");
         log_error("Failed to generate new refresh token");
@@ -696,7 +700,7 @@ int oauth_refresh_access_token(db_handle_t *db,
 
     if (rotate_rc == 1) {
         /* Replay attack detected */
-        free(new_refresh_token);
+        cleanse_free(new_refresh_token);
         signing_key_free(signing_key);
         db_execute_trusted(db, "ROLLBACK");
 
@@ -715,7 +719,7 @@ int oauth_refresh_access_token(db_handle_t *db,
 
     if (rotate_rc != 0) {
         /* Not found, expired, revoked, or error */
-        free(new_refresh_token);
+        cleanse_free(new_refresh_token);
         signing_key_free(signing_key);
         db_execute_trusted(db, "ROLLBACK");
         log_error("Failed to rotate refresh token");
@@ -724,7 +728,7 @@ int oauth_refresh_access_token(db_handle_t *db,
 
     /* Step 6: Validate client matches */
     if (token_data.client_pin != client.pin) {
-        free(new_refresh_token);
+        cleanse_free(new_refresh_token);
         signing_key_free(signing_key);
         db_execute_trusted(db, "ROLLBACK");
         log_error("Client PIN mismatch in refresh token");
@@ -735,7 +739,7 @@ int oauth_refresh_access_token(db_handle_t *db,
     const char *final_scope = token_data.scopes;
     if (scope && scope[0] != '\0') {
         if (validate_scope_subset(scope, token_data.scopes) != 0) {
-            free(new_refresh_token);
+            cleanse_free(new_refresh_token);
             signing_key_free(signing_key);
             db_execute_trusted(db, "ROLLBACK");
             log_error("Requested scope exceeds original grant");
@@ -750,7 +754,7 @@ int oauth_refresh_access_token(db_handle_t *db,
     unsigned char resource_server_id[16];
     if (oauth_resolve_resource_server(db, client.pin, resource,
                                        &resource_server_pin, resource_server_id) != 0) {
-        free(new_refresh_token);
+        cleanse_free(new_refresh_token);
         signing_key_free(signing_key);
         db_execute_trusted(db, "ROLLBACK");
         log_error("Failed to resolve resource server");
@@ -766,7 +770,7 @@ int oauth_refresh_access_token(db_handle_t *db,
 
     db_stmt_t *user_stmt = NULL;
     if (db_prepare(db, &user_stmt, user_lookup_sql) != 0) {
-        free(new_refresh_token);
+        cleanse_free(new_refresh_token);
         signing_key_free(signing_key);
         db_execute_trusted(db, "ROLLBACK");
         log_error("Failed to prepare user lookup statement");
@@ -781,7 +785,7 @@ int oauth_refresh_access_token(db_handle_t *db,
         db_finalize(user_stmt);
     } else {
         db_finalize(user_stmt);
-        free(new_refresh_token);
+        cleanse_free(new_refresh_token);
         signing_key_free(signing_key);
         db_execute_trusted(db, "ROLLBACK");
         log_error("User account not found or inactive");
@@ -805,7 +809,7 @@ int oauth_refresh_access_token(db_handle_t *db,
     char *access_token = malloc(JWT_MAX_TOKEN_LENGTH);
     if (!access_token) {
         signing_key_free(signing_key);
-        free(new_refresh_token);
+        cleanse_free(new_refresh_token);
         db_execute_trusted(db, "ROLLBACK");
         log_error("Failed to allocate access token");
         return -1;
@@ -813,9 +817,9 @@ int oauth_refresh_access_token(db_handle_t *db,
 
     if (jwt_encode_es256(&claims, signing_key_active_private(signing_key),
                          access_token, JWT_MAX_TOKEN_LENGTH) != 0) {
-        free(access_token);
+        OPENSSL_cleanse(access_token, JWT_MAX_TOKEN_LENGTH); free(access_token);
         signing_key_free(signing_key);
-        free(new_refresh_token);
+        cleanse_free(new_refresh_token);
         db_execute_trusted(db, "ROLLBACK");
         log_error("Failed to generate ES256 JWT access token");
         return -1;
@@ -831,8 +835,8 @@ int oauth_refresh_access_token(db_handle_t *db,
                                    access_token, final_scope,
                                    client.access_token_ttl_seconds,
                                    access_token_id) != 0) {
-        free(access_token);
-        free(new_refresh_token);
+        OPENSSL_cleanse(access_token, JWT_MAX_TOKEN_LENGTH); free(access_token);
+        cleanse_free(new_refresh_token);
         db_execute_trusted(db, "ROLLBACK");
         log_error("Failed to create access token");
         return -1;
@@ -840,8 +844,8 @@ int oauth_refresh_access_token(db_handle_t *db,
 
     /* Commit transaction */
     if (db_execute_trusted(db, "COMMIT") != 0) {
-        free(access_token);
-        free(new_refresh_token);
+        OPENSSL_cleanse(access_token, JWT_MAX_TOKEN_LENGTH); free(access_token);
+        cleanse_free(new_refresh_token);
         log_error("Failed to commit transaction");
         return -1;
     }
@@ -951,7 +955,7 @@ int oauth_client_credentials(db_handle_t *db,
 
     if (jwt_encode_es256(&claims, signing_key_active_private(signing_key),
                          access_token, JWT_MAX_TOKEN_LENGTH) != 0) {
-        free(access_token);
+        OPENSSL_cleanse(access_token, JWT_MAX_TOKEN_LENGTH); free(access_token);
         signing_key_free(signing_key);
         log_error("Failed to generate ES256 JWT access token");
         return -1;
@@ -969,7 +973,7 @@ int oauth_client_credentials(db_handle_t *db,
                                    scope ? scope : "",
                                    client.access_token_ttl_seconds,
                                    access_token_id) != 0) {
-        free(access_token);
+        OPENSSL_cleanse(access_token, JWT_MAX_TOKEN_LENGTH); free(access_token);
         log_error("Failed to create access token record");
         return -1;
     }

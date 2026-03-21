@@ -46,7 +46,7 @@ int oauth_client_lookup(db_handle_t *db, const unsigned char *client_id,
 /*
  * Validate redirect URI is registered for client
  *
- * Performs exact match validation (case-insensitive for URI).
+ * Performs exact string match validation.
  * OAuth2 security requirement: no wildcard matching allowed.
  *
  * Parameters:

@@ -8,6 +8,7 @@
 #include <ctype.h>
 #include <stdbool.h>
 #include <arpa/inet.h>  /* for INET6_ADDRSTRLEN */
+#include <openssl/crypto.h>
 
 /* ============================================================================
  * HTTP Request Parsing - Zero-copy, fast, minimal
@@ -388,20 +389,26 @@ HttpResponse *http_response_new(int status_code) {
     resp->body = NULL;
     resp->body_length = 0;
 
+    http_response_set_header(resp, "X-Content-Type-Options", "nosniff");
+
     return resp;
 }
 
 void http_response_free(HttpResponse *resp) {
     if (!resp) return;
 
-    /* Free header names and values */
+    /* Cleanse and free header values (Set-Cookie contains session token) */
     for (int i = 0; i < resp->header_count; i++) {
+        if (resp->headers[i].value)
+            OPENSSL_cleanse(resp->headers[i].value, strlen(resp->headers[i].value));
         free(resp->headers[i].name);
         free(resp->headers[i].value);
     }
     free(resp->headers);
 
-    /* Free body */
+    /* Cleanse and free body (may contain tokens or secrets in API responses) */
+    if (resp->body && resp->body_length > 0)
+        OPENSSL_cleanse(resp->body, resp->body_length);
     free(resp->body);
 
     /* Free response itself */
@@ -496,6 +503,8 @@ HttpResponse *jsonbuf_to_response(JsonBuf *jb, int status_code) {
     }
 
     http_response_set_header(resp, "Content-Type", "application/json; charset=utf-8");
+    http_response_set_header(resp, "Cache-Control", "no-store");
+    http_response_set_header(resp, "Pragma", "no-cache");
     http_response_set_body_owned(resp, jb->buf, jb->len);
 
     /* Free the struct only — buf ownership transferred */

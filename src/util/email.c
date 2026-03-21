@@ -8,9 +8,19 @@
 #include <signal.h>
 #include <unistd.h>
 #include <time.h>
+#include <openssl/crypto.h>
 #include <sys/wait.h>
 
 #define EMAIL_TIMEOUT_SECONDS 30
+
+/* Write a message to stderr without locks (safe after fork in multi-threaded process).
+ * log_* functions use flockfile(stderr) which can deadlock if another thread held
+ * the lock at the time of fork(). */
+static void sub_log(const char *msg) {
+    if (write(STDERR_FILENO, msg, strlen(msg)) < 0
+        || write(STDERR_FILENO, "\n", 1) < 0)
+        _exit(1);
+}
 
 int email_send(const config_t *config,
                const char *to,
@@ -62,12 +72,14 @@ int email_send(const config_t *config,
     pid_t pid = fork();
     if (pid < 0) {
         log_error("Failed to fork for email command");
+        OPENSSL_cleanse(jb->buf, jb->len);
         jsonbuf_free(jb);
         return -1;
     }
 
     if (pid != 0) {
-        /* Parent: free payload and return immediately */
+        /* Parent: cleanse and free payload (may contain tokens in email body) */
+        OPENSSL_cleanse(jb->buf, jb->len);
         jsonbuf_free(jb);
         return 0;
     }
@@ -104,9 +116,14 @@ int email_send(const config_t *config,
     /* Child: write payload to grandchild's stdin */
     close(pipefd[0]);
     if (write(pipefd[1], jb->buf, jb->len) < 0) {
-        log_warn("Failed to write email payload to pipe");
+        sub_log("[WARN] Failed to write email payload to pipe");
     }
     close(pipefd[1]);
+
+    /* Payload no longer needed — cleanse before waiting */
+    OPENSSL_cleanse(jb->buf, jb->len);
+    jsonbuf_free(jb);
+    jb = NULL;
 
     /* Wait for grandchild with timeout */
     time_t deadline = time(NULL) + EMAIL_TIMEOUT_SECONDS;
@@ -125,15 +142,15 @@ int email_send(const config_t *config,
         /* Timed out — kill the email command */
         kill(email_pid, SIGKILL);
         waitpid(email_pid, &status, 0);
-        log_warn("Email command timed out after %d seconds", EMAIL_TIMEOUT_SECONDS);
+        sub_log("[WARN] Email command timed out");
     } else if (result > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0) {
-        log_info("Email sent: %s", subject ? subject : "(no subject)");
+        sub_log("[INFO] Email sent");
     } else if (result > 0 && WIFEXITED(status)) {
-        log_warn("Email command exited with status %d", WEXITSTATUS(status));
+        sub_log("[WARN] Email command exited with non-zero status");
     } else if (result > 0) {
-        log_warn("Email command terminated abnormally");
+        sub_log("[WARN] Email command terminated abnormally");
     } else {
-        log_warn("Failed to wait for email command");
+        sub_log("[WARN] Failed to wait for email command");
     }
 
     _exit(0);

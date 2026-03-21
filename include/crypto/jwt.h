@@ -97,17 +97,17 @@ int jwt_decode(const char *token,
               jwt_claims_t *out_claims);
 
 /*
- * Validate JWT without full decode (fast path)
+ * Validate JWT (convenience wrapper)
  *
- * Checks signature and expiration without parsing all claims.
- * Useful for quick token validation before expensive operations.
+ * Returns 1 (valid) or 0 (invalid/expired/error) without exposing
+ * parsed claims to the caller. Performs a full decode internally.
  *
  * Parameters:
  *   token       - JWT string to validate
  *   secret      - Secret key for signature verification
  *   secret_len  - Length of secret key
  *
- * Returns: 1 if valid, 0 if invalid/expired, negative on error
+ * Returns: 1 if valid, 0 if invalid/expired/error
  */
 int jwt_validate(const char *token,
                 const unsigned char *secret, size_t secret_len);

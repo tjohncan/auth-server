@@ -205,10 +205,13 @@ HttpResponse *rs_provision_user_handler(const HttpRequest *req,
                 email_send(g_config, email, "Set up your account",
                            body_text, body_html);
 
+            OPENSSL_cleanse(body_text, body_text ? strlen(body_text) : 0);
             free(body_text);
+            OPENSSL_cleanse(body_html, body_html ? strlen(body_html) : 0);
             free(body_html);
         }
 #endif
+        OPENSSL_cleanse(invite_url, sizeof(invite_url));
     }
 
     jsonbuf_appendf(jb, "}");

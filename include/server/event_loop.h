@@ -14,7 +14,7 @@
  * - Each worker runs its own epoll instance (no shared state)
  * - Kernel distributes connections via SO_REUSEPORT
  * - Non-blocking I/O with edge-triggered epoll
- * - Handles 10k+ concurrent connections per core
+ * - Default 1024 concurrent connections per core (configurable)
  *
  * Benefits of this approach:
  * - Scales linearly with CPU cores

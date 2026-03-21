@@ -82,7 +82,7 @@ int mfa_totp_confirm(db_handle_t *db,
  *   source_ip        - Client IP for audit log (optional)
  *   user_agent       - Client user agent for audit log (optional)
  *
- * Returns: 1 if valid, 0 if invalid, -1 on error
+ * Returns: 1 if valid, 0 if invalid, -1 on error, -2 if rate limited
  */
 int mfa_verify(db_handle_t *db,
                long long user_account_pin,

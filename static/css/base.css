@@ -118,6 +118,7 @@ textarea:focus,
 select:focus {
     outline: none;
     border-color: #87ceeb;
+    box-shadow: 0 0 0 2px rgba(135, 206, 235, 0.4);
 }
 
 .form-field label {
@@ -191,7 +192,7 @@ select:focus {
 .back-link { margin-top: 24px; font-size: 14px; }
 .nowrap { white-space: nowrap; }
 .no-margin { margin: 0; }
-.no-shrink { min-width: 0; }
+.no-shrink { flex-shrink: 0; }
 .clickable { cursor: pointer; }
 .pre-line { white-space: pre-line; }
 .plain-list { list-style: none; padding: 0; }

@@ -1,64 +1,9 @@
 #include "crypto/pbkdf2.h"
-#include "crypto/random.h"
 #include "util/log.h"
 #include "util/data.h"
 #include <openssl/evp.h>
 #include <openssl/crypto.h>
 #include <string.h>
-
-/* ============================================================================
- * Public API
- * ============================================================================ */
-
-int crypto_pbkdf2_hash(const char *password, size_t password_len,
-                      char *out_salt_hex, size_t salt_hex_len,
-                      int *out_iterations,
-                      char *out_hash_hex, size_t hash_hex_len) {
-    if (!password || !out_salt_hex || !out_iterations || !out_hash_hex) {
-        log_error("Invalid arguments to crypto_pbkdf2_hash");
-        return -1;
-    }
-
-    if (salt_hex_len < PBKDF2_SALT_HEX_LENGTH || hash_hex_len < PBKDF2_HASH_HEX_LENGTH) {
-        log_error("Output buffers too small for PBKDF2 hash");
-        return -1;
-    }
-
-    /* Generate random salt */
-    unsigned char salt[PBKDF2_SALT_LENGTH];
-    if (crypto_random_bytes(salt, sizeof(salt)) != 0) {
-        log_error("Failed to generate salt for PBKDF2");
-        return -1;
-    }
-
-    /* Generate random iterations in range [min, max] */
-    int iterations = crypto_random_int_range(PBKDF2_MIN_ITERATIONS, PBKDF2_MAX_ITERATIONS);
-
-    /* Derive key using PBKDF2-HMAC-SHA256 */
-    unsigned char hash[PBKDF2_HASH_LENGTH];
-    int result = PKCS5_PBKDF2_HMAC(
-        password,
-        (int)password_len,
-        salt,
-        sizeof(salt),
-        iterations,
-        EVP_sha256(),
-        sizeof(hash),
-        hash
-    );
-
-    if (result != 1) {
-        log_error("PBKDF2 hash failed");
-        return -1;
-    }
-
-    /* Convert to hex strings for database storage */
-    bytes_to_hex(salt, sizeof(salt), out_salt_hex, salt_hex_len);
-    bytes_to_hex(hash, sizeof(hash), out_hash_hex, hash_hex_len);
-    *out_iterations = iterations;
-
-    return 0;
-}
 
 int crypto_pbkdf2_hash_with_salt(const char *password, size_t password_len,
                                  const char *salt_hex, int iterations,
@@ -99,6 +44,8 @@ int crypto_pbkdf2_hash_with_salt(const char *password, size_t password_len,
     );
 
     if (result != 1) {
+        OPENSSL_cleanse(salt, sizeof(salt));
+        OPENSSL_cleanse(hash, sizeof(hash));
         log_error("PBKDF2 hash failed");
         return -1;
     }
@@ -106,6 +53,8 @@ int crypto_pbkdf2_hash_with_salt(const char *password, size_t password_len,
     /* Convert hash to hex string */
     bytes_to_hex(hash, sizeof(hash), out_hash_hex, hash_hex_len);
 
+    OPENSSL_cleanse(salt, sizeof(salt));
+    OPENSSL_cleanse(hash, sizeof(hash));
     return 0;
 }
 

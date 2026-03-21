@@ -24,6 +24,7 @@ static int generate_recovery_codes(char ***out_codes) {
         unsigned char rand_bytes[MFA_RECOVERY_CODE_LENGTH / 2];
         if (crypto_random_bytes(rand_bytes, sizeof(rand_bytes)) != 0) {
             log_error("Failed to generate random bytes for recovery code");
+            OPENSSL_cleanse(rand_bytes, sizeof(rand_bytes));
             for (int j = 0; j < i; j++) { OPENSSL_cleanse(codes[j], MFA_RECOVERY_CODE_LENGTH); free(codes[j]); }
             free(codes);
             return -1;
@@ -32,12 +33,14 @@ static int generate_recovery_codes(char ***out_codes) {
         codes[i] = malloc(MFA_RECOVERY_CODE_LENGTH + 1);
         if (!codes[i]) {
             log_error("Failed to allocate recovery code string");
+            OPENSSL_cleanse(rand_bytes, sizeof(rand_bytes));
             for (int j = 0; j < i; j++) { OPENSSL_cleanse(codes[j], MFA_RECOVERY_CODE_LENGTH); free(codes[j]); }
             free(codes);
             return -1;
         }
 
         bytes_to_hex(rand_bytes, sizeof(rand_bytes), codes[i], MFA_RECOVERY_CODE_LENGTH + 1);
+        OPENSSL_cleanse(rand_bytes, sizeof(rand_bytes));
     }
 
     *out_codes = codes;
@@ -61,6 +64,7 @@ int mfa_totp_setup(db_handle_t *db,
     /* Generate TOTP secret */
     char secret[TOTP_SECRET_BASE32_LEN + 1];
     if (crypto_totp_generate_secret(secret, sizeof(secret)) != 0) {
+        OPENSSL_cleanse(secret, sizeof(secret));
         log_error("Failed to generate TOTP secret");
         return -1;
     }
@@ -68,6 +72,7 @@ int mfa_totp_setup(db_handle_t *db,
     /* Encrypt secret for database storage */
     char encrypted_secret[256];
     if (encrypt_field(secret, encrypted_secret, sizeof(encrypted_secret)) != 0) {
+        OPENSSL_cleanse(encrypted_secret, sizeof(encrypted_secret));
         OPENSSL_cleanse(secret, sizeof(secret));
         log_error("Failed to encrypt MFA secret");
         return -1;
@@ -77,10 +82,12 @@ int mfa_totp_setup(db_handle_t *db,
     unsigned char method_id[16];
     if (mfa_method_create(db, user_account_pin, "TOTP", display_name,
                           encrypted_secret, method_id) != 0) {
+        OPENSSL_cleanse(encrypted_secret, sizeof(encrypted_secret));
         OPENSSL_cleanse(secret, sizeof(secret));
         log_error("Failed to create MFA method");
         return -1;
     }
+    OPENSSL_cleanse(encrypted_secret, sizeof(encrypted_secret));
 
     /* Generate QR URL */
     if (crypto_totp_generate_qr_url(secret, username, issuer,
@@ -121,11 +128,13 @@ int mfa_totp_confirm(db_handle_t *db,
 
     if (method.user_account_pin != user_account_pin) {
         log_error("MFA method does not belong to this user");
+        OPENSSL_cleanse(&method, sizeof(method));
         return -1;
     }
 
     if (method.is_confirmed) {
         log_error("MFA method is already confirmed");
+        OPENSSL_cleanse(&method, sizeof(method));
         return -1;
     }
 
@@ -133,10 +142,12 @@ int mfa_totp_confirm(db_handle_t *db,
     char decrypted_secret[TOTP_SECRET_BASE32_LEN + 1];
     if (decrypt_field(method.secret, decrypted_secret, sizeof(decrypted_secret)) != 0) {
         log_error("Failed to decrypt MFA secret");
+        OPENSSL_cleanse(&method, sizeof(method));
         return -1;
     }
 
     /* Verify TOTP code against the unconfirmed method's secret */
+    OPENSSL_cleanse(&method, sizeof(method));
     int valid = crypto_totp_verify(decrypted_secret, totp_code, time(NULL));
     OPENSSL_cleanse(decrypted_secret, sizeof(decrypted_secret));
     if (valid != 1) {
@@ -211,16 +222,19 @@ int mfa_verify(db_handle_t *db,
 
     if (method.user_account_pin != user_account_pin) {
         log_error("MFA method does not belong to this user");
+        OPENSSL_cleanse(&method, sizeof(method));
         return 0;  /* Treat as invalid */
     }
 
     if (!method.is_confirmed) {
         log_error("MFA method is not confirmed");
+        OPENSSL_cleanse(&method, sizeof(method));
         return 0;  /* Treat as invalid */
     }
 
     if (method.is_rate_limited) {
         log_info("MFA rate limited (too many failed attempts)");
+        OPENSSL_cleanse(&method, sizeof(method));
         return -2;
     }
 
@@ -228,6 +242,7 @@ int mfa_verify(db_handle_t *db,
     char decrypted_secret[TOTP_SECRET_BASE32_LEN + 1];
     if (decrypt_field(method.secret, decrypted_secret, sizeof(decrypted_secret)) != 0) {
         log_error("Failed to decrypt MFA secret");
+        OPENSSL_cleanse(&method, sizeof(method));
         return -1;
     }
 
@@ -237,6 +252,7 @@ int mfa_verify(db_handle_t *db,
 
     /* Log the attempt (fire-and-forget) */
     mfa_log_usage(db, method.pin, valid == 1 ? 1 : 0, source_ip, user_agent);
+    OPENSSL_cleanse(&method, sizeof(method));
 
     if (valid == 1) {
         log_info("MFA verified");
@@ -286,9 +302,11 @@ int mfa_delete_method(db_handle_t *db,
 
     if (method.user_account_pin != user_account_pin) {
         log_error("MFA method does not belong to this user");
+        OPENSSL_cleanse(&method, sizeof(method));
         return -1;
     }
 
+    OPENSSL_cleanse(&method, sizeof(method));
     return mfa_method_delete(db, method_id);
 }
 

@@ -5,6 +5,10 @@
     #error "Define DB_BACKEND_SQLITE or DB_BACKEND_POSTGRESQL"
 #endif
 
+#if defined(DB_BACKEND_SQLITE) && defined(DB_BACKEND_POSTGRESQL)
+    #error "Cannot define both DB_BACKEND_SQLITE and DB_BACKEND_POSTGRESQL"
+#endif
+
 /*
  * Database SQL Abstraction Layer
  *

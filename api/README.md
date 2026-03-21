@@ -378,7 +378,6 @@ curl -X POST http://localhost:8080/api/admin/bootstrap \
   -H "Content-Type: application/json" \
   -d '{
     "username": "admin",
-    "email": "admin@example.com",
     "password": "MySecurePassword123!"
   }'
 

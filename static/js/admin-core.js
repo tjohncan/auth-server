@@ -294,7 +294,7 @@ function formDuration(label, name, value, presets, required = false) {
                     ${opts}
                     <option value="custom" ${showCustom ? 'selected' : ''}>Custom...</option>
                 </select>
-                <input type="number" name="${name}" value="${numValue}" min="1"
+                <input type="number" name="${name}" value="${numValue}"${showCustom ? ' min="1"' : ''}
                        class="form-input input-narrow${showCustom ? '' : ' hidden'}">
                 <span class="text-muted text-sm${showCustom ? '' : ' hidden'}" data-duration-unit="${name}">seconds</span>
             </div>

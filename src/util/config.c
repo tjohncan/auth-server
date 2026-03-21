@@ -1107,6 +1107,7 @@ config_t *config_load(const char *config_file) {
 
     /* Parse config file */
     char line[MAX_LINE_LENGTH];
+    char key[128], value[MAX_LINE_LENGTH];
     int line_num = 0;
 
     while (fgets(line, sizeof(line), file)) {
@@ -1127,7 +1128,6 @@ config_t *config_load(const char *config_file) {
         }
 
         /* Parse key=value */
-        char key[128], value[MAX_LINE_LENGTH];
         if (parse_key_value(line, key, sizeof(key), value, sizeof(value)) == 0) {
             set_config_value(config, key, value);
         } else {
@@ -1139,6 +1139,8 @@ config_t *config_load(const char *config_file) {
 
     /* Cleanse parse buffers (may contain db_password or encryption_key) */
     OPENSSL_cleanse(line, sizeof(line));
+    OPENSSL_cleanse(value, sizeof(value));
+    OPENSSL_cleanse(key, sizeof(key));
 
     /* Apply environment variable overrides */
     apply_env_overrides(config);
@@ -1149,6 +1151,17 @@ config_t *config_load(const char *config_file) {
                 "Setting max = min.",
                 config->secret_hash_max_iterations, config->secret_hash_min_iterations);
         config->secret_hash_max_iterations = config->secret_hash_min_iterations;
+    }
+
+    /* Algorithm-specific iteration limits */
+    int algo_max = (config->secret_hashing_algorithm == PASSWORD_HASH_ARGON2ID) ? 20 : 10000000;
+    if (config->secret_hash_max_iterations > algo_max) {
+        log_error("secret_hash_max_iterations (%d) exceeds maximum for %s (%d)",
+                config->secret_hash_max_iterations,
+                config->secret_hashing_algorithm == PASSWORD_HASH_ARGON2ID ? "argon2id" : "pbkdf2-sha256",
+                algo_max);
+        config_free(config);
+        return NULL;
     }
 
     log_info("Configuration loaded successfully");
@@ -1180,11 +1193,19 @@ static int pg_quote_append(char *dst, size_t dst_size, size_t pos, const char *v
 }
 
 int config_build_pg_connection_string(const config_t *config, char *out, size_t out_size) {
-    int n = snprintf(out, out_size, "host=%s port=%d dbname=", config->db_host, config->db_port);
+    int n = snprintf(out, out_size, "host=");
     if (n < 0 || (size_t)n >= out_size) return -1;
     size_t pos = (size_t)n;
 
-    int q = pg_quote_append(out, out_size, pos, config->db_name);
+    int q = pg_quote_append(out, out_size, pos, config->db_host);
+    if (q < 0) return -1;
+    pos += q;
+
+    n = snprintf(out + pos, out_size - pos, " port=%d dbname=", config->db_port);
+    if (n < 0 || (size_t)n >= out_size - pos) return -1;
+    pos += n;
+
+    q = pg_quote_append(out, out_size, pos, config->db_name);
     if (q < 0) return -1;
     pos += q;
 

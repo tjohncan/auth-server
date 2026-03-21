@@ -24,6 +24,7 @@
 #include <signal.h>
 #include <stdbool.h>
 #include <sys/types.h>
+#include <openssl/crypto.h>
 
 static void worker_thread_cleanup(void) {
     crypto_jwt_thread_cleanup();
@@ -110,6 +111,7 @@ static int router_request_handler(Connection *conn,
 
     if (req.method == HTTP_UNKNOWN) {
         log_warn("[Connection %lu] Failed to parse HTTP request", conn->connection_id);
+        OPENSSL_cleanse(request_copy, request_len);
         free(request_copy);
 
         HttpResponse *error_resp = response_json_error(400, "Bad Request");
@@ -128,6 +130,7 @@ static int router_request_handler(Connection *conn,
     HttpResponse *resp = router_dispatch(router, &req);
 
     http_request_cleanup(&req);
+    OPENSSL_cleanse(request_copy, request_len);
     free(request_copy);
 
     if (!resp) {
@@ -287,6 +290,9 @@ int main(void) {
         return 1;
     }
     cleaner_started = true;
+
+    /* Connection string no longer needed — cleanse if it held credentials */
+    OPENSSL_cleanse(pg_conn_str, sizeof(pg_conn_str));
 
     /* Set global context for HTTP handlers */
     g_config = config;

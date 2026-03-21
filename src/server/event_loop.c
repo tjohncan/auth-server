@@ -21,6 +21,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <time.h>
+#include <openssl/crypto.h>
 
 /* ============================================================================
  * Constants and Defaults
@@ -244,7 +245,11 @@ static void connection_destroy(Connection *conn) {
         close(conn->fd);
     }
 
+    if (conn->read_buffer)
+        OPENSSL_cleanse(conn->read_buffer, conn->read_buffer_size);
     free(conn->read_buffer);
+    if (conn->write_buffer)
+        OPENSSL_cleanse(conn->write_buffer, conn->write_buffer_size);
     free(conn->write_buffer);
     /* Note: userdata points to shared context (router), not connection-owned memory */
     free(conn);

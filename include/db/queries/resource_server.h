@@ -197,7 +197,7 @@ typedef struct {
  *
  * Dual-auth capable: session user OR organization key.
  * Creates authentication key for resource server introspection endpoint.
- * Hashes secret with Argon2id before storage.
+ * Hashes secret with configured algorithm before storage.
  *
  * Parameters:
  *   db                   - Database handle

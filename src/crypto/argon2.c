@@ -1,65 +1,9 @@
 #include "crypto/argon2.h"
-#include "crypto/random.h"
 #include "util/log.h"
 #include "util/data.h"
 #include <argon2.h>
 #include <openssl/crypto.h>
 #include <string.h>
-
-/* ============================================================================
- * Public API
- * ============================================================================ */
-
-int crypto_argon2_hash(const char *password, size_t password_len,
-                      char *out_salt_hex, size_t salt_hex_len,
-                      int *out_iterations,
-                      char *out_hash_hex, size_t hash_hex_len) {
-    if (!password || !out_salt_hex || !out_iterations || !out_hash_hex) {
-        log_error("Invalid arguments to crypto_argon2_hash");
-        return -1;
-    }
-
-    if (salt_hex_len < ARGON2_SALT_HEX_LENGTH || hash_hex_len < ARGON2_HASH_HEX_LENGTH) {
-        log_error("Output buffers too small for Argon2 hash");
-        return -1;
-    }
-
-    /* Generate random salt */
-    unsigned char salt[ARGON2_SALT_LENGTH];
-    if (crypto_random_bytes(salt, sizeof(salt)) != 0) {
-        log_error("Failed to generate salt for Argon2");
-        return -1;
-    }
-
-    /* Generate random iterations in range [min, max] */
-    int iterations = crypto_random_int_range(ARGON2_MIN_ITERATIONS, ARGON2_MAX_ITERATIONS);
-
-    /* Hash password with Argon2id */
-    unsigned char hash[ARGON2_HASH_LENGTH];
-    int result = argon2id_hash_raw(
-        iterations,
-        ARGON2_MEMORY_COST,
-        ARGON2_PARALLELISM,
-        password,
-        password_len,
-        salt,
-        sizeof(salt),
-        hash,
-        sizeof(hash)
-    );
-
-    if (result != ARGON2_OK) {
-        log_error("Argon2 hash failed: %s", argon2_error_message(result));
-        return -1;
-    }
-
-    /* Convert to hex strings for database storage */
-    bytes_to_hex(salt, sizeof(salt), out_salt_hex, salt_hex_len);
-    bytes_to_hex(hash, sizeof(hash), out_hash_hex, hash_hex_len);
-    *out_iterations = iterations;
-
-    return 0;
-}
 
 int crypto_argon2_hash_with_salt(const char *password, size_t password_len,
                                  const char *salt_hex, int iterations,
@@ -101,6 +45,8 @@ int crypto_argon2_hash_with_salt(const char *password, size_t password_len,
     );
 
     if (result != ARGON2_OK) {
+        OPENSSL_cleanse(salt, sizeof(salt));
+        OPENSSL_cleanse(hash, sizeof(hash));
         log_error("Argon2 hash failed: %s", argon2_error_message(result));
         return -1;
     }
@@ -108,6 +54,8 @@ int crypto_argon2_hash_with_salt(const char *password, size_t password_len,
     /* Convert hash to hex string */
     bytes_to_hex(hash, sizeof(hash), out_hash_hex, hash_hex_len);
 
+    OPENSSL_cleanse(salt, sizeof(salt));
+    OPENSSL_cleanse(hash, sizeof(hash));
     return 0;
 }
 

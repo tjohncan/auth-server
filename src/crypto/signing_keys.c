@@ -79,6 +79,15 @@ static char *generate_hmac_secret(void) {
 /*
  * Export EVP_PKEY to PEM string (private or public)
  */
+/* Cleanse BIO internal buffer and free (for private key export) */
+static void bio_cleanse_free(BIO *bio) {
+    BUF_MEM *bptr;
+    BIO_get_mem_ptr(bio, &bptr);
+    if (bptr && bptr->data && bptr->length > 0)
+        OPENSSL_cleanse(bptr->data, bptr->length);
+    BIO_free(bio);
+}
+
 static char *export_key_to_pem(EVP_PKEY *pkey, int is_private) {
     BIO *bio = BIO_new(BIO_s_mem());
     if (!bio) {
@@ -95,7 +104,7 @@ static char *export_key_to_pem(EVP_PKEY *pkey, int is_private) {
 
     if (!success) {
         log_error("Failed to write key to PEM format");
-        BIO_free(bio);
+        if (is_private) bio_cleanse_free(bio); else BIO_free(bio);
         return NULL;
     }
 
@@ -104,7 +113,7 @@ static char *export_key_to_pem(EVP_PKEY *pkey, int is_private) {
     long pem_len = BIO_get_mem_data(bio, &pem_data);
     if (pem_len <= 0) {
         log_error("Failed to get PEM data from BIO");
-        BIO_free(bio);
+        if (is_private) bio_cleanse_free(bio); else BIO_free(bio);
         return NULL;
     }
 
@@ -112,14 +121,14 @@ static char *export_key_to_pem(EVP_PKEY *pkey, int is_private) {
     char *result = malloc(pem_len + 1);
     if (!result) {
         log_error("Failed to allocate memory for PEM string");
-        BIO_free(bio);
+        if (is_private) bio_cleanse_free(bio); else BIO_free(bio);
         return NULL;
     }
 
     memcpy(result, pem_data, pem_len);
     result[pem_len] = '\0';
 
-    BIO_free(bio);
+    if (is_private) bio_cleanse_free(bio); else BIO_free(bio);
     return result;
 }
 
@@ -163,6 +172,7 @@ static int generate_es256_keypair(char **out_private_pem, char **out_public_pem)
 
     if (!*out_private_pem || !*out_public_pem) {
         log_error("Failed to export keypair to PEM");
+        if (*out_private_pem) OPENSSL_cleanse(*out_private_pem, strlen(*out_private_pem));
         free(*out_private_pem);
         free(*out_public_pem);
         *out_private_pem = NULL;

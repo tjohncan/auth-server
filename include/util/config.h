@@ -8,7 +8,7 @@
  * Configuration System
  *
  * Loads settings from config file + environment variables.
- * Config file format: INI-style [section] key=value
+ * Config file format: key = value (one per line, # comments)
  * Environment variables override config file values.
  */
 

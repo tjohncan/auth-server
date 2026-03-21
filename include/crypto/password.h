@@ -29,6 +29,9 @@
 #define PASSWORD_SALT_HEX_MAX_LENGTH  65
 #define PASSWORD_HASH_HEX_MAX_LENGTH  65
 
+/* Maximum password/secret length (bytes) — rejects before hashing */
+#define PASSWORD_MAX_LENGTH  1024
+
 /*
  * Initialize password hashing module
  *

@@ -211,6 +211,7 @@ void str_to_lower(char *dest, size_t dest_size, const char *src) {
 /*******/
 
 size_t str_html_escape(char *dst, size_t dst_size, const char *src) {
+    if (!dst || !src || dst_size == 0) return 0;
     size_t i = 0;
     for (; *src; src++) {
         const char *ent;

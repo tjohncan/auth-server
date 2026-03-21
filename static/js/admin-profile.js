@@ -166,6 +166,7 @@ async function fetchUserInfo() {
 // ===== Email Management =====
 
 async function loadEmails() {
+    if (!document.getElementById('emailsContent')) return;
     try {
         const response = await fetch(`${API_URL}/user/emails`, { credentials: 'include' });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -477,7 +478,7 @@ async function showMFAAddDevice() {
             ${formField('Device Name', 'display_name', '', 'text', true, false, 200)}
             <p class="text-muted text-sm">A recognizable name, e.g. "Auth App" or "Work Phone".</p>
             <div class="modal-actions">
-                <button type="submit" class="btn-blue btn-modal nowrap">Next \u2192</button>
+                <button type="submit" class="btn-blue btn-modal nowrap">Next</button>
                 <button type="button" data-action="close-modal" class="btn-gray btn-modal">Cancel</button>
             </div>
         </form>
@@ -630,11 +631,7 @@ async function mfaRegenerateCodes() {
 
 async function toggleMfaRequire() {
     try {
-        const response = await fetch(`${API_URL}/user/profile`, { credentials: 'include' });
-        if (!response.ok) throw new Error('Failed to get profile');
-        const profile = await response.json();
-
-        const newState = !profile.require_mfa;
+        const newState = !cachedProfile.require_mfa;
         const action = newState ? 'enable' : 'disable';
         if (!(await showConfirm(`Are you sure you want to ${action} MFA enforcement for yourself?`))) return;
 
