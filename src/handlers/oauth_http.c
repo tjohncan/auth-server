@@ -225,7 +225,6 @@ HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params) {
 
         if (!refresh_token) {
             free(grant_type);
-            cleanse_free(refresh_token);
             free(scope);
             free(resource);
             return response_json_error(400, "refresh_token required");
