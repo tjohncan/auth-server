@@ -6,6 +6,9 @@
 #include "util/config.h"
 #include "util/json.h"
 
+/* Global configuration (set once in main.c, read-only thereafter) */
+extern const config_t *g_config;
+
 /*
  * Handler function declarations
  *

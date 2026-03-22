@@ -110,7 +110,6 @@ HttpResponse *mfa_totp_setup_handler(const HttpRequest *req, const RouteParams *
     }
 
     /* Use server host as issuer */
-    extern const config_t *g_config;
     const char *issuer = (g_config && g_config->host) ? g_config->host : "auth";
 
     /* Set up TOTP method */

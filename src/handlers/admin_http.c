@@ -114,9 +114,6 @@ HttpResponse *admin_bootstrap_handler(const HttpRequest *req, const RouteParams 
         goto cleanup;
     }
 
-    /* Get config from global context */
-    extern const config_t *g_config;
-
     /* Check if organization already exists (409 Conflict) */
     int org_ex = org_exists(db, org_code_name);
     if (org_ex < 0) {
@@ -538,7 +535,6 @@ HttpResponse *admin_create_organization_key_handler(const HttpRequest *req, cons
 
     /* Validate required fields */
     if (!org_code_name) {
-        free(org_code_name);
         if (user_secret) OPENSSL_cleanse(user_secret, strlen(user_secret));
         free(user_secret);
         free(note);

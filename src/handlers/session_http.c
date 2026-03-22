@@ -762,8 +762,6 @@ HttpResponse *create_email_verification_token_handler(const HttpRequest *req,
         return response_json_error(400, validation_error);
     }
 
-    extern const config_t *g_config;
-
     char token[44];
     int result = user_create_email_verification_token(
         db, session.user_account_pin, email,
@@ -956,8 +954,6 @@ HttpResponse *request_password_reset_handler(const HttpRequest *req,
         free(email);
         return response_json_error(400, validation_error);
     }
-
-    extern const config_t *g_config;
 
     char token[44];
     int result = user_create_password_reset_token(
@@ -1311,8 +1307,6 @@ HttpResponse *request_passwordless_login_handler(const HttpRequest *req,
             return_to = NULL;
         }
     }
-
-    extern const config_t *g_config;
 
     char token[44];
     int result = user_create_passwordless_login_token(
