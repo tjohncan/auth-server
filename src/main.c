@@ -291,8 +291,10 @@ int main(void) {
     }
     cleaner_started = true;
 
-    /* Connection string no longer needed — cleanse if it held credentials */
-    OPENSSL_cleanse(pg_conn_str, sizeof(pg_conn_str));
+    /* Connection string no longer needed — cleanse credentials from stack */
+    if (config->db_type != DB_TYPE_SQLITE) {
+        OPENSSL_cleanse(pg_conn_str, sizeof(pg_conn_str));
+    }
 
     /* Set global context for HTTP handlers */
     g_config = config;
