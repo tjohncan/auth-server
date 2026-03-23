@@ -187,7 +187,7 @@ static Connection *connection_create(int fd, const char *remote_ip, uint64_t con
     conn->bytes_read = 0;
 
     /* Copy remote IP */
-    snprintf(conn->remote_ip, sizeof(conn->remote_ip), "%s", remote_ip);
+    str_copy(conn->remote_ip, sizeof(conn->remote_ip), remote_ip);
 
     /* Linked list pointers initialized to NULL by memset */
 
