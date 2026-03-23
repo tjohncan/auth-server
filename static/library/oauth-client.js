@@ -35,6 +35,7 @@ class OAuthClient {
      * @param {number} [config.refreshBufferSeconds=60] - Seconds before expiry to trigger proactive refresh
      * @param {Function} [config.onSessionExpired] - Called when session cannot be recovered (refresh token expired/revoked)
      * @param {Function} [config.onTokenRefresh] - Called after successful token refresh with new token data
+     * @param {string} [config.tokenStorage='local'] - Token storage: 'local' (cross-tab) or 'session' (per-tab)
      */
     constructor(config) {
         this.authUrl = config.authUrl;
@@ -44,6 +45,7 @@ class OAuthClient {
         this.refreshBufferSeconds = config.refreshBufferSeconds || 60;
         this.onSessionExpired = config.onSessionExpired || null;
         this.onTokenRefresh = config.onTokenRefresh || null;
+        this._tokenStorage = config.tokenStorage === 'session' ? sessionStorage : localStorage;
 
         this.tokenKey = `tokens_${this.clientId}`;
         this.pkceKey = `pkce_${this.clientId}`;
@@ -215,19 +217,19 @@ class OAuthClient {
      * ====================================================================== */
 
     /**
-     * Store tokens in localStorage
+     * Store tokens in configured storage backend
      * @param {Object} tokens - Token data to store
      */
     storeTokens(tokens) {
-        localStorage.setItem(this.tokenKey, JSON.stringify(tokens));
+        this._tokenStorage.setItem(this.tokenKey, JSON.stringify(tokens));
     }
 
     /**
-     * Retrieve stored tokens from localStorage
+     * Retrieve stored tokens from configured storage backend
      * @returns {Object|null} Token data or null if not found
      */
     getTokens() {
-        const stored = localStorage.getItem(this.tokenKey);
+        const stored = this._tokenStorage.getItem(this.tokenKey);
         return stored ? JSON.parse(stored) : null;
     }
 
@@ -246,7 +248,7 @@ class OAuthClient {
      * Clear stored tokens, PKCE data, and cancel any scheduled refresh
      */
     clearTokens() {
-        localStorage.removeItem(this.tokenKey);
+        this._tokenStorage.removeItem(this.tokenKey);
         sessionStorage.removeItem(this.pkceKey);
         this._cancelRefresh();
     }
@@ -256,7 +258,7 @@ class OAuthClient {
      * ====================================================================== */
 
     /**
-     * Handle localStorage changes from other tabs
+     * Handle storage changes from other tabs
      *
      * The 'storage' event fires in all OTHER tabs when localStorage changes.
      * When another tab refreshes tokens, this tab picks up the new tokens
@@ -283,7 +285,7 @@ class OAuthClient {
      * Acquire a cross-tab refresh lock using write-then-verify pattern
      *
      * Two tabs may attempt to refresh simultaneously. Both write their tab ID
-     * to the same localStorage key. After a 50ms settle window, whichever
+     * to the same storage key. After a 50ms settle window, whichever
      * tab ID remains in storage is the winner (last-writer-wins). The loser
      * backs off and waits for the winner to complete the refresh.
      *
@@ -296,7 +298,7 @@ class OAuthClient {
         const now = Date.now();
 
         // Check for existing fresh lock held by another tab
-        const existing = localStorage.getItem(this._lockKey);
+        const existing = this._tokenStorage.getItem(this._lockKey);
         if (existing) {
             const lock = JSON.parse(existing);
             if (now - lock.ts < 10000) {
@@ -305,14 +307,14 @@ class OAuthClient {
         }
 
         // Write our claim
-        localStorage.setItem(this._lockKey,
+        this._tokenStorage.setItem(this._lockKey,
             JSON.stringify({ tabId: this._tabId, ts: now }));
 
         // Settle window — let any concurrent writer finish
         await new Promise(r => setTimeout(r, 50));
 
         // Verify we still hold the lock
-        const check = localStorage.getItem(this._lockKey);
+        const check = this._tokenStorage.getItem(this._lockKey);
         if (!check) return false;
         return JSON.parse(check).tabId === this._tabId;
     }
@@ -322,11 +324,11 @@ class OAuthClient {
      * @private
      */
     _releaseRefreshLock() {
-        const raw = localStorage.getItem(this._lockKey);
+        const raw = this._tokenStorage.getItem(this._lockKey);
         if (raw) {
             const lock = JSON.parse(raw);
             if (lock.tabId === this._tabId) {
-                localStorage.removeItem(this._lockKey);
+                this._tokenStorage.removeItem(this._lockKey);
             }
         }
     }
@@ -334,7 +336,7 @@ class OAuthClient {
     /**
      * Wait for another tab to complete its token refresh
      *
-     * Polls localStorage every 200ms for up to 5 seconds. Resolves as soon
+     * Polls storage every 200ms for up to 5 seconds. Resolves as soon
      * as the stored tokens change (the other tab finished refreshing).
      *
      * @private
