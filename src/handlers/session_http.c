@@ -576,6 +576,7 @@ HttpResponse *add_email_handler(const HttpRequest *req, const RouteParams *param
         return response_json_error(400, "Request body required");
     }
 
+    HttpResponse *resp = NULL;
     char *email = json_get_string(req->body, "email");
     if (!email) {
         return response_json_error(400, "email required");
@@ -583,26 +584,28 @@ HttpResponse *add_email_handler(const HttpRequest *req, const RouteParams *param
 
     char validation_error[256];
     if (validate_email(email, validation_error, sizeof(validation_error)) != 0) {
-        free(email);
-        return response_json_error(400, validation_error);
+        resp = response_json_error(400, validation_error);
+        goto cleanup;
     }
 
     int exists = user_email_exists(db, email, session.user_account_pin);
     if (exists < 0) {
-        free(email);
-        return response_json_error(500, "Failed to check email");
+        resp = response_json_error(500, "Failed to check email");
+        goto cleanup;
     } else if (exists == 1) {
-        free(email);
-        return response_json_error(409, "Email already taken");
+        resp = response_json_error(409, "Email already taken");
+        goto cleanup;
     }
 
     if (user_add_email(db, session.user_account_pin, email) != 0) {
-        free(email);
-        return response_json_error(500, "Failed to add email");
+        resp = response_json_error(500, "Failed to add email");
+    } else {
+        resp = response_json_ok("{\"message\":\"Email added\"}");
     }
 
+cleanup:
     free(email);
-    return response_json_ok("{\"message\":\"Email added\"}");
+    return resp;
 }
 
 /*
