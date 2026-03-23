@@ -218,7 +218,7 @@ HttpResponse *login_handler(const HttpRequest *req, const RouteParams *params) {
         return response_json_error(500, "Internal server error");
     }
 
-    http_response_set_header(resp, "Set-Cookie", cookie_header);
+    http_response_add_header(resp, "Set-Cookie", cookie_header);
 
     cleanse_free(session_token);
     OPENSSL_cleanse(cookie_header, sizeof(cookie_header));
@@ -1510,7 +1510,7 @@ HttpResponse *passwordless_login_handler(const HttpRequest *req,
     }
 
     HttpResponse *resp = http_response_new(303);
-    http_response_set_header(resp, "Set-Cookie", cookie_header);
+    http_response_add_header(resp, "Set-Cookie", cookie_header);
     OPENSSL_cleanse(cookie_header, sizeof(cookie_header));
     http_response_set_header(resp, "Location", location);
     http_response_set(resp, CONTENT_TYPE_HTML,
@@ -1613,7 +1613,7 @@ HttpResponse *logout_handler(const HttpRequest *req, const RouteParams *params) 
         snprintf(clear_cookie, sizeof(clear_cookie),
                  "%s=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0",
                  SESSION_COOKIE_NAME);
-        http_response_set_header(response, "Set-Cookie", clear_cookie);
+        http_response_add_header(response, "Set-Cookie", clear_cookie);
     }
 
     return response;

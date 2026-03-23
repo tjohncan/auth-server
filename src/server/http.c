@@ -415,19 +415,7 @@ void http_response_free(HttpResponse *resp) {
     free(resp);
 }
 
-void http_response_set_header(HttpResponse *resp, const char *name, const char *value) {
-    /* Check if header already exists (replace it) */
-    for (int i = 0; i < resp->header_count; i++) {
-        if (strcasecmp(resp->headers[i].name, name) == 0) {
-            char *new_value = str_dup(value);
-            if (!new_value) return;  /* OOM - keep existing value */
-            free(resp->headers[i].value);
-            resp->headers[i].value = new_value;
-            return;
-        }
-    }
-
-    /* Add new header */
+void http_response_add_header(HttpResponse *resp, const char *name, const char *value) {
     if (resp->header_count >= resp->header_capacity) {
         int new_capacity = resp->header_capacity == 0 ? 8 : resp->header_capacity * 2;
         HttpHeader *new_headers = realloc(resp->headers, new_capacity * sizeof(HttpHeader));
@@ -446,6 +434,22 @@ void http_response_set_header(HttpResponse *resp, const char *name, const char *
     resp->headers[resp->header_count].name = dup_name;
     resp->headers[resp->header_count].value = dup_value;
     resp->header_count++;
+}
+
+void http_response_set_header(HttpResponse *resp, const char *name, const char *value) {
+    /* Check if header already exists (replace it) */
+    for (int i = 0; i < resp->header_count; i++) {
+        if (strcasecmp(resp->headers[i].name, name) == 0) {
+            char *new_value = str_dup(value);
+            if (!new_value) return;  /* OOM - keep existing value */
+            free(resp->headers[i].value);
+            resp->headers[i].value = new_value;
+            return;
+        }
+    }
+
+    /* Header doesn't exist yet — append */
+    http_response_add_header(resp, name, value);
 }
 
 void http_response_set_body(HttpResponse *resp, const char *body, size_t length) {
