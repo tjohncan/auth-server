@@ -49,6 +49,7 @@ static const char *get_mime_type(const char *path) {
     if (strcmp(ext, "json") == 0) return "application/json; charset=utf-8";
     if (strcmp(ext, "txt") == 0) return "text/plain; charset=utf-8";
     if (strcmp(ext, "xml") == 0) return "application/xml; charset=utf-8";
+    if (strcmp(ext, "webmanifest") == 0) return "application/manifest+json";
 
     /* Images */
     if (strcmp(ext, "png") == 0) return "image/png";
