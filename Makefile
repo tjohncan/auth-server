@@ -142,4 +142,4 @@ help:
 	@echo "  make clean          - Remove build artifacts"
 	@echo "  make help           - Show this help"
 
-.PHONY: all debug release clean help test test-str test-http test-router test-db test-crypto
+.PHONY: all debug release clean help test test-str test-http test-router test-db test-crypto test-email
