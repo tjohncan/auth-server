@@ -51,9 +51,6 @@ static HttpResponse *response_html_error(int status_code, const char *message) {
     return resp;
 }
 
-/* Default session TTL: 7 days */
-#define DEFAULT_SESSION_TTL_SECONDS (7 * 24 * 60 * 60)
-
 /* Cookie name for session token */
 #define SESSION_COOKIE_NAME "session"
 
@@ -150,7 +147,7 @@ HttpResponse *login_handler(const HttpRequest *req, const RouteParams *params) {
         db, username, password,
         http_request_get_client_ip(req, NULL),  /* source_ip */
         http_request_get_header(req, "User-Agent"),  /* user_agent */
-        DEFAULT_SESSION_TTL_SECONDS,
+        g_config->session_ttl_seconds,
         &session_token,
         &user_pin
     );
@@ -166,7 +163,7 @@ HttpResponse *login_handler(const HttpRequest *req, const RouteParams *params) {
     char cookie_header[512];
     snprintf(cookie_header, sizeof(cookie_header),
              "%s=%s; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=%d",
-             SESSION_COOKIE_NAME, session_token, DEFAULT_SESSION_TTL_SECONDS);
+             SESSION_COOKIE_NAME, session_token, g_config->session_ttl_seconds);
 
     /* Get user profile to check MFA preference */
     user_profile_t profile;
@@ -1469,7 +1466,7 @@ HttpResponse *passwordless_login_handler(const HttpRequest *req,
                               "passwordless",
                               http_request_get_client_ip(req, NULL),
                               http_request_get_header(req, "User-Agent"),
-                              DEFAULT_SESSION_TTL_SECONDS,
+                              g_config->session_ttl_seconds,
                               session_id);
 
     if (rc != 0) {
@@ -1483,7 +1480,7 @@ HttpResponse *passwordless_login_handler(const HttpRequest *req,
     char cookie_header[512];
     snprintf(cookie_header, sizeof(cookie_header),
              "%s=%s; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=%d",
-             SESSION_COOKIE_NAME, session_token, DEFAULT_SESSION_TTL_SECONDS);
+             SESSION_COOKIE_NAME, session_token, g_config->session_ttl_seconds);
     OPENSSL_cleanse(session_token, token_buf_size);
     free(session_token);
 
