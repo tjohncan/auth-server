@@ -1,5 +1,5 @@
-/* Define _POSIX_C_SOURCE for localtime_r */
-#define _POSIX_C_SOURCE 200112L
+/* Define _POSIX_C_SOURCE for gmtime_r */
+#define _POSIX_C_SOURCE 200809L
 
 #include "util/log.h"
 #include <stdio.h>
