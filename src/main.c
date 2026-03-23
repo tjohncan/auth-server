@@ -202,6 +202,7 @@ int main(void) {
         config_free(config);
         return 1;
     }
+    OPENSSL_cleanse(config->encryption_key, strlen(config->encryption_key));
 
     /* Determine number of workers (auto-detect if config specifies 0) */
     int num_workers = config->workers;
@@ -242,6 +243,9 @@ int main(void) {
         encrypt_cleanup();
         config_free(config);
         return 1;
+    }
+    if (config->db_password) {
+        OPENSSL_cleanse(config->db_password, strlen(config->db_password));
     }
 
     /* Initialize schema using first connection */
