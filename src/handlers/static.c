@@ -201,7 +201,7 @@ HttpResponse *static_html_alias_handler(const HttpRequest *req, const RouteParam
     char path_with_html[512];
     snprintf(path_with_html, sizeof(path_with_html), "%s.html", req->path);
 
-    HttpRequest modified_req = *req;
+    HttpRequest modified_req = *req;  /* shallow copy — downstream usage is read-only */
     modified_req.path = path_with_html;
 
     return static_file_handler(&modified_req, params);
