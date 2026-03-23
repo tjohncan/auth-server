@@ -88,8 +88,10 @@ static int validate_pkce(const char *code_verifier,
             return 0;
         }
 
-        /* Compare with provided code_challenge (timing-safe not critical here) */
-        return strcmp(encoded_hash, code_challenge) == 0 ? 1 : 0;
+        /* Constant-time compare (not critical here; consistent with other crypto checks) */
+        size_t challenge_len = strlen(code_challenge);
+        if (encoded_len != challenge_len) return 0;
+        return CRYPTO_memcmp(encoded_hash, code_challenge, encoded_len) == 0 ? 1 : 0;
     } else {
         log_error("Unknown PKCE method: %s", code_challenge_method);
         return 0;
