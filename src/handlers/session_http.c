@@ -1444,22 +1444,8 @@ HttpResponse *passwordless_login_handler(const HttpRequest *req,
     cleanse_free(token);
 
     if (rc != 0) {
-        HttpResponse *resp = http_response_new(400);
-        http_response_set(resp, CONTENT_TYPE_HTML,
-            "<!DOCTYPE html><html lang=\"en\"><head>"
-            "<meta charset=\"UTF-8\">"
-            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
-            "<meta name=\"color-scheme\" content=\"dark\">"
-            "<title>Login Failed</title>"
-            "<link rel=\"stylesheet\" href=\"/css/base.css\">"
-            "<link rel=\"stylesheet\" href=\"/css/templates.css\">"
-            "</head><body><div class=\"page-container\">"
-            "<h1>Login Failed</h1>"
-            "<p>This login link is invalid, expired, or has already been used.</p>"
-            "<p class=\"back-link\"><a href=\"/request-passwordless-login\">"
-            "Request a new login link</a></p>"
-            "</div></body></html>");
-        return resp;
+        HttpResponse *resp = response_template(400, "pages/passwordless-login-invalid.html", NULL);
+        return resp ? resp : response_html_error(400, "Invalid login link");
     }
 
     /* Generate session token */
