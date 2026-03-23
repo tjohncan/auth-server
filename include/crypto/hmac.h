@@ -7,7 +7,7 @@
  * HMAC-SHA256 for JWT signatures and token validation
  *
  * Uses OpenSSL's HMAC implementation with SHA-256 hash function.
- * Thread-safe, no state stored between calls.
+ * Thread-safe. Caches EVP_MAC handle for performance (call crypto_hmac_cleanup at shutdown).
  */
 
 /* SHA-256 produces 32-byte (256-bit) output */
@@ -107,5 +107,10 @@ int crypto_hmac_compare(const unsigned char *hmac1, const unsigned char *hmac2, 
 int crypto_hmac_sha1(const unsigned char *key, size_t key_len,
                      const unsigned char *data, size_t data_len,
                      unsigned char *out_hmac, size_t hmac_len);
+
+/*
+ * Free cached HMAC resources (call at shutdown)
+ */
+void crypto_hmac_cleanup(void);
 
 #endif /* CRYPTO_HMAC_H */

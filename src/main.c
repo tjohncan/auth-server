@@ -11,6 +11,7 @@
 #include "crypto/password.h"
 #include "crypto/jwt.h"
 #include "crypto/encrypt.h"
+#include "crypto/hmac.h"
 #include "server/event_loop.h"
 #include "server/router.h"
 #include "server/http.h"
@@ -472,6 +473,7 @@ int main(void) {
     template_cleanup();
     db_pool_shutdown();
     encrypt_cleanup();
+    crypto_hmac_cleanup();
     config_free(config);
 
     log_info("=== Auth Server Stopped ===");
