@@ -584,9 +584,13 @@ function showMFARecoveryCodes(codes, title) {
     `);
 
     document.getElementById('copyCodesBtn').addEventListener('click', () => {
-        navigator.clipboard.writeText(codes.join('\n'));
-        document.getElementById('copyCodesBtn').textContent = 'Copied!';
-        setTimeout(() => { document.getElementById('copyCodesBtn').textContent = 'Copy All'; }, 2000);
+        navigator.clipboard.writeText(codes.join('\n')).then(() => {
+            document.getElementById('copyCodesBtn').textContent = 'Copied!';
+            setTimeout(() => { document.getElementById('copyCodesBtn').textContent = 'Copy All'; }, 2000);
+        }).catch(() => {
+            document.getElementById('copyCodesBtn').textContent = 'Failed.';
+            setTimeout(() => { document.getElementById('copyCodesBtn').textContent = 'Copy All'; }, 2000);
+        });
     });
 
     document.getElementById('doneBtn').addEventListener('click', async () => {

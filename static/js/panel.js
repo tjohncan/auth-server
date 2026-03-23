@@ -32,9 +32,13 @@ function showError(prefix, msg) {
 function handleCopy(btn) {
     var value = copyStore[btn.dataset.key];
     if (value) {
-        navigator.clipboard.writeText(value);
         var orig = btn.textContent;
-        btn.textContent = 'Copied!';
-        setTimeout(function() { btn.textContent = orig; }, 1500);
+        navigator.clipboard.writeText(value).then(function() {
+            btn.textContent = 'Copied!';
+            setTimeout(function() { btn.textContent = orig; }, 1500);
+        }).catch(function() {
+            btn.textContent = 'Failed.';
+            setTimeout(function() { btn.textContent = orig; }, 1500);
+        });
     }
 }

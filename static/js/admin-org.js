@@ -969,21 +969,27 @@ function showSecretModal(keyId, secret, entityId, keyType) {
     modal.querySelector('[data-action="copy-key-id"]').onclick = function(e) {
         e.stopPropagation();
         const btn = e.target;
+        const orig = btn.textContent;
         navigator.clipboard.writeText(formattedKeyId).then(() => {
-            const orig = btn.textContent;
             btn.textContent = '\u2713 Copied!';
             setTimeout(() => { btn.textContent = orig; }, 2000);
-        }).catch(() => { btn.textContent = 'Failed.'; });
+        }).catch(() => {
+            btn.textContent = 'Failed.';
+            setTimeout(() => { btn.textContent = orig; }, 2000);
+        });
     };
 
     modal.querySelector('[data-action="copy-secret"]').onclick = function(e) {
         e.stopPropagation();
         const btn = e.target;
+        const orig = btn.textContent;
         navigator.clipboard.writeText(secret).then(() => {
-            const orig = btn.textContent;
             btn.textContent = '\u2713 Copied!';
             setTimeout(() => { btn.textContent = orig; }, 2000);
-        }).catch(() => { btn.textContent = 'Failed.'; });
+        }).catch(() => {
+            btn.textContent = 'Failed.';
+            setTimeout(() => { btn.textContent = orig; }, 2000);
+        });
     };
 
     modal.querySelector('[data-action="download-json"]').onclick = function(e) {
