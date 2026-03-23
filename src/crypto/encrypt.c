@@ -23,7 +23,7 @@ static unsigned char derived_key[AES_KEY_LENGTH];
 static unsigned char hmac_key[AES_KEY_LENGTH];
 static int key_initialized = 0;
 
-/* Derive a 32-byte key via HKDF-SHA256 (extract + expand) */
+/* HKDF-Expand: derive a 32-byte key from PRK + info (single round) */
 static int hkdf_derive(const unsigned char *prk, size_t prk_len,
                        const unsigned char *info, size_t info_len,
                        unsigned char *out_key, size_t key_len) {
