@@ -20,6 +20,14 @@ int validate_username(const char *username, char *error_msg, size_t error_len) {
         return -1;
     }
 
+    /* Check length (must fit within field encryption limit) */
+    if (strlen(username) > 254) {
+        if (error_msg && error_len > 0) {
+            snprintf(error_msg, error_len, "Username must be 254 characters or fewer");
+        }
+        return -1;
+    }
+
     /* Check for spaces and @ symbol */
     for (const char *p = username; *p; p++) {
         if (*p == ' ') {
@@ -51,6 +59,14 @@ int validate_email(const char *email, char *error_msg, size_t error_len) {
     if (email[0] == '\0') {
         if (error_msg && error_len > 0) {
             snprintf(error_msg, error_len, "Email cannot be empty");
+        }
+        return -1;
+    }
+
+    /* Check length (must fit within field encryption limit; also RFC 5321 max) */
+    if (strlen(email) > 254) {
+        if (error_msg && error_len > 0) {
+            snprintf(error_msg, error_len, "Email must be 254 characters or fewer");
         }
         return -1;
     }
