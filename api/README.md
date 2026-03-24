@@ -8,7 +8,7 @@ HTTP endpoints for the OAuth2 authentication server.
 2. [Organization Management API (Session Auth)](#organization-management-api-session-auth)
 3. [Organization Management API (Org-Key Auth)](#organization-management-api-org-key-auth)
 4. [OAuth2 Endpoints (Public)](#oauth2-endpoints-public)
-5. [User Account Endpoints (Session Auth)](#account-endpoints-session-auth)
+5. [User Account Endpoints (Session Auth)](#user-account-endpoints-session-auth)
 6. [Email Verification Endpoints](#email-verification-endpoints)
 7. [Password Reset Endpoints](#password-reset-endpoints)
 8. [Passwordless Login Endpoints](#passwordless-login-endpoints)
@@ -2242,7 +2242,7 @@ A drop-in OAuth2 client library is available at `/library/oauth-client.js` for e
 
 ### Documentation
 
-Full API documentation available at [static/library/README.md](static/library/README.md)
+Full API documentation available at [static/library/README.md](../static/library/README.md)
 or see the management console (`admin.html`) for a complete working example.
 
 ### Reference Implementation
