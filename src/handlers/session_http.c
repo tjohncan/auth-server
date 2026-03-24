@@ -1133,7 +1133,7 @@ HttpResponse *accept_invitation_page_handler(const HttpRequest *req,
     }
 
     /* Build account info HTML */
-    char account_info[1024];
+    char account_info[2560];
     account_info[0] = '\0';
     int pos = 0;
 
@@ -1388,7 +1388,7 @@ HttpResponse *passwordless_login_page_handler(const HttpRequest *req,
     str_html_escape(escaped_token, sizeof(escaped_token), token);
     cleanse_free(token);
 
-    char display_info[1280];
+    char display_info[2560];
     if (escaped_username[0]) {
         snprintf(display_info, sizeof(display_info),
                  "<p class=\"display-email\">%s</p>"
