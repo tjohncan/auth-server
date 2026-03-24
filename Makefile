@@ -39,7 +39,7 @@ endif
 # - fPIE: Position-independent executable for ASLR
 # - Wformat-security: Warn about dangerous format strings
 SECURITY_FLAGS = -fstack-protector-strong -D_FORTIFY_SOURCE=2 -fPIE -Wformat -Wformat-security
-SECURITY_LDFLAGS = -pie
+SECURITY_LDFLAGS = -pie -Wl,-z,relro,-z,now
 
 # Debug flags (use with: make debug)
 DEBUG_FLAGS = -g -O0 -DDEBUG
