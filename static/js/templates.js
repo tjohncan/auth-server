@@ -40,11 +40,17 @@ document.querySelectorAll('form[data-endpoint]').forEach(function(form) {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body)
             });
-            var data = await res.json();
 
-            msg.className = 'status-message success';
-            msg.innerHTML = successMessage;
-            form.style.display = 'none';
+            if (res.ok) {
+                msg.className = 'status-message success';
+                msg.innerHTML = successMessage;
+                form.style.display = 'none';
+            } else {
+                var data = await res.json().catch(function() { return {}; });
+                btn.disabled = false;
+                msg.className = 'status-message error';
+                msg.textContent = data.error || 'Something went wrong. Please try again.';
+            }
         } catch (err) {
             btn.disabled = false;
             msg.className = 'status-message error';
