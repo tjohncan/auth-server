@@ -598,6 +598,9 @@ static int get_column_defs_postgresql(db_handle_t *db, const char *schema_name,
     db_result_t *result = NULL;
     int rc;
     char sql[1024];
+    char quoted_schema[128], quoted_table[128];
+    quote_literal(quoted_schema, sizeof(quoted_schema), schema_name);
+    quote_literal(quoted_table, sizeof(quoted_table), table_name);
 
     /* Query information_schema for column definitions */
     snprintf(sql, sizeof(sql),
@@ -611,9 +614,9 @@ static int get_column_defs_postgresql(db_handle_t *db, const char *schema_name,
             "END AS data_type, "
             "ordinal_position "
             "FROM information_schema.columns "
-            "WHERE table_schema = '%s' AND table_name = '%s' "
+            "WHERE table_schema = %s AND table_name = %s "
             "ORDER BY ordinal_position;",
-            schema_name, table_name);
+            quoted_schema, quoted_table);
 
     rc = db_query(db, &result, "%s", sql);
     if (rc != 0) {
