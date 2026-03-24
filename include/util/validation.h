@@ -101,6 +101,7 @@ int validate_url_field(const char *url, const char *field_name,
  * Rules:
  *   - All validate_url_field rules apply
  *   - Scheme must be http:// or https://
+ *   - Length <= 500 characters (must fit in JWT claim buffer)
  */
 int validate_redirect_uri(const char *uri, char *error_msg, size_t error_len);
 
@@ -114,7 +115,7 @@ int validate_redirect_uri(const char *uri, char *error_msg, size_t error_len);
  *   - Allowed characters per token: %x21 / %x23-5B / %x5D-7E (NQCHAR)
  *     (printable ASCII except space, double-quote, and backslash)
  *   - No leading, trailing, or consecutive spaces
- *   - Total length <= 1000 characters
+ *   - Total length <= 250 characters (must fit in JWT claim buffer)
  */
 int validate_scope(const char *scope, char *error_msg, size_t error_len);
 

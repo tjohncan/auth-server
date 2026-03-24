@@ -491,7 +491,7 @@ HttpResponse *authorize_handler(const HttpRequest *req, const RouteParams *param
     char response_type[64];
     char client_id_str[128];
     char redirect_uri[512];
-    char state[256];
+    char state[512];
 
     if (str_url_decode(response_type, sizeof(response_type), response_type_enc) < 0 ||
         str_url_decode(client_id_str, sizeof(client_id_str), client_id_enc) < 0 ||

@@ -264,9 +264,9 @@ int validate_scope(const char *scope, char *error_msg, size_t error_len) {
     }
 
     size_t len = strlen(scope);
-    if (len > 1000) {
+    if (len > 250) {
         if (error_msg && error_len > 0) {
-            snprintf(error_msg, error_len, "Scope cannot exceed 1000 characters");
+            snprintf(error_msg, error_len, "Scope cannot exceed 250 characters");
         }
         return -1;
     }
@@ -320,6 +320,14 @@ int validate_scope(const char *scope, char *error_msg, size_t error_len) {
 
 int validate_redirect_uri(const char *uri, char *error_msg, size_t error_len) {
     if (validate_url_field(uri, "Redirect URI", error_msg, error_len) != 0) {
+        return -1;
+    }
+
+    /* Stricter length limit than generic URLs — must fit in JWT claim buffer */
+    if (strlen(uri) > 500) {
+        if (error_msg && error_len > 0) {
+            snprintf(error_msg, error_len, "Redirect URI cannot exceed 500 characters");
+        }
         return -1;
     }
 
