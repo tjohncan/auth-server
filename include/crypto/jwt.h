@@ -187,7 +187,7 @@ typedef struct {
 
     /* PKCE challenge (optional) */
     char code_challenge[128];                   /* PKCE challenge (empty string if not used) */
-    char code_challenge_method[16];             /* "plain" or "S256" (empty string if not used) */
+    char code_challenge_method[16];             /* "S256" (empty string if not used) */
 
     /* Metadata */
     time_t iat;                                 /* Issued at (unix timestamp) */
