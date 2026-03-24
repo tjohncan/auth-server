@@ -836,7 +836,7 @@ HttpResponse *verify_email_page_handler(const HttpRequest *req,
         return resp ? resp : response_json_error(400, "Invalid token");
     }
 
-    char escaped_email[512];
+    char escaped_email[1536];
     str_html_escape(escaped_email, sizeof(escaped_email), result.email_address);
 
     char user_id_hex[33];
@@ -898,7 +898,7 @@ HttpResponse *verify_email_handler(const HttpRequest *req,
         return resp ? resp : response_json_error(400, "Verification failed");
     }
 
-    char escaped_email[512];
+    char escaped_email[1536];
     str_html_escape(escaped_email, sizeof(escaped_email), result.email_address);
 
     HttpResponse *resp = response_template(200, "pages/verify-email-success.html",
@@ -1145,7 +1145,7 @@ HttpResponse *accept_invitation_page_handler(const HttpRequest *req,
     }
 
     if (result.email_address[0]) {
-        char escaped[512];
+        char escaped[1536];
         str_html_escape(escaped, sizeof(escaped), result.email_address);
         pos += snprintf(account_info + pos, sizeof(account_info) - pos,
                         "<p>Email: <strong>%s</strong></p>", escaped);
@@ -1380,7 +1380,7 @@ HttpResponse *passwordless_login_page_handler(const HttpRequest *req,
         return resp ? resp : response_json_error(400, "Invalid token");
     }
 
-    char escaped_email[512];
+    char escaped_email[1536];
     char escaped_username[512];
     char escaped_token[128];
     str_html_escape(escaped_email, sizeof(escaped_email), lookup.email_address);

@@ -225,11 +225,11 @@ size_t str_html_escape(char *dst, size_t dst_size, const char *src) {
         }
         if (ent) {
             size_t len = strlen(ent);
-            if (i + len >= dst_size) return 0;
+            if (i + len >= dst_size) { dst[i] = '\0'; return 0; }
             memcpy(dst + i, ent, len);
             i += len;
         } else {
-            if (i + 1 >= dst_size) return 0;
+            if (i + 1 >= dst_size) { dst[i] = '\0'; return 0; }
             dst[i++] = *src;
         }
     }

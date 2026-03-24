@@ -20,10 +20,10 @@ int validate_username(const char *username, char *error_msg, size_t error_len) {
         return -1;
     }
 
-    /* Check length (must fit within field encryption limit) */
-    if (strlen(username) > 254) {
+    /* Check length (must fit within HTML escape buffers and encryption limit) */
+    if (strlen(username) > 100) {
         if (error_msg && error_len > 0) {
-            snprintf(error_msg, error_len, "Username must be 254 characters or fewer");
+            snprintf(error_msg, error_len, "Username must be 100 characters or fewer");
         }
         return -1;
     }
