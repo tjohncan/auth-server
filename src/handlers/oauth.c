@@ -43,9 +43,8 @@ void oauth_token_response_free(oauth_token_response_t *resp) {
 }
 
 /*
- * Validate PKCE code verifier against code challenge
+ * Validate PKCE code verifier against code challenge (S256 only)
  *
- * Supports "plain" and "S256" methods.
  * Per RFC 7636: code_challenge = BASE64URL(SHA256(ASCII(code_verifier)))
  *
  * Returns: 1 if valid, 0 if invalid
@@ -57,45 +56,42 @@ static int validate_pkce(const char *code_verifier,
         return 0;
     }
 
-    if (strcmp(code_challenge_method, "plain") == 0) {
-        /* Plain: verifier must exactly match challenge */
-        return strcmp(code_verifier, code_challenge) == 0 ? 1 : 0;
-    } else if (strcmp(code_challenge_method, "S256") == 0) {
-        /* S256: BASE64URL(SHA256(code_verifier)) must match code_challenge */
-
-        /* Compute SHA256 hash of code_verifier */
-        unsigned char hash[32];  /* SHA256 produces 32 bytes */
-        unsigned int hash_len = 0;
-
-        if (EVP_Digest(code_verifier, strlen(code_verifier),
-                       hash, &hash_len, EVP_sha256(), NULL) != 1) {
-            log_error("SHA256 hash failed for PKCE S256");
-            return 0;
-        }
-
-        if (hash_len != 32) {
-            log_error("Unexpected SHA256 hash length: %u", hash_len);
-            return 0;
-        }
-
-        /* Base64url encode the hash */
-        char encoded_hash[64];  /* 32 bytes -> 43 chars + null */
-        size_t encoded_len = crypto_base64url_encode(hash, hash_len,
-                                                      encoded_hash, sizeof(encoded_hash));
-
-        if (encoded_len == 0) {
-            log_error("Base64url encoding failed for PKCE S256");
-            return 0;
-        }
-
-        /* Constant-time compare (not critical here; consistent with other crypto checks) */
-        size_t challenge_len = strlen(code_challenge);
-        if (encoded_len != challenge_len) return 0;
-        return CRYPTO_memcmp(encoded_hash, code_challenge, encoded_len) == 0 ? 1 : 0;
-    } else {
-        log_error("Unknown PKCE method: %s", code_challenge_method);
+    if (strcmp(code_challenge_method, "S256") != 0) {
+        log_error("Unsupported PKCE method: %s (only S256 is accepted)", code_challenge_method);
         return 0;
     }
+
+    /* S256: BASE64URL(SHA256(code_verifier)) must match code_challenge */
+
+    /* Compute SHA256 hash of code_verifier */
+    unsigned char hash[32];  /* SHA256 produces 32 bytes */
+    unsigned int hash_len = 0;
+
+    if (EVP_Digest(code_verifier, strlen(code_verifier),
+                   hash, &hash_len, EVP_sha256(), NULL) != 1) {
+        log_error("SHA256 hash failed for PKCE S256");
+        return 0;
+    }
+
+    if (hash_len != 32) {
+        log_error("Unexpected SHA256 hash length: %u", hash_len);
+        return 0;
+    }
+
+    /* Base64url encode the hash */
+    char encoded_hash[64];  /* 32 bytes -> 43 chars + null */
+    size_t encoded_len = crypto_base64url_encode(hash, hash_len,
+                                                  encoded_hash, sizeof(encoded_hash));
+
+    if (encoded_len == 0) {
+        log_error("Base64url encoding failed for PKCE S256");
+        return 0;
+    }
+
+    /* Constant-time compare (not critical here; consistent with other crypto checks) */
+    size_t challenge_len = strlen(code_challenge);
+    if (encoded_len != challenge_len) return 0;
+    return CRYPTO_memcmp(encoded_hash, code_challenge, encoded_len) == 0 ? 1 : 0;
 }
 
 /*

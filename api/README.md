@@ -967,7 +967,7 @@ OAuth2 authorization endpoint (RFC 6749 Section 3.1). Initiates authorization co
 | scope                 | string        | No        | Space-separated scope list                             |
 | state                 | string        | No        | CSRF protection token                                  |
 | code_challenge        | string        | No        | PKCE challenge (required for public clients)           |
-| code_challenge_method | string        | No        | "plain" or "S256" (required if code_challenge present) |
+| code_challenge_method | string        | No        | "S256" (required if code_challenge present)            |
 
 **Prerequisites**:
 - User must be authenticated (valid session cookie)
