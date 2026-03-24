@@ -71,11 +71,18 @@ int validate_email(const char *email, char *error_msg, size_t error_len) {
         return -1;
     }
 
-    /* Find @ symbol and check for spaces */
+    /* Find @ symbol, check for spaces and control characters */
     const char *at_pos = NULL;
     int at_count = 0;
 
     for (const char *p = email; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c < 0x20 || c == 0x7F) {
+            if (error_msg && error_len > 0) {
+                snprintf(error_msg, error_len, "Email contains invalid control character (0x%02X)", c);
+            }
+            return -1;
+        }
         if (*p == ' ') {
             if (error_msg && error_len > 0) {
                 snprintf(error_msg, error_len, "Email cannot contain spaces");
@@ -228,6 +235,17 @@ int validate_url_field(const char *url, const char *field_name,
             snprintf(error_msg, error_len, "%s cannot exceed 2000 characters", name);
         }
         return -1;
+    }
+
+    /* Reject control characters (prevents header injection) */
+    for (const char *p = url; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c < 0x20 || c == 0x7F) {
+            if (error_msg && error_len > 0) {
+                snprintf(error_msg, error_len, "%s contains invalid control character (0x%02X)", name, c);
+            }
+            return -1;
+        }
     }
 
     return 0;
