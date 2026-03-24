@@ -302,9 +302,9 @@ Generates and verifies JWTs for OAuth2 access tokens.
 {
   "alg": "ES256",
   "typ": "JWT",
-  "sub": "7777777a-333b-4444-8cd8-999999999000",  // user_account_id (UUID)
-  "aud": "7777777a-333b-4444-8cd8-999999999001",  // resource_server_id (UUID)
-  "client_id": "7777777a-333b-4444-8cd8-999999999002",  // client_id (UUID)
+  "sub": "7777777a333b44448cd8999999999001",  // user_account_id (UUID)
+  "aud": "7777777a333b44448cd8999999999002",  // resource_server_id (UUID)
+  "client_id": "7777777a333b44448cd8999999999000",  // client_id (UUID)
   "scope": "read write",
   "iat": 1766770496,
   "exp": 1766774096
@@ -316,8 +316,8 @@ Generates and verifies JWTs for OAuth2 access tokens.
 {
   "alg": "HS256",
   "typ": "JWT",
-  "client_id": "7777777a-333b-4444-8cd8-999999999000",  // Client UUID
-  "user_account_id": "7777777a-333b-4444-8cd8-999999999001",  // User UUID
+  "client_id": "7777777a333b44448cd8999999999000",  // Client UUID
+  "user_id": "7777777a333b44448cd8999999999001",  // User UUID
   "redirect_uri": "https://app.example.com/callback",
   "scope": "read write",
   "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",

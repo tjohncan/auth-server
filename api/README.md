@@ -974,7 +974,7 @@ Location: https://app.example.com/callback?error=invalid_request&error_descripti
 - Format: Stateless JWT signed with HMAC-SHA256
 - Lifetime: 60 seconds
 - Single-use enforced via database replay detection
-- JWT payload contains: client_id, user_account_id, redirect_uri, scope, PKCE challenge, nonce
+- JWT payload contains: client_id, user_id, redirect_uri, scope, PKCE challenge, nonce
 - Database stores: id, client_pin, user_account_pin, code (JWT), code_challenge, code_challenge_method, timestamps
 - Note: redirect_uri and scope are in the JWT and validated at endpoints, not duplicated in DB
 
