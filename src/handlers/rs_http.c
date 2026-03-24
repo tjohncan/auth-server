@@ -7,6 +7,7 @@
 #include "util/data.h"
 #include "util/json.h"
 #include "util/config.h"
+#include "util/validation.h"
 #ifdef EMAIL_SUPPORT
 #include "util/email.h"
 #include "util/template.h"
@@ -153,6 +154,16 @@ HttpResponse *rs_provision_user_handler(const HttpRequest *req,
 
     if (!username && !email) {
         return response_json_error(400, "username and/or email required");
+    }
+
+    char validation_error[256];
+    if (username && validate_username(username, validation_error, sizeof(validation_error)) != 0) {
+        free(username); free(email);
+        return response_json_error(400, validation_error);
+    }
+    if (email && validate_email(email, validation_error, sizeof(validation_error)) != 0) {
+        free(username); free(email);
+        return response_json_error(400, validation_error);
     }
 
     rs_user_info_t info = {0};
