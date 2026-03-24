@@ -5,7 +5,7 @@ Drop-in JavaScript library for OAuth2 authorization code flow with PKCE (S256).
 ## Features
 
 - Full PKCE (Proof Key for Code Exchange) support with S256
-- Automatic token storage in localStorage
+- Automatic token storage (localStorage default, configurable)
 - Automatic token refresh with proactive scheduling
 - Transparent 401 retry with fresh tokens
 - Concurrent refresh de-duplication
@@ -190,7 +190,7 @@ const response = await client.fetchWithToken('/api/resource', {
 
 #### `getTokens()`
 
-Retrieves stored tokens from localStorage.
+Retrieves stored tokens from configured storage backend.
 
 ```javascript
 const tokens = client.getTokens();
@@ -202,7 +202,7 @@ const tokens = client.getTokens();
 
 #### `storeTokens(tokens)`
 
-Stores tokens in localStorage.
+Stores tokens in configured storage backend.
 
 ```javascript
 client.storeTokens({
