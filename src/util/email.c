@@ -128,10 +128,9 @@ int email_send(const config_t *config,
     }
     close(pipefd[1]);
 
-    /* Payload no longer needed — cleanse before waiting */
+    /* Cleanse payload — skip free() to avoid potential deadlock after fork()
+     * (malloc mutex may be held by another thread). _exit() reclaims all memory. */
     OPENSSL_cleanse(jb->buf, jb->len);
-    jsonbuf_free(jb);
-    jb = NULL;
 
     /* Wait for grandchild with timeout */
     time_t deadline = time(NULL) + EMAIL_TIMEOUT_SECONDS;
