@@ -1048,7 +1048,7 @@ static int jwt_decode_auth_request_with_secret(const char *token,
 
     /* Verify signature (timing-safe comparison) */
     if (!crypto_hmac_compare(expected_signature, provided_signature, 32)) {
-        log_error("JWT signature verification failed");
+        log_debug("JWT signature mismatch (may retry with prior key)");
         return -1;
     }
 
