@@ -72,13 +72,15 @@ typedef org_data_t admin_organization_t;
  *   code_name     - Unique organization code name
  *   display_name  - Human-readable name
  *   note          - Optional description (can be NULL)
+ *   out_id        - Output: Organization UUID (16 bytes), or NULL if not needed
  *
  * Returns: 0 on success, -1 on error
  */
 int admin_create_organization(db_handle_t *db,
                               const char *code_name,
                               const char *display_name,
-                              const char *note);
+                              const char *note,
+                              unsigned char *out_id);
 
 /*
  * List all organizations where user is admin

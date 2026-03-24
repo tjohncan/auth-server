@@ -221,12 +221,16 @@ HttpResponse *admin_create_organization_handler(const HttpRequest *req, const Ro
     }
 
     /* Call handler */
-    int result = admin_create_organization(db, code_name, display_name, note);
+    unsigned char org_id[16];
+    int result = admin_create_organization(db, code_name, display_name, note, org_id);
 
     /* Build response */
     if (result == 0) {
+        char org_id_hex[33];
+        bytes_to_hex(org_id, 16, org_id_hex, sizeof(org_id_hex));
+
         JsonBuf *jb = jsonbuf_new(2048);
-        jsonbuf_appendf(jb, "{\"code_name\":\"");
+        jsonbuf_appendf(jb, "{\"organization_id\":\"%s\",\"code_name\":\"", org_id_hex);
         jsonbuf_append_escaped(jb, code_name);
         jsonbuf_appendf(jb, "\",\"display_name\":\"");
         jsonbuf_append_escaped(jb, display_name);

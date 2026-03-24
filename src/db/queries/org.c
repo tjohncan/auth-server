@@ -12,7 +12,7 @@
 
 int org_create(db_handle_t *db, const char *code_name,
                const char *display_name, const char *note,
-               long long *out_pin) {
+               long long *out_pin, unsigned char *out_id) {
     if (!db || !code_name || !display_name || !out_pin) {
         log_error("Invalid arguments to org_create");
         return -1;
@@ -59,6 +59,8 @@ int org_create(db_handle_t *db, const char *code_name,
         db_finalize(stmt);
         return -1;
     }
+
+    if (out_id) memcpy(out_id, id, 16);
 
     log_info("Created organization: code_name='%s', display_name='%s'",
              code_name, display_name);

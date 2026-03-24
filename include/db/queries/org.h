@@ -22,12 +22,13 @@
  *   display_name  - Human-readable name
  *   note          - Optional description (can be NULL)
  *   out_pin       - Output: Organization PIN (internal ID)
+ *   out_id        - Output: Organization UUID (16 bytes), or NULL if not needed
  *
  * Returns: 0 on success, -1 on error
  */
 int org_create(db_handle_t *db, const char *code_name,
                const char *display_name, const char *note,
-               long long *out_pin);
+               long long *out_pin, unsigned char *out_id);
 
 /*
  * Check if organization exists by code_name

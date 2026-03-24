@@ -59,7 +59,7 @@ int admin_bootstrap(db_handle_t *db,
 
     /* Create organization */
     long long org_pin;
-    if (org_create(db, org_code_name, org_display_name, "Management API + UI", &org_pin) != 0) {
+    if (org_create(db, org_code_name, org_display_name, "Management API + UI", &org_pin, NULL) != 0) {
         log_error("Bootstrap failed: could not create organization");
         return -1;
     }
@@ -128,7 +128,8 @@ int admin_bootstrap(db_handle_t *db,
 int admin_create_organization(db_handle_t *db,
                               const char *code_name,
                               const char *display_name,
-                              const char *note) {
+                              const char *note,
+                              unsigned char *out_id) {
     if (!db || !code_name || !display_name) {
         log_error("Invalid arguments to admin_create_organization");
         return -1;
@@ -145,7 +146,7 @@ int admin_create_organization(db_handle_t *db,
 
     /* Create organization */
     long long org_pin;
-    if (org_create(db, code_name, display_name, note, &org_pin) != 0) {
+    if (org_create(db, code_name, display_name, note, &org_pin, out_id) != 0) {
         log_error("Failed to create organization");
         return -1;
     }
