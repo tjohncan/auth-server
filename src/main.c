@@ -294,7 +294,7 @@ int main(void) {
         config_free(config);
         return 1;
     }
-    cleaner_started = true;
+    cleaner_started = cleaner_cfg.enabled;
 
     /* Connection string no longer needed — cleanse credentials from stack */
     if (config->db_type != DB_TYPE_SQLITE) {
