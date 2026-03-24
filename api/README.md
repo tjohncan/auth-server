@@ -72,26 +72,17 @@ Bootstrap the authentication system with initial organization and management UI.
 
 - **403 Forbidden** (not from localhost):
 ```json
-{
-  "error": "forbidden",
-  "message": "Admin endpoints only accessible from localhost"
-}
+{"error": "Admin endpoints only accessible from localhost"}
 ```
 
 - **409 Conflict** (organization exists):
 ```json
-{
-  "error": "conflict",
-  "message": "Organization 'system' already exists"
-}
+{"error": "Organization 'system' already exists. Use a different org_code_name."}
 ```
 
 - **400 Bad Request** (validation error):
 ```json
-{
-  "error": "invalid_request",
-  "message": "Username is required"
-}
+{"error": "username and password are required"}
 ```
 
 **Creates**:
@@ -153,10 +144,7 @@ Create a new organization (tenant).
 - **403 Forbidden** (not from localhost)
 - **409 Conflict** (code_name exists):
 ```json
-{
-  "error": "conflict",
-  "message": "Organization code_name 'aaacorp' already exists"
-}
+{"error": "Organization already exists or creation failed"}
 ```
 
 **Example**:
@@ -208,19 +196,9 @@ Create a user account (not attached to any organization or client).
 **Error Responses**:
 
 - **403 Forbidden** (not from localhost)
-- **409 Conflict** (username exists):
+- **409 Conflict** (username or email exists):
 ```json
-{
-  "error": "conflict",
-  "message": "Username 'tiger' already exists"
-}
-```
-- **409 Conflict** (email exists):
-```json
-{
-  "error": "conflict",
-  "message": "Email 'tiger@example.com' already exists"
-}
+{"error": "User already exists or creation failed"}
 ```
 
 **Example**:
@@ -269,19 +247,9 @@ Grant organization admin privileges to a user.
 **Error Responses**:
 
 - **403 Forbidden** (not from localhost)
-- **404 Not Found** (user doesn't exist):
+- **404 Not Found** (user or organization doesn't exist):
 ```json
-{
-  "error": "not_found",
-  "message": "User 'tiger' does not exist"
-}
-```
-- **404 Not Found** (organization doesn't exist):
-```json
-{
-  "error": "not_found",
-  "message": "Organization 'aaacorp' does not exist"
-}
+{"error": "User not found"}
 ```
 
 **Example**:
@@ -820,6 +788,7 @@ code_verifier=<pkce_verifier>
 | redirect_uri  | Yes         | Must match redirect_uri used in /authorize  |
 | client_id     | Yes         | Client UUID (hex-encoded)                   |
 | code_verifier | Conditional | PKCE verifier (required for public clients) |
+| resource      | No          | Resource server address (RFC 8707)          |
 
 **Success Response** (200 OK):
 ```json
@@ -833,18 +802,11 @@ code_verifier=<pkce_verifier>
 ```
 
 **Error Responses**:
-- **400 Bad Request** - Invalid or expired code:
+- **400 Bad Request** - Invalid, expired, or replayed code:
 ```json
-{
-  "error": "Invalid authorization code"
-}
+{"error": "invalid_grant", "error_description": "Invalid authorization code"}
 ```
-- **400 Bad Request** - Replay attack detected:
-```json
-{
-  "error": "Authorization code has already been used"
-}
-```
+Note: Replayed codes and genuinely invalid codes return the same error to prevent information disclosure. Replay triggers automatic revocation of the entire token chain.
 
 #### Refresh Token Grant
 
@@ -867,6 +829,7 @@ scope=<optional_scope>
 | refresh_token | Yes       | Valid refresh token                          |
 | client_id     | Yes       | Client UUID (hex-encoded)                    |
 | scope         | No        | Requested scope (must be subset of original) |
+| resource      | No        | Resource server address (RFC 8707)           |
 
 **Success Response** (200 OK):
 ```json
