@@ -233,6 +233,73 @@ int validate_url_field(const char *url, const char *field_name,
     return 0;
 }
 
+int validate_scope(const char *scope, char *error_msg, size_t error_len) {
+    if (!scope) {
+        return 0;  /* NULL means "no scope requested" - allowed */
+    }
+
+    if (scope[0] == '\0') {
+        if (error_msg && error_len > 0) {
+            snprintf(error_msg, error_len, "Scope cannot be empty string");
+        }
+        return -1;
+    }
+
+    size_t len = strlen(scope);
+    if (len > 1000) {
+        if (error_msg && error_len > 0) {
+            snprintf(error_msg, error_len, "Scope cannot exceed 1000 characters");
+        }
+        return -1;
+    }
+
+    /*
+     * RFC 6749 Section 3.3:
+     *   scope       = scope-token *( SP scope-token )
+     *   scope-token = 1*NQCHAR
+     *   NQCHAR      = %x21 / %x23-5B / %x5D-7E
+     *
+     * This explicitly excludes: space (0x20, separator only), " (0x22),
+     * \ (0x5C), control characters (0x00-0x1F), and DEL/high bytes (0x7F+).
+     */
+    int in_token = 0;
+    for (const char *p = scope; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c == ' ') {
+            if (!in_token) {
+                /* Leading space or consecutive spaces */
+                if (error_msg && error_len > 0) {
+                    snprintf(error_msg, error_len,
+                             "Scope has invalid whitespace (leading, trailing, or consecutive spaces)");
+                }
+                return -1;
+            }
+            in_token = 0;
+        } else if (c == 0x21 || (c >= 0x23 && c <= 0x5B) || (c >= 0x5D && c <= 0x7E)) {
+            /* Valid NQCHAR */
+            in_token = 1;
+        } else {
+            if (error_msg && error_len > 0) {
+                snprintf(error_msg, error_len,
+                         "Scope contains invalid character (0x%02X); "
+                         "only printable ASCII except '\"' and '\\' are allowed", c);
+            }
+            return -1;
+        }
+    }
+
+    if (!in_token) {
+        /* Trailing space */
+        if (error_msg && error_len > 0) {
+            snprintf(error_msg, error_len,
+                     "Scope has invalid whitespace (leading, trailing, or consecutive spaces)");
+        }
+        return -1;
+    }
+
+    return 0;  /* Valid */
+}
+
 int validate_redirect_uri(const char *uri, char *error_msg, size_t error_len) {
     if (validate_url_field(uri, "Redirect URI", error_msg, error_len) != 0) {
         return -1;

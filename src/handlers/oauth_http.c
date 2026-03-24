@@ -16,6 +16,7 @@
 #include "util/log.h"
 #include "util/data.h"
 #include "util/str.h"
+#include "util/validation.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -231,6 +232,15 @@ HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params) {
                                          "refresh_token parameter is required");
         }
 
+        char scope_err[256];
+        if (scope && validate_scope(scope, scope_err, sizeof(scope_err)) != 0) {
+            free(grant_type);
+            cleanse_free(refresh_token);
+            free(scope);
+            free(resource);
+            return response_oauth_error(400, "invalid_scope", scope_err);
+        }
+
         oauth_token_response_t token_resp;
         int rc = oauth_refresh_access_token(db, client_id, refresh_token, scope, resource, &token_resp);
 
@@ -282,6 +292,17 @@ HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params) {
             free(resource);
             return response_oauth_error(400, "invalid_request",
                                          "client_key_id and client_secret required for client_credentials grant");
+        }
+
+        char scope_err[256];
+        if (scope && validate_scope(scope, scope_err, sizeof(scope_err)) != 0) {
+            free(grant_type);
+            free(client_key_id_str);
+            OPENSSL_cleanse(client_secret, strlen(client_secret));
+            free(client_secret);
+            free(scope);
+            free(resource);
+            return response_oauth_error(400, "invalid_scope", scope_err);
         }
 
         /* Parse client_key_id UUID */
@@ -528,6 +549,13 @@ HttpResponse *authorize_handler(const HttpRequest *req, const RouteParams *param
             return response_json_error(400, "Invalid URL encoding in scope parameter");
         }
         free(scope_enc);
+
+        char scope_err[256];
+        if (validate_scope(scope, scope_err, sizeof(scope_err)) != 0) {
+            free(code_challenge_enc);
+            free(code_challenge_method_enc);
+            return response_json_error(400, scope_err);
+        }
     } else {
         scope[0] = '\0';
     }
