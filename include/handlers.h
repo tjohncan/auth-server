@@ -48,6 +48,17 @@ HttpResponse *response_json_ok(const char *json);
 HttpResponse *response_json_error(int status_code, const char *message);
 
 /*
+ * Create OAuth2 error response per RFC 6749 Section 5.2
+ *
+ * Format: {"error":"<code>","error_description":"<description>"}
+ *
+ * Used by /token, /revoke, /introspect endpoints where the spec mandates
+ * machine-readable error codes (e.g., "invalid_grant", "invalid_request").
+ */
+HttpResponse *response_oauth_error(int status_code, const char *error_code,
+                                    const char *description);
+
+/*
  * Parse query string parameter
  *
  * Extracts value for given key from URL query string.
@@ -280,7 +291,7 @@ HttpResponse *mfa_set_require_handler(const HttpRequest *req, const RouteParams 
 /* GET /authorize - OAuth2 authorization endpoint (authorization code flow) */
 HttpResponse *authorize_handler(const HttpRequest *req, const RouteParams *params);
 
-/* POST /token - OAuth2 token endpoint (authorization_code, refresh_token grants) */
+/* POST /token - OAuth2 token endpoint (authorization_code, refresh_token, client_credentials) */
 HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params);
 
 /* GET /.well-known/jwks.json - JWKS endpoint (public keys for token verification) */

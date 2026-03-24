@@ -51,6 +51,27 @@ HttpResponse *response_json_error(int status_code, const char *message) {
     return resp;
 }
 
+HttpResponse *response_oauth_error(int status_code, const char *error_code,
+                                    const char *description) {
+    HttpResponse *resp = http_response_new(status_code);
+    if (resp) {
+        char escaped_code[64];
+        char escaped_desc[256];
+        char json[512];
+
+        json_escape(escaped_code, sizeof(escaped_code), error_code);
+        json_escape(escaped_desc, sizeof(escaped_desc), description);
+
+        snprintf(json, sizeof(json),
+                 "{\"error\":\"%s\",\"error_description\":\"%s\"}",
+                 escaped_code, escaped_desc);
+        http_response_set(resp, CONTENT_TYPE_JSON, json);
+        http_response_set_header(resp, "Cache-Control", "no-store");
+        http_response_set_header(resp, "Pragma", "no-cache");
+    }
+    return resp;
+}
+
 char *http_query_get_param(const char *query_string, const char *key) {
     if (!query_string || !key) return NULL;
 
