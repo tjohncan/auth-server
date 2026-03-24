@@ -126,7 +126,7 @@ int encrypt_field(const char *plaintext, char *out_buf, size_t buf_size) {
     }
 
     int ret = -1;
-    unsigned char ciphertext[256];
+    unsigned char ciphertext[ENCRYPT_FIELD_MAX_LENGTH];
     unsigned char tag[GCM_TAG_LENGTH];
     int ciphertext_len = 0;
     int len = 0;
