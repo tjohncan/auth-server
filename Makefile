@@ -95,7 +95,7 @@ clean:
 
 # Test programs
 test-str:
-	$(CC) $(CFLAGS) $(SECURITY_FLAGS) test/test_str.c src/util/str.c src/util/log.c -o test-str $(SECURITY_LDFLAGS)
+	$(CC) $(CFLAGS) $(SECURITY_FLAGS) test/test_str.c src/util/str.c src/util/json.c src/util/log.c -o test-str $(SECURITY_LDFLAGS)
 	@echo "Test built! Run with: ./test-str"
 
 test-http:
