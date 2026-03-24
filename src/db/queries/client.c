@@ -764,7 +764,11 @@ int client_update(db_handle_t *db, const unsigned char *client_id,
         pos += snprintf(sql + pos, sizeof(sql) - pos, ", issue_refresh_tokens = " P"%d", param++);
     }
     if (refresh_token_ttl_seconds) {
-        pos += snprintf(sql + pos, sizeof(sql) - pos, ", refresh_token_ttl_seconds = " P"%d", param++);
+        if (*refresh_token_ttl_seconds < 0) {
+            pos += snprintf(sql + pos, sizeof(sql) - pos, ", refresh_token_ttl_seconds = NULL");
+        } else {
+            pos += snprintf(sql + pos, sizeof(sql) - pos, ", refresh_token_ttl_seconds = " P"%d", param++);
+        }
     }
     if (maximum_session_seconds) {
         if (*maximum_session_seconds < 0) {
@@ -866,8 +870,13 @@ int client_update(db_handle_t *db, const unsigned char *client_id,
         if (conditions++ > 0) {
             pos += snprintf(sql + pos, sizeof(sql) - pos, " OR ");
         }
-        pos += snprintf(sql + pos, sizeof(sql) - pos,
-            "refresh_token_ttl_seconds IS DISTINCT FROM " P"%d", param++);
+        if (*refresh_token_ttl_seconds < 0) {
+            pos += snprintf(sql + pos, sizeof(sql) - pos,
+                "refresh_token_ttl_seconds IS NOT NULL");
+        } else {
+            pos += snprintf(sql + pos, sizeof(sql) - pos,
+                "refresh_token_ttl_seconds IS DISTINCT FROM " P"%d", param++);
+        }
     }
     if (maximum_session_seconds) {
         if (conditions++ > 0) {
@@ -935,7 +944,7 @@ int client_update(db_handle_t *db, const unsigned char *client_id,
     if (issue_refresh_tokens) {
         db_bind_int(stmt, param++, *issue_refresh_tokens);
     }
-    if (refresh_token_ttl_seconds) {
+    if (refresh_token_ttl_seconds && *refresh_token_ttl_seconds >= 0) {
         db_bind_int(stmt, param++, *refresh_token_ttl_seconds);
     }
     if (maximum_session_seconds && *maximum_session_seconds >= 0) {
