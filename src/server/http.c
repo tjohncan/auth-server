@@ -174,7 +174,7 @@ HttpRequest http_request_parse(char *raw, size_t length) {
         return req;
     }
 
-    /* Allocate headers and save pointers BEFORE modifying buffer */
+    /* Allocate headers and save pointers before parse_header_line inserts NULs */
     if (req.header_count > 0) {
         req.headers = malloc(req.header_count * sizeof(HttpHeader));
         if (!req.headers) {
