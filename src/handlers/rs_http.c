@@ -203,9 +203,9 @@ HttpResponse *rs_provision_user_handler(const HttpRequest *req,
                 email_send(g_config, email, "Set up your account",
                            body_text, body_html);
 
-            OPENSSL_cleanse(body_text, body_text ? strlen(body_text) : 0);
+            if (body_text) OPENSSL_cleanse(body_text, strlen(body_text));
             free(body_text);
-            OPENSSL_cleanse(body_html, body_html ? strlen(body_html) : 0);
+            if (body_html) OPENSSL_cleanse(body_html, strlen(body_html));
             free(body_html);
         }
 #endif
