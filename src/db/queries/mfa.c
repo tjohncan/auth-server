@@ -513,13 +513,13 @@ int recovery_code_set_create(db_handle_t *db,
         return -1;
     }
 
-    unsigned char salt_bytes[32];
+    unsigned char salt_bytes[16];
     if (crypto_random_bytes(salt_bytes, sizeof(salt_bytes)) != 0) {
         log_error("Failed to generate salt for recovery codes");
         return -1;
     }
 
-    char salt_hex[65];
+    char salt_hex[33];
     bytes_to_hex(salt_bytes, sizeof(salt_bytes), salt_hex, sizeof(salt_hex));
     OPENSSL_cleanse(salt_bytes, sizeof(salt_bytes));
 
