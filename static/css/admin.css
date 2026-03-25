@@ -336,6 +336,12 @@ input.input-narrow { width: 100px; }
     margin: 0;
 }
 
+.email-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
 .duration-custom {
     -moz-appearance: textfield;
 }

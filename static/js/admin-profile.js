@@ -206,12 +206,12 @@ async function loadEmails() {
 
                 html += `
                     <div class="list-item">
-                        <div class="flex-between">
-                            <div class="no-shrink">
+                        <div class="flex-between email-actions">
+                            <div>
                                 <strong>${escapeHtml(email.email_address)}</strong>${primaryBadge}
                                 <span class="ml-md">${verifiedBadge}</span>
                             </div>
-                            <div class="nowrap ml-md">
+                            <div class="nowrap">
                                 ${buttons}
                             </div>
                         </div>
