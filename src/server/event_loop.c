@@ -429,8 +429,9 @@ static int extract_content_length(const char *buffer, size_t buffer_len, size_t 
             char *endptr;
             long length = strtol(value_start, &endptr, 10);
 
-            /* Validate: at least one digit parsed, non-negative */
-            if (endptr > value_start && length >= 0) {
+            /* Validate: at least one digit parsed, non-negative, no trailing garbage */
+            if (endptr > value_start && length >= 0 &&
+                (*endptr == '\r' || *endptr == '\n' || *endptr == '\0' || *endptr == ' ')) {
                 if (!found) {
                     /* First Content-Length header */
                     first_value = (size_t)length;
