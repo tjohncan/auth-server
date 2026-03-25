@@ -1130,9 +1130,8 @@ config_t *config_load(const char *config_file) {
 
         /* Remove newline */
         size_t len = strlen(line);
-        if (len > 0 && line[len - 1] == '\n') {
-            line[len - 1] = '\0';
-        }
+        if (len > 0 && line[len - 1] == '\n') line[--len] = '\0';
+        if (len > 0 && line[len - 1] == '\r') line[--len] = '\0';
 
         /* Trim whitespace */
         trim(line);
