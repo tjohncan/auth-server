@@ -341,6 +341,9 @@ input.input-narrow { width: 100px; }
     flex-wrap: wrap;
     gap: 6px;
 }
+.flex-wrap-actions > :last-child {
+    margin-left: auto;
+}
 
 .duration-custom {
     -moz-appearance: textfield;
