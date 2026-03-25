@@ -7,6 +7,7 @@
 #include "crypto/totp.h"
 #include "crypto/encrypt.h"
 #include "util/log.h"
+#include "util/data.h"
 #include "util/config.h"
 #include "db/db.h"
 #include <openssl/evp.h>
@@ -230,12 +231,15 @@ int main(void) {
         return 1;
     }
 
-    printf("HMAC-SHA256 (hex): ");
-    for (size_t i = 0; i < HMAC_SHA256_LENGTH; i++) {
-        printf("%02x", hmac_binary[i]);
+    /* Verify against known value (HMAC-SHA256 of "The quick brown fox..." with key "secret") */
+    char hmac_check[HMAC_SHA256_HEX_LENGTH];
+    bytes_to_hex(hmac_binary, HMAC_SHA256_LENGTH, hmac_check, sizeof(hmac_check));
+    const char *hmac_expected = "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8";
+    if (strcmp(hmac_check, hmac_expected) != 0) {
+        log_error("HMAC mismatch: got %s, expected %s", hmac_check, hmac_expected);
+        return 1;
     }
-    printf("\n");
-    log_info("HMAC computed successfully: PASS\n");
+    log_info("HMAC-SHA256 binary: PASS\n");
 
     /* HMAC-SHA256 hex output */
     log_info("Test: HMAC-SHA256 hex output");
@@ -248,8 +252,11 @@ int main(void) {
         return 1;
     }
 
-    log_info("HMAC-SHA256 hex: %s", hmac_hex);
-    log_info("Hex output matches binary: PASS\n");
+    if (strcmp(hmac_hex, hmac_expected) != 0) {
+        log_error("HMAC hex mismatch: got %s, expected %s", hmac_hex, hmac_expected);
+        return 1;
+    }
+    log_info("HMAC-SHA256 hex matches binary: PASS\n");
 
     /* RFC 4231 Test Vector #1 */
     log_info("Test: RFC 4231 HMAC-SHA256 Test Vector #1");
