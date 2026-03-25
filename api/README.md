@@ -18,6 +18,19 @@ HTTP endpoints for the OAuth2 authentication server.
 
 ---
 
+## Health Check
+
+### GET /health
+
+Returns server status. No authentication required.
+
+**Response** (200 OK):
+```json
+{"status":"ok"}
+```
+
+---
+
 ## Admin API (Localhost-Only)
 
 Administrative endpoints for initial setup and tenant management. 
@@ -426,7 +439,7 @@ Body: `organization_id`, `code_name`, `display_name`, `address`, `note` (require
 Update resource server.
 
 Query: `id` (required)
-Body: `display_name`, `address`, `note`, `is_active` (all optional)
+Body: `display_name`, `address`, `note`, `is_active`, `allow_user_provisioning` (all optional)
 
 ### Clients
 
@@ -928,8 +941,8 @@ OAuth2 authorization endpoint (RFC 6749 Section 3.1). Initiates authorization co
 | redirect_uri          | string        | Yes       | Registered callback URL                                |
 | scope                 | string        | No        | Space-separated scope list                             |
 | state                 | string        | No        | CSRF protection token                                  |
-| code_challenge        | string        | No        | PKCE challenge (required for public clients)           |
-| code_challenge_method | string        | No        | "S256" (required if code_challenge present)            |
+| code_challenge        | string        | Conditional | PKCE challenge (required for public clients)         |
+| code_challenge_method | string        | Conditional | "S256" (required if code_challenge present)          |
 
 **Prerequisites**:
 - User must be authenticated (valid session cookie)
