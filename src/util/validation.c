@@ -28,8 +28,15 @@ int validate_username(const char *username, char *error_msg, size_t error_len) {
         return -1;
     }
 
-    /* Check for spaces and @ symbol */
+    /* Check for spaces, @ symbol, and control characters */
     for (const char *p = username; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c < 0x20 || c == 0x7F) {
+            if (error_msg && error_len > 0) {
+                snprintf(error_msg, error_len, "Username contains invalid control character (0x%02X)", c);
+            }
+            return -1;
+        }
         if (*p == ' ') {
             if (error_msg && error_len > 0) {
                 snprintf(error_msg, error_len, "Username cannot contain spaces");
@@ -169,6 +176,17 @@ int validate_code_name(const char *code_name, char *error_msg, size_t error_len)
         return -1;
     }
 
+    /* Check for control characters */
+    for (const char *p = code_name; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c < 0x20 || c == 0x7F) {
+            if (error_msg && error_len > 0) {
+                snprintf(error_msg, error_len, "Code name contains invalid control character (0x%02X)", c);
+            }
+            return -1;
+        }
+    }
+
     return 0;  /* Valid */
 }
 
@@ -194,6 +212,17 @@ int validate_display_name(const char *display_name, char *error_msg, size_t erro
         return -1;
     }
 
+    /* Check for control characters */
+    for (const char *p = display_name; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c < 0x20 || c == 0x7F) {
+            if (error_msg && error_len > 0) {
+                snprintf(error_msg, error_len, "Display name contains invalid control character (0x%02X)", c);
+            }
+            return -1;
+        }
+    }
+
     return 0;
 }
 
@@ -207,6 +236,23 @@ int validate_note(const char *note, char *error_msg, size_t error_len) {
             snprintf(error_msg, error_len, "Note cannot exceed 2000 characters");
         }
         return -1;
+    }
+
+    /* Check for control characters (allow \n and \t in notes) */
+    for (const char *p = note; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c < 0x20 && c != '\n' && c != '\t') {
+            if (error_msg && error_len > 0) {
+                snprintf(error_msg, error_len, "Note contains invalid control character (0x%02X)", c);
+            }
+            return -1;
+        }
+        if (c == 0x7F) {
+            if (error_msg && error_len > 0) {
+                snprintf(error_msg, error_len, "Note contains invalid control character (0x7F)");
+            }
+            return -1;
+        }
     }
 
     return 0;
