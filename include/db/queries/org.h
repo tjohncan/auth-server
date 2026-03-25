@@ -200,11 +200,8 @@ int organization_key_get_organization_pin(db_handle_t *db,
 /*
  * Create organization key
  *
- * Dual-mode secret provisioning:
- * - If secret is provided: Use as-is (BYOS - bring your own secret)
- * - If secret is NULL: Generate secure 32-byte base64url token
- *
  * Secret is hashed using crypto_password_hash() before storage.
+ * (Secret generation, if needed, is handled by the HTTP layer.)
  * Returned key_id is used for authentication (X-Org-Key-Id header).
  *
  * SECURITY WARNING: Organization keys grant FULL admin access.
@@ -213,7 +210,7 @@ int organization_key_get_organization_pin(db_handle_t *db,
  * Parameters:
  *   db                   - Database handle
  *   organization_code_name - Organization code name (e.g., "system")
- *   secret               - Secret to hash (NULL = generate secure token)
+ *   secret               - Plaintext secret to hash (required)
  *   note                 - Optional description
  *   out_key_id           - Output: Generated key UUID (16 bytes)
  *
