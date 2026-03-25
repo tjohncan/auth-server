@@ -83,7 +83,7 @@ Lookup tables for valid values.
 - `grant_type` - OAuth2 grant type descriptions
 - `client_type` - Public vs confidential client types
 - `code_challenge_method` - PKCE methods (plain, S256)
-- `mfa_method` - Available MFA types (TOTP, SMS, etc.)
+- `mfa_method` - Available MFA types (TOTP; SMS reserved for future use)
 
 ### Keys Domain
 Cryptographic signing keys for JWTs with automatic rotation.
@@ -292,14 +292,6 @@ Partial unique indexes enforce single-use semantics for authorization codes and 
 - Only one access token can be created directly from an authorization code
 - Only one access token can be created from a given refresh token exchange
 - Each generation in a refresh token rotation chain must be unique (prevents duplicate generations)
-
-### Refresh Token Rotation
-
-Refresh tokens are single-use with chain tracking via `origin_refresh_token_id` and `generation` fields. If an already-exchanged token is reused (replay attack detected), the entire chain can be revoked in a single query.
-
-### Multi-Tenant Isolation
-
-Composite foreign keys in `client_resource_server` enforce that clients can only access resource servers within the same organization, preventing cross-tenant privilege escalation.
 
 ### Redirect URI Validation
 
