@@ -934,15 +934,15 @@ OAuth2 authorization endpoint (RFC 6749 Section 3.1). Initiates authorization co
 
 **Query Parameters**:
 
-| Parameter             | Type          | Required  | Description                                            |
-|-----------------------|---------------|-----------|--------------------------------------------------------|
-| response_type         | string        | Yes       | Must be "code"                                         |
-| client_id             | string (UUID) | Yes       | Client identifier                                      |
-| redirect_uri          | string        | Yes       | Registered callback URL                                |
-| scope                 | string        | No        | Space-separated scope list                             |
-| state                 | string        | No        | CSRF protection token                                  |
-| code_challenge        | string        | Conditional | PKCE challenge (required for public clients)         |
-| code_challenge_method | string        | Conditional | "S256" (required if code_challenge present)          |
+| Parameter             | Type          | Required    | Description                                  |
+|-----------------------|---------------|-------------|----------------------------------------------|
+| response_type         | string        | Yes         | Must be "code"                               |
+| client_id             | string (UUID) | Yes         | Client identifier                            |
+| redirect_uri          | string        | Yes         | Registered callback URL                      |
+| scope                 | string        | No          | Space-separated scope list                   |
+| state                 | string        | No          | CSRF protection token                        |
+| code_challenge        | string        | Conditional | PKCE challenge (required for public clients) |
+| code_challenge_method | string        | Conditional | "S256" (required if code_challenge present)  |
 
 **Prerequisites**:
 - User must be authenticated (valid session cookie)
@@ -1497,9 +1497,9 @@ Set or clear the primary email for the current user.
 }
 ```
 
-| Field | Type        | Required | Description                                       |
-|-------|-------------|----------|---------------------------------------------------|
-| email | string/null | No       | Email address to make primary, or null to clear    |
+| Field | Type        | Required | Description                                     |
+|-------|-------------|----------|-------------------------------------------------|
+| email | string/null | No       | Email address to make primary, or null to clear |
 
 **Success Response** (200 OK):
 ```json
@@ -1824,8 +1824,8 @@ Request a verification email for one of the current user's email addresses.
 }
 ```
 
-| Field | Type   | Required | Description                              |
-|-------|--------|----------|------------------------------------------|
+| Field | Type   | Required | Description                                  |
+|-------|--------|----------|----------------------------------------------|
 | email | string | Yes      | Email address to verify (must be on account) |
 
 **Success Response** (200 OK):
@@ -1881,9 +1881,9 @@ Render the email verification confirmation page.
 
 **Query Parameters**:
 
-| Parameter | Type   | Required | Description          |
-|-----------|--------|----------|----------------------|
-| token     | string | Yes      | Verification token   |
+| Parameter | Type   | Required | Description        |
+|-----------|--------|----------|--------------------|
+| token     | string | Yes      | Verification token |
 
 **Success Response** (200 OK):
 
@@ -1982,9 +1982,9 @@ Request a password reset email.
 }
 ```
 
-| Field | Type   | Required | Description                     |
-|-------|--------|----------|---------------------------------|
-| email | string | Yes      | Email address of the account    |
+| Field | Type   | Required | Description                  |
+|-------|--------|----------|------------------------------|
+| email | string | Yes      | Email address of the account |
 
 **Response** (200 OK — always, to prevent user enumeration):
 ```json
@@ -2046,10 +2046,10 @@ Consume a password reset token and set a new password.
 
 **Request Body**: Form-encoded (`application/x-www-form-urlencoded`)
 
-| Field    | Type   | Required | Description        |
-|----------|--------|----------|--------------------|
+| Field    | Type   | Required | Description          |
+|----------|--------|----------|----------------------|
 | token    | string | Yes      | Password reset token |
-| password | string | Yes      | New password       |
+| password | string | Yes      | New password         |
 
 **Success Response** (200 OK):
 
@@ -2097,9 +2097,9 @@ Render the passwordless login request page.
 
 **Query Parameters**:
 
-| Parameter | Type   | Required | Description                                          |
-|-----------|--------|----------|------------------------------------------------------|
-| return_to | string | No       | Authorize query string to redirect after login       |
+| Parameter | Type   | Required | Description                                    |
+|-----------|--------|----------|------------------------------------------------|
+| return_to | string | No       | Authorize query string to redirect after login |
 
 Returns an HTML page with an email input form. On submit, the form
 POSTs to `/request-passwordless-login` via JavaScript.
@@ -2287,9 +2287,9 @@ The method is unconfirmed until `POST /api/user/mfa/totp/confirm` succeeds.
 }
 ```
 
-| Field        | Type   | Required  | Description                                             |
-|--------------|--------|-----------|---------------------------------------------------------|
-| display_name | string | Yes       | User-chosen label (e.g., "J-Phone 131", "Work Phone")   |
+| Field        | Type   | Required  | Description                                           |
+|--------------|--------|-----------|-------------------------------------------------------|
+| display_name | string | Yes       | User-chosen label (e.g., "J-Phone 131", "Work Phone") |
 
 **Success Response** (200 OK):
 ```json
