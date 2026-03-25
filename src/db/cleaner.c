@@ -410,6 +410,13 @@ static void cleaner_init(db_handle_t *db, cleaner_config_t *config) {
          " AND NOT EXISTS (SELECT 1 FROM " TBL_ACCESS_TOKEN
          " WHERE refresh_token_id = " TBL_REFRESH_TOKEN ".id)",
          config->retention_tokens_grace_days, 1, 0},
+        {TBL_REFRESH_TOKEN, "Refresh tokens (revoked)", "id", "revoked_at",
+         " AND is_revoked = " BOOL_TRUE
+         " AND NOT EXISTS (SELECT 1 FROM " TBL_REFRESH_TOKEN " AS X "
+         " WHERE X.origin_refresh_token_id = " TBL_REFRESH_TOKEN ".id) "
+         " AND NOT EXISTS (SELECT 1 FROM " TBL_ACCESS_TOKEN
+         " WHERE refresh_token_id = " TBL_REFRESH_TOKEN ".id)",
+         config->retention_tokens_grace_days, 1, 0},
 
         /* Tier 3: Medium-volume short-lived tokens */
         {TBL_AUTHORIZATION_CODE, "Authorization codes", "id", "expected_expiry",
