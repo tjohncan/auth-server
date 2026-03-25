@@ -23,7 +23,8 @@ function createOAuthClient(clientId) {
         authUrl: HOST,
         clientId: clientId,
         redirectUri: CALLBACK_URL,
-        scope: 'openid'
+        scope: 'openid',
+        onSessionExpired: () => { window.location.href = '/login?return=' + encodeURIComponent(window.location.pathname + window.location.search); }
     });
 }
 
