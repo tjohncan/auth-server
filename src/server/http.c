@@ -17,6 +17,9 @@
 /* HTTP version this server supports */
 #define HTTP_VERSION "HTTP/1.0"
 
+/* Maximum number of HTTP headers to parse (DoS protection) */
+#define HTTP_MAX_HEADERS 50
+
 /*
  * Parse HTTP method from string
  */
@@ -163,7 +166,7 @@ HttpRequest http_request_parse(char *raw, size_t length) {
     }
 
     /* Protect resources from malicious/malformed high header counts */
-    if (req.header_count > 50) {
+    if (req.header_count > HTTP_MAX_HEADERS) {
         req.method = HTTP_UNKNOWN;
         return req;
     }
