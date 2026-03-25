@@ -111,7 +111,7 @@ Cryptographic primitives for OAuth2 security.
 - **Argon2** (`argon2.c`, `include/crypto/argon2.h`) - Argon2id password hashing (memory-hard, GPU-resistant)
 - **PBKDF2** (`pbkdf2.c`, `include/crypto/pbkdf2.h`) - PBKDF2-SHA256 password hashing (alternative to Argon2)
 - **Password** (`password.c`, `include/crypto/password.h`) - Config-driven wrapper with random iteration selection
-- **SHA-256** (`sha256.c`, `include/crypto/sha256.h`) - SHA-256 hashing for token storage (sessions, auth codes, refresh tokens)
+- **SHA-256** (`sha256.c`, `include/crypto/sha256.h`) - SHA-256 hashing for token storage (sessions, auth codes, refresh/access tokens)
 - **HMAC** (`hmac.c`, `include/crypto/hmac.h`) - HMAC-SHA256 for JWT signatures and token validation. Timing-safe comparison.
 - **JWT** (`jwt.c`, `include/crypto/jwt.h`) - HS256/ES256 JWT encoding/decoding for OAuth2 tokens with expiration checking
 - **Signing Keys** (`signing_keys.c`, `include/crypto/signing_keys.h`) - Automatic key rotation management for JWTs. 
@@ -298,11 +298,11 @@ Generates and verifies JWTs for OAuth2 access tokens.
 **Configuration:**
 - `jwt_clock_skew_seconds`: Clock skew tolerance for token expiration (default: 0 for strict validation)
 
-**Access Token Claims:**
-```json
+**Access Token (ES256 JWT):**
+```
+Header: {"alg": "ES256", "typ": "JWT"}
+Payload:
 {
-  "alg": "ES256",
-  "typ": "JWT",
   "sub": "7777777a333b44448cd8999999999001",  // user_account_id (UUID)
   "aud": "7777777a333b44448cd8999999999002",  // resource_server_id (UUID)
   "client_id": "7777777a333b44448cd8999999999000",  // client_id (UUID)
@@ -312,11 +312,11 @@ Generates and verifies JWTs for OAuth2 access tokens.
 }
 ```
 
-**Authorization Code Claims (Stateless JWT):**
-```json
+**Authorization Code (Stateless HS256 JWT):**
+```
+Header: {"alg": "HS256", "typ": "JWT"}
+Payload:
 {
-  "alg": "HS256",
-  "typ": "JWT",
   "client_id": "7777777a333b44448cd8999999999000",  // Client UUID
   "user_id": "7777777a333b44448cd8999999999001",  // User UUID
   "redirect_uri": "https://app.example.com/callback",
