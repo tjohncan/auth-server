@@ -303,6 +303,7 @@ Generates and verifies JWTs for OAuth2 access tokens.
 Header: {"alg": "ES256", "typ": "JWT"}
 Payload:
 {
+  "iss": "https://auth.example.com",  // auth server URL
   "sub": "7777777a333b44448cd8999999999001",  // user_account_id (UUID)
   "aud": "7777777a333b44448cd8999999999002",  // resource_server_id (UUID)
   "client_id": "7777777a333b44448cd8999999999000",  // client_id (UUID)

@@ -532,6 +532,10 @@ int oauth_exchange_authorization_code(db_handle_t *db,
     bytes_to_hex(client.id, 16, client_id_hex, sizeof(client_id_hex));
 
     jwt_claims_t claims = {0};
+    if (strcmp(g_config->host, "localhost") == 0)
+        snprintf(claims.iss, sizeof(claims.iss), "http://localhost:%d", g_config->port);
+    else
+        snprintf(claims.iss, sizeof(claims.iss), "https://%s", g_config->host);
     str_copy(claims.sub, sizeof(claims.sub), user_id_hex);
     str_copy(claims.aud, sizeof(claims.aud), rs_id_hex);
     str_copy(claims.client_id, sizeof(claims.client_id), client_id_hex);
@@ -797,6 +801,10 @@ int oauth_refresh_access_token(db_handle_t *db,
     bytes_to_hex(client.id, 16, client_id_hex, sizeof(client_id_hex));
 
     jwt_claims_t claims = {0};
+    if (strcmp(g_config->host, "localhost") == 0)
+        snprintf(claims.iss, sizeof(claims.iss), "http://localhost:%d", g_config->port);
+    else
+        snprintf(claims.iss, sizeof(claims.iss), "https://%s", g_config->host);
     str_copy(claims.sub, sizeof(claims.sub), user_id_hex);
     str_copy(claims.aud, sizeof(claims.aud), rs_id_hex);
     str_copy(claims.client_id, sizeof(claims.client_id), client_id_hex);
@@ -937,6 +945,10 @@ int oauth_client_credentials(db_handle_t *db,
     bytes_to_hex(client.id, 16, client_id_hex, sizeof(client_id_hex));
 
     jwt_claims_t claims = {0};
+    if (strcmp(g_config->host, "localhost") == 0)
+        snprintf(claims.iss, sizeof(claims.iss), "http://localhost:%d", g_config->port);
+    else
+        snprintf(claims.iss, sizeof(claims.iss), "https://%s", g_config->host);
     str_copy(claims.sub, sizeof(claims.sub), client_id_hex);
     str_copy(claims.aud, sizeof(claims.aud), rs_id_hex);
     str_copy(claims.client_id, sizeof(claims.client_id), client_id_hex);
