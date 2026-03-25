@@ -145,7 +145,7 @@ Each handler domain (admin, session, OAuth, MFA, user provisioning) follows the 
 ### 1. Database Query Layer (`src/db/queries/`)
 Entity-based query functions for direct database operations.
 
-- **Files**: `org.c`, `user.c`, `client.c`, `resource_server.c`, `mfa.c`
+- **Files**: `org.c`, `user.c`, `client.c`, `resource_server.c`, `oauth.c`, `mfa.c`
 - **Responsibility**: Prepared statements, parameter binding, result extraction
 - **Used by**: Admin handlers, OAuth2 handlers
 - **Design**: Natural keys (code_name, username) instead of internal PINs
@@ -490,6 +490,10 @@ vendor/
 - Conditional compilation ensures only selected backend is compiled
 - Smaller binaries, reduced attack surface
 - **SQLite setup:** The amalgamation (`sqlite3.c`) is not included in the repository — see `vendor/setup_notes.txt`
+
+**Email Support (Optional):**
+- `make EMAIL_SUPPORT=1` - Enable email delivery (password reset, verification, passwordless login, invitations)
+- See [Deployment Guide](deployment/README.md) for email script configuration
 
 **Test Targets:**
 - `make test-str` - String utilities tests
