@@ -230,7 +230,7 @@ MFA required = client.require_mfa OR user.require_mfa
 - Deleting the last MFA method automatically clears both flags in the same transaction
 
 **Enrollment Flow (Two-Step Confirmation):**
-1. User initiates enrollment (POST /api/user/mfa/methods)
+1. User initiates enrollment (POST /api/user/mfa/&lt;method&gt;/setup)
 2. Server generates secret/code, creates `user_mfa` record with `is_confirmed = 0`
 3. User proves control (TOTP code from authenticator app, or SMS code from phone)
 4. Server verifies code, sets `is_confirmed = 1`, updates `user.has_mfa = 1`
