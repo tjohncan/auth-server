@@ -284,6 +284,7 @@ int mfa_method_list(db_handle_t *db,
 
         /* Extract MFA method data */
         mfa_method_t *method = &methods[count];
+        memset(method, 0, sizeof(*method));
 
         const unsigned char *id_blob = db_column_blob(stmt, 0);
         if (!id_blob) continue;
