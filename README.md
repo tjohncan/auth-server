@@ -111,6 +111,7 @@ Cryptographic primitives for OAuth2 security.
 - **Argon2** (`argon2.c`, `include/crypto/argon2.h`) - Argon2id password hashing (memory-hard, GPU-resistant)
 - **PBKDF2** (`pbkdf2.c`, `include/crypto/pbkdf2.h`) - PBKDF2-SHA256 password hashing (alternative to Argon2)
 - **Password** (`password.c`, `include/crypto/password.h`) - Config-driven wrapper with random iteration selection
+- **SHA-256** (`sha256.c`, `include/crypto/sha256.h`) - SHA-256 hashing for token storage (sessions, auth codes, refresh tokens)
 - **HMAC** (`hmac.c`, `include/crypto/hmac.h`) - HMAC-SHA256 for JWT signatures and token validation. Timing-safe comparison.
 - **JWT** (`jwt.c`, `include/crypto/jwt.h`) - HS256/ES256 JWT encoding/decoding for OAuth2 tokens with expiration checking
 - **Signing Keys** (`signing_keys.c`, `include/crypto/signing_keys.h`) - Automatic key rotation management for JWTs. 
