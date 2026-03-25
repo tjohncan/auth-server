@@ -1,6 +1,7 @@
 /* Define POSIX features before including headers */
 #define _POSIX_C_SOURCE 200809L
 
+#include "handlers.h"
 #include "handlers/oauth.h"
 #include "db/queries/oauth.h"
 #include "db/queries/client.h"
