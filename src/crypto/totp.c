@@ -8,6 +8,9 @@
 #include <stdio.h>
 #include <ctype.h>
 
+/* TOTP modulus: 10^TOTP_CODE_DIGITS */
+#define TOTP_MODULUS 1000000
+
 /* Base32 alphabet (RFC 4648) */
 static const char base32_alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
@@ -169,7 +172,7 @@ static int totp_generate_code_internal(const unsigned char *secret, size_t secre
                          | (hmac[offset + 3] & 0xFF);
 
     /* Generate 6-digit code */
-    uint32_t code = binary_code % 1000000;
+    uint32_t code = binary_code % TOTP_MODULUS;
     snprintf(out_code, TOTP_CODE_DIGITS + 1, "%06u", code);
 
     return 0;
