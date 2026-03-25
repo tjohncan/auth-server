@@ -241,6 +241,7 @@ input.input-narrow { width: 100px; }
 .modal-actions-end {
     display: flex;
     justify-content: flex-end;
+    gap: 10px;
 }
 
 .btn-modal {
