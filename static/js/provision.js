@@ -1,5 +1,11 @@
 'use strict';
 
+function formatUUID(hex) {
+    if (!hex || hex.length !== 32) return hex;
+    return hex.slice(0,8) + '-' + hex.slice(8,12) + '-' +
+           hex.slice(12,16) + '-' + hex.slice(16,20) + '-' + hex.slice(20);
+}
+
 /* Shared auth fields */
 function requireAuth() {
     return requireFields([
@@ -53,7 +59,7 @@ function showResult(panelId, method, url, body, status, responseText, json) {
 
     var copies = [];
     if (json) {
-        if (json.user_id) copies.push(['Copy User ID', json.user_id]);
+        if (json.user_id) copies.push(['Copy User ID', formatUUID(json.user_id)]);
         if (json.invitation && json.invitation.url) copies.push(['Copy Invitation URL', json.invitation.url]);
     }
     if (copies.length) {
@@ -86,9 +92,9 @@ async function runProvision() {
     showResult('prov', 'POST', '/api/rs/users', body, r.status, r.text, r.json);
 
     if (r.json && r.json.user_id) {
-        $('lookup-user-id').value = r.json.user_id;
-        $('link-user-id').value = r.json.user_id;
-        $('unlink-user-id').value = r.json.user_id;
+        $('lookup-user-id').value = formatUUID(r.json.user_id);
+        $('link-user-id').value = formatUUID(r.json.user_id);
+        $('unlink-user-id').value = formatUUID(r.json.user_id);
     }
 }
 
@@ -108,8 +114,8 @@ async function runLookup() {
     showResult('lookup', 'POST', '/api/rs/users/lookup', body, r.status, r.text, r.json);
 
     if (r.json && r.json.user_id) {
-        $('link-user-id').value = r.json.user_id;
-        $('unlink-user-id').value = r.json.user_id;
+        $('link-user-id').value = formatUUID(r.json.user_id);
+        $('unlink-user-id').value = formatUUID(r.json.user_id);
     }
 }
 
@@ -159,17 +165,28 @@ async function runList() {
     showResult('list', 'POST', '/api/rs/client-users/list', body, r.status, r.text, r.json);
 }
 
-/* Delegated click handler */
-document.addEventListener('click', function(e) {
+/* Delegated click handler (with run-btn disable to prevent double-fire) */
+document.addEventListener('click', async function(e) {
     var btn = e.target.closest('[data-action]');
     if (!btn) return;
-    switch (btn.dataset.action) {
-        case 'switch-panel': switchPanel(btn.dataset.panel); break;
-        case 'run-provision': runProvision(); break;
-        case 'run-lookup': runLookup(); break;
-        case 'run-link': runLink(); break;
-        case 'run-unlink': runUnlink(); break;
-        case 'run-list': runList(); break;
-        case 'copy': handleCopy(btn); break;
+    if (btn.classList.contains('run-btn')) {
+        if (btn.disabled) return;
+        btn.disabled = true;
+        try {
+            switch (btn.dataset.action) {
+                case 'run-provision': await runProvision(); break;
+                case 'run-lookup': await runLookup(); break;
+                case 'run-link': await runLink(); break;
+                case 'run-unlink': await runUnlink(); break;
+                case 'run-list': await runList(); break;
+            }
+        } finally {
+            btn.disabled = false;
+        }
+    } else {
+        switch (btn.dataset.action) {
+            case 'switch-panel': switchPanel(btn.dataset.panel); break;
+            case 'copy': handleCopy(btn); break;
+        }
     }
 });
