@@ -467,7 +467,10 @@ class OAuthClient {
         const msUntilExpiry = tokens.expires_at - Date.now();
         const refreshIn = msUntilExpiry - (this.refreshBufferSeconds * 1000);
 
-        if (refreshIn <= 0) return;
+        if (refreshIn <= 0) {
+            this.refreshAccessToken().catch(() => {});
+            return;
+        }
 
         this._refreshTimer = setTimeout(() => {
             this.refreshAccessToken().catch(() => {});
