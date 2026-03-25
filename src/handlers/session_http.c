@@ -105,7 +105,7 @@ static HttpResponse *require_authenticated_session(const HttpRequest *req,
  *
  * Response (success):
  *   200 OK
- *   Set-Cookie: session=<token>; HttpOnly; Secure; SameSite=Strict; Max-Age=604800
+ *   Set-Cookie: session=<token>; HttpOnly; Secure; SameSite=Lax; Max-Age=604800
  *   {"message":"Login successful"}
  *
  * Response (failure):
@@ -162,7 +162,7 @@ HttpResponse *login_handler(const HttpRequest *req, const RouteParams *params) {
     /* Build Set-Cookie header */
     char cookie_header[512];
     snprintf(cookie_header, sizeof(cookie_header),
-             "%s=%s; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=%d",
+             "%s=%s; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=%d",
              SESSION_COOKIE_NAME, session_token, g_config->session_ttl_seconds);
 
     /* Get user profile to check MFA preference */
@@ -1479,7 +1479,7 @@ HttpResponse *passwordless_login_handler(const HttpRequest *req,
     /* Build Set-Cookie header */
     char cookie_header[512];
     snprintf(cookie_header, sizeof(cookie_header),
-             "%s=%s; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=%d",
+             "%s=%s; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=%d",
              SESSION_COOKIE_NAME, session_token, g_config->session_ttl_seconds);
     OPENSSL_cleanse(session_token, token_buf_size);
     free(session_token);
@@ -1516,6 +1516,8 @@ HttpResponse *passwordless_login_handler(const HttpRequest *req,
 HttpResponse *passwordless_login_toggle_handler(const HttpRequest *req,
                                                  const RouteParams *params) {
     (void)params;
+    HttpResponse *ct_err = require_content_type(req, "application/json");
+    if (ct_err) return ct_err;
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -1594,7 +1596,7 @@ HttpResponse *logout_handler(const HttpRequest *req, const RouteParams *params) 
     if (response) {
         char clear_cookie[256];
         snprintf(clear_cookie, sizeof(clear_cookie),
-                 "%s=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0",
+                 "%s=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0",
                  SESSION_COOKIE_NAME);
         http_response_add_header(response, "Set-Cookie", clear_cookie);
     }
