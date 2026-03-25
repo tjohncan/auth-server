@@ -234,7 +234,7 @@ int main(void) {
     /* Verify against known value (HMAC-SHA256 of "The quick brown fox..." with key "secret") */
     char hmac_check[HMAC_SHA256_HEX_LENGTH];
     bytes_to_hex(hmac_binary, HMAC_SHA256_LENGTH, hmac_check, sizeof(hmac_check));
-    const char *hmac_expected = "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8";
+    const char *hmac_expected = "54cd5b827c0ec938fa072a29b177469c843317b095591dc846767aa338bac600";
     if (strcmp(hmac_check, hmac_expected) != 0) {
         log_error("HMAC mismatch: got %s, expected %s", hmac_check, hmac_expected);
         return 1;
