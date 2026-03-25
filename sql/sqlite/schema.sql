@@ -501,7 +501,7 @@ create table refresh_token (
 , token text not null
 , scopes text
 , issued_at text not null
-, expected_expiry text not null
+, expected_expiry text
 , is_exchanged integer not null default 0
 , exchanged_at text
 , is_revoked integer not null default 0
@@ -736,6 +736,9 @@ create index idx_access_token_expected_expiry
 
 create index idx_refresh_token_expected_expiry
   on refresh_token(expected_expiry);
+
+create index idx_refresh_token_revoked_cleanup
+  on refresh_token(is_revoked, revoked_at);
 
 create index idx_passwordless_login_token_expected_expiry
   on passwordless_login_token(expected_expiry);
