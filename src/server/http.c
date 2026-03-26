@@ -42,6 +42,7 @@ static HttpMethod parse_method(const char *method_str) {
  * Returns: Pointer to start of body, or NULL if not found
  */
 static char *find_header_end(char *data, size_t length) {
+    if (length < 4) return NULL;
     char *p = data;
     char *end = data + length;
 
