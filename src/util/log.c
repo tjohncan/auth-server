@@ -6,11 +6,6 @@
 #include <stdarg.h>
 #include <time.h>
 
-/*
- * Static variable - this keeps its value between function calls.
- * It's like a "global" but only visible within this file.
- * Starts at LOG_INFO by default.
- */
 static LogLevel current_min_level = LOG_INFO;
 
 /*
