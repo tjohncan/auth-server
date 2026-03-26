@@ -479,7 +479,7 @@ async function logout() {
     const keysToRemove = [];
     for (let i = 0; i < localStorage.length; i++) {
         const key = localStorage.key(i);
-        if (key.startsWith('tokens_') || key.startsWith('pkce_')) {
+        if (key.startsWith('tokens_') || key.startsWith('pkce_') || key.startsWith('refresh_lock_')) {
             keysToRemove.push(key);
         }
     }
