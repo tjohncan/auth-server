@@ -102,6 +102,7 @@ Common helper functions.
 - **Data** (`data.c`, `include/util/data.h`) - Hex encoding/decoding utilities used by crypto modules
 - **Validation** (`validation.c`, `include/util/validation.h`) - Input validation for usernames, emails, and code names
 - **JSON** (`json.c`, `include/util/json.h`) - JSON parsing utilities (unescape, get_string, get_int, get_bool)
+- **Email** (`email.c`, `include/util/email.h`) - Non-blocking email delivery via fork+exec (requires `EMAIL_SUPPORT=1`)
 
 ### Crypto Layer (`src/crypto/`)
 Cryptographic primitives for OAuth2 security.
@@ -386,7 +387,8 @@ src/
 │   ├── template.c
 │   ├── data.c
 │   ├── validation.c
-│   └── json.c
+│   ├── json.c
+│   └── email.c
 ├── handlers/           # Endpoints
 │   ├── common.c
 │   ├── health.c
@@ -442,7 +444,8 @@ include/
 │   ├── template.h
 │   ├── data.h
 │   ├── validation.h
-│   └── json.h
+│   ├── json.h
+│   └── email.h
 ├── handlers/
 │   ├── admin.h
 │   ├── session.h
