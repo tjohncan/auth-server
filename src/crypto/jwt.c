@@ -499,6 +499,10 @@ static int ecdsa_der_to_raw(const unsigned char *der_sig, size_t der_len,
     memset(raw_sig, 0, 64);
     int r_len = BN_num_bytes(r);
     int s_len = BN_num_bytes(s);
+    if (r_len > 32 || s_len > 32) {
+        ECDSA_SIG_free(sig);
+        return -1;
+    }
     BN_bn2bin(r, raw_sig + (32 - r_len));
     BN_bn2bin(s, raw_sig + 32 + (32 - s_len));
 
