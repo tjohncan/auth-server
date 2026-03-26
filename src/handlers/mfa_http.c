@@ -85,6 +85,11 @@ HttpResponse *mfa_totp_setup_handler(const HttpRequest *req, const RouteParams *
     HttpResponse *auth_err = require_session(req, db, &session);
     if (auth_err) return auth_err;
 
+    /* If user already has MFA, require completion before enrolling new methods */
+    if (session.user_requires_mfa && !session.mfa_completed) {
+        return response_json_error(403, "MFA verification required");
+    }
+
     /* Parse JSON body */
     if (!req->body) {
         return response_json_error(400, "Request body required");
@@ -187,6 +192,11 @@ HttpResponse *mfa_totp_confirm_handler(const HttpRequest *req, const RouteParams
     oauth_session_info_t session;
     HttpResponse *auth_err = require_session(req, db, &session);
     if (auth_err) return auth_err;
+
+    /* If user already has MFA, require completion before confirming new methods */
+    if (session.user_requires_mfa && !session.mfa_completed) {
+        return response_json_error(403, "MFA verification required");
+    }
 
     /* Parse JSON body */
     if (!req->body) {
