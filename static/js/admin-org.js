@@ -1004,7 +1004,7 @@ function showSecretModal(keyId, secret, entityId, keyType) {
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = `${keyType.replace('_', '-')}-${keyId.substring(0, 8)}.json`;
+        a.download = `${keyType.replace(/_/g, '-')}-${keyId.substring(0, 8)}.json`;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
