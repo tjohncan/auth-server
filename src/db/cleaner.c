@@ -380,7 +380,7 @@ static void vacuum_table(db_handle_t *db, cleaner_config_t *config,
 static void cleaner_init(db_handle_t *db, cleaner_config_t *config) {
     g_num_active_cleaners = 0;
 
-    /* Define all possible static cleaners (14 tables) */
+    /* Define all possible static cleaners (16 entries, 15 tables) */
 #ifdef DB_BACKEND_SQLITE
     #define PK_SUB "rowid"
 #endif
