@@ -669,7 +669,7 @@ int oauth_refresh_access_token(db_handle_t *db,
         return -1;
     }
 
-    /* Begin transaction */
+    /* Step 3: Begin transaction */
     if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
         signing_key_free(signing_key);
         log_error("Failed to begin transaction");
