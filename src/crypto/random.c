@@ -52,15 +52,17 @@ int crypto_random_bytes(void *buffer, size_t length) {
 
 size_t crypto_base64url_encode(const unsigned char *input, size_t input_len,
                               char *output, size_t output_len) {
+    /* Pre-check output buffer: base64url needs ceil(input_len * 4 / 3) + null */
+    size_t required = ((input_len * 4) + 2) / 3 + 1;
+    if (output_len < required) {
+        log_error("Base64url output buffer too small (%zu < %zu)", output_len, required);
+        return 0;
+    }
+
     size_t output_pos = 0;
 
     /* Process 3-byte blocks */
     for (size_t i = 0; i < input_len; i += 3) {
-        /* Need at least 4 bytes in output for each 3-byte input block */
-        if (output_pos + 4 > output_len) {
-            log_error("Base64url output buffer too small");
-            return 0;
-        }
 
         /* Read 3 bytes (or fewer for last block) */
         unsigned char b0 = input[i];

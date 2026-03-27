@@ -16,6 +16,7 @@
 #include "util/log.h"
 #include "util/data.h"
 #include "util/str.h"
+#include "util/validation.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,6 +31,24 @@ static void cleanse_free(char *s) {
         OPENSSL_cleanse(s, strlen(s));
         free(s);
     }
+}
+
+/* RFC 6750 Section 3: Bearer token error response with WWW-Authenticate header.
+ * error_code is NULL for missing auth, or "invalid_token" for bad/expired tokens. */
+static HttpResponse *response_bearer_error(const char *error_code,
+                                            const char *description) {
+    HttpResponse *resp = response_json_error(401, description);
+    if (resp) {
+        if (error_code) {
+            char www_auth[128];
+            snprintf(www_auth, sizeof(www_auth),
+                     "Bearer error=\"%s\"", error_code);
+            http_response_set_header(resp, "WWW-Authenticate", www_auth);
+        } else {
+            http_response_set_header(resp, "WWW-Authenticate", "Bearer");
+        }
+    }
+    return resp;
 }
 
 /* ============================================================================
@@ -105,7 +124,7 @@ static char *form_get_param(const char *body, const char *key) {
  * POST /token
  *
  * OAuth2 token endpoint (RFC 6749 Section 3.2)
- * Supports grant types: authorization_code, refresh_token
+ * Supports grant types: authorization_code, refresh_token, client_credentials
  *
  * Request (authorization_code):
  *   Content-Type: application/x-www-form-urlencoded
@@ -136,20 +155,20 @@ HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params) {
 
     const char *body = req->body;
     if (!body) {
-        return response_json_error(400, "Request body required");
+        return response_oauth_error(400, "invalid_request", "Request body required");
     }
 
     /* Parse grant_type */
     char *grant_type = form_get_param(body, "grant_type");
     if (!grant_type) {
-        return response_json_error(400, "grant_type required");
+        return response_oauth_error(400, "invalid_request", "grant_type parameter is required");
     }
 
     /* Parse client_id */
     char *client_id_str = form_get_param(body, "client_id");
     if (!client_id_str) {
         free(grant_type);
-        return response_json_error(400, "client_id required");
+        return response_oauth_error(400, "invalid_request", "client_id parameter is required");
     }
 
     /* Decode client_id from hex */
@@ -157,7 +176,7 @@ HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params) {
     if (hex_to_bytes(client_id_str, client_id, sizeof(client_id)) != 0) {
         free(grant_type);
         free(client_id_str);
-        return response_json_error(400, "Invalid client_id format");
+        return response_oauth_error(400, "invalid_request", "Invalid client_id format");
     }
     free(client_id_str);
 
@@ -176,7 +195,8 @@ HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params) {
             free(redirect_uri);
             cleanse_free(code_verifier);
             free(resource);
-            return response_json_error(400, "code and redirect_uri required");
+            return response_oauth_error(400, "invalid_request",
+                                         "code and redirect_uri required for authorization_code grant");
         }
 
         oauth_token_response_t token_resp;
@@ -188,13 +208,12 @@ HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params) {
         cleanse_free(code_verifier);
         free(resource);
 
-        if (rc == 1) {
-            /* Replay attack detected - token chain revoked automatically */
+        if (rc != 0) {
+            /* rc == 1: replay attack detected (token chain revoked automatically)
+             * rc <  0: invalid, expired, or malformed authorization code
+             * Same response for both — prevents distinguishing replay from invalid */
             free(grant_type);
-            return response_json_error(400, "Invalid authorization code");
-        } else if (rc != 0) {
-            free(grant_type);
-            return response_json_error(400, "Invalid authorization code");
+            return response_oauth_error(400, "invalid_grant", "Invalid authorization code");
         }
 
         /* Build JSON response */
@@ -225,10 +244,19 @@ HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params) {
 
         if (!refresh_token) {
             free(grant_type);
+            free(scope);
+            free(resource);
+            return response_oauth_error(400, "invalid_request",
+                                         "refresh_token parameter is required");
+        }
+
+        char scope_err[256];
+        if (scope && validate_scope(scope, scope_err, sizeof(scope_err)) != 0) {
+            free(grant_type);
             cleanse_free(refresh_token);
             free(scope);
             free(resource);
-            return response_json_error(400, "refresh_token required");
+            return response_oauth_error(400, "invalid_scope", scope_err);
         }
 
         oauth_token_response_t token_resp;
@@ -238,13 +266,12 @@ HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params) {
         free(scope);
         free(resource);
 
-        if (rc == 1) {
-            /* Replay attack detected - token chain revoked automatically */
+        if (rc != 0) {
+            /* rc == 1: replay attack detected (token chain revoked automatically)
+             * rc <  0: invalid, expired, or malformed refresh token
+             * Same response for both — prevents distinguishing replay from invalid */
             free(grant_type);
-            return response_json_error(400, "Invalid refresh token");
-        } else if (rc != 0) {
-            free(grant_type);
-            return response_json_error(400, "Invalid refresh token");
+            return response_oauth_error(400, "invalid_grant", "Invalid refresh token");
         }
 
         /* Build JSON response */
@@ -281,7 +308,19 @@ HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params) {
             free(client_secret);
             free(scope);
             free(resource);
-            return response_json_error(400, "client_key_id and client_secret required");
+            return response_oauth_error(400, "invalid_request",
+                                         "client_key_id and client_secret required for client_credentials grant");
+        }
+
+        char scope_err[256];
+        if (scope && validate_scope(scope, scope_err, sizeof(scope_err)) != 0) {
+            free(grant_type);
+            free(client_key_id_str);
+            OPENSSL_cleanse(client_secret, strlen(client_secret));
+            free(client_secret);
+            free(scope);
+            free(resource);
+            return response_oauth_error(400, "invalid_scope", scope_err);
         }
 
         /* Parse client_key_id UUID */
@@ -293,7 +332,7 @@ HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params) {
             free(client_secret);
             free(scope);
             free(resource);
-            return response_json_error(400, "Invalid client_key_id format");
+            return response_oauth_error(400, "invalid_request", "Invalid client_key_id format");
         }
         free(client_key_id_str);
 
@@ -313,7 +352,7 @@ HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params) {
 
         if (rc != 0) {
             free(grant_type);
-            return response_json_error(400, "Invalid client credentials");
+            return response_oauth_error(401, "invalid_client", "Client authentication failed");
         }
 
         /* Build JSON response */
@@ -334,7 +373,8 @@ HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params) {
 
     } else {
         free(grant_type);
-        return response_json_error(400, "Unsupported grant_type");
+        return response_oauth_error(400, "unsupported_grant_type",
+                                     "Supported grant types: authorization_code, refresh_token, client_credentials");
     }
 
     free(grant_type);
@@ -469,7 +509,7 @@ HttpResponse *authorize_handler(const HttpRequest *req, const RouteParams *param
     char response_type[64];
     char client_id_str[128];
     char redirect_uri[512];
-    char state[256];
+    char state[512];
 
     if (str_url_decode(response_type, sizeof(response_type), response_type_enc) < 0 ||
         str_url_decode(client_id_str, sizeof(client_id_str), client_id_enc) < 0 ||
@@ -527,6 +567,13 @@ HttpResponse *authorize_handler(const HttpRequest *req, const RouteParams *param
             return response_json_error(400, "Invalid URL encoding in scope parameter");
         }
         free(scope_enc);
+
+        char scope_err[256];
+        if (validate_scope(scope, scope_err, sizeof(scope_err)) != 0) {
+            free(code_challenge_enc);
+            free(code_challenge_method_enc);
+            return response_json_error(400, scope_err);
+        }
     } else {
         scope[0] = '\0';
     }
@@ -946,7 +993,7 @@ HttpResponse *revoke_handler(const HttpRequest *req, const RouteParams *params) 
     if (ct_err) return ct_err;
 
     if (req->method != HTTP_POST) {
-        return response_json_error(405, "Method not allowed");
+        return response_method_not_allowed("POST");
     }
 
     /* Get database connection */
@@ -974,7 +1021,8 @@ HttpResponse *revoke_handler(const HttpRequest *req, const RouteParams *params) 
         if (client_secret) OPENSSL_cleanse(client_secret, strlen(client_secret));
         free(client_secret);
         free(token_type_hint);
-        return response_json_error(400, "token, client_id, client_key_id, and client_secret required");
+        return response_oauth_error(400, "invalid_request",
+                                     "token, client_id, client_key_id, and client_secret required");
     }
 
     /* Parse client_id UUID */
@@ -986,7 +1034,7 @@ HttpResponse *revoke_handler(const HttpRequest *req, const RouteParams *params) 
         OPENSSL_cleanse(client_secret, strlen(client_secret));
         free(client_secret);
         free(token_type_hint);
-        return response_json_error(400, "Invalid client_id format");
+        return response_oauth_error(400, "invalid_request", "Invalid client_id format");
     }
     free(client_id_str);
 
@@ -998,7 +1046,7 @@ HttpResponse *revoke_handler(const HttpRequest *req, const RouteParams *params) 
         OPENSSL_cleanse(client_secret, strlen(client_secret));
         free(client_secret);
         free(token_type_hint);
-        return response_json_error(400, "Invalid client_key_id format");
+        return response_oauth_error(400, "invalid_request", "Invalid client_key_id format");
     }
     free(client_key_id_str);
 
@@ -1075,7 +1123,7 @@ HttpResponse *introspect_handler(const HttpRequest *req, const RouteParams *para
     if (ct_err) return ct_err;
 
     if (req->method != HTTP_POST) {
-        return response_json_error(405, "Method not allowed");
+        return response_method_not_allowed("POST");
     }
 
     /* Get database connection */
@@ -1103,7 +1151,8 @@ HttpResponse *introspect_handler(const HttpRequest *req, const RouteParams *para
         if (resource_server_secret) OPENSSL_cleanse(resource_server_secret, strlen(resource_server_secret));
         free(resource_server_secret);
         free(token_type_hint);
-        return response_json_error(400, "token, resource_server_id, resource_server_key_id, and resource_server_secret required");
+        return response_oauth_error(400, "invalid_request",
+                                     "token, resource_server_id, resource_server_key_id, and resource_server_secret required");
     }
 
     /* Parse resource_server_id UUID */
@@ -1115,7 +1164,7 @@ HttpResponse *introspect_handler(const HttpRequest *req, const RouteParams *para
         OPENSSL_cleanse(resource_server_secret, strlen(resource_server_secret));
         free(resource_server_secret);
         free(token_type_hint);
-        return response_json_error(400, "Invalid resource_server_id format");
+        return response_oauth_error(400, "invalid_request", "Invalid resource_server_id format");
     }
     free(resource_server_id_str);
 
@@ -1127,7 +1176,7 @@ HttpResponse *introspect_handler(const HttpRequest *req, const RouteParams *para
         OPENSSL_cleanse(resource_server_secret, strlen(resource_server_secret));
         free(resource_server_secret);
         free(token_type_hint);
-        return response_json_error(400, "Invalid resource_server_key_id format");
+        return response_oauth_error(400, "invalid_request", "Invalid resource_server_key_id format");
     }
     free(resource_server_key_id_str);
 
@@ -1257,11 +1306,11 @@ HttpResponse *userinfo_handler(const HttpRequest *req, const RouteParams *params
     /* Extract Bearer token from Authorization header */
     const char *auth_header = http_request_get_header(req, "Authorization");
     if (!auth_header || strncmp(auth_header, "Bearer ", 7) != 0) {
-        return response_json_error(401, "Bearer token required");
+        return response_bearer_error(NULL, "Bearer token required");
     }
     const char *token = auth_header + 7;
     if (*token == '\0') {
-        return response_json_error(401, "Bearer token required");
+        return response_bearer_error(NULL, "Bearer token required");
     }
 
     /* Get signing keys for JWT verification */
@@ -1282,24 +1331,24 @@ HttpResponse *userinfo_handler(const HttpRequest *req, const RouteParams *params
     if (jwt_decode_es256(token, key->current_public_key,
                          key->prior_public_key, &claims) != 0) {
         signing_key_free(key);
-        return response_json_error(401, "Invalid or expired token");
+        return response_bearer_error("invalid_token", "Invalid or expired token");
     }
     signing_key_free(key);
 
     /* Extract user UUID from sub claim */
     if (claims.sub[0] == '\0') {
-        return response_json_error(401, "Token has no subject");
+        return response_bearer_error("invalid_token", "Token has no subject");
     }
 
     unsigned char user_id[16];
     if (hex_to_bytes(claims.sub, user_id, 16) != 0) {
-        return response_json_error(401, "Invalid subject in token");
+        return response_bearer_error("invalid_token", "Invalid subject in token");
     }
 
     /* Look up user profile */
     user_userinfo_t info;
     if (user_get_userinfo_by_id(db, user_id, &info) != 0) {
-        return response_json_error(401, "User not found");
+        return response_bearer_error("invalid_token", "User not found");
     }
 
     /* Build JSON response */

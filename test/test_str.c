@@ -1,4 +1,5 @@
 #include "util/str.h"
+#include "util/json.h"
 #include "util/log.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -116,6 +117,113 @@ void test_str_url_encode_decode(void) {
     printf("Decode '%s' -> '%s' (%d bytes)\n", encoded, decoded, dec_len);
 }
 
+void test_str_html_escape(void) {
+    printf("\n=== Testing str_html_escape ===\n\n");
+
+    char buf[256];
+    size_t written;
+
+    /* All five entity escapes */
+    written = str_html_escape(buf, sizeof(buf), "&<>\"'");
+    assert(written > 0);
+    assert(strcmp(buf, "&amp;&lt;&gt;&quot;&#39;") == 0);
+    printf("Escaped '&<>\"\\'' -> '%s' (%zu bytes)\n", buf, written);
+
+    /* Safe text passes through unchanged */
+    written = str_html_escape(buf, sizeof(buf), "Hello World 123");
+    assert(written > 0);
+    assert(strcmp(buf, "Hello World 123") == 0);
+    printf("Escaped 'Hello World 123' -> '%s'\n", buf);
+
+    /* Mixed content */
+    written = str_html_escape(buf, sizeof(buf), "<script>alert('xss')</script>");
+    assert(written > 0);
+    assert(strcmp(buf, "&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;") == 0);
+    printf("Escaped XSS payload -> '%s'\n", buf);
+
+    /* Buffer too small returns 0 and null-terminates */
+    written = str_html_escape(buf, 5, "&<>");
+    assert(written == 0);
+    assert(buf[0] == '\0');
+    printf("Buffer too small (first char): returned %zu, null-terminated\n", written);
+
+    /* Partial write then truncation: 'a' fits, '&' doesn't */
+    written = str_html_escape(buf, 4, "a&b");
+    assert(written == 0);
+    assert(buf[0] == 'a');
+    assert(buf[1] == '\0');
+    printf("Buffer too small (mid-string): partial 'a' + null-terminated\n");
+
+    /* Empty string */
+    written = str_html_escape(buf, sizeof(buf), "");
+    assert(strcmp(buf, "") == 0);
+    printf("Empty string: '%s' (%zu bytes)\n", buf, written);
+}
+
+void test_json_escape(void) {
+    printf("\n=== Testing json_escape ===\n\n");
+
+    char buf[256];
+    size_t written;
+
+    /* Quotes and backslash */
+    written = json_escape(buf, sizeof(buf), "say \"hello\\world\"");
+    assert(written > 0);
+    assert(strcmp(buf, "say \\\"hello\\\\world\\\"") == 0);
+    printf("Escaped quotes/backslash -> '%s'\n", buf);
+
+    /* Control characters */
+    written = json_escape(buf, sizeof(buf), "line1\tline2\nline3");
+    assert(written > 0);
+    assert(strcmp(buf, "line1\\tline2\\nline3") == 0);
+    printf("Escaped control chars -> '%s'\n", buf);
+
+    /* Low control char (0x01) gets \u0001 */
+    written = json_escape(buf, sizeof(buf), "\x01");
+    assert(written > 0);
+    assert(strcmp(buf, "\\u0001") == 0);
+    printf("Escaped 0x01 -> '%s'\n", buf);
+
+    /* Safe text passes through */
+    written = json_escape(buf, sizeof(buf), "abc 123");
+    assert(written > 0);
+    assert(strcmp(buf, "abc 123") == 0);
+    printf("Safe text unchanged: '%s'\n", buf);
+}
+
+void test_json_unescape(void) {
+    printf("\n=== Testing json_unescape ===\n\n");
+
+    char buf[256];
+
+    /* Standard escapes */
+    strcpy(buf, "say \\\"hello\\\\world\\\"");
+    json_unescape(buf);
+    assert(strcmp(buf, "say \"hello\\world\"") == 0);
+    printf("Unescaped quotes/backslash -> '%s'\n", buf);
+
+    /* Tab and newline */
+    strcpy(buf, "col1\\tcol2\\nrow2");
+    json_unescape(buf);
+    assert(strcmp(buf, "col1\tcol2\nrow2") == 0);
+    printf("Unescaped \\t and \\n -> (contains tab and newline)\n");
+
+    /* \\uXXXX for printable ASCII */
+    strcpy(buf, "\\u003Cscript\\u003E");
+    json_unescape(buf);
+    assert(strcmp(buf, "<script>") == 0);
+    printf("Unescaped \\u003C/\\u003E -> '%s'\n", buf);
+
+    /* Round-trip: escape then unescape */
+    char escaped[256];
+    json_escape(escaped, sizeof(escaped), "He said \"hi\" & <bye>");
+    strcpy(buf, escaped);
+    json_unescape(buf);
+    assert(strcmp(buf, "He said \"hi\" & <bye>") == 0);
+    printf("Round-trip: '%s' -> escape -> unescape -> '%s'\n",
+           "He said \"hi\" & <bye>", buf);
+}
+
 int main(void) {
     log_init(LOG_INFO);
     log_info("TESTING - String Utilities");
@@ -125,6 +233,9 @@ int main(void) {
     test_str_split();
     test_str_url_encode_decode();
     test_memmem_nocase();
+    test_str_html_escape();
+    test_json_escape();
+    test_json_unescape();
 
     printf("\n=== All tests complete ===\n");
 

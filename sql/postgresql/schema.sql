@@ -472,7 +472,7 @@ create table session.refresh_token (
 , token text not null
 , scopes text
 , issued_at timestamp not null
-, expected_expiry timestamp not null
+, expected_expiry timestamp
 , is_exchanged boolean not null default false
 , exchanged_at timestamp
 , is_revoked boolean not null default false
@@ -746,6 +746,9 @@ create index idx_access_token_expected_expiry
 
 create index idx_refresh_token_expected_expiry
   on session.refresh_token(expected_expiry);
+
+create index idx_refresh_token_revoked_cleanup
+  on session.refresh_token(is_revoked, revoked_at);
 
 create index idx_passwordless_login_token_expected_expiry
   on session.passwordless_login_token(expected_expiry);

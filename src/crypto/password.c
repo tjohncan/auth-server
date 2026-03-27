@@ -64,15 +64,15 @@ int crypto_password_hash(const char *password, size_t password_len,
         return -1;
     }
 
-    if ((int)password_len < g_password_min_length) {
-        log_info("Password rejected: length %zu below minimum %d",
-                 password_len, g_password_min_length);
-        return -2;
-    }
-
     if (password_len > PASSWORD_MAX_LENGTH) {
         log_info("Password rejected: length %zu exceeds maximum %d",
                  password_len, PASSWORD_MAX_LENGTH);
+        return -2;
+    }
+
+    if ((int)password_len < g_password_min_length) {
+        log_info("Password rejected: length %zu below minimum %d",
+                 password_len, g_password_min_length);
         return -2;
     }
 

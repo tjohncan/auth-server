@@ -76,8 +76,8 @@
  * INTERVAL_SECONDS(expr) creates a relative time offset from now.
  * DAYS_AGO(n) creates a timestamp N days in the past (for cleanup queries).
  * SECONDS_AGO(n) creates a timestamp N seconds in the past (for rate limiting, etc.).
- *   Note: n must be a string literal or char array, not an integer.
- *   Example: DAYS_AGO("90") or with snprintf: sprintf(buf, "%d", days); DAYS_AGO(buf)
+ *   Note: n must be a string literal (compile-time concatenation).
+ *   Example: DAYS_AGO("90")
  */
 
 #ifdef DB_BACKEND_SQLITE

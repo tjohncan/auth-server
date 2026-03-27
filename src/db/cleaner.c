@@ -380,7 +380,7 @@ static void vacuum_table(db_handle_t *db, cleaner_config_t *config,
 static void cleaner_init(db_handle_t *db, cleaner_config_t *config) {
     g_num_active_cleaners = 0;
 
-    /* Define all possible static cleaners (14 tables) */
+    /* Define all possible static cleaners (16 entries, 15 tables) */
 #ifdef DB_BACKEND_SQLITE
     #define PK_SUB "rowid"
 #endif
@@ -405,6 +405,13 @@ static void cleaner_init(db_handle_t *db, cleaner_config_t *config) {
         {TBL_ACCESS_TOKEN, "Access tokens", "id", "expected_expiry", NULL,
          config->retention_tokens_grace_days, 1, 0},
         {TBL_REFRESH_TOKEN, "Refresh tokens", "id", "expected_expiry",
+         " AND NOT EXISTS (SELECT 1 FROM " TBL_REFRESH_TOKEN " AS X "
+         " WHERE X.origin_refresh_token_id = " TBL_REFRESH_TOKEN ".id) "
+         " AND NOT EXISTS (SELECT 1 FROM " TBL_ACCESS_TOKEN
+         " WHERE refresh_token_id = " TBL_REFRESH_TOKEN ".id)",
+         config->retention_tokens_grace_days, 1, 0},
+        {TBL_REFRESH_TOKEN, "Refresh tokens (revoked)", "id", "revoked_at",
+         " AND is_revoked = " BOOL_TRUE
          " AND NOT EXISTS (SELECT 1 FROM " TBL_REFRESH_TOKEN " AS X "
          " WHERE X.origin_refresh_token_id = " TBL_REFRESH_TOKEN ".id) "
          " AND NOT EXISTS (SELECT 1 FROM " TBL_ACCESS_TOKEN

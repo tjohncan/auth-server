@@ -241,6 +241,7 @@ input.input-narrow { width: 100px; }
 .modal-actions-end {
     display: flex;
     justify-content: flex-end;
+    gap: 10px;
 }
 
 .btn-modal {
@@ -333,6 +334,15 @@ input.input-narrow { width: 100px; }
 .duration-custom::-webkit-outer-spin-button {
     -webkit-appearance: none;
     margin: 0;
+}
+
+.flex-wrap-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+.flex-wrap-actions > :last-child {
+    margin-left: auto;
 }
 
 .duration-custom {

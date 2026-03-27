@@ -5,7 +5,7 @@ Drop-in JavaScript library for OAuth2 authorization code flow with PKCE (S256).
 ## Features
 
 - Full PKCE (Proof Key for Code Exchange) support with S256
-- Automatic token storage in localStorage
+- Automatic token storage (localStorage default, configurable)
 - Automatic token refresh with proactive scheduling
 - Transparent 401 retry with fresh tokens
 - Concurrent refresh de-duplication
@@ -102,6 +102,7 @@ new OAuthClient(config)
 - `config.refreshBufferSeconds` (number, optional) - Seconds before expiry to trigger proactive refresh (default: `60`)
 - `config.onSessionExpired` (function, optional) - Called when session cannot be recovered (refresh token expired or revoked)
 - `config.onTokenRefresh` (function, optional) - Called after successful token refresh with new token data
+- `config.tokenStorage` (string, optional) - Token storage: `'local'` (default, cross-tab) or `'session'` (per-tab, disables cross-tab coordination)
 
 ### Methods
 
@@ -189,7 +190,7 @@ const response = await client.fetchWithToken('/api/resource', {
 
 #### `getTokens()`
 
-Retrieves stored tokens from localStorage.
+Retrieves stored tokens from configured storage backend.
 
 ```javascript
 const tokens = client.getTokens();
@@ -201,7 +202,7 @@ const tokens = client.getTokens();
 
 #### `storeTokens(tokens)`
 
-Stores tokens in localStorage.
+Stores tokens in configured storage backend.
 
 ```javascript
 client.storeTokens({
@@ -264,8 +265,9 @@ The auth server issues a new refresh token with each refresh response (token rot
 
 The library stores data in browser storage using these keys:
 
-**localStorage:**
+**Token storage** (localStorage by default, configurable via `tokenStorage`):
 - `tokens_{clientId}` - Access and refresh tokens with expiration
+- `refresh_lock_{clientId}` - Cross-tab refresh coordination lock
 
 **sessionStorage:**
 - `pkce_{clientId}` - PKCE code verifier (temporary, cleared after token exchange)
@@ -280,7 +282,7 @@ See `admin.html` and `callback.html` in this repository for a complete working e
 - **HTTPS Required:** Always use HTTPS in production to prevent token interception
 - **PKCE Protection:** Implements PKCE S256 (RFC 7636) required for public clients - prevents authorization code interception attacks
 - **CSRF Protection:** Uses cryptographic random state parameter combined with client_id binding - prevents cross-site request forgery attacks on the callback endpoint
-- **Token Storage:** Tokens stored in localStorage (vulnerable to XSS - ensure your app sanitizes all user input)
+- **Token Storage:** Tokens stored in localStorage by default for cross-tab coordination. Pass `tokenStorage: 'session'` for per-tab isolation if your app doesn't need multi-tab support. localStorage is vulnerable to XSS — enforce a strict Content-Security-Policy (`script-src 'self'`) to mitigate
 - **Token Rotation:** Auth server issues new refresh tokens on each use, preventing replay of stolen refresh tokens
 - **Session Cookies:** Auth server enforces `HttpOnly` session cookies which JavaScript cannot access (prevents XSS token theft)
 

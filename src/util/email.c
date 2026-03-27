@@ -10,6 +10,7 @@
 #include <time.h>
 #include <openssl/crypto.h>
 #include <sys/wait.h>
+#include <errno.h>
 
 #define EMAIL_TIMEOUT_SECONDS 30
 
@@ -115,15 +116,21 @@ int email_send(const config_t *config,
 
     /* Child: write payload to grandchild's stdin */
     close(pipefd[0]);
-    if (write(pipefd[1], jb->buf, jb->len) < 0) {
-        sub_log("[WARN] Failed to write email payload to pipe");
+    size_t written = 0;
+    while (written < jb->len) {
+        ssize_t n = write(pipefd[1], jb->buf + written, jb->len - written);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            sub_log("[WARN] Failed to write email payload to pipe");
+            break;
+        }
+        written += (size_t)n;
     }
     close(pipefd[1]);
 
-    /* Payload no longer needed — cleanse before waiting */
+    /* Cleanse payload — skip free() to avoid potential deadlock after fork()
+     * (malloc mutex may be held by another thread). _exit() reclaims all memory. */
     OPENSSL_cleanse(jb->buf, jb->len);
-    jsonbuf_free(jb);
-    jb = NULL;
 
     /* Wait for grandchild with timeout */
     time_t deadline = time(NULL) + EMAIL_TIMEOUT_SECONDS;

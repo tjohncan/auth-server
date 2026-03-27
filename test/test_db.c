@@ -181,7 +181,85 @@ int main(void) {
     db_finalize(stmt);
     log_info("Prepared statement tests passed!");
 
-    /* TODO: Add tests for db_bind_int(), db_bind_int64(), db_bind_blob(), db_bind_null(), and unbound parameter detection */
+    /* Test bind/column for all parameter types via SELECT passthrough */
+    log_info("\nTesting bind/column types...");
+
+    const char *type_sql =
+        "SELECT " P"1, " P"2, " P"3, " P"4";
+
+    db_stmt_t *type_stmt = NULL;
+    result = db_prepare(db, &type_stmt, type_sql);
+    if (result != 0) {
+        log_error("Prepare type test failed: %s", db_error(db));
+        db_disconnect(db);
+        config_free(config);
+        return 1;
+    }
+
+    /* Bind: int, int64, blob, null */
+    db_bind_int(type_stmt, 1, 7777777);
+    db_bind_int64(type_stmt, 2, 631411200000LL);
+    unsigned char test_blob[] = {0xDA, 0xDA};
+    db_bind_blob(type_stmt, 3, test_blob, sizeof(test_blob));
+    db_bind_null(type_stmt, 4);
+
+    result = db_step(type_stmt);
+    if (result != DB_ROW) {
+        log_error("Type test: expected row, got %d", result);
+        db_finalize(type_stmt);
+        db_disconnect(db);
+        config_free(config);
+        return 1;
+    }
+
+    /* Verify int */
+    int int_val = db_column_int(type_stmt, 0);
+    if (int_val != 7777777) {
+        log_error("Type test: int expected 7777777, got %d", int_val);
+        db_finalize(type_stmt);
+        db_disconnect(db);
+        config_free(config);
+        return 1;
+    }
+    log_info("  int:   %d (OK)", int_val);
+
+    /* Verify int64 */
+    long long int64_val = db_column_int64(type_stmt, 1);
+    if (int64_val != 631411200000LL) {
+        log_error("Type test: int64 expected 631411200000, got %lld", int64_val);
+        db_finalize(type_stmt);
+        db_disconnect(db);
+        config_free(config);
+        return 1;
+    }
+    log_info("  int64: %lld (OK)", int64_val);
+
+    /* Verify blob */
+    const unsigned char *blob_val = db_column_blob(type_stmt, 2);
+    int blob_len = db_column_bytes(type_stmt, 2);
+    if (!blob_val || blob_len != 2 ||
+        blob_val[0] != 0xDA || blob_val[1] != 0xDA) {
+        log_error("Type test: blob mismatch (len=%d)", blob_len);
+        db_finalize(type_stmt);
+        db_disconnect(db);
+        config_free(config);
+        return 1;
+    }
+    log_info("  blob:  0xDADA (%d bytes) (OK)", blob_len);
+
+    /* Verify null */
+    int null_type = db_column_type(type_stmt, 3);
+    if (null_type != DB_NULL) {
+        log_error("Type test: expected NULL type (%d), got %d", DB_NULL, null_type);
+        db_finalize(type_stmt);
+        db_disconnect(db);
+        config_free(config);
+        return 1;
+    }
+    log_info("  null:  (OK)");
+
+    db_finalize(type_stmt);
+    log_info("Bind/column type tests passed!");
 
     /* Disconnect */
     log_info("\nDisconnecting...");

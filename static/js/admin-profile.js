@@ -206,12 +206,12 @@ async function loadEmails() {
 
                 html += `
                     <div class="list-item">
-                        <div class="flex-between">
-                            <div class="no-shrink">
+                        <div class="flex-between flex-wrap-actions">
+                            <div>
                                 <strong>${escapeHtml(email.email_address)}</strong>${primaryBadge}
                                 <span class="ml-md">${verifiedBadge}</span>
                             </div>
-                            <div class="nowrap ml-md">
+                            <div class="nowrap">
                                 ${buttons}
                             </div>
                         </div>
@@ -584,9 +584,13 @@ function showMFARecoveryCodes(codes, title) {
     `);
 
     document.getElementById('copyCodesBtn').addEventListener('click', () => {
-        navigator.clipboard.writeText(codes.join('\n'));
-        document.getElementById('copyCodesBtn').textContent = 'Copied!';
-        setTimeout(() => { document.getElementById('copyCodesBtn').textContent = 'Copy All'; }, 2000);
+        navigator.clipboard.writeText(codes.join('\n')).then(() => {
+            document.getElementById('copyCodesBtn').textContent = 'Copied!';
+            setTimeout(() => { document.getElementById('copyCodesBtn').textContent = 'Copy All'; }, 2000);
+        }).catch(() => {
+            document.getElementById('copyCodesBtn').textContent = 'Failed.';
+            setTimeout(() => { document.getElementById('copyCodesBtn').textContent = 'Copy All'; }, 2000);
+        });
     });
 
     document.getElementById('doneBtn').addEventListener('click', async () => {

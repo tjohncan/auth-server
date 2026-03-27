@@ -12,6 +12,7 @@ FROM=$(field from)
 FROM_NAME=$(field from_name)
 SUBJECT=$(field subject)
 BODY_HTML=$(field body_html)
+BODY_TEXT=$(field body_text)
 
 SENDER="$FROM"
 [ -n "$FROM_NAME" ] && SENDER="$FROM_NAME <$FROM>"
@@ -19,7 +20,8 @@ SENDER="$FROM"
 MSG=$(jq -n \
   --arg subj "$SUBJECT" \
   --arg html "$BODY_HTML" \
-  '{Subject:{Data:$subj,Charset:"UTF-8"},Body:{Html:{Data:$html,Charset:"UTF-8"}}}')
+  --arg text "$BODY_TEXT" \
+  '{Subject:{Data:$subj,Charset:"UTF-8"},Body:{Html:{Data:$html,Charset:"UTF-8"},Text:{Data:$text,Charset:"UTF-8"}}}')
 
 aws ses send-email \
   --from "$SENDER" \

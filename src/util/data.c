@@ -34,8 +34,11 @@ int hex_to_bytes(const char *hex, unsigned char *bytes, size_t byte_len) {
     char stripped[513];
     size_t j = 0;
 
-    for (size_t i = 0; hex[i] && j < byte_len * 2; i++) {
+    for (size_t i = 0; hex[i]; i++) {
         if (hex[i] != '-') {
+            if (j >= byte_len * 2) {
+                return -1;  /* Trailing input after expected hex */
+            }
             stripped[j++] = hex[i];
         }
     }

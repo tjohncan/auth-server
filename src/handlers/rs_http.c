@@ -7,6 +7,7 @@
 #include "util/data.h"
 #include "util/json.h"
 #include "util/config.h"
+#include "util/validation.h"
 #ifdef EMAIL_SUPPORT
 #include "util/email.h"
 #include "util/template.h"
@@ -16,8 +17,6 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
-
-extern const config_t *g_config;
 
 /* ============================================================================
  * RS Key Auth Helper
@@ -143,7 +142,7 @@ HttpResponse *rs_provision_user_handler(const HttpRequest *req,
     (void)params;
 
     if (req->method != HTTP_POST)
-        return response_json_error(405, "Method not allowed");
+        return response_method_not_allowed("POST");
 
     rs_auth_t auth;
     HttpResponse *err = rs_authenticate(req, "rs_provision_user", &auth);
@@ -155,6 +154,16 @@ HttpResponse *rs_provision_user_handler(const HttpRequest *req,
 
     if (!username && !email) {
         return response_json_error(400, "username and/or email required");
+    }
+
+    char validation_error[256];
+    if (username && validate_username(username, validation_error, sizeof(validation_error)) != 0) {
+        free(username); free(email);
+        return response_json_error(400, validation_error);
+    }
+    if (email && validate_email(email, validation_error, sizeof(validation_error)) != 0) {
+        free(username); free(email);
+        return response_json_error(400, validation_error);
     }
 
     rs_user_info_t info = {0};
@@ -205,9 +214,9 @@ HttpResponse *rs_provision_user_handler(const HttpRequest *req,
                 email_send(g_config, email, "Set up your account",
                            body_text, body_html);
 
-            OPENSSL_cleanse(body_text, body_text ? strlen(body_text) : 0);
+            if (body_text) OPENSSL_cleanse(body_text, strlen(body_text));
             free(body_text);
-            OPENSSL_cleanse(body_html, body_html ? strlen(body_html) : 0);
+            if (body_html) OPENSSL_cleanse(body_html, strlen(body_html));
             free(body_html);
         }
 #endif
@@ -282,7 +291,7 @@ HttpResponse *rs_link_client_user_handler(const HttpRequest *req,
     (void)params;
 
     if (req->method != HTTP_POST)
-        return response_json_error(405, "Method not allowed");
+        return response_method_not_allowed("POST");
 
     rs_auth_t auth;
     HttpResponse *err = rs_authenticate(req, "rs_link_client_user", &auth);
@@ -326,7 +335,7 @@ HttpResponse *rs_unlink_client_user_handler(const HttpRequest *req,
     (void)params;
 
     if (req->method != HTTP_DELETE)
-        return response_json_error(405, "Method not allowed");
+        return response_method_not_allowed("DELETE");
 
     rs_auth_t auth;
     HttpResponse *err = rs_authenticate(req, "rs_unlink_client_user", &auth);

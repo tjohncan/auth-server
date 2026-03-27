@@ -60,7 +60,7 @@ void oauth_authorize_response_free(oauth_authorize_response_t *resp);
  *   redirect_uri    - Redirect URI (must be registered for client)
  *   scope           - Requested scopes (optional, space-separated)
  *   code_challenge  - PKCE code challenge (optional for confidential, required for public)
- *   code_challenge_method - PKCE method: "plain" or "S256" (NULL if no PKCE)
+ *   code_challenge_method - PKCE method: "S256" (NULL if no PKCE)
  *   state           - State parameter from client (CSRF protection, optional)
  *   session_token   - Browser session token from cookie
  *   out_response    - Output: Authorization response (caller must free)

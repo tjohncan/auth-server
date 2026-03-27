@@ -6,6 +6,9 @@
 #include <openssl/crypto.h>
 #include <string.h>
 
+/* Cached EVP_MAC — fetched once, reused for all HMAC operations (thread-safe) */
+static EVP_MAC *g_mac = NULL;
+
 /*
  * Compute HMAC using EVP_MAC API (OpenSSL 3.0+)
  * Internal helper — callers use crypto_hmac_sha256 / crypto_hmac_sha1
@@ -14,14 +17,13 @@ static int hmac_compute(const char *digest,
                         const unsigned char *key, size_t key_len,
                         const unsigned char *data, size_t data_len,
                         unsigned char *out, size_t out_size, size_t *out_len) {
-    EVP_MAC *mac = EVP_MAC_fetch(NULL, "HMAC", NULL);
-    if (!mac) return -1;
-
-    EVP_MAC_CTX *ctx = EVP_MAC_CTX_new(mac);
-    if (!ctx) {
-        EVP_MAC_free(mac);
-        return -1;
+    if (!g_mac) {
+        g_mac = EVP_MAC_fetch(NULL, "HMAC", NULL);
+        if (!g_mac) return -1;
     }
+
+    EVP_MAC_CTX *ctx = EVP_MAC_CTX_new(g_mac);
+    if (!ctx) return -1;
 
     OSSL_PARAM params[] = {
         OSSL_PARAM_construct_utf8_string("digest", (char *)digest, 0),
@@ -36,7 +38,6 @@ static int hmac_compute(const char *digest,
     }
 
     EVP_MAC_CTX_free(ctx);
-    EVP_MAC_free(mac);
     return rc;
 }
 
@@ -122,4 +123,11 @@ int crypto_hmac_compare(const unsigned char *hmac1, const unsigned char *hmac2, 
 
     /* Constant-time comparison */
     return CRYPTO_memcmp(hmac1, hmac2, len) == 0 ? 1 : 0;
+}
+
+void crypto_hmac_cleanup(void) {
+    if (g_mac) {
+        EVP_MAC_free(g_mac);
+        g_mac = NULL;
+    }
 }

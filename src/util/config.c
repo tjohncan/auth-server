@@ -18,6 +18,7 @@
 
 /* Invitation token default (not gated by EMAIL_SUPPORT) */
 #define DEFAULT_INVITATION_TOKEN_TTL_SECONDS 259200  /* 72 hours */
+#define DEFAULT_SESSION_TTL_SECONDS (7 * 24 * 3600)  /* 7 days */
 
 /* Default values */
 #define DEFAULT_HOST "localhost"
@@ -435,6 +436,17 @@ static void set_config_value(config_t *config, const char *key, const char *valu
                     value, config->invitation_token_ttl_seconds);
         } else {
             config->invitation_token_ttl_seconds = ttl;
+        }
+    }
+
+    /* Browser session TTL */
+    else if (strcmp(key, "session_ttl_seconds") == 0) {
+        int ttl = 0;
+        if (parse_int(value, &ttl) != 0 || ttl < 60) {
+            log_warn("Invalid session_ttl_seconds '%s', must be >= 60. Keeping current: %d",
+                    value, config->session_ttl_seconds);
+        } else {
+            config->session_ttl_seconds = ttl;
         }
     }
 
@@ -1048,6 +1060,9 @@ config_t *config_load(const char *config_file) {
     /* Invitation token TTL */
     config->invitation_token_ttl_seconds = DEFAULT_INVITATION_TOKEN_TTL_SECONDS;
 
+    /* Browser session TTL */
+    config->session_ttl_seconds = DEFAULT_SESSION_TTL_SECONDS;
+
     /* Database cleaner defaults */
     config->cleaner_enabled = DEFAULT_CLEANER_ENABLED;
     config->cleaner_interval_seconds = DEFAULT_CLEANER_INTERVAL_SECONDS;
@@ -1115,9 +1130,8 @@ config_t *config_load(const char *config_file) {
 
         /* Remove newline */
         size_t len = strlen(line);
-        if (len > 0 && line[len - 1] == '\n') {
-            line[len - 1] = '\0';
-        }
+        if (len > 0 && line[len - 1] == '\n') line[--len] = '\0';
+        if (len > 0 && line[len - 1] == '\r') line[--len] = '\0';
 
         /* Trim whitespace */
         trim(line);

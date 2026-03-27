@@ -114,9 +114,6 @@ HttpResponse *admin_bootstrap_handler(const HttpRequest *req, const RouteParams 
         goto cleanup;
     }
 
-    /* Get config from global context */
-    extern const config_t *g_config;
-
     /* Check if organization already exists (409 Conflict) */
     int org_ex = org_exists(db, org_code_name);
     if (org_ex < 0) {
@@ -194,50 +191,46 @@ HttpResponse *admin_create_organization_handler(const HttpRequest *req, const Ro
         return response_json_error(400, "Request body required");
     }
 
+    HttpResponse *resp = NULL;
     char *code_name = json_get_string(req->body, "code_name");
     char *display_name = json_get_string(req->body, "display_name");
     char *note = json_get_string(req->body, "note");
 
     /* Validate required fields */
     if (!code_name || !*code_name || !display_name || !*display_name) {
-        free(code_name);
-        free(display_name);
-        free(note);
-        return response_json_error(400, "code_name and display_name are required");
+        resp = response_json_error(400, "code_name and display_name are required");
+        goto cleanup;
     }
 
     /* Validate input formats */
     char validation_error[256];
 
     if (validate_code_name(code_name, validation_error, sizeof(validation_error)) != 0) {
-        free(code_name);
-        free(display_name);
-        free(note);
-        return response_json_error(400, validation_error);
+        resp = response_json_error(400, validation_error);
+        goto cleanup;
     }
 
     if (validate_display_name(display_name, validation_error, sizeof(validation_error)) != 0) {
-        free(code_name);
-        free(display_name);
-        free(note);
-        return response_json_error(400, validation_error);
+        resp = response_json_error(400, validation_error);
+        goto cleanup;
     }
 
     if (validate_note(note, validation_error, sizeof(validation_error)) != 0) {
-        free(code_name);
-        free(display_name);
-        free(note);
-        return response_json_error(400, validation_error);
+        resp = response_json_error(400, validation_error);
+        goto cleanup;
     }
 
     /* Call handler */
-    int result = admin_create_organization(db, code_name, display_name, note);
+    unsigned char org_id[16];
+    int result = admin_create_organization(db, code_name, display_name, note, org_id);
 
     /* Build response */
-    HttpResponse *resp;
     if (result == 0) {
+        char org_id_hex[33];
+        bytes_to_hex(org_id, 16, org_id_hex, sizeof(org_id_hex));
+
         JsonBuf *jb = jsonbuf_new(2048);
-        jsonbuf_appendf(jb, "{\"code_name\":\"");
+        jsonbuf_appendf(jb, "{\"organization_id\":\"%s\",\"code_name\":\"", org_id_hex);
         jsonbuf_append_escaped(jb, code_name);
         jsonbuf_appendf(jb, "\",\"display_name\":\"");
         jsonbuf_append_escaped(jb, display_name);
@@ -247,11 +240,10 @@ HttpResponse *admin_create_organization_handler(const HttpRequest *req, const Ro
         resp = response_json_error(409, "Organization already exists or creation failed");
     }
 
-    /* Clean up */
+cleanup:
     free(code_name);
     free(display_name);
     free(note);
-
     return resp;
 }
 
@@ -280,42 +272,33 @@ HttpResponse *admin_create_user_handler(const HttpRequest *req, const RouteParam
         return response_json_error(400, "Request body required");
     }
 
+    HttpResponse *resp = NULL;
     char *username = json_get_string(req->body, "username");
     char *email = json_get_string(req->body, "email");
     char *password = json_get_string(req->body, "password");
 
     /* Validate required fields */
     if (!password) {
-        free(username);
-        free(email);
-        return response_json_error(400, "password is required");
+        resp = response_json_error(400, "password is required");
+        goto cleanup;
     }
 
     if (!username && !email) {
-        free(username);
-        free(email);
-        OPENSSL_cleanse(password, strlen(password));
-        free(password);
-        return response_json_error(400, "At least one of username or email is required");
+        resp = response_json_error(400, "At least one of username or email is required");
+        goto cleanup;
     }
 
     /* Validate input formats */
     char validation_error[256];
 
     if (username && validate_username(username, validation_error, sizeof(validation_error)) != 0) {
-        free(username);
-        free(email);
-        OPENSSL_cleanse(password, strlen(password));
-        free(password);
-        return response_json_error(400, validation_error);
+        resp = response_json_error(400, validation_error);
+        goto cleanup;
     }
 
     if (email && validate_email(email, validation_error, sizeof(validation_error)) != 0) {
-        free(username);
-        free(email);
-        OPENSSL_cleanse(password, strlen(password));
-        free(password);
-        return response_json_error(400, validation_error);
+        resp = response_json_error(400, validation_error);
+        goto cleanup;
     }
 
     /* Call handler */
@@ -323,7 +306,6 @@ HttpResponse *admin_create_user_handler(const HttpRequest *req, const RouteParam
     int result = admin_create_user(db, username, email, password, user_id);
 
     /* Build response */
-    HttpResponse *resp;
     if (result == 0) {
         char user_id_hex[33];
         bytes_to_hex(user_id, 16, user_id_hex, sizeof(user_id_hex));
@@ -348,12 +330,11 @@ HttpResponse *admin_create_user_handler(const HttpRequest *req, const RouteParam
         resp = response_json_error(409, "User already exists or creation failed");
     }
 
-    /* Clean up */
+cleanup:
     free(username);
     free(email);
-    OPENSSL_cleanse(password, strlen(password));
+    if (password) OPENSSL_cleanse(password, strlen(password));
     free(password);
-
     return resp;
 }
 
@@ -382,44 +363,40 @@ HttpResponse *admin_make_org_admin_handler(const HttpRequest *req, const RoutePa
         return response_json_error(400, "Request body required");
     }
 
+    HttpResponse *resp = NULL;
     char *username = json_get_string(req->body, "username");
     char *org_code_name = json_get_string(req->body, "org_code_name");
 
     /* Validate required fields */
     if (!username || !org_code_name) {
-        free(username);
-        free(org_code_name);
-        return response_json_error(400, "username and org_code_name are required");
+        resp = response_json_error(400, "username and org_code_name are required");
+        goto cleanup;
     }
 
     /* Validate input formats */
     char validation_error[256];
 
     if (validate_username(username, validation_error, sizeof(validation_error)) != 0) {
-        free(username);
-        free(org_code_name);
-        return response_json_error(400, validation_error);
+        resp = response_json_error(400, validation_error);
+        goto cleanup;
     }
 
     if (validate_code_name(org_code_name, validation_error, sizeof(validation_error)) != 0) {
-        free(username);
-        free(org_code_name);
-        return response_json_error(400, validation_error);
+        resp = response_json_error(400, validation_error);
+        goto cleanup;
     }
 
     /* Look up user by username to get user_id */
     unsigned char user_id[16];
     if (user_lookup_id_by_username(db, username, user_id) != 0) {
-        free(username);
-        free(org_code_name);
-        return response_json_error(404, "User not found");
+        resp = response_json_error(404, "User not found");
+        goto cleanup;
     }
 
     /* Call handler */
     int result = admin_make_org_admin(db, user_id, org_code_name);
 
     /* Build response */
-    HttpResponse *resp;
     if (result == 0) {
         char user_id_hex[33];
         bytes_to_hex(user_id, 16, user_id_hex, sizeof(user_id_hex));
@@ -435,10 +412,9 @@ HttpResponse *admin_make_org_admin_handler(const HttpRequest *req, const RoutePa
         resp = response_json_error(404, "Organization not found or operation failed");
     }
 
-    /* Clean up */
+cleanup:
     free(username);
     free(org_code_name);
-
     return resp;
 }
 
@@ -532,47 +508,38 @@ HttpResponse *admin_create_organization_key_handler(const HttpRequest *req, cons
         return response_json_error(400, "Request body required");
     }
 
+    HttpResponse *resp = NULL;
     char *org_code_name = json_get_string(req->body, "organization_code_name");
     char *user_secret = json_get_string(req->body, "secret");
     char *note = json_get_string(req->body, "note");
+    char generated_secret[64] = {0};
 
     /* Validate required fields */
     if (!org_code_name) {
-        free(org_code_name);
-        if (user_secret) OPENSSL_cleanse(user_secret, strlen(user_secret));
-        free(user_secret);
-        free(note);
-        return response_json_error(400, "organization_code_name is required");
+        resp = response_json_error(400, "organization_code_name is required");
+        goto cleanup;
     }
 
     /* Validate input formats */
     char validation_error[256];
 
     if (validate_note(note, validation_error, sizeof(validation_error)) != 0) {
-        free(org_code_name);
-        if (user_secret) OPENSSL_cleanse(user_secret, strlen(user_secret));
-        free(user_secret);
-        free(note);
-        return response_json_error(400, validation_error);
+        resp = response_json_error(400, validation_error);
+        goto cleanup;
     }
 
     /* Dual-mode secret provisioning */
-    char generated_secret[64];
     const char *secret_to_use;
     int is_generated = 0;
 
     if (user_secret && strlen(user_secret) > 0) {
         /* User provided their own secret (BYOS) */
         secret_to_use = user_secret;
-        is_generated = 0;
     } else {
         /* Generate secure 32-byte base64url token */
         if (crypto_random_token(generated_secret, sizeof(generated_secret), 32) < 0) {
-            free(org_code_name);
-            if (user_secret) OPENSSL_cleanse(user_secret, strlen(user_secret));
-            free(user_secret);
-            free(note);
-            return response_json_error(500, "Failed to generate secret");
+            resp = response_json_error(500, "Failed to generate secret");
+            goto cleanup;
         }
         secret_to_use = generated_secret;
         is_generated = 1;
@@ -582,18 +549,15 @@ HttpResponse *admin_create_organization_key_handler(const HttpRequest *req, cons
     unsigned char key_id[16];
     int result = organization_key_create(db, org_code_name, secret_to_use, note, key_id);
     if (result != 0) {
-        free(org_code_name);
-        if (user_secret) OPENSSL_cleanse(user_secret, strlen(user_secret));
-        free(user_secret);
-        OPENSSL_cleanse(generated_secret, sizeof(generated_secret));
-        free(note);
         if (result == -2) {
             char msg[128];
             snprintf(msg, sizeof(msg),
                      "Secret must be at least %d characters", crypto_password_min_length());
-            return response_json_error(400, msg);
+            resp = response_json_error(400, msg);
+        } else {
+            resp = response_json_error(500, "Failed to create organization key");
         }
-        return response_json_error(500, "Failed to create organization key");
+        goto cleanup;
     }
 
     /* Build response */
@@ -616,14 +580,15 @@ HttpResponse *admin_create_organization_key_handler(const HttpRequest *req, cons
     }
 
     jsonbuf_appendf(jb, "}");
+    resp = jsonbuf_to_response(jb, 200);
 
+cleanup:
     free(org_code_name);
     if (user_secret) OPENSSL_cleanse(user_secret, strlen(user_secret));
     free(user_secret);
     OPENSSL_cleanse(generated_secret, sizeof(generated_secret));
     free(note);
-
-    return jsonbuf_to_response(jb, 200);
+    return resp;
 }
 
 /* ============================================================================

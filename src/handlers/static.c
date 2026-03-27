@@ -49,6 +49,7 @@ static const char *get_mime_type(const char *path) {
     if (strcmp(ext, "json") == 0) return "application/json; charset=utf-8";
     if (strcmp(ext, "txt") == 0) return "text/plain; charset=utf-8";
     if (strcmp(ext, "xml") == 0) return "application/xml; charset=utf-8";
+    if (strcmp(ext, "webmanifest") == 0) return "application/manifest+json";
 
     /* Images */
     if (strcmp(ext, "png") == 0) return "image/png";
@@ -201,7 +202,7 @@ HttpResponse *static_html_alias_handler(const HttpRequest *req, const RouteParam
     char path_with_html[512];
     snprintf(path_with_html, sizeof(path_with_html), "%s.html", req->path);
 
-    HttpRequest modified_req = *req;
+    HttpRequest modified_req = *req;  /* shallow copy — downstream usage is read-only */
     modified_req.path = path_with_html;
 
     return static_file_handler(&modified_req, params);

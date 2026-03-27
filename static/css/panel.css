@@ -62,5 +62,6 @@
 .copy-btn:active { background: #1a1a1a; }
 
 .note { background: #111; border-left: 3px solid #87ceeb; padding: 10px 14px; margin-bottom: 20px; font-size: 12px; color: #aaa; line-height: 1.5; }
+.note.warn { border-left-color: #daa520; }
 
 .field-error { color: #ff6b6b; font-size: 12px; margin-bottom: 14px; display: none; }

@@ -22,12 +22,13 @@
  *   display_name  - Human-readable name
  *   note          - Optional description (can be NULL)
  *   out_pin       - Output: Organization PIN (internal ID)
+ *   out_id        - Output: Organization UUID (16 bytes), or NULL if not needed
  *
  * Returns: 0 on success, -1 on error
  */
 int org_create(db_handle_t *db, const char *code_name,
                const char *display_name, const char *note,
-               long long *out_pin);
+               long long *out_pin, unsigned char *out_id);
 
 /*
  * Check if organization exists by code_name
@@ -199,11 +200,8 @@ int organization_key_get_organization_pin(db_handle_t *db,
 /*
  * Create organization key
  *
- * Dual-mode secret provisioning:
- * - If secret is provided: Use as-is (BYOS - bring your own secret)
- * - If secret is NULL: Generate secure 32-byte base64url token
- *
  * Secret is hashed using crypto_password_hash() before storage.
+ * (Secret generation, if needed, is handled by the HTTP layer.)
  * Returned key_id is used for authentication (X-Org-Key-Id header).
  *
  * SECURITY WARNING: Organization keys grant FULL admin access.
@@ -212,7 +210,7 @@ int organization_key_get_organization_pin(db_handle_t *db,
  * Parameters:
  *   db                   - Database handle
  *   organization_code_name - Organization code name (e.g., "system")
- *   secret               - Secret to hash (NULL = generate secure token)
+ *   secret               - Plaintext secret to hash (required)
  *   note                 - Optional description
  *   out_key_id           - Output: Generated key UUID (16 bytes)
  *

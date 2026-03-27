@@ -101,7 +101,22 @@ int validate_url_field(const char *url, const char *field_name,
  * Rules:
  *   - All validate_url_field rules apply
  *   - Scheme must be http:// or https://
+ *   - Length <= 500 characters (must fit in JWT claim buffer)
  */
 int validate_redirect_uri(const char *uri, char *error_msg, size_t error_len);
+
+/*
+ * validate_scope - Validate OAuth2 scope string (RFC 6749 Section 3.3)
+ *
+ * Rules:
+ *   - NULL is allowed (returns 0, means "no scope requested")
+ *   - Empty string is not allowed
+ *   - Space-separated tokens, each 1+ characters
+ *   - Allowed characters per token: %x21 / %x23-5B / %x5D-7E (NQCHAR)
+ *     (printable ASCII except space, double-quote, and backslash)
+ *   - No leading, trailing, or consecutive spaces
+ *   - Total length <= 250 characters (must fit in JWT claim buffer)
+ */
+int validate_scope(const char *scope, char *error_msg, size_t error_len);
 
 #endif /* VALIDATION_H */

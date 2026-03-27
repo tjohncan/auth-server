@@ -51,9 +51,6 @@ static HttpResponse *response_html_error(int status_code, const char *message) {
     return resp;
 }
 
-/* Default session TTL: 7 days */
-#define DEFAULT_SESSION_TTL_SECONDS (7 * 24 * 60 * 60)
-
 /* Cookie name for session token */
 #define SESSION_COOKIE_NAME "session"
 
@@ -108,7 +105,7 @@ static HttpResponse *require_authenticated_session(const HttpRequest *req,
  *
  * Response (success):
  *   200 OK
- *   Set-Cookie: session=<token>; HttpOnly; Secure; SameSite=Strict; Max-Age=604800
+ *   Set-Cookie: session=<token>; HttpOnly; Secure; SameSite=Lax; Max-Age=604800
  *   {"message":"Login successful"}
  *
  * Response (failure):
@@ -150,7 +147,7 @@ HttpResponse *login_handler(const HttpRequest *req, const RouteParams *params) {
         db, username, password,
         http_request_get_client_ip(req, NULL),  /* source_ip */
         http_request_get_header(req, "User-Agent"),  /* user_agent */
-        DEFAULT_SESSION_TTL_SECONDS,
+        g_config->session_ttl_seconds,
         &session_token,
         &user_pin
     );
@@ -165,8 +162,8 @@ HttpResponse *login_handler(const HttpRequest *req, const RouteParams *params) {
     /* Build Set-Cookie header */
     char cookie_header[512];
     snprintf(cookie_header, sizeof(cookie_header),
-             "%s=%s; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=%d",
-             SESSION_COOKIE_NAME, session_token, DEFAULT_SESSION_TTL_SECONDS);
+             "%s=%s; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=%d",
+             SESSION_COOKIE_NAME, session_token, g_config->session_ttl_seconds);
 
     /* Get user profile to check MFA preference */
     user_profile_t profile;
@@ -218,7 +215,7 @@ HttpResponse *login_handler(const HttpRequest *req, const RouteParams *params) {
         return response_json_error(500, "Internal server error");
     }
 
-    http_response_set_header(resp, "Set-Cookie", cookie_header);
+    http_response_add_header(resp, "Set-Cookie", cookie_header);
 
     cleanse_free(session_token);
     OPENSSL_cleanse(cookie_header, sizeof(cookie_header));
@@ -576,6 +573,7 @@ HttpResponse *add_email_handler(const HttpRequest *req, const RouteParams *param
         return response_json_error(400, "Request body required");
     }
 
+    HttpResponse *resp = NULL;
     char *email = json_get_string(req->body, "email");
     if (!email) {
         return response_json_error(400, "email required");
@@ -583,26 +581,28 @@ HttpResponse *add_email_handler(const HttpRequest *req, const RouteParams *param
 
     char validation_error[256];
     if (validate_email(email, validation_error, sizeof(validation_error)) != 0) {
-        free(email);
-        return response_json_error(400, validation_error);
+        resp = response_json_error(400, validation_error);
+        goto cleanup;
     }
 
     int exists = user_email_exists(db, email, session.user_account_pin);
     if (exists < 0) {
-        free(email);
-        return response_json_error(500, "Failed to check email");
+        resp = response_json_error(500, "Failed to check email");
+        goto cleanup;
     } else if (exists == 1) {
-        free(email);
-        return response_json_error(409, "Email already taken");
+        resp = response_json_error(409, "Email already taken");
+        goto cleanup;
     }
 
     if (user_add_email(db, session.user_account_pin, email) != 0) {
-        free(email);
-        return response_json_error(500, "Failed to add email");
+        resp = response_json_error(500, "Failed to add email");
+    } else {
+        resp = response_json_ok("{\"message\":\"Email added\"}");
     }
 
+cleanup:
     free(email);
-    return response_json_ok("{\"message\":\"Email added\"}");
+    return resp;
 }
 
 /*
@@ -762,8 +762,6 @@ HttpResponse *create_email_verification_token_handler(const HttpRequest *req,
         return response_json_error(400, validation_error);
     }
 
-    extern const config_t *g_config;
-
     char token[44];
     int result = user_create_email_verification_token(
         db, session.user_account_pin, email,
@@ -838,7 +836,7 @@ HttpResponse *verify_email_page_handler(const HttpRequest *req,
         return resp ? resp : response_json_error(400, "Invalid token");
     }
 
-    char escaped_email[512];
+    char escaped_email[1536];
     str_html_escape(escaped_email, sizeof(escaped_email), result.email_address);
 
     char user_id_hex[33];
@@ -900,7 +898,7 @@ HttpResponse *verify_email_handler(const HttpRequest *req,
         return resp ? resp : response_json_error(400, "Verification failed");
     }
 
-    char escaped_email[512];
+    char escaped_email[1536];
     str_html_escape(escaped_email, sizeof(escaped_email), result.email_address);
 
     HttpResponse *resp = response_template(200, "pages/verify-email-success.html",
@@ -956,8 +954,6 @@ HttpResponse *request_password_reset_handler(const HttpRequest *req,
         free(email);
         return response_json_error(400, validation_error);
     }
-
-    extern const config_t *g_config;
 
     char token[44];
     int result = user_create_password_reset_token(
@@ -1137,7 +1133,7 @@ HttpResponse *accept_invitation_page_handler(const HttpRequest *req,
     }
 
     /* Build account info HTML */
-    char account_info[1024];
+    char account_info[2560];
     account_info[0] = '\0';
     int pos = 0;
 
@@ -1149,7 +1145,7 @@ HttpResponse *accept_invitation_page_handler(const HttpRequest *req,
     }
 
     if (result.email_address[0]) {
-        char escaped[512];
+        char escaped[1536];
         str_html_escape(escaped, sizeof(escaped), result.email_address);
         pos += snprintf(account_info + pos, sizeof(account_info) - pos,
                         "<p>Email: <strong>%s</strong></p>", escaped);
@@ -1312,8 +1308,6 @@ HttpResponse *request_passwordless_login_handler(const HttpRequest *req,
         }
     }
 
-    extern const config_t *g_config;
-
     char token[44];
     int result = user_create_passwordless_login_token(
         db, email,
@@ -1386,7 +1380,7 @@ HttpResponse *passwordless_login_page_handler(const HttpRequest *req,
         return resp ? resp : response_json_error(400, "Invalid token");
     }
 
-    char escaped_email[512];
+    char escaped_email[1536];
     char escaped_username[512];
     char escaped_token[128];
     str_html_escape(escaped_email, sizeof(escaped_email), lookup.email_address);
@@ -1394,7 +1388,7 @@ HttpResponse *passwordless_login_page_handler(const HttpRequest *req,
     str_html_escape(escaped_token, sizeof(escaped_token), token);
     cleanse_free(token);
 
-    char display_info[1280];
+    char display_info[2560];
     if (escaped_username[0]) {
         snprintf(display_info, sizeof(display_info),
                  "<p class=\"display-email\">%s</p>"
@@ -1447,22 +1441,8 @@ HttpResponse *passwordless_login_handler(const HttpRequest *req,
     cleanse_free(token);
 
     if (rc != 0) {
-        HttpResponse *resp = http_response_new(400);
-        http_response_set(resp, CONTENT_TYPE_HTML,
-            "<!DOCTYPE html><html lang=\"en\"><head>"
-            "<meta charset=\"UTF-8\">"
-            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
-            "<meta name=\"color-scheme\" content=\"dark\">"
-            "<title>Login Failed</title>"
-            "<link rel=\"stylesheet\" href=\"/css/base.css\">"
-            "<link rel=\"stylesheet\" href=\"/css/templates.css\">"
-            "</head><body><div class=\"page-container\">"
-            "<h1>Login Failed</h1>"
-            "<p>This login link is invalid, expired, or has already been used.</p>"
-            "<p class=\"back-link\"><a href=\"/request-passwordless-login\">"
-            "Request a new login link</a></p>"
-            "</div></body></html>");
-        return resp;
+        HttpResponse *resp = response_template(400, "pages/passwordless-login-invalid.html", NULL);
+        return resp ? resp : response_html_error(400, "Invalid login link");
     }
 
     /* Generate session token */
@@ -1486,7 +1466,7 @@ HttpResponse *passwordless_login_handler(const HttpRequest *req,
                               "passwordless",
                               http_request_get_client_ip(req, NULL),
                               http_request_get_header(req, "User-Agent"),
-                              DEFAULT_SESSION_TTL_SECONDS,
+                              g_config->session_ttl_seconds,
                               session_id);
 
     if (rc != 0) {
@@ -1499,8 +1479,8 @@ HttpResponse *passwordless_login_handler(const HttpRequest *req,
     /* Build Set-Cookie header */
     char cookie_header[512];
     snprintf(cookie_header, sizeof(cookie_header),
-             "%s=%s; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=%d",
-             SESSION_COOKIE_NAME, session_token, DEFAULT_SESSION_TTL_SECONDS);
+             "%s=%s; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=%d",
+             SESSION_COOKIE_NAME, session_token, g_config->session_ttl_seconds);
     OPENSSL_cleanse(session_token, token_buf_size);
     free(session_token);
 
@@ -1513,7 +1493,7 @@ HttpResponse *passwordless_login_handler(const HttpRequest *req,
     }
 
     HttpResponse *resp = http_response_new(303);
-    http_response_set_header(resp, "Set-Cookie", cookie_header);
+    http_response_add_header(resp, "Set-Cookie", cookie_header);
     OPENSSL_cleanse(cookie_header, sizeof(cookie_header));
     http_response_set_header(resp, "Location", location);
     http_response_set(resp, CONTENT_TYPE_HTML,
@@ -1536,6 +1516,8 @@ HttpResponse *passwordless_login_handler(const HttpRequest *req,
 HttpResponse *passwordless_login_toggle_handler(const HttpRequest *req,
                                                  const RouteParams *params) {
     (void)params;
+    HttpResponse *ct_err = require_content_type(req, "application/json");
+    if (ct_err) return ct_err;
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -1614,9 +1596,9 @@ HttpResponse *logout_handler(const HttpRequest *req, const RouteParams *params) 
     if (response) {
         char clear_cookie[256];
         snprintf(clear_cookie, sizeof(clear_cookie),
-                 "%s=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0",
+                 "%s=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0",
                  SESSION_COOKIE_NAME);
-        http_response_set_header(response, "Set-Cookie", clear_cookie);
+        http_response_add_header(response, "Set-Cookie", clear_cookie);
     }
 
     return response;

@@ -8,13 +8,26 @@ HTTP endpoints for the OAuth2 authentication server.
 2. [Organization Management API (Session Auth)](#organization-management-api-session-auth)
 3. [Organization Management API (Org-Key Auth)](#organization-management-api-org-key-auth)
 4. [OAuth2 Endpoints (Public)](#oauth2-endpoints-public)
-5. [User Account Endpoints (Session Auth)](#account-endpoints-session-auth)
+5. [User Account Endpoints (Session Auth)](#user-account-endpoints-session-auth)
 6. [Email Verification Endpoints](#email-verification-endpoints)
 7. [Password Reset Endpoints](#password-reset-endpoints)
 8. [Passwordless Login Endpoints](#passwordless-login-endpoints)
 9. [MFA Endpoints (Session Auth)](#mfa-endpoints-session-auth)
 10. [RS User Provisioning API (RS Key Auth)](#rs-user-provisioning-api-rs-key-auth)
 11. [Invitation Endpoints (Public)](#invitation-endpoints-public)
+
+---
+
+## Health Check
+
+### GET /health
+
+Returns server status. No authentication required.
+
+**Response** (200 OK):
+```json
+{"status":"ok"}
+```
 
 ---
 
@@ -72,26 +85,17 @@ Bootstrap the authentication system with initial organization and management UI.
 
 - **403 Forbidden** (not from localhost):
 ```json
-{
-  "error": "forbidden",
-  "message": "Admin endpoints only accessible from localhost"
-}
+{"error": "Admin endpoints only accessible from localhost"}
 ```
 
 - **409 Conflict** (organization exists):
 ```json
-{
-  "error": "conflict",
-  "message": "Organization 'system' already exists"
-}
+{"error": "Organization 'system' already exists. Use a different org_code_name."}
 ```
 
 - **400 Bad Request** (validation error):
 ```json
-{
-  "error": "invalid_request",
-  "message": "Username is required"
-}
+{"error": "username and password are required"}
 ```
 
 **Creates**:
@@ -142,7 +146,7 @@ Create a new organization (tenant).
 **Success Response** (200 OK):
 ```json
 {
-  "organization_id": "aaace122-333b-4444-8cd8-999999999001",
+  "organization_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
   "code_name": "aaacorp",
   "display_name": "Triple A Corporation"
 }
@@ -153,10 +157,7 @@ Create a new organization (tenant).
 - **403 Forbidden** (not from localhost)
 - **409 Conflict** (code_name exists):
 ```json
-{
-  "error": "conflict",
-  "message": "Organization code_name 'aaacorp' already exists"
-}
+{"error": "Organization already exists or creation failed"}
 ```
 
 **Example**:
@@ -199,7 +200,7 @@ Create a user account (not attached to any organization or client).
 **Success Response** (200 OK):
 ```json
 {
-  "user_id": "a1b2c3d4-0000-4aaa-944b-a1b2c3d4e5f6",
+  "user_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
   "username": "tiger",
   "email": "tiger@example.com"
 }
@@ -208,19 +209,9 @@ Create a user account (not attached to any organization or client).
 **Error Responses**:
 
 - **403 Forbidden** (not from localhost)
-- **409 Conflict** (username exists):
+- **409 Conflict** (username or email exists):
 ```json
-{
-  "error": "conflict",
-  "message": "Username 'tiger' already exists"
-}
-```
-- **409 Conflict** (email exists):
-```json
-{
-  "error": "conflict",
-  "message": "Email 'tiger@example.com' already exists"
-}
+{"error": "User already exists or creation failed"}
 ```
 
 **Example**:
@@ -260,8 +251,7 @@ Grant organization admin privileges to a user.
 **Success Response** (200 OK):
 ```json
 {
-  "user_id": "a1b2c3d4-0000-4aaa-944b-a1b2c3d4e5f6",
-  "organization_id": "7777777a-333b-4444-8cd8-999999999001",
+  "user_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
   "message": "User 'tiger' is now an admin of organization 'aaacorp'"
 }
 ```
@@ -269,19 +259,9 @@ Grant organization admin privileges to a user.
 **Error Responses**:
 
 - **403 Forbidden** (not from localhost)
-- **404 Not Found** (user doesn't exist):
+- **404 Not Found** (user or organization doesn't exist):
 ```json
-{
-  "error": "not_found",
-  "message": "User 'tiger' does not exist"
-}
-```
-- **404 Not Found** (organization doesn't exist):
-```json
-{
-  "error": "not_found",
-  "message": "Organization 'aaacorp' does not exist"
-}
+{"error": "User not found"}
 ```
 
 **Example**:
@@ -459,7 +439,7 @@ Body: `organization_id`, `code_name`, `display_name`, `address`, `note` (require
 Update resource server.
 
 Query: `id` (required)
-Body: `display_name`, `address`, `note`, `is_active` (all optional)
+Body: `display_name`, `address`, `note`, `is_active`, `allow_user_provisioning` (all optional)
 
 ### Clients
 
@@ -622,7 +602,7 @@ Body:
 Response (generated secret):
 ```json
 {
-  "key_id": "555e5478-e10b-41c4-a554-098765432100",
+  "key_id": "555e5478e10b41c4a554098765432100",
   "secret": "xK9mN2pQ7rS4tV6wY8zA1bC3dE5fG7hJ9kL0mN2pQ4rS",
   "warning": "Save the secret now - it cannot be retrieved later!"
 }
@@ -631,7 +611,7 @@ Response (generated secret):
 Response (user-provided secret):
 ```json
 {
-  "key_id": "555e5478-e10b-41c4-a554-098765432100"
+  "key_id": "555e5478e10b41c4a554098765432100"
 }
 ```
 
@@ -645,13 +625,13 @@ Response:
 {
   "keys": [
     {
-      "key_id": "555e5478-e10b-41c4-a554-098765432100",
+      "key_id": "555e5478e10b41c4a554098765432100",
       "is_active": true,
       "generated_at": "2026-02-04T10:30:00Z",
       "note": "CI/CD pipeline key"
     }
   ],
-  "pagination": {"limit": 20, "offset": 0, "count": 1}
+  "pagination": {"limit": 20, "offset": 0, "count": 1, "total": 1}
 }
 ```
 
@@ -692,8 +672,8 @@ X-Org-Key-Secret: <plaintext_secret>
 **Example**:
 ```bash
 # List resource servers using org key auth
-curl "http://localhost:8080/api/admin/resource-servers?organization_id=555e5478-e10b-41c4-a554-098765432100" \
-  -H "X-Org-Key-Id: 555e5478-e10b-41c4-a554-098765432101" \
+curl "http://localhost:8080/api/admin/resource-servers?organization_id=555e5478e10b41c4a554098765432100" \
+  -H "X-Org-Key-Id: 555e5478e10b41c4a554098765432101" \
   -H "X-Org-Key-Secret: xK9mN2pQ7rS4tV6wY8zA1bC3dE5fG7hJ9kL0mN2pQ4rS"
 ```
 
@@ -820,6 +800,7 @@ code_verifier=<pkce_verifier>
 | redirect_uri  | Yes         | Must match redirect_uri used in /authorize  |
 | client_id     | Yes         | Client UUID (hex-encoded)                   |
 | code_verifier | Conditional | PKCE verifier (required for public clients) |
+| resource      | No          | Resource server address (RFC 8707)          |
 
 **Success Response** (200 OK):
 ```json
@@ -833,18 +814,11 @@ code_verifier=<pkce_verifier>
 ```
 
 **Error Responses**:
-- **400 Bad Request** - Invalid or expired code:
+- **400 Bad Request** - Invalid, expired, or replayed code:
 ```json
-{
-  "error": "Invalid authorization code"
-}
+{"error": "invalid_grant", "error_description": "Invalid authorization code"}
 ```
-- **400 Bad Request** - Replay attack detected:
-```json
-{
-  "error": "Authorization code has already been used"
-}
-```
+Note: Replayed codes and genuinely invalid codes return the same error to prevent information disclosure. Replay triggers automatic revocation of the entire token chain.
 
 #### Refresh Token Grant
 
@@ -867,6 +841,7 @@ scope=<optional_scope>
 | refresh_token | Yes       | Valid refresh token                          |
 | client_id     | Yes       | Client UUID (hex-encoded)                    |
 | scope         | No        | Requested scope (must be subset of original) |
+| resource      | No        | Resource server address (RFC 8707)           |
 
 **Success Response** (200 OK):
 ```json
@@ -889,12 +864,12 @@ scope=<optional_scope>
 # Exchange authorization code
 curl -X POST http://localhost:8080/token \
   -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "grant_type=authorization_code&code=abc123&redirect_uri=http://localhost:3000/callback&client_id=555e5478-e10b-41c4-a554-098765432100&code_verifier=xyz789"
+  -d "grant_type=authorization_code&code=abc123&redirect_uri=http://localhost:3000/callback&client_id=555e5478e10b41c4a554098765432100&code_verifier=xyz789"
 
 # Refresh access token
 curl -X POST http://localhost:8080/token \
   -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "grant_type=refresh_token&refresh_token=8xLOxBtZp8&client_id=555e5478-e10b-41c4-a554-098765432100"
+  -d "grant_type=refresh_token&refresh_token=8xLOxBtZp8&client_id=555e5478e10b41c4a554098765432100"
 ```
 
 ---
@@ -948,7 +923,7 @@ resource=<resource_address>
 # Client credentials grant
 curl -X POST http://localhost:8080/token \
   -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "grant_type=client_credentials&client_id=555e5478-e10b-41c4-a554-098765432100&client_key_id=555e5478-e10b-41c4-a554-098765432101&client_secret=MySecretKey123"
+  -d "grant_type=client_credentials&client_id=555e5478e10b41c4a554098765432100&client_key_id=555e5478e10b41c4a554098765432101&client_secret=MySecretKey123"
 ```
 
 ---
@@ -959,15 +934,15 @@ OAuth2 authorization endpoint (RFC 6749 Section 3.1). Initiates authorization co
 
 **Query Parameters**:
 
-| Parameter             | Type          | Required  | Description                                            |
-|-----------------------|---------------|-----------|--------------------------------------------------------|
-| response_type         | string        | Yes       | Must be "code"                                         |
-| client_id             | string (UUID) | Yes       | Client identifier                                      |
-| redirect_uri          | string        | Yes       | Registered callback URL                                |
-| scope                 | string        | No        | Space-separated scope list                             |
-| state                 | string        | No        | CSRF protection token                                  |
-| code_challenge        | string        | No        | PKCE challenge (required for public clients)           |
-| code_challenge_method | string        | No        | "plain" or "S256" (required if code_challenge present) |
+| Parameter             | Type          | Required    | Description                                  |
+|-----------------------|---------------|-------------|----------------------------------------------|
+| response_type         | string        | Yes         | Must be "code"                               |
+| client_id             | string (UUID) | Yes         | Client identifier                            |
+| redirect_uri          | string        | Yes         | Registered callback URL                      |
+| scope                 | string        | No          | Space-separated scope list                   |
+| state                 | string        | No          | CSRF protection token                        |
+| code_challenge        | string        | Conditional | PKCE challenge (required for public clients) |
+| code_challenge_method | string        | Conditional | "S256" (required if code_challenge present)  |
 
 **Prerequisites**:
 - User must be authenticated (valid session cookie)
@@ -983,39 +958,43 @@ Location: https://app.example.com/callback?code=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpX
 
 **Error Responses**:
 
-- **401 Unauthorized** (not authenticated):
-```json
-{
-  "error": "Authentication required"
-}
+- **302 Found** (not authenticated — redirects to login):
+```http
+Location: /login?return=%2Fauthorize%3Fresponse_type%3Dcode%26client_id%3D...
 ```
 
-- **401 Unauthorized** (MFA required):
-```json
-{
-  "error": "MFA required"
-}
+- **302 Found** (MFA required — redirects to MFA challenge):
+```http
+Location: /login?mfa_step=1&return=%2Fauthorize%3Fresponse_type%3Dcode%26client_id%3D...
 ```
 
-- **400 Bad Request** (invalid request):
+- **302 Found** (MFA required but no methods enrolled — redirects with OAuth2 error):
+```http
+Location: https://app.example.com/callback?error=access_denied&error_description=MFA%20required%20but%20no%20methods%20enrolled
+```
+
+- **400 Bad Request** (invalid client_id, missing redirect_uri, or unregistered redirect_uri — pre-trust, no redirect):
 ```json
-{
-  "error": "Invalid authorization request"
-}
+{"error": "Invalid client_id or redirect_uri"}
+```
+
+- **302 Found** (post-trust validation error — redirects with OAuth2 error):
+```http
+Location: https://app.example.com/callback?error=invalid_request&error_description=Invalid%20authorization%20request&state=abc123
 ```
 
 **Authorization Code**:
 - Format: Stateless JWT signed with HMAC-SHA256
 - Lifetime: 60 seconds
 - Single-use enforced via database replay detection
-- JWT payload contains: client_id, user_account_id, redirect_uri, scope, PKCE challenge, nonce
+- JWT payload contains: client_id, user_id, redirect_uri, scope, PKCE challenge, nonce
 - Database stores: id, client_pin, user_account_pin, code (JWT), code_challenge, code_challenge_method, timestamps
 - Note: redirect_uri and scope are in the JWT and validated at endpoints, not duplicated in DB
 
 **Example**:
 ```bash
 # Redirect user to authorization endpoint (after login)
-https://localhost:8080/authorize?response_type=code&client_id=555e5478-e10b-41c4-a554-098765432100&redirect_uri=https://app.example.com/callback&scope=read+write&state=xyz789&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256
+https://localhost:8080/authorize?response_type=code&client_id=555e5478e10b41c4a554098765432100&redirect_uri=https://app.example.com/callback&scope=read+write&state=xyz789&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256
 ```
 
 ---
@@ -1155,9 +1134,9 @@ resource_server_secret=<resource_server_secret>
   "active": true,
   "token_type": "Bearer",
   "scope": "read write",
-  "client_id": "ab12cd34-8765-4321-1234-5678abcdef92",
-  "sub": "ab12cd34-8765-4321-1234-5678abcdef91",
-  "aud": "ab12cd34-8765-4321-1234-5678abcdef90",
+  "client_id": "ab12cd3487654321123456789abcdef2",
+  "sub": "ab12cd3487654321123456789abcdef1",
+  "aud": "ab12cd3487654321123456789abcdef0",
   "exp": 1735689600,
   "iat": 1735686000
 }
@@ -1268,7 +1247,7 @@ Get current user's profile information.
 **Success Response** (200 OK):
 ```json
 {
-  "user_id": "a1b2c3d4-0000-4aaa-944b-a1b2c3d4e5f6",
+  "user_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
   "username": "alice",
   "has_mfa": true,
   "require_mfa": false,
@@ -1518,9 +1497,9 @@ Set or clear the primary email for the current user.
 }
 ```
 
-| Field | Type        | Required | Description                                       |
-|-------|-------------|----------|---------------------------------------------------|
-| email | string/null | No       | Email address to make primary, or null to clear    |
+| Field | Type        | Required | Description                                     |
+|-------|-------------|----------|-------------------------------------------------|
+| email | string/null | No       | Email address to make primary, or null to clear |
 
 **Success Response** (200 OK):
 ```json
@@ -1845,8 +1824,8 @@ Request a verification email for one of the current user's email addresses.
 }
 ```
 
-| Field | Type   | Required | Description                              |
-|-------|--------|----------|------------------------------------------|
+| Field | Type   | Required | Description                                  |
+|-------|--------|----------|----------------------------------------------|
 | email | string | Yes      | Email address to verify (must be on account) |
 
 **Success Response** (200 OK):
@@ -1902,9 +1881,9 @@ Render the email verification confirmation page.
 
 **Query Parameters**:
 
-| Parameter | Type   | Required | Description          |
-|-----------|--------|----------|----------------------|
-| token     | string | Yes      | Verification token   |
+| Parameter | Type   | Required | Description        |
+|-----------|--------|----------|--------------------|
+| token     | string | Yes      | Verification token |
 
 **Success Response** (200 OK):
 
@@ -2003,9 +1982,9 @@ Request a password reset email.
 }
 ```
 
-| Field | Type   | Required | Description                     |
-|-------|--------|----------|---------------------------------|
-| email | string | Yes      | Email address of the account    |
+| Field | Type   | Required | Description                  |
+|-------|--------|----------|------------------------------|
+| email | string | Yes      | Email address of the account |
 
 **Response** (200 OK — always, to prevent user enumeration):
 ```json
@@ -2067,10 +2046,10 @@ Consume a password reset token and set a new password.
 
 **Request Body**: Form-encoded (`application/x-www-form-urlencoded`)
 
-| Field    | Type   | Required | Description        |
-|----------|--------|----------|--------------------|
+| Field    | Type   | Required | Description          |
+|----------|--------|----------|----------------------|
 | token    | string | Yes      | Password reset token |
-| password | string | Yes      | New password       |
+| password | string | Yes      | New password         |
 
 **Success Response** (200 OK):
 
@@ -2118,9 +2097,9 @@ Render the passwordless login request page.
 
 **Query Parameters**:
 
-| Parameter | Type   | Required | Description                                          |
-|-----------|--------|----------|------------------------------------------------------|
-| return_to | string | No       | Authorize query string to redirect after login       |
+| Parameter | Type   | Required | Description                                    |
+|-----------|--------|----------|------------------------------------------------|
+| return_to | string | No       | Authorize query string to redirect after login |
 
 Returns an HTML page with an email input form. On submit, the form
 POSTs to `/request-passwordless-login` via JavaScript.
@@ -2276,7 +2255,7 @@ A drop-in OAuth2 client library is available at `/library/oauth-client.js` for e
 
 ### Documentation
 
-Full API documentation available at [static/library/README.md](static/library/README.md)
+Full API documentation available at [static/library/README.md](../static/library/README.md)
 or see the management console (`admin.html`) for a complete working example.
 
 ### Reference Implementation
@@ -2308,9 +2287,9 @@ The method is unconfirmed until `POST /api/user/mfa/totp/confirm` succeeds.
 }
 ```
 
-| Field        | Type   | Required  | Description                                             |
-|--------------|--------|-----------|---------------------------------------------------------|
-| display_name | string | Yes       | User-chosen label (e.g., "J-Phone 131", "Work Phone")   |
+| Field        | Type   | Required  | Description                                           |
+|--------------|--------|-----------|-------------------------------------------------------|
+| display_name | string | Yes       | User-chosen label (e.g., "J-Phone 131", "Work Phone") |
 
 **Success Response** (200 OK):
 ```json

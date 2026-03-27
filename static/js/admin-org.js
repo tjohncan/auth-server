@@ -275,13 +275,13 @@ async function renderOrgDetail(container) {
                 : '<span class="badge-inactive">\u25CF Inactive</span>';
             html += `
                 <div class="list-item">
-                    <div class="flex-between">
-                        <div class="no-shrink">
+                    <div class="flex-between flex-wrap-actions">
+                        <div>
                             <strong>${escapeHtml(rs.display_name)}</strong>
                             <span class="text-muted text-sm ml-md">${escapeHtml(rs.code_name)}</span>
                             <span class="ml-md">${statusBadge}</span>
                         </div>
-                        <button data-action="navigate-to-rs" data-id="${rs.id}" class="btn-gray btn-sm ml-sm">Details</button>
+                        <button data-action="navigate-to-rs" data-id="${rs.id}" class="btn-gray btn-sm">Details</button>
                     </div>
                 </div>
             `;
@@ -313,13 +313,13 @@ async function renderOrgDetail(container) {
                 : '<span class="badge-inactive">\u25CF Inactive</span>';
             html += `
                 <div class="list-item">
-                    <div class="flex-between">
-                        <div class="no-shrink">
+                    <div class="flex-between flex-wrap-actions">
+                        <div>
                             <strong>${escapeHtml(client.display_name)}</strong>
                             <span class="text-muted text-sm ml-md">${escapeHtml(client.code_name)}</span>
                             <span class="ml-md">${statusBadge}</span>
                         </div>
-                        <button data-action="navigate-to-client" data-id="${client.id}" class="btn-gray btn-sm ml-sm">Details</button>
+                        <button data-action="navigate-to-client" data-id="${client.id}" class="btn-gray btn-sm">Details</button>
                     </div>
                 </div>
             `;
@@ -402,8 +402,8 @@ async function renderResourceServerDetail(container) {
     } else {
         linkData.links.forEach(link => {
             html += `
-                <div class="list-item flex-between">
-                    <div class="no-shrink">
+                <div class="list-item flex-between flex-wrap-actions">
+                    <div>
                         <strong>${escapeHtml(link.client_display_name)}</strong>
                         <span class="text-muted text-sm ml-md">${escapeHtml(link.client_code_name)}</span>
                     </div>
@@ -504,8 +504,8 @@ async function renderClientDetail(container) {
         } else {
             uriData.redirect_uris.forEach(uri => {
                 html += `
-                    <div class="list-item flex-between">
-                        <div class="no-shrink">
+                    <div class="list-item flex-between flex-wrap-actions">
+                        <div>
                             <code>${escapeHtml(uri.redirect_uri)}</code>
                             ${uri.note ? `<div class="text-muted text-sm mt-xs">${escapeHtml(uri.note)}</div>` : ''}
                         </div>
@@ -526,8 +526,8 @@ async function renderClientDetail(container) {
     } else {
         linkData.links.forEach(link => {
             html += `
-                <div class="list-item flex-between">
-                    <div class="no-shrink">
+                <div class="list-item flex-between flex-wrap-actions">
+                    <div>
                         <strong>${escapeHtml(link.resource_server_display_name)}</strong>
                         <span class="text-muted text-sm ml-md">${escapeHtml(link.resource_server_code_name)}</span>
                     </div>
@@ -969,21 +969,27 @@ function showSecretModal(keyId, secret, entityId, keyType) {
     modal.querySelector('[data-action="copy-key-id"]').onclick = function(e) {
         e.stopPropagation();
         const btn = e.target;
+        const orig = btn.textContent;
         navigator.clipboard.writeText(formattedKeyId).then(() => {
-            const orig = btn.textContent;
             btn.textContent = '\u2713 Copied!';
             setTimeout(() => { btn.textContent = orig; }, 2000);
-        }).catch(() => { btn.textContent = 'Failed.'; });
+        }).catch(() => {
+            btn.textContent = 'Failed.';
+            setTimeout(() => { btn.textContent = orig; }, 2000);
+        });
     };
 
     modal.querySelector('[data-action="copy-secret"]').onclick = function(e) {
         e.stopPropagation();
         const btn = e.target;
+        const orig = btn.textContent;
         navigator.clipboard.writeText(secret).then(() => {
-            const orig = btn.textContent;
             btn.textContent = '\u2713 Copied!';
             setTimeout(() => { btn.textContent = orig; }, 2000);
-        }).catch(() => { btn.textContent = 'Failed.'; });
+        }).catch(() => {
+            btn.textContent = 'Failed.';
+            setTimeout(() => { btn.textContent = orig; }, 2000);
+        });
     };
 
     modal.querySelector('[data-action="download-json"]').onclick = function(e) {
@@ -998,7 +1004,7 @@ function showSecretModal(keyId, secret, entityId, keyType) {
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = `${keyType.replace('_', '-')}-${keyId.substring(0, 8)}.json`;
+        a.download = `${keyType.replace(/_/g, '-')}-${keyId.substring(0, 8)}.json`;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);

@@ -298,6 +298,7 @@ HttpResponse *admin_update_organization_handler(const HttpRequest *req, const Ro
         return response_json_error(400, "Request body required");
     }
 
+    HttpResponse *resp = NULL;
     char *display_name = json_get_string(req->body, "display_name");
     char *note = json_get_string(req->body, "note");
 
@@ -311,36 +312,34 @@ HttpResponse *admin_update_organization_handler(const HttpRequest *req, const Ro
     char validation_error[256];
 
     if (display_name && validate_display_name(display_name, validation_error, sizeof(validation_error)) != 0) {
-        free(display_name);
-        free(note);
-        return response_json_error(400, validation_error);
+        resp = response_json_error(400, validation_error);
+        goto cleanup;
     }
 
     if (validate_note(note, validation_error, sizeof(validation_error)) != 0) {
-        free(display_name);
-        free(note);
-        return response_json_error(400, validation_error);
+        resp = response_json_error(400, validation_error);
+        goto cleanup;
     }
 
     /* At least one field must be provided */
     if (!display_name && !note && !is_active) {
-        free(display_name);
-        free(note);
-        return response_json_error(400, "At least one field must be provided for update");
+        resp = response_json_error(400, "At least one field must be provided for update");
+        goto cleanup;
     }
 
     /* Call update handler */
     int result = admin_update_organization(db, ctx.user_account_pin, ctx.organization_key_pin, org_id, display_name, note, is_active);
 
-    /* Clean up */
-    free(display_name);
-    free(note);
-
     if (result != 0) {
-        return response_json_error(404, "Organization not found or update failed");
+        resp = response_json_error(404, "Organization not found or update failed");
+    } else {
+        resp = response_json_ok("{\"message\":\"Organization updated successfully\"}");
     }
 
-    return response_json_ok("{\"message\":\"Organization updated successfully\"}");
+cleanup:
+    free(display_name);
+    free(note);
+    return resp;
 }
 
 /* ============================================================================
@@ -508,6 +507,7 @@ HttpResponse *admin_create_resource_server_handler(const HttpRequest *req, const
         return response_json_error(400, "Request body required");
     }
 
+    HttpResponse *resp = NULL;
     char *org_id_str = json_get_string(req->body, "organization_id");
     char *code_name = json_get_string(req->body, "code_name");
     char *display_name = json_get_string(req->body, "display_name");
@@ -515,57 +515,61 @@ HttpResponse *admin_create_resource_server_handler(const HttpRequest *req, const
     char *note = json_get_string(req->body, "note");
 
     if (!org_id_str || !code_name || !*code_name || !display_name || !*display_name || !address || !*address) {
-        free(org_id_str); free(code_name); free(display_name); free(address); free(note);
-        return response_json_error(400, "organization_id, code_name, display_name, and address are required");
+        resp = response_json_error(400, "organization_id, code_name, display_name, and address are required");
+        goto cleanup;
     }
 
     /* Validate input formats */
     char validation_error[256];
 
     if (validate_code_name(code_name, validation_error, sizeof(validation_error)) != 0) {
-        free(org_id_str); free(code_name); free(display_name); free(address); free(note);
-        return response_json_error(400, validation_error);
+        resp = response_json_error(400, validation_error);
+        goto cleanup;
     }
 
     if (validate_display_name(display_name, validation_error, sizeof(validation_error)) != 0) {
-        free(org_id_str); free(code_name); free(display_name); free(address); free(note);
-        return response_json_error(400, validation_error);
+        resp = response_json_error(400, validation_error);
+        goto cleanup;
     }
 
     if (validate_url_field(address, "Address", validation_error, sizeof(validation_error)) != 0) {
-        free(org_id_str); free(code_name); free(display_name); free(address); free(note);
-        return response_json_error(400, validation_error);
+        resp = response_json_error(400, validation_error);
+        goto cleanup;
     }
 
     if (validate_note(note, validation_error, sizeof(validation_error)) != 0) {
-        free(org_id_str); free(code_name); free(display_name); free(address); free(note);
-        return response_json_error(400, validation_error);
+        resp = response_json_error(400, validation_error);
+        goto cleanup;
     }
 
     unsigned char org_id[16];
     if (hex_to_bytes(org_id_str, org_id, 16) != 0) {
-        free(org_id_str); free(code_name); free(display_name); free(address); free(note);
-        return response_json_error(400, "Invalid organization_id format");
+        resp = response_json_error(400, "Invalid organization_id format");
+        goto cleanup;
     }
-    free(org_id_str);
 
     unsigned char server_id[16];
     int result = admin_create_resource_server(db, ctx.user_account_pin, ctx.organization_key_pin,
                                                org_id, code_name, display_name, address, note, server_id);
 
-    free(code_name); free(display_name); free(address); free(note);
-
     if (result != 0) {
-        return response_json_error(409, "Resource server creation failed (possibly duplicate code_name or address)");
+        resp = response_json_error(409, "Resource server creation failed (possibly duplicate code_name or address)");
+    } else {
+        char server_id_hex[33];
+        bytes_to_hex(server_id, 16, server_id_hex, sizeof(server_id_hex));
+
+        JsonBuf *jb = jsonbuf_new(256);
+        jsonbuf_appendf(jb, "{\"id\":\"%s\",\"message\":\"Resource server created successfully\"}", server_id_hex);
+        resp = jsonbuf_to_response(jb, 200);
     }
 
-    char server_id_hex[33];
-    bytes_to_hex(server_id, 16, server_id_hex, sizeof(server_id_hex));
-
-    JsonBuf *jb = jsonbuf_new(256);
-    jsonbuf_appendf(jb, "{\"id\":\"%s\",\"message\":\"Resource server created successfully\"}", server_id_hex);
-
-    return jsonbuf_to_response(jb, 200);
+cleanup:
+    free(org_id_str);
+    free(code_name);
+    free(display_name);
+    free(address);
+    free(note);
+    return resp;
 }
 
 /*
@@ -617,6 +621,7 @@ HttpResponse *admin_update_resource_server_handler(const HttpRequest *req, const
         return response_json_error(400, "Request body required");
     }
 
+    HttpResponse *resp = NULL;
     char *display_name = json_get_string(req->body, "display_name");
     char *address = json_get_string(req->body, "address");
     char *note = json_get_string(req->body, "note");
@@ -637,34 +642,38 @@ HttpResponse *admin_update_resource_server_handler(const HttpRequest *req, const
     char validation_error[256];
 
     if (display_name && validate_display_name(display_name, validation_error, sizeof(validation_error)) != 0) {
-        free(display_name); free(address); free(note);
-        return response_json_error(400, validation_error);
+        resp = response_json_error(400, validation_error);
+        goto cleanup;
     }
 
     if (address && validate_url_field(address, "Address", validation_error, sizeof(validation_error)) != 0) {
-        free(display_name); free(address); free(note);
-        return response_json_error(400, validation_error);
+        resp = response_json_error(400, validation_error);
+        goto cleanup;
     }
 
     if (validate_note(note, validation_error, sizeof(validation_error)) != 0) {
-        free(display_name); free(address); free(note);
-        return response_json_error(400, validation_error);
+        resp = response_json_error(400, validation_error);
+        goto cleanup;
     }
 
     if (!display_name && !address && !note && !is_active && !allow_user_provisioning) {
-        free(display_name); free(address); free(note);
-        return response_json_error(400, "At least one field must be provided for update");
+        resp = response_json_error(400, "At least one field must be provided for update");
+        goto cleanup;
     }
 
     int result = admin_update_resource_server(db, ctx.user_account_pin, ctx.organization_key_pin, server_id, display_name, address, note, is_active, allow_user_provisioning);
 
-    free(display_name); free(address); free(note);
-
     if (result != 0) {
-        return response_json_error(404, "Resource server not found or update failed");
+        resp = response_json_error(404, "Resource server not found or update failed");
+    } else {
+        resp = response_json_ok("{\"message\":\"Resource server updated successfully\"}");
     }
 
-    return response_json_ok("{\"message\":\"Resource server updated successfully\"}");
+cleanup:
+    free(display_name);
+    free(address);
+    free(note);
+    return resp;
 }
 
 /* ============================================================================
@@ -829,6 +838,7 @@ HttpResponse *admin_create_client_handler(const HttpRequest *req, const RoutePar
         return response_json_error(400, "Request body required");
     }
 
+    HttpResponse *resp = NULL;
     char *org_id_str = json_get_string(req->body, "organization_id");
     char *code_name = json_get_string(req->body, "code_name");
     char *display_name = json_get_string(req->body, "display_name");
@@ -840,30 +850,26 @@ HttpResponse *admin_create_client_handler(const HttpRequest *req, const RoutePar
     if (!org_id_str || !code_name || !*code_name || !display_name || !*display_name ||
         !client_type || !*client_type || !grant_type || !*grant_type ||
         json_get_int(req->body, "access_token_ttl_seconds", &access_ttl) != 0) {
-        free(org_id_str); free(code_name); free(display_name);
-        free(client_type); free(grant_type); free(note);
-        return response_json_error(400, "Missing required fields");
+        resp = response_json_error(400, "Missing required fields");
+        goto cleanup;
     }
 
     /* Validate input formats */
     char validation_error[256];
 
     if (validate_code_name(code_name, validation_error, sizeof(validation_error)) != 0) {
-        free(org_id_str); free(code_name); free(display_name);
-        free(client_type); free(grant_type); free(note);
-        return response_json_error(400, validation_error);
+        resp = response_json_error(400, validation_error);
+        goto cleanup;
     }
 
     if (validate_display_name(display_name, validation_error, sizeof(validation_error)) != 0) {
-        free(org_id_str); free(code_name); free(display_name);
-        free(client_type); free(grant_type); free(note);
-        return response_json_error(400, validation_error);
+        resp = response_json_error(400, validation_error);
+        goto cleanup;
     }
 
     if (validate_note(note, validation_error, sizeof(validation_error)) != 0) {
-        free(org_id_str); free(code_name); free(display_name);
-        free(client_type); free(grant_type); free(note);
-        return response_json_error(400, validation_error);
+        resp = response_json_error(400, validation_error);
+        goto cleanup;
     }
 
     /* Optional fields - default to 0/false if not provided */
@@ -875,30 +881,34 @@ HttpResponse *admin_create_client_handler(const HttpRequest *req, const RoutePar
 
     unsigned char org_id[16], client_id[16];
     if (hex_to_bytes(org_id_str, org_id, 16) != 0) {
-        free(org_id_str); free(code_name); free(display_name);
-        free(client_type); free(grant_type); free(note);
-        return response_json_error(400, "Invalid organization_id format");
+        resp = response_json_error(400, "Invalid organization_id format");
+        goto cleanup;
     }
-    free(org_id_str);
 
     int result = admin_create_client(db, ctx.user_account_pin, ctx.organization_key_pin,
                                       org_id, code_name, display_name,
                                      client_type, grant_type, note, require_mfa, access_ttl,
                                      issue_refresh, refresh_ttl, max_session, secret_rotation, client_id);
 
-    free(code_name); free(display_name); free(client_type); free(grant_type); free(note);
-
     if (result != 0) {
-        return response_json_error(409, "Client creation failed");
+        resp = response_json_error(409, "Client creation failed");
+    } else {
+        char client_id_hex[33];
+        bytes_to_hex(client_id, 16, client_id_hex, sizeof(client_id_hex));
+
+        JsonBuf *jb = jsonbuf_new(256);
+        jsonbuf_appendf(jb, "{\"id\":\"%s\",\"message\":\"Client created successfully\"}", client_id_hex);
+        resp = jsonbuf_to_response(jb, 200);
     }
 
-    char client_id_hex[33];
-    bytes_to_hex(client_id, 16, client_id_hex, sizeof(client_id_hex));
-
-    JsonBuf *jb = jsonbuf_new(256);
-    jsonbuf_appendf(jb, "{\"id\":\"%s\",\"message\":\"Client created successfully\"}", client_id_hex);
-
-    return jsonbuf_to_response(jb, 200);
+cleanup:
+    free(org_id_str);
+    free(code_name);
+    free(display_name);
+    free(client_type);
+    free(grant_type);
+    free(note);
+    return resp;
 }
 
 /*
@@ -944,6 +954,7 @@ HttpResponse *admin_update_client_handler(const HttpRequest *req, const RoutePar
         return response_json_error(400, "Request body required");
     }
 
+    HttpResponse *resp = NULL;
     char *display_name = json_get_string(req->body, "display_name");
     char *note = json_get_string(req->body, "note");
 
@@ -964,32 +975,35 @@ HttpResponse *admin_update_client_handler(const HttpRequest *req, const RoutePar
     char validation_error[256];
 
     if (display_name && validate_display_name(display_name, validation_error, sizeof(validation_error)) != 0) {
-        free(display_name); free(note);
-        return response_json_error(400, validation_error);
+        resp = response_json_error(400, validation_error);
+        goto cleanup;
     }
 
     if (validate_note(note, validation_error, sizeof(validation_error)) != 0) {
-        free(display_name); free(note);
-        return response_json_error(400, validation_error);
+        resp = response_json_error(400, validation_error);
+        goto cleanup;
     }
 
     if (!display_name && !note && !require_mfa && !access_ttl && !issue_refresh &&
         !refresh_ttl && !max_session && !secret_rotation && !is_active) {
-        free(display_name); free(note);
-        return response_json_error(400, "At least one field must be provided");
+        resp = response_json_error(400, "At least one field must be provided");
+        goto cleanup;
     }
 
     int result = admin_update_client(db, ctx.user_account_pin, ctx.organization_key_pin, client_id, display_name, note, require_mfa,
                                      access_ttl, issue_refresh, refresh_ttl, max_session,
                                      secret_rotation, is_active);
 
-    free(display_name); free(note);
-
     if (result != 0) {
-        return response_json_error(404, "Client not found or update failed");
+        resp = response_json_error(404, "Client not found or update failed");
+    } else {
+        resp = response_json_ok("{\"message\":\"Client updated successfully\"}");
     }
 
-    return response_json_ok("{\"message\":\"Client updated successfully\"}");
+cleanup:
+    free(display_name);
+    free(note);
+    return resp;
 }
 
 /* ============================================================================
@@ -1705,43 +1719,37 @@ HttpResponse *admin_create_client_key_handler(const HttpRequest *req, const Rout
         return response_json_error(400, "Request body required");
     }
 
+    HttpResponse *resp = NULL;
     char *client_id_str = json_get_string(req->body, "client_id");
     char *note = json_get_string(req->body, "note");
     char *user_secret = json_get_string(req->body, "secret");
+    char generated_secret[64] = {0};
 
     /* Validate input formats */
     char validation_error[256];
 
     if (validate_note(note, validation_error, sizeof(validation_error)) != 0) {
-        free(client_id_str); free(note);
-        if (user_secret) OPENSSL_cleanse(user_secret, strlen(user_secret));
-        free(user_secret);
-        return response_json_error(400, validation_error);
+        resp = response_json_error(400, validation_error);
+        goto cleanup;
     }
 
     if (!client_id_str) {
-        free(note);
-        if (user_secret) OPENSSL_cleanse(user_secret, strlen(user_secret));
-        free(user_secret);
-        return response_json_error(400, "client_id required");
+        resp = response_json_error(400, "client_id required");
+        goto cleanup;
     }
 
     /* Determine mode: generate or use provided secret */
-    char generated_secret[64];
     const char *secret_to_use;
     int is_generated = 0;
 
     if (user_secret && strlen(user_secret) > 0) {
         /* Bring-your-own mode */
         secret_to_use = user_secret;
-        is_generated = 0;
     } else {
         /* Generate mode */
         if (crypto_random_token(generated_secret, sizeof(generated_secret), 32) < 0) {
-            free(client_id_str); free(note);
-            if (user_secret) OPENSSL_cleanse(user_secret, strlen(user_secret));
-            free(user_secret);
-            return response_json_error(500, "Failed to generate secret");
+            resp = response_json_error(500, "Failed to generate secret");
+            goto cleanup;
         }
         secret_to_use = generated_secret;
         is_generated = 1;
@@ -1749,47 +1757,43 @@ HttpResponse *admin_create_client_key_handler(const HttpRequest *req, const Rout
 
     unsigned char client_id[16], key_id[16];
     if (hex_to_bytes(client_id_str, client_id, 16) != 0) {
-        free(client_id_str); free(note);
-        if (user_secret) OPENSSL_cleanse(user_secret, strlen(user_secret));
-        free(user_secret);
-        return response_json_error(400, "Invalid client_id format");
+        resp = response_json_error(400, "Invalid client_id format");
+        goto cleanup;
     }
-    free(client_id_str);
 
     int result = admin_create_client_key(db, ctx.user_account_pin, ctx.organization_key_pin,
                                           client_id, secret_to_use, note, key_id);
 
-    free(note);
-    if (user_secret) OPENSSL_cleanse(user_secret, strlen(user_secret));
-    free(user_secret);
-
     if (result == -2) {
-        OPENSSL_cleanse(generated_secret, sizeof(generated_secret));
         char msg[128];
         snprintf(msg, sizeof(msg),
                  "Secret must be at least %d characters", crypto_password_min_length());
-        return response_json_error(400, msg);
-    }
-    if (result != 0) {
-        OPENSSL_cleanse(generated_secret, sizeof(generated_secret));
-        return response_json_error(409, "Key creation failed (client must be confidential)");
-    }
-
-    char key_id_hex[33];
-    bytes_to_hex(key_id, 16, key_id_hex, sizeof(key_id_hex));
-
-    JsonBuf *jb = jsonbuf_new(2048);
-    jsonbuf_appendf(jb, "{\"id\":\"%s\",\"key_id\":\"%s\"", key_id_hex, key_id_hex);
-    if (is_generated) {
-        jsonbuf_appendf(jb, ",\"secret\":\"%s\",\"message\":\"Save the secret now - it cannot be retrieved later!\"",
-                        generated_secret);
+        resp = response_json_error(400, msg);
+    } else if (result != 0) {
+        resp = response_json_error(409, "Key creation failed (client must be confidential)");
     } else {
-        jsonbuf_appendf(jb, ",\"message\":\"Key created successfully\"");
-    }
-    jsonbuf_appendf(jb, "}");
+        char key_id_hex[33];
+        bytes_to_hex(key_id, 16, key_id_hex, sizeof(key_id_hex));
 
+        JsonBuf *jb = jsonbuf_new(2048);
+        jsonbuf_appendf(jb, "{\"id\":\"%s\",\"key_id\":\"%s\"", key_id_hex, key_id_hex);
+        if (is_generated) {
+            jsonbuf_appendf(jb, ",\"secret\":\"%s\",\"message\":\"Save the secret now - it cannot be retrieved later!\"",
+                            generated_secret);
+        } else {
+            jsonbuf_appendf(jb, ",\"message\":\"Key created successfully\"");
+        }
+        jsonbuf_appendf(jb, "}");
+        resp = jsonbuf_to_response(jb, 200);
+    }
+
+cleanup:
+    free(client_id_str);
+    free(note);
+    if (user_secret) OPENSSL_cleanse(user_secret, strlen(user_secret));
+    free(user_secret);
     OPENSSL_cleanse(generated_secret, sizeof(generated_secret));
-    return jsonbuf_to_response(jb, 200);
+    return resp;
 }
 
 /*

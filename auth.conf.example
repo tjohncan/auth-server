@@ -49,6 +49,11 @@ secret_hash_max_iterations = 4
 # Minimum password length (default 1, minimum 1)
 # password_min_length = 8
 
+# Browser session lifetime (in seconds)
+# How long a login session remains valid. Clients can enforce stricter limits
+# via maximum_session_seconds. Default: 604800 (7 days)
+# session_ttl_seconds = 604800
+
 # OAuth2 token limits
 # Maximum TTL for client access tokens (in seconds)
 # Must be >= access token rotation interval to prevent double-rotation invalidation

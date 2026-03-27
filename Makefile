@@ -39,7 +39,7 @@ endif
 # - fPIE: Position-independent executable for ASLR
 # - Wformat-security: Warn about dangerous format strings
 SECURITY_FLAGS = -fstack-protector-strong -D_FORTIFY_SOURCE=2 -fPIE -Wformat -Wformat-security
-SECURITY_LDFLAGS = -pie
+SECURITY_LDFLAGS = -pie -Wl,-z,relro,-z,now
 
 # Debug flags (use with: make debug)
 DEBUG_FLAGS = -g -O0 -DDEBUG
@@ -95,7 +95,7 @@ clean:
 
 # Test programs
 test-str:
-	$(CC) $(CFLAGS) $(SECURITY_FLAGS) test/test_str.c src/util/str.c src/util/log.c -o test-str $(SECURITY_LDFLAGS)
+	$(CC) $(CFLAGS) $(SECURITY_FLAGS) test/test_str.c src/util/str.c src/util/json.c src/util/log.c -o test-str $(SECURITY_LDFLAGS)
 	@echo "Test built! Run with: ./test-str"
 
 test-http:
@@ -142,4 +142,4 @@ help:
 	@echo "  make clean          - Remove build artifacts"
 	@echo "  make help           - Show this help"
 
-.PHONY: all debug release clean help test test-str test-http test-router test-db test-crypto
+.PHONY: all debug release clean help test test-str test-http test-router test-db test-crypto test-email

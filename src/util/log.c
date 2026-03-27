@@ -1,16 +1,11 @@
-/* Define _POSIX_C_SOURCE for localtime_r */
-#define _POSIX_C_SOURCE 200112L
+/* Define _POSIX_C_SOURCE for gmtime_r */
+#define _POSIX_C_SOURCE 200809L
 
 #include "util/log.h"
 #include <stdio.h>
 #include <stdarg.h>
 #include <time.h>
 
-/*
- * Static variable - this keeps its value between function calls.
- * It's like a "global" but only visible within this file.
- * Starts at LOG_INFO by default.
- */
 static LogLevel current_min_level = LOG_INFO;
 
 /*

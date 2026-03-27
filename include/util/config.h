@@ -64,6 +64,9 @@ typedef struct {
     /* Invitation token TTL (not gated by EMAIL_SUPPORT — RS provisioning always needs this) */
     int invitation_token_ttl_seconds;  /* How long invitation tokens are valid (default 72 hours) */
 
+    /* Browser session TTL */
+    int session_ttl_seconds;  /* How long login sessions are valid (default 7 days) */
+
     /* Database cleaner settings */
     int cleaner_enabled;                    /* Master switch: 0=off, 1=on */
     int cleaner_interval_seconds;           /* Sleep between table checks */

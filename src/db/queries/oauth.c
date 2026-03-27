@@ -392,6 +392,7 @@ int oauth_session_set_mfa_completed(db_handle_t *db, const char *session_token) 
     const char *sql =
         "UPDATE " TBL_BROWSER " "
         "SET mfa_completed = " BOOL_TRUE ", "
+        "mfa_completed_at = " NOW ", "
         "updated_at = " NOW " "
         "WHERE session_token = " P"1 "
         "AND is_closed = " BOOL_FALSE " "

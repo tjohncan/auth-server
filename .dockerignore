@@ -18,6 +18,7 @@ auth-server
 *.md
 *.txt
 !templates/emails/*.txt
+!static/robots.txt
 
 # Deployment config (not needed inside the image)
 deployment/

@@ -102,6 +102,7 @@ Common helper functions.
 - **Data** (`data.c`, `include/util/data.h`) - Hex encoding/decoding utilities used by crypto modules
 - **Validation** (`validation.c`, `include/util/validation.h`) - Input validation for usernames, emails, and code names
 - **JSON** (`json.c`, `include/util/json.h`) - JSON parsing utilities (unescape, get_string, get_int, get_bool)
+- **Email** (`email.c`, `include/util/email.h`) - Non-blocking email delivery via fork+exec (requires `EMAIL_SUPPORT=1`)
 
 ### Crypto Layer (`src/crypto/`)
 Cryptographic primitives for OAuth2 security.
@@ -111,6 +112,7 @@ Cryptographic primitives for OAuth2 security.
 - **Argon2** (`argon2.c`, `include/crypto/argon2.h`) - Argon2id password hashing (memory-hard, GPU-resistant)
 - **PBKDF2** (`pbkdf2.c`, `include/crypto/pbkdf2.h`) - PBKDF2-SHA256 password hashing (alternative to Argon2)
 - **Password** (`password.c`, `include/crypto/password.h`) - Config-driven wrapper with random iteration selection
+- **SHA-256** (`sha256.c`, `include/crypto/sha256.h`) - SHA-256 hashing for token storage (sessions, auth codes, refresh/access tokens)
 - **HMAC** (`hmac.c`, `include/crypto/hmac.h`) - HMAC-SHA256 for JWT signatures and token validation. Timing-safe comparison.
 - **JWT** (`jwt.c`, `include/crypto/jwt.h`) - HS256/ES256 JWT encoding/decoding for OAuth2 tokens with expiration checking
 - **Signing Keys** (`signing_keys.c`, `include/crypto/signing_keys.h`) - Automatic key rotation management for JWTs. 
@@ -144,7 +146,7 @@ Each handler domain (admin, session, OAuth, MFA, user provisioning) follows the 
 ### 1. Database Query Layer (`src/db/queries/`)
 Entity-based query functions for direct database operations.
 
-- **Files**: `org.c`, `user.c`, `client.c`, `resource_server.c`, `mfa.c`
+- **Files**: `org.c`, `user.c`, `client.c`, `resource_server.c`, `oauth.c`, `mfa.c`
 - **Responsibility**: Prepared statements, parameter binding, result extraction
 - **Used by**: Admin handlers, OAuth2 handlers
 - **Design**: Natural keys (code_name, username) instead of internal PINs
@@ -297,27 +299,28 @@ Generates and verifies JWTs for OAuth2 access tokens.
 **Configuration:**
 - `jwt_clock_skew_seconds`: Clock skew tolerance for token expiration (default: 0 for strict validation)
 
-**Access Token Claims:**
-```json
+**Access Token (ES256 JWT):**
+```
+Header: {"alg": "ES256", "typ": "JWT"}
+Payload:
 {
-  "alg": "ES256",
-  "typ": "JWT",
-  "sub": "7777777a-333b-4444-8cd8-999999999000",  // user_account_id (UUID)
-  "aud": "7777777a-333b-4444-8cd8-999999999001",  // resource_server_id (UUID)
-  "client_id": "7777777a-333b-4444-8cd8-999999999002",  // client_id (UUID)
+  "iss": "https://auth.example.com",  // auth server URL
+  "sub": "7777777a333b44448cd8999999999001",  // user_account_id (UUID)
+  "aud": "7777777a333b44448cd8999999999002",  // resource_server_id (UUID)
+  "client_id": "7777777a333b44448cd8999999999000",  // client_id (UUID)
   "scope": "read write",
   "iat": 1766770496,
   "exp": 1766774096
 }
 ```
 
-**Authorization Code Claims (Stateless JWT):**
-```json
+**Authorization Code (Stateless HS256 JWT):**
+```
+Header: {"alg": "HS256", "typ": "JWT"}
+Payload:
 {
-  "alg": "HS256",
-  "typ": "JWT",
-  "client_id": "7777777a-333b-4444-8cd8-999999999000",  // Client UUID
-  "user_account_id": "7777777a-333b-4444-8cd8-999999999001",  // User UUID
+  "client_id": "7777777a333b44448cd8999999999000",  // Client UUID
+  "user_id": "7777777a333b44448cd8999999999001",  // User UUID
   "redirect_uri": "https://app.example.com/callback",
   "scope": "read write",
   "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
@@ -384,7 +387,8 @@ src/
 │   ├── template.c
 │   ├── data.c
 │   ├── validation.c
-│   └── json.c
+│   ├── json.c
+│   └── email.c
 ├── handlers/           # Endpoints
 │   ├── common.c
 │   ├── health.c
@@ -440,7 +444,8 @@ include/
 │   ├── template.h
 │   ├── data.h
 │   ├── validation.h
-│   └── json.h
+│   ├── json.h
+│   └── email.h
 ├── handlers/
 │   ├── admin.h
 │   ├── session.h
@@ -489,6 +494,10 @@ vendor/
 - Conditional compilation ensures only selected backend is compiled
 - Smaller binaries, reduced attack surface
 - **SQLite setup:** The amalgamation (`sqlite3.c`) is not included in the repository — see `vendor/setup_notes.txt`
+
+**Email Support (Optional):**
+- `make EMAIL_SUPPORT=1` - Enable email delivery (password reset, verification, passwordless login, invitations)
+- See [Deployment Guide](deployment/README.md) for email script configuration
 
 **Test Targets:**
 - `make test-str` - String utilities tests

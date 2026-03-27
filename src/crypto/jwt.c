@@ -499,6 +499,10 @@ static int ecdsa_der_to_raw(const unsigned char *der_sig, size_t der_len,
     memset(raw_sig, 0, 64);
     int r_len = BN_num_bytes(r);
     int s_len = BN_num_bytes(s);
+    if (r_len > 32 || s_len > 32) {
+        ECDSA_SIG_free(sig);
+        return -1;
+    }
     BN_bn2bin(r, raw_sig + (32 - r_len));
     BN_bn2bin(s, raw_sig + 32 + (32 - s_len));
 
@@ -920,7 +924,7 @@ int jwt_encode_auth_request(const auth_request_claims_t *claims,
     }
 
     /* Compute HMAC-SHA256 signature */
-    unsigned char signature[32];
+    unsigned char signature[HMAC_SHA256_LENGTH];
     if (crypto_hmac_sha256(secret, secret_len,
                            (const unsigned char *)to_sign, to_sign_len,
                            signature, sizeof(signature)) != 0) {
@@ -1024,7 +1028,7 @@ static int jwt_decode_auth_request_with_secret(const char *token,
     }
 
     /* Compute expected HMAC */
-    unsigned char expected_signature[32];
+    unsigned char expected_signature[HMAC_SHA256_LENGTH];
     if (crypto_hmac_sha256(secret, secret_len,
                            (const unsigned char *)to_verify, to_verify_len,
                            expected_signature, sizeof(expected_signature)) != 0) {
@@ -1037,18 +1041,18 @@ static int jwt_decode_auth_request_with_secret(const char *token,
     OPENSSL_cleanse(secret, sizeof(secret));
 
     /* Decode provided signature */
-    unsigned char provided_signature[32];
+    unsigned char provided_signature[HMAC_SHA256_LENGTH];
     int provided_sig_len = crypto_base64url_decode(signature_b64, strlen(signature_b64),
                                                     provided_signature, sizeof(provided_signature));
 
-    if (provided_sig_len != 32) {
+    if (provided_sig_len != HMAC_SHA256_LENGTH) {
         log_error("Invalid JWT signature length: %d", provided_sig_len);
         return -1;
     }
 
     /* Verify signature (timing-safe comparison) */
-    if (!crypto_hmac_compare(expected_signature, provided_signature, 32)) {
-        log_error("JWT signature verification failed");
+    if (!crypto_hmac_compare(expected_signature, provided_signature, HMAC_SHA256_LENGTH)) {
+        log_debug("JWT signature mismatch (may retry with prior key)");
         return -1;
     }
 

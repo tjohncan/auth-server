@@ -108,7 +108,7 @@ docker compose restart
 # Update (rebuild and restart)
 docker compose up -d --build
 
-# Certificate renewal is automatic (certbot renews every 12h, nginx reloads to pick up new certs).
+# Certificate renewal is automatic (certbot checks every 12h, nginx reloads to pick up new certs).
 # To force a manual renewal:
 docker compose run --rm certbot renew
 docker compose exec nginx nginx -s reload
@@ -180,7 +180,8 @@ overridden by environment variables (useful for Docker and secrets management).
 | `AUTH_EMAIL_FROM_NAME`| `email_from_name`| Sender display name      | —              |
 
 Environment variable names can be customized in `auth.conf` (e.g., `db_password_env = MY_SECRET`)
-to match your infrastructure's naming conventions.
+to match your infrastructure's naming conventions. See `auth.conf.example` for the full list of
+configuration options including password policy, session TTL, token limits, and cleaner settings.
 
 ## Email Delivery (Optional)
 

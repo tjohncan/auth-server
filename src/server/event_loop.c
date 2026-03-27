@@ -187,7 +187,7 @@ static Connection *connection_create(int fd, const char *remote_ip, uint64_t con
     conn->bytes_read = 0;
 
     /* Copy remote IP */
-    snprintf(conn->remote_ip, sizeof(conn->remote_ip), "%s", remote_ip);
+    str_copy(conn->remote_ip, sizeof(conn->remote_ip), remote_ip);
 
     /* Linked list pointers initialized to NULL by memset */
 
@@ -429,8 +429,9 @@ static int extract_content_length(const char *buffer, size_t buffer_len, size_t 
             char *endptr;
             long length = strtol(value_start, &endptr, 10);
 
-            /* Validate: at least one digit parsed, non-negative */
-            if (endptr > value_start && length >= 0) {
+            /* Validate: at least one digit parsed, non-negative, no trailing garbage */
+            if (endptr > value_start && length >= 0 &&
+                (*endptr == '\r' || *endptr == '\n' || *endptr == '\0' || *endptr == ' ')) {
                 if (!found) {
                     /* First Content-Length header */
                     first_value = (size_t)length;

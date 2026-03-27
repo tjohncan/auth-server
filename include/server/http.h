@@ -16,7 +16,6 @@
  * ============================================================================ */
 
 /*
- * HTTP Methods
  * List of standard HTTP methods (RFC 7231, RFC 5789)
  */
 typedef enum {
@@ -163,6 +162,14 @@ void http_response_free(HttpResponse *resp);
  * http_response_set_header - Set a header (or replace if exists)
  */
 void http_response_set_header(HttpResponse *resp, const char *name, const char *value);
+
+/*
+ * http_response_add_header - Append a header (no dedup)
+ *
+ * Use for headers that may appear multiple times (e.g., Set-Cookie).
+ * Per RFC 6265, multiple Set-Cookie headers cannot be comma-joined.
+ */
+void http_response_add_header(HttpResponse *resp, const char *name, const char *value);
 
 /*
  * http_response_set_body - Set response body (copies data)

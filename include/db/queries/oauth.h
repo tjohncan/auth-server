@@ -155,7 +155,7 @@ int oauth_session_set_mfa_completed(db_handle_t *db, const char *session_token);
  *   user_account_id       - User UUID (for logging)
  *   code                  - Pre-generated authorization code (random, base64url)
  *   code_challenge        - PKCE code challenge (optional for confidential, required for public)
- *   code_challenge_method - PKCE method: "plain" or "S256" (NULL if no PKCE)
+ *   code_challenge_method - PKCE method: "S256" (NULL if no PKCE)
  *   ttl_seconds           - Code lifetime
  *   out_id                - Output: 16-byte authorization code UUID
  *

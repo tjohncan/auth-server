@@ -83,7 +83,7 @@ Lookup tables for valid values.
 - `grant_type` - OAuth2 grant type descriptions
 - `client_type` - Public vs confidential client types
 - `code_challenge_method` - PKCE methods (plain, S256)
-- `mfa_method` - Available MFA types (TOTP, SMS, etc.)
+- `mfa_method` - Available MFA types (TOTP; SMS reserved for future use)
 
 ### Keys Domain
 Cryptographic signing keys for JWTs with automatic rotation.
@@ -230,7 +230,7 @@ MFA required = client.require_mfa OR user.require_mfa
 - Deleting the last MFA method automatically clears both flags in the same transaction
 
 **Enrollment Flow (Two-Step Confirmation):**
-1. User initiates enrollment (POST /api/user/mfa/methods)
+1. User initiates enrollment (POST /api/user/mfa/&lt;method&gt;/setup)
 2. Server generates secret/code, creates `user_mfa` record with `is_confirmed = 0`
 3. User proves control (TOTP code from authenticator app, or SMS code from phone)
 4. Server verifies code, sets `is_confirmed = 1`, updates `user.has_mfa = 1`
@@ -292,14 +292,6 @@ Partial unique indexes enforce single-use semantics for authorization codes and 
 - Only one access token can be created directly from an authorization code
 - Only one access token can be created from a given refresh token exchange
 - Each generation in a refresh token rotation chain must be unique (prevents duplicate generations)
-
-### Refresh Token Rotation
-
-Refresh tokens are single-use with chain tracking via `origin_refresh_token_id` and `generation` fields. If an already-exchanged token is reused (replay attack detected), the entire chain can be revoked in a single query.
-
-### Multi-Tenant Isolation
-
-Composite foreign keys in `client_resource_server` enforce that clients can only access resource servers within the same organization, preventing cross-tenant privilege escalation.
 
 ### Redirect URI Validation
 
