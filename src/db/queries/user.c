@@ -392,6 +392,7 @@ int user_verify_password(db_handle_t *db, const char *username,
     const char *sql =
         "SELECT pin, id, salt, hash_iterations, secret_hash FROM " TBL_USER_ACCOUNT " "
         "WHERE username_hash = " P"1 AND is_active = " BOOL_TRUE " "
+        "AND secret_hash IS NOT NULL "
         "LIMIT 1";
 
     db_stmt_t *stmt = NULL;
@@ -478,6 +479,7 @@ int user_verify_password_by_email(db_handle_t *db, const char *email,
         "JOIN " TBL_USER_ACCOUNT " ua ON ua.pin = ue.user_account_pin "
         "WHERE ue.email_hash = " P"1 AND ue.is_verified = " BOOL_TRUE " "
         "AND ua.is_active = " BOOL_TRUE " "
+        "AND ua.secret_hash IS NOT NULL "
         "LIMIT 1";
 
     db_stmt_t *stmt = NULL;
