@@ -142,7 +142,7 @@ HttpResponse *rs_provision_user_handler(const HttpRequest *req,
     (void)params;
 
     if (req->method != HTTP_POST)
-        return response_json_error(405, "Method not allowed");
+        return response_method_not_allowed("POST");
 
     rs_auth_t auth;
     HttpResponse *err = rs_authenticate(req, "rs_provision_user", &auth);
@@ -291,7 +291,7 @@ HttpResponse *rs_link_client_user_handler(const HttpRequest *req,
     (void)params;
 
     if (req->method != HTTP_POST)
-        return response_json_error(405, "Method not allowed");
+        return response_method_not_allowed("POST");
 
     rs_auth_t auth;
     HttpResponse *err = rs_authenticate(req, "rs_link_client_user", &auth);
@@ -335,7 +335,7 @@ HttpResponse *rs_unlink_client_user_handler(const HttpRequest *req,
     (void)params;
 
     if (req->method != HTTP_DELETE)
-        return response_json_error(405, "Method not allowed");
+        return response_method_not_allowed("DELETE");
 
     rs_auth_t auth;
     HttpResponse *err = rs_authenticate(req, "rs_unlink_client_user", &auth);

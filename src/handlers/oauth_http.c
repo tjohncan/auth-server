@@ -33,6 +33,24 @@ static void cleanse_free(char *s) {
     }
 }
 
+/* RFC 6750 Section 3: Bearer token error response with WWW-Authenticate header.
+ * error_code is NULL for missing auth, or "invalid_token" for bad/expired tokens. */
+static HttpResponse *response_bearer_error(const char *error_code,
+                                            const char *description) {
+    HttpResponse *resp = response_json_error(401, description);
+    if (resp) {
+        if (error_code) {
+            char www_auth[128];
+            snprintf(www_auth, sizeof(www_auth),
+                     "Bearer error=\"%s\"", error_code);
+            http_response_set_header(resp, "WWW-Authenticate", www_auth);
+        } else {
+            http_response_set_header(resp, "WWW-Authenticate", "Bearer");
+        }
+    }
+    return resp;
+}
+
 /* ============================================================================
  * JSON/Form Parsing Helpers
  * ========================================================================== */
@@ -975,7 +993,7 @@ HttpResponse *revoke_handler(const HttpRequest *req, const RouteParams *params) 
     if (ct_err) return ct_err;
 
     if (req->method != HTTP_POST) {
-        return response_json_error(405, "Method not allowed");
+        return response_method_not_allowed("POST");
     }
 
     /* Get database connection */
@@ -1105,7 +1123,7 @@ HttpResponse *introspect_handler(const HttpRequest *req, const RouteParams *para
     if (ct_err) return ct_err;
 
     if (req->method != HTTP_POST) {
-        return response_json_error(405, "Method not allowed");
+        return response_method_not_allowed("POST");
     }
 
     /* Get database connection */
@@ -1288,11 +1306,11 @@ HttpResponse *userinfo_handler(const HttpRequest *req, const RouteParams *params
     /* Extract Bearer token from Authorization header */
     const char *auth_header = http_request_get_header(req, "Authorization");
     if (!auth_header || strncmp(auth_header, "Bearer ", 7) != 0) {
-        return response_json_error(401, "Bearer token required");
+        return response_bearer_error(NULL, "Bearer token required");
     }
     const char *token = auth_header + 7;
     if (*token == '\0') {
-        return response_json_error(401, "Bearer token required");
+        return response_bearer_error(NULL, "Bearer token required");
     }
 
     /* Get signing keys for JWT verification */
@@ -1313,24 +1331,24 @@ HttpResponse *userinfo_handler(const HttpRequest *req, const RouteParams *params
     if (jwt_decode_es256(token, key->current_public_key,
                          key->prior_public_key, &claims) != 0) {
         signing_key_free(key);
-        return response_json_error(401, "Invalid or expired token");
+        return response_bearer_error("invalid_token", "Invalid or expired token");
     }
     signing_key_free(key);
 
     /* Extract user UUID from sub claim */
     if (claims.sub[0] == '\0') {
-        return response_json_error(401, "Token has no subject");
+        return response_bearer_error("invalid_token", "Token has no subject");
     }
 
     unsigned char user_id[16];
     if (hex_to_bytes(claims.sub, user_id, 16) != 0) {
-        return response_json_error(401, "Invalid subject in token");
+        return response_bearer_error("invalid_token", "Invalid subject in token");
     }
 
     /* Look up user profile */
     user_userinfo_t info;
     if (user_get_userinfo_by_id(db, user_id, &info) != 0) {
-        return response_json_error(401, "User not found");
+        return response_bearer_error("invalid_token", "User not found");
     }
 
     /* Build JSON response */

@@ -41,11 +41,15 @@ extern const config_t *g_config;
  */
 HttpResponse *require_content_type(const HttpRequest *req, const char *expected);
 
-/* Create 200 OK response with JSON body */
+/* Create 200 OK response with JSON body.
+ * All endpoints (including resource creation) use 200 for uniform client handling. */
 HttpResponse *response_json_ok(const char *json);
 
 /* Create error response with JSON error format: {"error":"message"} */
 HttpResponse *response_json_error(int status_code, const char *message);
+
+/* Create 405 Method Not Allowed with Allow header (RFC 7231 Section 6.5.5) */
+HttpResponse *response_method_not_allowed(const char *allowed);
 
 /*
  * Create OAuth2 error response per RFC 6749 Section 5.2

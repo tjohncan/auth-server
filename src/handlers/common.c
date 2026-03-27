@@ -51,6 +51,14 @@ HttpResponse *response_json_error(int status_code, const char *message) {
     return resp;
 }
 
+HttpResponse *response_method_not_allowed(const char *allowed) {
+    HttpResponse *resp = response_json_error(405, "Method not allowed");
+    if (resp) {
+        http_response_set_header(resp, "Allow", allowed);
+    }
+    return resp;
+}
+
 HttpResponse *response_oauth_error(int status_code, const char *error_code,
                                     const char *description) {
     HttpResponse *resp = http_response_new(status_code);
