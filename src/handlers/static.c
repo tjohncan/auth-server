@@ -303,6 +303,11 @@ static int scan_and_register(Router *router, const char *dir_path, const char *u
         if (S_ISDIR(st.st_mode)) {
             count += scan_and_register(router, fs_path, url_path);
         } else if (S_ISREG(st.st_mode)) {
+            /* Skip documentation files (kept in static/ for repo browsing, not served) */
+            const char *ext = strrchr(entry->d_name, '.');
+            if (ext && strcmp(ext, ".md") == 0)
+                continue;
+
             if (cache_file(fs_path, url_path) != 0)
                 continue;
 
