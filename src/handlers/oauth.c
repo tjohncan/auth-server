@@ -192,25 +192,25 @@ int oauth_authorize(db_handle_t *db,
 
     /* Step 3: Validate session */
     if (!session_token) {
-        log_error("Session token required");
+        log_info("Session token required");
         return -2;  /* Not authenticated */
     }
 
     oauth_session_info_t session;
     if (oauth_session_get_by_token(db, session_token, &session) != 0) {
-        log_error("Session not found or expired");
+        log_info("Session not found or expired");
         return -2;  /* Not authenticated */
     }
 
     /* Step 4: Check authentication complete */
     if (!session.authentication_complete) {
-        log_error("Session authentication not complete");
+        log_info("Session authentication not complete");
         return -2;  /* Not authenticated */
     }
 
     /* Step 5: Check MFA if required by client or user preference */
     if ((client.require_mfa || session.user_requires_mfa) && !session.mfa_completed) {
-        log_error("MFA required but not completed");
+        log_info("MFA required but not completed");
         out_response->user_account_pin = session.user_account_pin;
         return -3;  /* MFA required */
     }
