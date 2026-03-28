@@ -793,16 +793,16 @@ code_verifier=<pkce_verifier>
 
 **Parameters**:
 
-| Parameter     | Required    | Description                                            |
-|---------------|-------------|--------------------------------------------------------|
-| grant_type    | Yes         | Must be `authorization_code`                           |
-| code          | Yes         | Authorization code from /authorize                     |
-| redirect_uri  | Yes         | Must match redirect_uri used in /authorize             |
-| client_id     | Yes         | Client UUID (hex-encoded)                              |
+| Parameter     | Required    | Description                                                 |
+|---------------|-------------|-------------------------------------------------------------|
+| grant_type    | Yes         | Must be `authorization_code`                                |
+| code          | Yes         | Authorization code from /authorize                          |
+| redirect_uri  | Yes         | Must match redirect_uri used in /authorize                  |
+| client_id     | Yes         | Client UUID (hex-encoded)                                   |
 | code_verifier | Yes         | PKCE verifier (required for all authorization_code clients) |
-| resource      | No          | Resource server address (RFC 8707)                     |
-| client_key_id | Conditional | Client key UUID (required for confidential clients)    |
-| client_secret | Conditional | Client secret (required for confidential clients)      |
+| resource      | No          | Resource server address (RFC 8707)                          |
+| client_key_id | Conditional | Client key UUID (required for confidential clients)         |
+| client_secret | Conditional | Client secret (required for confidential clients)           |
 
 **Success Response** (200 OK):
 ```json
@@ -936,15 +936,15 @@ OAuth2 authorization endpoint (RFC 6749 Section 3.1). Initiates authorization co
 
 **Query Parameters**:
 
-| Parameter             | Type          | Required    | Description                                  |
-|-----------------------|---------------|-------------|----------------------------------------------|
-| response_type         | string        | Yes         | Must be "code"                               |
-| client_id             | string (UUID) | Yes         | Client identifier                            |
-| redirect_uri          | string        | Yes         | Registered callback URL                      |
-| scope                 | string        | No          | Space-separated scope list                   |
-| state                 | string        | No          | CSRF protection token                        |
+| Parameter             | Type          | Required    | Description                                                  |
+|-----------------------|---------------|-------------|--------------------------------------------------------------|
+| response_type         | string        | Yes         | Must be "code"                                               |
+| client_id             | string (UUID) | Yes         | Client identifier                                            |
+| redirect_uri          | string        | Yes         | Registered callback URL                                      |
+| scope                 | string        | No          | Space-separated scope list                                   |
+| state                 | string        | No          | CSRF protection token                                        |
 | code_challenge        | string        | Yes         | PKCE challenge (required for all authorization_code clients) |
-| code_challenge_method | string        | Yes         | Must be "S256"                               |
+| code_challenge_method | string        | Yes         | Must be "S256"                                               |
 
 **Prerequisites**:
 - User must be authenticated (valid session cookie)
