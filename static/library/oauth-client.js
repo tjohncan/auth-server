@@ -1,8 +1,11 @@
 /**
  * OAuth2 Client Library with PKCE Support
  *
- * Drop-in client for OAuth2 authorization code flow with PKCE (S256).
+ * Drop-in browser client for OAuth2 authorization code flow with PKCE (S256).
  * Handles token storage, automatic refresh, and authenticated API requests.
+ *
+ * This library is designed for PUBLIC clients (browser/mobile apps that cannot
+ * keep secrets). For CONFIDENTIAL clients (server-side apps), see the note below.
  *
  * @example
  * const client = new OAuthClient({
@@ -24,6 +27,34 @@
  *
  * // Make authenticated requests (auto-refreshes if needed)
  * const response = await client.fetchWithToken('/api/resource');
+ *
+ * ---
+ *
+ * Confidential Client Authorization Code Flow
+ *
+ * Server-side apps that can securely store a client secret use the same
+ * authorization code flow but exchange the code server-to-server. The browser
+ * never sees the tokens.
+ *
+ * 1. Your server redirects the user's browser to the auth server:
+ *    GET /authorize?client_id=ID&redirect_uri=URI&response_type=code
+ *        &code_challenge=CHALLENGE&code_challenge_method=S256&scope=SCOPE&state=STATE
+ *
+ * 2. After login, the auth server redirects back to your server's callback:
+ *    GET /your-callback?code=AUTH_CODE&state=STATE
+ *
+ * 3. Your server exchanges the code (server-to-server, not from the browser):
+ *    POST /token
+ *    grant_type=authorization_code&code=AUTH_CODE&redirect_uri=URI
+ *    &client_id=ID&client_key_id=KEY_ID&client_secret=SECRET&code_verifier=VERIFIER
+ *
+ * 4. Your server receives access_token + refresh_token in the response,
+ *    stores them in its own session, and uses them for API calls.
+ *
+ * 5. Your server manages token refresh (POST /token with grant_type=refresh_token)
+ *    when the access token expires.
+ *
+ * PKCE is required for all authorization code clients (OAuth 2.1).
  */
 class OAuthClient {
     /**
