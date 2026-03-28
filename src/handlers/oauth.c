@@ -192,30 +192,30 @@ int oauth_authorize(db_handle_t *db,
 
     /* Step 3: Validate session */
     if (!session_token) {
-        log_error("Session token required");
+        log_info("Session token required");
         return -2;  /* Not authenticated */
     }
 
     oauth_session_info_t session;
     if (oauth_session_get_by_token(db, session_token, &session) != 0) {
-        log_error("Session not found or expired");
+        log_info("Session not found or expired");
         return -2;  /* Not authenticated */
     }
 
     /* Step 4: Check authentication complete */
     if (!session.authentication_complete) {
-        log_error("Session authentication not complete");
+        log_info("Session authentication not complete");
         return -2;  /* Not authenticated */
     }
 
-    /* Step 5: Check MFA if required by client or user preference */
+    /* Step 5: Check MFA */
     if ((client.require_mfa || session.user_requires_mfa) && !session.mfa_completed) {
-        log_error("MFA required but not completed");
+        log_info("MFA required but not completed");
         out_response->user_account_pin = session.user_account_pin;
         return -3;  /* MFA required */
     }
 
-    /* Step 5.1: Check maximum session duration for this client */
+    /* Step 6: Check maximum session duration for this client */
     if (client.maximum_session_seconds > 0) {
         time_t session_age = time(NULL) - session.started_at;
         if (session_age > client.maximum_session_seconds) {
@@ -225,30 +225,28 @@ int oauth_authorize(db_handle_t *db,
         }
     }
 
-    /* Step 5.5: Validate PKCE for public clients (RFC 7636) */
-    if (strcmp(client.client_type, "public") == 0) {
-        if (!code_challenge || code_challenge[0] == '\0') {
-            log_error("Public client must provide PKCE code_challenge");
-            return -1;
-        }
-        if (!code_challenge_method || code_challenge_method[0] == '\0') {
-            log_error("Public client must provide PKCE code_challenge_method");
-            return -1;
-        }
-        if (strcmp(code_challenge_method, "S256") != 0) {
-            log_error("Public client must use S256 PKCE method, got: %s", code_challenge_method);
-            return -1;
-        }
+    /* Step 7: Validate PKCE (OAuth 2.1 — required for all authorization_code clients) */
+    if (!code_challenge || code_challenge[0] == '\0') {
+        log_error("PKCE code_challenge required");
+        return -1;
+    }
+    if (!code_challenge_method || code_challenge_method[0] == '\0') {
+        log_error("PKCE code_challenge_method required");
+        return -1;
+    }
+    if (strcmp(code_challenge_method, "S256") != 0) {
+        log_error("Only S256 PKCE method is supported, got: %s", code_challenge_method);
+        return -1;
     }
 
-    /* Step 6: Get signing key for auth request JWTs */
+    /* Step 8: Get signing key for auth request JWTs */
     signing_key_t *auth_signing_key = NULL;
     if (signing_key_get_or_rotate(db, SIGNING_KEY_AUTH_REQUEST, &auth_signing_key) != 0) {
         log_error("Failed to get auth request signing key");
         return -1;
     }
 
-    /* Step 7: Build JWT claims */
+    /* Step 9: Build JWT claims */
     auth_request_claims_t claims = {0};
     memcpy(claims.client_id, client_id, 16);
     memcpy(claims.user_account_id, session.user_account_id, 16);
@@ -281,7 +279,7 @@ int oauth_authorize(db_handle_t *db,
         snprintf(claims.nonce + i * 2, sizeof(claims.nonce) - i * 2, "%02x", nonce_bytes[i]);
     }
 
-    /* Step 8: Decode base64url secret to raw bytes */
+    /* Step 10: Decode base64url secret to raw bytes */
     unsigned char secret_bytes[256];
     int secret_len = crypto_base64url_decode(
         auth_signing_key->current_secret,
@@ -299,7 +297,7 @@ int oauth_authorize(db_handle_t *db,
 
     signing_key_free(auth_signing_key);
 
-    /* Step 9: Encode JWT authorization code */
+    /* Step 11: Encode JWT authorization code */
     char *code_jwt = malloc(JWT_MAX_TOKEN_LENGTH);
     if (!code_jwt) {
         OPENSSL_cleanse(secret_bytes, sizeof(secret_bytes));
@@ -320,7 +318,7 @@ int oauth_authorize(db_handle_t *db,
     /* Secret no longer needed */
     OPENSSL_cleanse(secret_bytes, sizeof(secret_bytes));
 
-    /* Step 10: Create DB record (for replay detection) */
+    /* Step 12: Create DB record (for replay detection) */
     unsigned char auth_code_id[16];
     if (oauth_auth_code_create(db, client.pin, client.id,
                                 session.user_account_pin, session.user_account_id,
@@ -334,7 +332,7 @@ int oauth_authorize(db_handle_t *db,
         return -1;
     }
 
-    /* Step 11: Prepare response */
+    /* Step 13: Prepare response */
     out_response->code = code_jwt;
 
     if (state) {
@@ -378,6 +376,12 @@ int oauth_exchange_authorization_code(db_handle_t *db,
         return -1;
     }
 
+    /* Step 1b: Validate grant type */
+    if (strcmp(client.grant_type, "authorization_code") != 0) {
+        log_error("Client not configured for authorization_code grant");
+        return -1;
+    }
+
     /* Step 2: Decode and verify authorization code JWT (stateless) */
     signing_key_t *auth_signing_key = NULL;
     if (signing_key_get_or_rotate(db, SIGNING_KEY_AUTH_REQUEST, &auth_signing_key) != 0) {
@@ -409,21 +413,18 @@ int oauth_exchange_authorization_code(db_handle_t *db,
         return -1;
     }
 
-    /* Step 5: Validate PKCE (if present) */
-    if (auth_claims.code_challenge[0] != '\0') {
-        if (!code_verifier) {
-            log_error("PKCE code_verifier required but not provided");
-            return -1;
-        }
-
-        if (!validate_pkce(code_verifier, auth_claims.code_challenge,
-                           auth_claims.code_challenge_method)) {
-            log_error("PKCE validation failed");
-            return -1;
-        }
-    } else if (strcmp(client.client_type, "public") == 0) {
-        /* Public clients MUST use PKCE */
-        log_error("Public client must use PKCE");
+    /* Step 5: Validate PKCE (required for all authorization_code clients) */
+    if (auth_claims.code_challenge[0] == '\0') {
+        log_error("PKCE code_challenge missing from authorization code");
+        return -1;
+    }
+    if (!code_verifier) {
+        log_error("PKCE code_verifier required but not provided");
+        return -1;
+    }
+    if (!validate_pkce(code_verifier, auth_claims.code_challenge,
+                       auth_claims.code_challenge_method)) {
+        log_error("PKCE validation failed");
         return -1;
     }
 

@@ -187,7 +187,7 @@ create table security.client (
 , constraint ck_grant_type check(grant_type in ('authorization_code', 'client_credentials'))
 , constraint ck_client_type_grant_type_pair check(
     (client_type = 'public' and grant_type = 'authorization_code') or
-    (client_type = 'confidential' and grant_type = 'client_credentials')
+    (client_type = 'confidential' and grant_type in ('client_credentials', 'authorization_code'))
   )
 , constraint ck_access_token_ttl check(access_token_ttl_seconds >= 0)
 , constraint ck_refresh_token_ttl check(refresh_token_ttl_seconds is null or refresh_token_ttl_seconds >= 0)
@@ -637,7 +637,7 @@ create table lookup.grant_type (
 );
 
 insert into lookup.grant_type (grant_type, description) values
-  ('authorization_code', 'OAuth2 authorization code flow for public clients')
+  ('authorization_code', 'OAuth2 authorization code flow')
 , ('client_credentials', 'OAuth2 client credentials flow for confidential clients');
 
 create table lookup.client_type (
@@ -655,7 +655,7 @@ create table lookup.client_type (
 
 insert into lookup.client_type (client_type, allowed_grant_types, description) values
   ('public', '{authorization_code}', 'Browser or mobile app - cannot keep secrets')
-, ('confidential', '{client_credentials}', 'Server-side app - can securely store secrets');
+, ('confidential', '{authorization_code,client_credentials}', 'Server-side app - can securely store secrets');
 
 create table lookup.mfa_method (
   pin bigint not null generated always as identity (start with 1 increment by 1)

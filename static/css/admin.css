@@ -192,7 +192,8 @@ h4 {
 }
 
 .form-hint { color: #6c757d; display: block; margin-top: -15px; }
-input.input-narrow { width: 100px; }
+.form-hint-inline { color: #6c757d; display: block; margin-top: 2px; }
+.input-narrow { width: 100px; }
 .key-display { flex: 1; padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-family: monospace; font-size: 12px; }
 
 /* ---- Settings panels ---- */

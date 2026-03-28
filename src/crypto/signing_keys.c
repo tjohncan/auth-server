@@ -242,6 +242,13 @@ static signing_key_t *load_key_from_db(db_handle_t *db, signing_key_type_t type)
         key->current_secret = current ? str_dup(current) : NULL;
         key->prior_secret = (prior && db_column_type(stmt, 1) != DB_NULL) ? str_dup(prior) : NULL;
 
+        if (current && !key->current_secret) {
+            log_error("Failed to allocate memory for signing key secret");
+            db_finalize(stmt);
+            signing_key_free(key);
+            return NULL;
+        }
+
         const char *current_ts = (const char *)db_column_text(stmt, 2);
         const char *prior_ts = (const char *)db_column_text(stmt, 3);
 
@@ -259,6 +266,14 @@ static signing_key_t *load_key_from_db(db_handle_t *db, signing_key_type_t type)
         key->current_public_key = current_pub ? str_dup(current_pub) : NULL;
         key->prior_private_key = (prior_priv && db_column_type(stmt, 2) != DB_NULL) ? str_dup(prior_priv) : NULL;
         key->prior_public_key = (prior_pub && db_column_type(stmt, 3) != DB_NULL) ? str_dup(prior_pub) : NULL;
+
+        if ((current_priv && !key->current_private_key) ||
+            (current_pub && !key->current_public_key)) {
+            log_error("Failed to allocate memory for signing key pair");
+            db_finalize(stmt);
+            signing_key_free(key);
+            return NULL;
+        }
 
         const char *current_ts = (const char *)db_column_text(stmt, 4);
         const char *prior_ts = (const char *)db_column_text(stmt, 5);

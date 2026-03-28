@@ -47,7 +47,7 @@ typedef struct {
     long long pin;          /* Internal PIN (for backend lookups, not API) */
     char code_name[128];    /* Unique code name */
     char display_name[256]; /* Human-readable name */
-    char note[512];         /* Optional description */
+    char note[2001];        /* Optional description (max 2000 chars + NUL) */
     int is_active;          /* 1 if active, 0 if inactive */
 } org_data_t;
 
@@ -160,7 +160,7 @@ typedef struct {
     unsigned char id[16];        /* key_id - shown to users */
     int is_active;
     char generated_at[32];       /* ISO 8601 timestamp */
-    char note[256];
+    char note[2001];
 } organization_key_data_t;
 
 /*

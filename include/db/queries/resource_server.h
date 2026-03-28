@@ -91,8 +91,8 @@ typedef struct {
     long long organization_pin;
     char code_name[128];
     char display_name[256];
-    char address[512];
-    char note[512];
+    char address[2001];
+    char note[2001];
     int is_active;
     int allow_user_provisioning;
 } resource_server_data_t;
@@ -189,7 +189,7 @@ typedef struct {
     unsigned char id[16];        /* key_id - shown to users */
     int is_active;
     char generated_at[32];
-    char note[256];
+    char note[2001];
 } resource_server_key_data_t;
 
 /*

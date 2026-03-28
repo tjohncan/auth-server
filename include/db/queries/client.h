@@ -126,7 +126,7 @@ int client_create(db_handle_t *db,
  */
 typedef struct {
     char redirect_uri[512];
-    char note[512];
+    char note[2001];
 } client_redirect_uri_data_t;
 
 /*
@@ -233,7 +233,7 @@ typedef struct {
     unsigned char resource_server_id[16];
     char resource_server_code_name[128];
     char resource_server_display_name[256];
-    char resource_server_address[512];
+    char resource_server_address[2001];
 } client_resource_server_data_t;
 
 /*
@@ -361,7 +361,7 @@ typedef struct {
     char display_name[256];
     char client_type[32];
     char grant_type[32];
-    char note[512];
+    char note[2001];
     int require_mfa;
     int access_token_ttl_seconds;
     int issue_refresh_tokens;
@@ -475,7 +475,7 @@ typedef struct {
     unsigned char id[16];        /* key_id - shown to users */
     int is_active;
     char generated_at[32];
-    char note[256];
+    char note[2001];
 } client_key_data_t;
 
 /*

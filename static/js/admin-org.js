@@ -455,9 +455,10 @@ async function renderClientDetail(container) {
                     <div><strong>Maximum Session Duration:</strong> ${formatDuration(client.maximum_session_seconds)}</div>
                     <div><strong>Refresh Tokens:</strong> ${client.issue_refresh_tokens ? 'Yes' : 'No'}</div>
                     <div><strong>Require MFA:</strong> ${client.require_mfa ? 'Yes' : 'No'}</div>
-                ` : `
+                ` : ''}
+                ${client.client_type === 'confidential' ? `
                     <div><strong>Maximum Key Age:</strong> ${formatDuration(client.secret_rotation_seconds)}</div>
-                `}
+                ` : ''}
                 ${client.note ? `<div class="pre-line"><strong>Note:</strong> ${escapeHtml(client.note)}</div>` : ''}
             </div>
         </div>
@@ -637,8 +638,9 @@ async function createClient(orgId) {
             ${formField('Code Name', 'code_name', '', 'text', true, false, 100)}
             ${formField('Display Name', 'display_name', '', 'text', true, false, 200)}
             ${formSelect('Client Type', 'client_config', [
-                { value: 'public', label: 'Public Client (Authorization Code Flow)' },
-                { value: 'confidential', label: 'Confidential Client (Client Credentials Flow)' }
+                { value: 'public', label: 'Public (Authorization Code)' },
+                { value: 'confidential_ac', label: 'Confidential (Authorization Code)' },
+                { value: 'confidential_cc', label: 'Confidential (Client Credentials)' }
             ], 'public', true)}
             ${formDuration('Access Token TTL', 'access_token_ttl_seconds', 3600, DURATION_PRESETS.access_token, true)}
             <div id="authCodeFields">
@@ -664,11 +666,13 @@ async function createClient(orgId) {
     const confidentialFields = document.getElementById('confidentialFields');
 
     function toggleFields() {
-        const isPublic = clientConfig.value === 'public';
-        authCodeFields.style.display = isPublic ? 'block' : 'none';
-        confidentialFields.style.display = isPublic ? 'none' : 'block';
-        confidentialFields.querySelectorAll('input, select').forEach(el => el.disabled = isPublic);
-        authCodeFields.querySelectorAll('input, select').forEach(el => el.disabled = !isPublic);
+        const val = clientConfig.value;
+        const showAuthCode = val === 'public' || val === 'confidential_ac';
+        const showConfidential = val === 'confidential_ac' || val === 'confidential_cc';
+        authCodeFields.style.display = showAuthCode ? 'block' : 'none';
+        confidentialFields.style.display = showConfidential ? 'block' : 'none';
+        authCodeFields.querySelectorAll('input, select').forEach(el => el.disabled = !showAuthCode);
+        confidentialFields.querySelectorAll('input, select').forEach(el => el.disabled = !showConfidential);
     }
     clientConfig.addEventListener('change', toggleFields);
     toggleFields();
@@ -677,11 +681,12 @@ async function createClient(orgId) {
         e.preventDefault();
         const formData = new FormData(e.target);
         try {
-            const clientConfig = formData.get('client_config');
-            const grant_type = clientConfig === 'public' ? 'authorization_code' : 'client_credentials';
+            const val = formData.get('client_config');
+            const client_type = val === 'public' ? 'public' : 'confidential';
+            const grant_type = val === 'confidential_cc' ? 'client_credentials' : 'authorization_code';
             const createData = {
                 organization_id: orgId, code_name: formData.get('code_name'),
-                display_name: formData.get('display_name'), client_type: clientConfig,
+                display_name: formData.get('display_name'), client_type: client_type,
                 grant_type: grant_type, access_token_ttl_seconds: parseInt(formData.get('access_token_ttl_seconds')),
                 note: formData.get('note') || null
             };
@@ -690,7 +695,8 @@ async function createClient(orgId) {
                 createData.refresh_token_ttl_seconds = optInt(formData, 'refresh_token_ttl_seconds');
                 createData.maximum_session_seconds = optInt(formData, 'maximum_session_seconds');
                 createData.require_mfa = formData.get('require_mfa') === 'on';
-            } else {
+            }
+            if (client_type === 'confidential') {
                 createData.secret_rotation_seconds = optInt(formData, 'secret_rotation_seconds');
             }
             await apiPost('/admin/clients', createData);
@@ -710,9 +716,10 @@ async function editClient(clientId) {
                 ${formDuration('Refresh Token TTL', 'refresh_token_ttl_seconds', client.refresh_token_ttl_seconds, DURATION_PRESETS.refresh_token)}
                 ${formDuration('Maximum Session Duration', 'maximum_session_seconds', client.maximum_session_seconds, DURATION_PRESETS.session)}
                 ${formCheckbox('Require MFA', 'require_mfa', client.require_mfa)}
-            ` : `
+            ` : ''}
+            ${client.client_type === 'confidential' ? `
                 ${formDuration('Maximum Key Age (Secret Rotation)', 'secret_rotation_seconds', client.secret_rotation_seconds, DURATION_PRESETS.rotation)}
-            `}
+            ` : ''}
             ${formTextarea('Note', 'note', client.note || '', false, 2000)}
             ${formCheckbox('Active', 'is_active', client.is_active)}
             <div class="modal-actions">
@@ -735,7 +742,8 @@ async function editClient(clientId) {
                 updateData.refresh_token_ttl_seconds = optInt(formData, 'refresh_token_ttl_seconds');
                 updateData.maximum_session_seconds = optInt(formData, 'maximum_session_seconds');
                 updateData.require_mfa = formData.get('require_mfa') === 'on';
-            } else {
+            }
+            if (client.client_type === 'confidential') {
                 updateData.secret_rotation_seconds = optInt(formData, 'secret_rotation_seconds');
             }
             await apiPut(`/admin/clients?id=${clientId}`, updateData);
@@ -756,7 +764,7 @@ async function addRedirectURI(clientId) {
                     </select>
                     <input type="text" name="uri_path" placeholder="localhost:3000/callback" required maxlength="2000" class="form-input flex-fill">
                 </div>
-                <small class="form-hint">Select the scheme and enter the path.</small>
+                <small class="form-hint-inline">Select the scheme and enter the path.</small>
             </div>
             ${formTextarea('Note', 'note', '', false, 2000)}
             <div class="modal-actions">
