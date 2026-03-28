@@ -167,7 +167,7 @@ create table client (
 , constraint ck_client_grant_type check(grant_type in ('authorization_code', 'client_credentials'))
 , constraint ck_client_type_grant_type_pair check(
     (client_type = 'public' and grant_type = 'authorization_code') or
-    (client_type = 'confidential' and grant_type = 'client_credentials')
+    (client_type = 'confidential' and grant_type in ('client_credentials', 'authorization_code'))
   )
 , constraint ck_client_require_mfa check(require_mfa in (0, 1))
 , constraint ck_client_access_token_ttl check(access_token_ttl_seconds >= 0)
@@ -199,7 +199,7 @@ create table grant_type (
 );
 
 insert into grant_type (grant_type, description) values
-  ('authorization_code', 'OAuth2 authorization code flow for public clients')
+  ('authorization_code', 'OAuth2 authorization code flow')
 , ('client_credentials', 'OAuth2 client credentials flow for confidential clients');
 
 create table client_type (
@@ -216,7 +216,7 @@ create table client_type (
 
 insert into client_type (client_type, allowed_grant_types, description) values
   ('public', '["authorization_code"]', 'Browser or mobile app - cannot keep secrets')
-, ('confidential', '["client_credentials"]', 'Server-side app - can securely store secrets');
+, ('confidential', '["authorization_code","client_credentials"]', 'Server-side app - can securely store secrets');
 
 create table client_key (
   pin integer primary key autoincrement
