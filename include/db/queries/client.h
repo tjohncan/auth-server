@@ -233,7 +233,7 @@ typedef struct {
     unsigned char resource_server_id[16];
     char resource_server_code_name[128];
     char resource_server_display_name[256];
-    char resource_server_address[512];
+    char resource_server_address[2001];
 } client_resource_server_data_t;
 
 /*

@@ -91,7 +91,7 @@ typedef struct {
     long long organization_pin;
     char code_name[128];
     char display_name[256];
-    char address[512];
+    char address[2001];
     char note[2001];
     int is_active;
     int allow_user_provisioning;

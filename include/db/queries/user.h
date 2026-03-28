@@ -134,7 +134,7 @@ typedef struct {
     unsigned char client_id[16];
     char client_code_name[128];
     char client_display_name[256];
-    char resource_server_address[512];
+    char resource_server_address[2001];
 } management_ui_setup_t;
 
 /*
