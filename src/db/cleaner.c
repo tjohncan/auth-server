@@ -463,7 +463,7 @@ static void cleaner_init(db_handle_t *db, cleaner_config_t *config) {
     /* Auto-discover history tables */
     discover_history_tables(db, config);
 
-    log_info("Cleaner: initialized with %d tables", g_num_active_cleaners);
+    log_info("Cleaner: initialized with %d tasks", g_num_active_cleaners);
 }
 
 /*
@@ -504,7 +504,7 @@ static void* cleaner_thread_main(void *arg) {
     /* Initial shuffle */
     shuffle_cleaners(g_active_cleaners, g_num_active_cleaners);
 
-    log_info("Cleaner: started (monitoring %d tables, interval=%ds, batch=%d)",
+    log_info("Cleaner: started (monitoring %d tasks, interval=%ds, batch=%d)",
              g_num_active_cleaners, config->interval_seconds, config->batch_size);
 
     int current_idx = 0;
@@ -548,7 +548,7 @@ static void* cleaner_thread_main(void *arg) {
         /* Hourly stats summary */
         time_t now = time(NULL);
         if (now - last_stats_time >= 3600) {
-            log_info("Cleaner: hourly stats: %d batches purged (%d tables checked %d times)",
+            log_info("Cleaner: hourly stats: %d batches purged (%d tasks checked %d times)",
                      total_purged, g_num_active_cleaners, total_checks);
             total_purged = 0;
             total_checks = 0;
