@@ -188,6 +188,8 @@ HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params) {
         char *redirect_uri = form_get_param(body, "redirect_uri");
         char *code_verifier = form_get_param(body, "code_verifier");
         char *resource = form_get_param(body, "resource");  /* RFC 8707 */
+        char *client_key_id_str = form_get_param(body, "client_key_id");
+        char *client_secret = form_get_param(body, "client_secret");
 
         if (!code || !redirect_uri) {
             free(grant_type);
@@ -195,9 +197,72 @@ HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params) {
             free(redirect_uri);
             cleanse_free(code_verifier);
             free(resource);
+            free(client_key_id_str);
+            cleanse_free(client_secret);
             return response_oauth_error(400, "invalid_request",
                                          "code and redirect_uri required for authorization_code grant");
         }
+
+        /* Look up client to determine type (before consuming auth code) */
+        oauth_client_info_t client;
+        if (oauth_client_lookup(db, client_id, &client) != 0) {
+            free(grant_type);
+            cleanse_free(code);
+            free(redirect_uri);
+            cleanse_free(code_verifier);
+            free(resource);
+            free(client_key_id_str);
+            cleanse_free(client_secret);
+            return response_oauth_error(400, "invalid_client", "Client not found");
+        }
+
+        /* Authenticate confidential clients before consuming auth code */
+        if (strcmp(client.client_type, "confidential") == 0) {
+            if (!client_key_id_str || !client_secret) {
+                free(grant_type);
+                cleanse_free(code);
+                free(redirect_uri);
+                cleanse_free(code_verifier);
+                free(resource);
+                free(client_key_id_str);
+                cleanse_free(client_secret);
+                return response_oauth_error(400, "invalid_request",
+                    "client_key_id and client_secret required for confidential clients");
+            }
+
+            unsigned char client_key_id[16];
+            if (hex_to_bytes(client_key_id_str, client_key_id, 16) != 0) {
+                free(grant_type);
+                cleanse_free(code);
+                free(redirect_uri);
+                cleanse_free(code_verifier);
+                free(resource);
+                free(client_key_id_str);
+                cleanse_free(client_secret);
+                return response_oauth_error(400, "invalid_request", "Invalid client_key_id format");
+            }
+
+            long long client_pin, key_pin;
+            int auth_result = oauth_client_authenticate(db, client_id, client_key_id,
+                                                         client_secret, &client_pin, &key_pin);
+            if (auth_result != 1) {
+                free(grant_type);
+                cleanse_free(code);
+                free(redirect_uri);
+                cleanse_free(code_verifier);
+                free(resource);
+                free(client_key_id_str);
+                cleanse_free(client_secret);
+                return response_oauth_error(401, "invalid_client", "Client authentication failed");
+            }
+
+            log_key_usage(db, KEY_USAGE_CLIENT, key_pin, "authorization_code",
+                          http_request_get_client_ip(req, NULL),
+                          http_request_get_header(req, "User-Agent"));
+        }
+
+        free(client_key_id_str);
+        cleanse_free(client_secret);
 
         oauth_token_response_t token_resp;
         int rc = oauth_exchange_authorization_code(db, client_id, code, redirect_uri,

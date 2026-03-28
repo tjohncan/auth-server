@@ -556,7 +556,7 @@ Query: `id` (required) - Key UUID
 
 ### Client Keys
 
-API key management for confidential client authentication (client_credentials flow).
+API key management for confidential client authentication.
 
 **POST /api/admin/client-keys**
 Create new client API key (confidential clients only).
@@ -793,14 +793,16 @@ code_verifier=<pkce_verifier>
 
 **Parameters**:
 
-| Parameter     | Required    | Description                                 |
-|---------------|-------------|---------------------------------------------|
-| grant_type    | Yes         | Must be `authorization_code`                |
-| code          | Yes         | Authorization code from /authorize          |
-| redirect_uri  | Yes         | Must match redirect_uri used in /authorize  |
-| client_id     | Yes         | Client UUID (hex-encoded)                   |
-| code_verifier | Conditional | PKCE verifier (required for public clients) |
-| resource      | No          | Resource server address (RFC 8707)          |
+| Parameter     | Required    | Description                                            |
+|---------------|-------------|--------------------------------------------------------|
+| grant_type    | Yes         | Must be `authorization_code`                           |
+| code          | Yes         | Authorization code from /authorize                     |
+| redirect_uri  | Yes         | Must match redirect_uri used in /authorize             |
+| client_id     | Yes         | Client UUID (hex-encoded)                              |
+| code_verifier | Yes         | PKCE verifier (required for all authorization_code clients) |
+| resource      | No          | Resource server address (RFC 8707)                     |
+| client_key_id | Conditional | Client key UUID (required for confidential clients)    |
+| client_secret | Conditional | Client secret (required for confidential clients)      |
 
 **Success Response** (200 OK):
 ```json
@@ -941,8 +943,8 @@ OAuth2 authorization endpoint (RFC 6749 Section 3.1). Initiates authorization co
 | redirect_uri          | string        | Yes         | Registered callback URL                      |
 | scope                 | string        | No          | Space-separated scope list                   |
 | state                 | string        | No          | CSRF protection token                        |
-| code_challenge        | string        | Conditional | PKCE challenge (required for public clients) |
-| code_challenge_method | string        | Conditional | "S256" (required if code_challenge present)  |
+| code_challenge        | string        | Yes         | PKCE challenge (required for all authorization_code clients) |
+| code_challenge_method | string        | Yes         | Must be "S256"                               |
 
 **Prerequisites**:
 - User must be authenticated (valid session cookie)
