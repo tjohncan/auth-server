@@ -1,6 +1,9 @@
 {
+  "id": "/",
   "name": "Auth Server",
   "short_name": "Auth",
+  "start_url": "/",
+  "scope": "/",
   "icons": [
     {
       "src": "/favicon/icon-192x192.png",
