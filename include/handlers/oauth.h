@@ -69,7 +69,8 @@ void oauth_authorize_response_free(oauth_authorize_response_t *resp);
  *          -1 on error or validation failure,
  *          -2 if session not authenticated (need login),
  *          -3 if MFA required but not completed,
- *          -4 if client not found or redirect_uri not registered (do NOT redirect)
+ *          -4 if client not found or redirect_uri not registered (do NOT redirect),
+ *          -5 if user is not linked to this client (access denied)
  */
 int oauth_authorize(db_handle_t *db,
                     const unsigned char *client_id,

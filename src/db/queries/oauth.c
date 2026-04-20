@@ -142,6 +142,40 @@ int oauth_redirect_uri_validate(db_handle_t *db, long long client_pin,
     }
 }
 
+int oauth_client_user_check(db_handle_t *db, long long client_pin,
+                             long long user_account_pin) {
+    if (!db) {
+        log_error("Invalid arguments to oauth_client_user_check");
+        return -1;
+    }
+
+    const char *sql =
+        "SELECT 1 FROM " TBL_CLIENT_USER " "
+        "WHERE client_pin = " P"1 AND user_account_pin = " P"2 "
+        "LIMIT 1";
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        log_error("Failed to prepare oauth_client_user_check statement");
+        return -1;
+    }
+
+    db_bind_int64(stmt, 1, client_pin);
+    db_bind_int64(stmt, 2, user_account_pin);
+
+    int rc = db_step(stmt);
+    db_finalize(stmt);
+
+    if (rc == DB_ROW) {
+        return 1;  /* Linked */
+    } else if (rc == DB_DONE) {
+        return 0;  /* Not linked */
+    } else {
+        log_error("Error checking client_user link");
+        return -1;
+    }
+}
+
 int oauth_session_create(db_handle_t *db, long long user_account_pin,
                          const unsigned char *user_account_id,
                          const char *session_token,

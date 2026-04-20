@@ -225,7 +225,26 @@ int oauth_authorize(db_handle_t *db,
         }
     }
 
-    /* Step 7: Validate PKCE (OAuth 2.1 — required for all authorization_code clients) */
+    /* Step 7: Verify user is linked to this client (skipped for universal clients) */
+    if (!client.is_universal) {
+        int link_rc = oauth_client_user_check(db, client.pin, session.user_account_pin);
+        if (link_rc < 0) {
+            log_error("Failed to check client_user link");
+            return -1;
+        }
+        if (link_rc == 0) {
+            char denied_client_id_hex[33], denied_user_id_hex[33];
+            bytes_to_hex(client.id, sizeof(client.id),
+                         denied_client_id_hex, sizeof(denied_client_id_hex));
+            bytes_to_hex(session.user_account_id, sizeof(session.user_account_id),
+                         denied_user_id_hex, sizeof(denied_user_id_hex));
+            log_info("User not linked to client: client_id=%s, user_id=%s",
+                     denied_client_id_hex, denied_user_id_hex);
+            return -5;  /* Access denied */
+        }
+    }
+
+    /* Step 8: Validate PKCE (OAuth 2.1 — required for all authorization_code clients) */
     if (!code_challenge || code_challenge[0] == '\0') {
         log_error("PKCE code_challenge required");
         return -1;
@@ -239,14 +258,14 @@ int oauth_authorize(db_handle_t *db,
         return -1;
     }
 
-    /* Step 8: Get signing key for auth request JWTs */
+    /* Step 9: Get signing key for auth request JWTs */
     signing_key_t *auth_signing_key = NULL;
     if (signing_key_get_or_rotate(db, SIGNING_KEY_AUTH_REQUEST, &auth_signing_key) != 0) {
         log_error("Failed to get auth request signing key");
         return -1;
     }
 
-    /* Step 9: Build JWT claims */
+    /* Step 10: Build JWT claims */
     auth_request_claims_t claims = {0};
     memcpy(claims.client_id, client_id, 16);
     memcpy(claims.user_account_id, session.user_account_id, 16);
@@ -279,7 +298,7 @@ int oauth_authorize(db_handle_t *db,
         snprintf(claims.nonce + i * 2, sizeof(claims.nonce) - i * 2, "%02x", nonce_bytes[i]);
     }
 
-    /* Step 10: Decode base64url secret to raw bytes */
+    /* Step 11: Decode base64url secret to raw bytes */
     unsigned char secret_bytes[256];
     int secret_len = crypto_base64url_decode(
         auth_signing_key->current_secret,
@@ -297,7 +316,7 @@ int oauth_authorize(db_handle_t *db,
 
     signing_key_free(auth_signing_key);
 
-    /* Step 11: Encode JWT authorization code */
+    /* Step 12: Encode JWT authorization code */
     char *code_jwt = malloc(JWT_MAX_TOKEN_LENGTH);
     if (!code_jwt) {
         OPENSSL_cleanse(secret_bytes, sizeof(secret_bytes));
@@ -318,7 +337,7 @@ int oauth_authorize(db_handle_t *db,
     /* Secret no longer needed */
     OPENSSL_cleanse(secret_bytes, sizeof(secret_bytes));
 
-    /* Step 12: Create DB record (for replay detection) */
+    /* Step 13: Create DB record (for replay detection) */
     unsigned char auth_code_id[16];
     if (oauth_auth_code_create(db, client.pin, client.id,
                                 session.user_account_pin, session.user_account_id,
@@ -332,7 +351,7 @@ int oauth_authorize(db_handle_t *db,
         return -1;
     }
 
-    /* Step 13: Prepare response */
+    /* Step 14: Prepare response */
     out_response->code = code_jwt;
 
     if (state) {
