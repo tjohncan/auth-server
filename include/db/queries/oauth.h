@@ -60,6 +60,23 @@ int oauth_redirect_uri_validate(db_handle_t *db, long long client_pin,
                                  const char *redirect_uri);
 
 /*
+ * Check if a user account is linked to a client (client_user membership)
+ *
+ * Enforces per-client access control at /authorize: a user must have an
+ * explicit client_user row before a code is issued. Callers should short-circuit
+ * on client.is_universal before invoking this check.
+ *
+ * Parameters:
+ *   db               - Database handle
+ *   client_pin       - Client PIN
+ *   user_account_pin - User account PIN
+ *
+ * Returns: 1 if linked, 0 if not linked, -1 on error
+ */
+int oauth_client_user_check(db_handle_t *db, long long client_pin,
+                             long long user_account_pin);
+
+/*
  * Create authenticated browser session
  *
  * Creates session after successful user authentication.

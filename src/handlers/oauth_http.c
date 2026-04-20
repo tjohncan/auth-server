@@ -779,6 +779,27 @@ HttpResponse *authorize_handler(const HttpRequest *req, const RouteParams *param
         return response_json_error(400, "Invalid client_id or redirect_uri");
     }
 
+    if (rc == -5) {
+        /* User not linked to this client — redirect with access_denied
+         * (redirect_uri is already validated, post-trust error per RFC 6749 §4.1.2.1) */
+        char location[2048];
+        if (build_error_redirect(redirect_uri, "access_denied",
+                                  "User is not authorized for this client",
+                                  state[0] ? state : NULL,
+                                  location, sizeof(location)) != 0) {
+            return response_json_error(500, "Internal server error");
+        }
+
+        HttpResponse *resp = http_response_new(302);
+        if (!resp) {
+            return response_json_error(500, "Internal server error");
+        }
+
+        http_response_set_header(resp, "Location", location);
+        http_response_set_body_str(resp, "");
+        return resp;
+    }
+
     if (rc != 0) {
         /* Validation error - redirect with invalid_request */
         char location[2048];
