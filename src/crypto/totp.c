@@ -206,6 +206,10 @@ int crypto_totp_generate_code(const char *secret, time_t timestamp,
  * TOTP Code Verification
  * ============================================================================ */
 
+/* DESIGN DECISION: codes are deliberately NOT single-use within their window.
+ * A code stays valid for its full ± TOTP_TIME_WINDOW span and replays succeed.
+ * This departs from RFC 6238 §5.2 on purpose — do not "fix" it without reading
+ * the rationale above crypto_totp_verify() in include/crypto/totp.h. */
 int crypto_totp_verify(const char *secret, const char *code, time_t current_time) {
     if (!secret || !code) {
         log_error("Invalid arguments to crypto_totp_verify");

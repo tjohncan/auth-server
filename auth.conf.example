@@ -7,6 +7,10 @@ log_level = info
 # Optional: Specify custom environment variable name for log level override
 # log_level_env = MY_LOG_LEVEL
 
+# Public identity of this server — used to build URLs (JWT `iss` claim, email links,
+# TOTP issuer). This is NOT a bind address: the server always listens on all
+# interfaces, so that an edge proxy or load balancer on another host can reach it.
+# Firewall the port; do not rely on this setting to restrict access.
 server_host = localhost
 server_port = 8080
 server_workers = 0
