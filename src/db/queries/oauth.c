@@ -1431,6 +1431,53 @@ int oauth_introspect_token(db_handle_t *db,
     return 0;
 }
 
+int oauth_access_token_is_active(db_handle_t *db, const char *token) {
+    if (!db || !token) {
+        log_error("Invalid arguments to oauth_access_token_is_active");
+        return -1;
+    }
+
+    /* Hash access token for lookup */
+    char token_hash[SHA256_HEX_LENGTH];
+    if (crypto_sha256_hex(token, strlen(token),
+                          token_hash, sizeof(token_hash)) != 0) {
+        log_error("Failed to hash token for active check");
+        return -1;
+    }
+
+    /* Same predicate oauth_introspect_token() applies: revoked tokens are dead,
+     * and so are the tokens of a client that has been deactivated. */
+    const char *sql =
+        "SELECT 1 FROM " TBL_ACCESS_TOKEN " at "
+        "INNER JOIN " TBL_CLIENT " c ON c.pin = at.client_pin "
+        "WHERE at.token = " P"1 "
+        "AND at.is_revoked = " BOOL_FALSE " "
+        "AND c.is_active = " BOOL_TRUE " "
+        "AND (at.expected_expiry IS NULL OR at.expected_expiry > " NOW ") "
+        "LIMIT 1";
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        log_error("Failed to prepare oauth_access_token_is_active statement");
+        return -1;
+    }
+
+    db_bind_text(stmt, 1, token_hash, -1);
+
+    int rc = db_step(stmt);
+    db_finalize(stmt);
+
+    if (rc == DB_ROW) {
+        return 1;  /* Active */
+    } else if (rc == DB_DONE) {
+        log_debug("Access token not active (revoked, expired, or unknown)");
+        return 0;
+    }
+
+    log_error("Error checking whether access token is active");
+    return -1;
+}
+
 int oauth_revoke_token(db_handle_t *db,
                        const char *token,
                        const char *token_type_hint,

@@ -1201,6 +1201,8 @@ OpenID Connect UserInfo endpoint (OIDC Core Section 5.3). Returns claims about t
 
 **Security**: Bearer token authentication. The access token (ES256 JWT) must be provided in the Authorization header. The token is verified against the server's current (and prior) signing keys.
 
+Signature and expiry are verified from the JWT itself, but a self-contained token cannot carry revocation state — so the token record is also consulted. A token revoked via `POST /revoke`, auto-revoked by replay-chain revocation, or belonging to a client that has since been deactivated, is rejected here immediately rather than remaining usable until `exp`. This applies the same liveness predicate as `POST /introspect`.
+
 **Request**:
 ```http
 GET /userinfo HTTP/1.1
@@ -1227,7 +1229,7 @@ Authorization: Bearer eyJhbGciOiJFUzI1NiIs...
 | server_time        | integer | Server Unix timestamp (custom extension)                               |
 
 **Error Responses**:
-- `401 Unauthorized` — Missing, invalid, or expired Bearer token; or user not found
+- `401 Unauthorized` — Missing, invalid, expired, or **revoked** Bearer token; or user not found
 
 **Example**:
 ```bash

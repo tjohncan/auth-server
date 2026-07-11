@@ -1458,6 +1458,22 @@ HttpResponse *userinfo_handler(const HttpRequest *req, const RouteParams *params
     }
     signing_key_free(key);
 
+    /* Signature and exp are now verified, but a self-contained JWT cannot carry
+     * revocation state — consult the token record so /revoke and replay-chain
+     * revocation are honored here as they are at /introspect.
+     *
+     * Distinguish "token is dead" from "we could not tell": a transient database
+     * error must not answer 401, or a well-behaved client would discard a
+     * perfectly good token and force the user to log in again over a DB hiccup. */
+    int token_active = oauth_access_token_is_active(db, token);
+    if (token_active < 0) {
+        log_error("Failed to check access token state for userinfo");
+        return response_json_error(500, "Internal server error");
+    }
+    if (token_active == 0) {
+        return response_bearer_error("invalid_token", "Invalid or expired token");
+    }
+
     /* Extract user UUID from sub claim */
     if (claims.sub[0] == '\0') {
         return response_bearer_error("invalid_token", "Token has no subject");
