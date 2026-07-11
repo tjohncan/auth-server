@@ -51,8 +51,15 @@
  * 4. Your server receives access_token + refresh_token in the response,
  *    stores them in its own session, and uses them for API calls.
  *
- * 5. Your server manages token refresh (POST /token with grant_type=refresh_token)
- *    when the access token expires.
+ * 5. Your server manages token refresh when the access token expires:
+ *    POST /token
+ *    grant_type=refresh_token&refresh_token=REFRESH_TOKEN
+ *    &client_id=ID&client_key_id=KEY_ID&client_secret=SECRET
+ *
+ *    Confidential clients must authenticate on refresh too (RFC 6749 Section 6) —
+ *    the refresh token alone is not sufficient. Public clients (the class this
+ *    library implements) hold no secret and send only client_id; PKCE and refresh
+ *    token rotation are their protection.
  *
  * PKCE is required for all authorization code clients (OAuth 2.1).
  */

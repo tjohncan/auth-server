@@ -116,6 +116,63 @@ static char *form_get_param(const char *body, const char *key) {
     return value;
 }
 
+/*
+ * Authenticate the client at the token endpoint (RFC 6749 Section 6).
+ *
+ * Confidential clients must present client_key_id + client_secret on every token
+ * call — the refresh token alone must not suffice, because at a confidential
+ * client the token store and the client secret live in separate places. Public
+ * clients hold no secret and pass straight through: PKCE plus refresh-token
+ * rotation are their protection.
+ *
+ * Shared by every grant that needs it, so the authorization_code and
+ * refresh_token paths cannot drift apart.
+ *
+ * Allocates nothing. The caller still owns the credential strings it parsed out
+ * of the form body and must free them on both success and failure.
+ *
+ * Returns NULL on success, or an error response for the caller to return.
+ */
+static HttpResponse *authenticate_token_client(db_handle_t *db,
+                                                const HttpRequest *req,
+                                                const unsigned char *client_id,
+                                                const char *client_key_id_str,
+                                                const char *client_secret,
+                                                const char *operation) {
+    oauth_client_info_t client;
+    if (oauth_client_lookup(db, client_id, &client) != 0) {
+        return response_oauth_error(400, "invalid_client", "Client not found");
+    }
+
+    if (strcmp(client.client_type, "confidential") != 0) {
+        return NULL;  /* Public client — PKCE + rotation are its protection */
+    }
+
+    /* RFC 6749 Section 5.2: absent or unusable client authentication is
+     * invalid_client, not invalid_request — the request is well-formed, it is the
+     * client that failed to authenticate. */
+    if (!client_key_id_str || !client_secret) {
+        return response_oauth_error(401, "invalid_client",
+            "client_key_id and client_secret required for confidential clients");
+    }
+
+    unsigned char client_key_id[16];
+    if (hex_to_bytes(client_key_id_str, client_key_id, 16) != 0) {
+        return response_oauth_error(401, "invalid_client", "Invalid client_key_id format");
+    }
+
+    long long client_pin, key_pin;
+    if (oauth_client_authenticate(db, client_id, client_key_id, client_secret,
+                                   &client_pin, &key_pin) != 1) {
+        return response_oauth_error(401, "invalid_client", "Client authentication failed");
+    }
+
+    log_key_usage(db, KEY_USAGE_CLIENT, key_pin, operation,
+                  http_request_get_client_ip(req, NULL),
+                  http_request_get_header(req, "User-Agent"));
+    return NULL;
+}
+
 /* ============================================================================
  * Token Endpoint
  * ========================================================================== */
@@ -203,9 +260,11 @@ HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params) {
                                          "code and redirect_uri required for authorization_code grant");
         }
 
-        /* Look up client to determine type (before consuming auth code) */
-        oauth_client_info_t client;
-        if (oauth_client_lookup(db, client_id, &client) != 0) {
+        /* Authenticate the client before consuming the auth code */
+        HttpResponse *auth_err = authenticate_token_client(db, req, client_id,
+                                                            client_key_id_str, client_secret,
+                                                            "authorization_code");
+        if (auth_err) {
             free(grant_type);
             cleanse_free(code);
             free(redirect_uri);
@@ -213,52 +272,7 @@ HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params) {
             free(resource);
             free(client_key_id_str);
             cleanse_free(client_secret);
-            return response_oauth_error(400, "invalid_client", "Client not found");
-        }
-
-        /* Authenticate confidential clients before consuming auth code */
-        if (strcmp(client.client_type, "confidential") == 0) {
-            if (!client_key_id_str || !client_secret) {
-                free(grant_type);
-                cleanse_free(code);
-                free(redirect_uri);
-                cleanse_free(code_verifier);
-                free(resource);
-                free(client_key_id_str);
-                cleanse_free(client_secret);
-                return response_oauth_error(400, "invalid_request",
-                    "client_key_id and client_secret required for confidential clients");
-            }
-
-            unsigned char client_key_id[16];
-            if (hex_to_bytes(client_key_id_str, client_key_id, 16) != 0) {
-                free(grant_type);
-                cleanse_free(code);
-                free(redirect_uri);
-                cleanse_free(code_verifier);
-                free(resource);
-                free(client_key_id_str);
-                cleanse_free(client_secret);
-                return response_oauth_error(400, "invalid_request", "Invalid client_key_id format");
-            }
-
-            long long client_pin, key_pin;
-            int auth_result = oauth_client_authenticate(db, client_id, client_key_id,
-                                                         client_secret, &client_pin, &key_pin);
-            if (auth_result != 1) {
-                free(grant_type);
-                cleanse_free(code);
-                free(redirect_uri);
-                cleanse_free(code_verifier);
-                free(resource);
-                free(client_key_id_str);
-                cleanse_free(client_secret);
-                return response_oauth_error(401, "invalid_client", "Client authentication failed");
-            }
-
-            log_key_usage(db, KEY_USAGE_CLIENT, key_pin, "authorization_code",
-                          http_request_get_client_ip(req, NULL),
-                          http_request_get_header(req, "User-Agent"));
+            return auth_err;
         }
 
         free(client_key_id_str);
@@ -306,11 +320,15 @@ HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params) {
         char *refresh_token = form_get_param(body, "refresh_token");
         char *scope = form_get_param(body, "scope");
         char *resource = form_get_param(body, "resource");  /* RFC 8707 */
+        char *client_key_id_str = form_get_param(body, "client_key_id");
+        char *client_secret = form_get_param(body, "client_secret");
 
         if (!refresh_token) {
             free(grant_type);
             free(scope);
             free(resource);
+            free(client_key_id_str);
+            cleanse_free(client_secret);
             return response_oauth_error(400, "invalid_request",
                                          "refresh_token parameter is required");
         }
@@ -321,8 +339,27 @@ HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params) {
             cleanse_free(refresh_token);
             free(scope);
             free(resource);
+            free(client_key_id_str);
+            cleanse_free(client_secret);
             return response_oauth_error(400, "invalid_scope", scope_err);
         }
+
+        /* Authenticate the client before rotating the refresh token */
+        HttpResponse *auth_err = authenticate_token_client(db, req, client_id,
+                                                            client_key_id_str, client_secret,
+                                                            "refresh_token");
+        if (auth_err) {
+            free(grant_type);
+            cleanse_free(refresh_token);
+            free(scope);
+            free(resource);
+            free(client_key_id_str);
+            cleanse_free(client_secret);
+            return auth_err;
+        }
+
+        free(client_key_id_str);
+        cleanse_free(client_secret);
 
         oauth_token_response_t token_resp;
         int rc = oauth_refresh_access_token(db, client_id, refresh_token, scope, resource, &token_resp);

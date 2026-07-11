@@ -832,18 +832,29 @@ Content-Type: application/x-www-form-urlencoded
 grant_type=refresh_token&
 refresh_token=<refresh_token>&
 client_id=<client_id>&
+client_key_id=<client_key_id>&        # confidential clients only
+client_secret=<client_secret>&        # confidential clients only
 scope=<optional_scope>
 ```
 
 **Parameters**:
 
-| Parameter     | Required  | Description                                  |
-|---------------|-----------|----------------------------------------------|
-| grant_type    | Yes       | Must be `refresh_token`                      |
-| refresh_token | Yes       | Valid refresh token                          |
-| client_id     | Yes       | Client UUID (hex-encoded)                    |
-| scope         | No        | Requested scope (must be subset of original) |
-| resource      | No        | Resource server address (RFC 8707)           |
+| Parameter     | Required           | Description                                  |
+|---------------|--------------------|----------------------------------------------|
+| grant_type    | Yes                | Must be `refresh_token`                      |
+| refresh_token | Yes                | Valid refresh token                          |
+| client_id     | Yes                | Client UUID (hex-encoded)                    |
+| client_key_id | Confidential only  | Client key UUID (hex-encoded)                |
+| client_secret | Confidential only  | Client secret                                |
+| scope         | No                 | Requested scope (must be subset of original) |
+| resource      | No                 | Resource server address (RFC 8707)           |
+
+**Client authentication** (RFC 6749 Section 6): confidential clients **must** authenticate on
+refresh, exactly as they do on the authorization code exchange. A refresh token alone is not
+sufficient — at a confidential client the token store and the client secret live in separate
+places, so requiring the secret keeps a token-store breach from yielding usable tokens.
+Public clients hold no secret and refresh with the refresh token alone (PKCE + rotation are
+their protection).
 
 **Success Response** (200 OK):
 ```json
