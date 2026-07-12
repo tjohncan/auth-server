@@ -219,7 +219,7 @@ HTTP endpoints for user authentication and management.
 - **Files**: `session_http.c`
 - **Responsibility**: JSON parsing, secure cookie setting, session validation, HTTP responses
 - **Used by**: Router (called for session-authenticated endpoints)
-- **Design**: Sets HttpOnly, Secure, SameSite=Strict session cookie with 7-day default TTL
+- **Design**: Sets HttpOnly, Secure, SameSite=Lax session cookie with 7-day default TTL
 - **Security**: Never exposes internal database PINs to browser, only UUIDs
 
 Examples:

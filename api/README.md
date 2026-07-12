@@ -715,7 +715,7 @@ Or with email (requires `EMAIL_SUPPORT`):
 **Success Response — no MFA** (200 OK):
 ```http
 HTTP/1.1 200 OK
-Set-Cookie: session=<token>; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=604800
+Set-Cookie: session=<token>; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=604800
 Content-Type: application/json
 
 {"message": "Login successful"}
@@ -724,7 +724,7 @@ Content-Type: application/json
 **Success Response — user requires MFA** (200 OK):
 ```http
 HTTP/1.1 200 OK
-Set-Cookie: session=<token>; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=604800
+Set-Cookie: session=<token>; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=604800
 Content-Type: application/json
 
 {
@@ -747,9 +747,17 @@ When `mfa_required` is true, the session cookie is set but the session's `mfa_co
 
 **Session Cookie**:
 - Name: `session`
-- Attributes: `HttpOnly; Secure; SameSite=Strict`
+- Attributes: `HttpOnly; Secure; SameSite=Lax`
 - Lifetime: 7 days (604800 seconds)
 - Used for subsequent OAuth2 authorization flow
+
+`SameSite=Lax` is deliberate, not a weakened `Strict`. `/authorize` is reached by a cross-site
+*top-level navigation* from the relying party's app. `Strict` withholds the session cookie on
+exactly that navigation, so a user holding a perfectly valid session would arrive at `/authorize`
+looking logged-out and get bounced to `/login` — silent SSO could never work. `Lax` sends the
+cookie on top-level GET navigations (which `/authorize` is) while still withholding it on
+cross-site POST, so the state-changing endpoints (`/login`, `/logout`, `/api/user/*`) keep their
+CSRF protection.
 
 **Example**:
 ```bash
@@ -1744,7 +1752,7 @@ Log out current user (close browser session).
 
 **Response Headers**:
 ```
-Set-Cookie: session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0
+Set-Cookie: session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0
 ```
 
 **Error Response** (401 Unauthorized):
@@ -2212,7 +2220,7 @@ Consume a passwordless login token and create a session.
 | token | string | Yes      | Passwordless login token |
 
 **Success Response** (303 See Other):
-- Sets `session` cookie (HttpOnly, Secure, SameSite=Strict)
+- Sets `session` cookie (HttpOnly, Secure, SameSite=Lax)
 - Redirects to `/authorize?{return_to}` if return_to was stored, otherwise `/`
 
 **Behavior**:
