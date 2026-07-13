@@ -193,20 +193,28 @@ HttpRequest http_request_parse(char *raw, size_t length) {
             return req;
         }
 
-        /* Single pass: capture the next line's start BEFORE parse_header_line()
-         * NUL-terminates this one, since that write destroys the "\r\n" we search for.
-         * header_count only advances past a slot parse_header_line() actually filled,
-         * so it can never outrun the initialized region of the array. */
+        /* Single pass over the header lines. header_count only advances past a slot
+         * parse_header_line() actually filled, so it can never outrun the initialized
+         * region of the array — that invariant is what keeps get_header()'s walk safe. */
         char *line = first_header;
         while (req.header_count < max_headers && *line != '\r' && *line != '\0') {
-            char *next = strstr(line, "\r\n");
-            if (next) next += 2;
+            /* Terminate this line at its CRLF before parsing, so the colon search in
+             * parse_header_line() stays inside one line. Capture the next line's start
+             * first, since NUL-ing the CRLF destroys the "\r\n" we'd search for. Without
+             * this, a colon-less line runs on and adopts a later line's colon — the
+             * request is still rejected, but a step later and via a header name carrying
+             * an embedded CRLF. Confining the line makes rejection immediate and keeps
+             * CRLF out of header names. */
+            char *crlf = strstr(line, "\r\n");
+            char *next = crlf ? crlf + 2 : NULL;
+            if (crlf) *crlf = '\0';
 
             if (!parse_header_line(line, &req.headers[req.header_count])) {
-                /* Header line with no colon — malformed (RFC 7230 §3.2). Reject the
-                 * request rather than skip the line: this server sits behind a reverse
-                 * proxy by design, and an origin that quietly tolerates a header block
-                 * the proxy read differently is where request smuggling starts. */
+                /* Header line with no colon — malformed (RFC 7230 §3.2.4). Reject the
+                 * request rather than skip the line. Request framing is already fixed at
+                 * the socket layer (event_loop.c); this is header-interpretation hygiene:
+                 * a proxy that folds or accepts such a line while the origin ignores it is
+                 * a divergence we decline to host, so we fail closed. */
                 free(req.headers);
                 req.headers = NULL;
                 req.header_count = 0;
@@ -307,7 +315,16 @@ const char *http_request_get_client_ip(const HttpRequest *req, const char *socke
         return first_ip;
     }
 
-    /* Fall back to socket IP (direct connection, always valid) */
+    /* DESIGN DECISION: no proxy header means no client IP, and we do NOT substitute
+     * the socket peer. In this server's required topology every real request arrives
+     * through the reverse proxy (it terminates TLS), which sets one of the headers
+     * above; behind that proxy the socket peer is the proxy's own address, so logging
+     * it as the client would record a wrong, misleading value (often 127.0.0.1) rather
+     * than an honest "unknown". Every caller passes NULL for socket_ip and every audit
+     * sink treats a NULL source_ip as unknown (binds SQL NULL), so unknown is
+     * representable. Direct-connection identity, where the socket peer IS the client, is
+     * needed only for localhost-only endpoints and is enforced separately by
+     * is_localhost() on req->remote_ip — which cannot be spoofed by these headers. */
     return socket_ip;
 }
 

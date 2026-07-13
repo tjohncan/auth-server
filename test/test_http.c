@@ -298,6 +298,22 @@ void test_malformed_requests(void) {
         http_request_cleanup(&parsed);
         printf("✓ Every counted header slot is initialized\n");
     }
+
+    /* Test 12: a colon-less line FOLLOWED by a valid header must still be rejected, and
+     * the colon-less line must not absorb the next line's colon. Each header line is
+     * parsed in isolation, so this rejects directly. */
+    {
+        char req[] =
+            "GET / HTTP/1.0\r\n"
+            "NotAHeaderLine\r\n"
+            "Host: x\r\n"
+            "\r\n";
+
+        HttpRequest parsed = http_request_parse(req, strlen(req));
+        assert(parsed.method == HTTP_UNKNOWN);
+        http_request_cleanup(&parsed);
+        printf("✓ Colon-less line does not absorb a later header\n");
+    }
 }
 
 int main(void) {
