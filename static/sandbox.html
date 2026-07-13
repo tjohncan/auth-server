@@ -110,7 +110,7 @@
 
     <!-- Panel 4: Refresh Token -->
     <div id="panel-refresh" class="panel">
-        <p class="desc">Exchange a refresh token for a new access token and refresh token. The old refresh token is invalidated (rotation). Refresh tokens are issued with <code>authorization_code</code> grants.</p>
+        <p class="desc">Exchange a refresh token for a new access token and refresh token. The old refresh token is invalidated (rotation). Refresh tokens are issued with <code>authorization_code</code> grants. Confidential clients must also authenticate here — public clients leave the key fields blank.</p>
         <div class="field">
             <label>Client ID <span class="req">*</span></label>
             <input type="text" id="ref-client-id" placeholder="32-character hex UUID">
@@ -118,6 +118,14 @@
         <div class="field">
             <label>Refresh Token <span class="req">*</span></label>
             <textarea id="ref-token" placeholder="Paste refresh token"></textarea>
+        </div>
+        <div class="field">
+            <label>Client Key ID</label>
+            <input type="text" id="ref-key-id" placeholder="Confidential clients only — leave blank if public">
+        </div>
+        <div class="field">
+            <label>Client Secret</label>
+            <input type="password" id="ref-secret" placeholder="Confidential clients only — leave blank if public" autocomplete="off">
         </div>
         <div class="field">
             <label>Scope</label>
@@ -139,6 +147,14 @@
         <div class="field">
             <label>Old Refresh Token <span class="req">*</span></label>
             <textarea id="replay-token" placeholder="Paste the old refresh token (before rotation)"></textarea>
+        </div>
+        <div class="field">
+            <label>Client Key ID</label>
+            <input type="text" id="replay-key-id" placeholder="Confidential clients only — leave blank if public">
+        </div>
+        <div class="field">
+            <label>Client Secret</label>
+            <input type="password" id="replay-secret" placeholder="Confidential clients only — leave blank if public" autocomplete="off">
         </div>
         <div id="replay-error" class="field-error"></div>
         <button class="run-btn" data-action="run-replay">Replay Token</button>

@@ -100,9 +100,13 @@ async function runRefresh() {
     if (err) return;
 
     var oldToken = tokenVal('ref-token');
+    /* Key ID and secret are optional: confidential clients must authenticate on refresh
+     * (RFC 6749 §6), public clients send neither. buildParams drops the blanks. */
     var params = buildParams(
         { grant_type: 'refresh_token', refresh_token: oldToken, client_id: val('ref-client-id') },
-        { scope: val('ref-scope') }
+        { scope: val('ref-scope'),
+          client_key_id: val('ref-key-id'),
+          client_secret: val('ref-secret') }
     );
     var r = await apiPost('/token', params);
     showResult('ref', '/token', params, r.status, r.text, r.json);
@@ -111,6 +115,10 @@ async function runRefresh() {
         $('ref-token').value = r.json.refresh_token;
         $('replay-token').value = oldToken;
         $('replay-client-id').value = val('ref-client-id');
+        /* Carry credentials across so the replay demo works for confidential clients
+         * without retyping them. */
+        $('replay-key-id').value = val('ref-key-id');
+        $('replay-secret').value = val('ref-secret');
     }
 }
 
@@ -119,7 +127,13 @@ async function runReplay() {
     showError('replay', err);
     if (err) return;
 
-    var params = { grant_type: 'refresh_token', refresh_token: tokenVal('replay-token'), client_id: val('replay-client-id') };
+    var params = buildParams(
+        { grant_type: 'refresh_token',
+          refresh_token: tokenVal('replay-token'),
+          client_id: val('replay-client-id') },
+        { client_key_id: val('replay-key-id'),
+          client_secret: val('replay-secret') }
+    );
     var r = await apiPost('/token', params);
     showResult('replay', '/token', params, r.status, r.text, r.json);
 }
