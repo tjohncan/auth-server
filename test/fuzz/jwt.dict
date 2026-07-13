@@ -1,0 +1,40 @@
+# libFuzzer dictionary for the auth-request JWT payload parser.
+#
+# The harness feeds the fuzzer's bytes in as the JWT *payload* (it signs a valid
+# token around them), so these are the JSON tokens the decoder's hand-rolled parser
+# looks for. Without them the mutator wastes its budget never forming a key the
+# parser recognizes. Pass with: -dict=test/fuzz/jwt.dict
+
+# --- The exact keys parse_json_string/parse_json_long search for ------------
+k_client_id="\"client_id\":\""
+k_user_id="\"user_id\":\""
+k_redirect="\"redirect_uri\":\""
+k_scope="\"scope\":\""
+k_nonce="\"nonce\":\""
+k_challenge="\"code_challenge\":\""
+k_method="\"code_challenge_method\":\""
+k_iat="\"iat\":"
+k_exp="\"exp\":"
+
+# --- JSON structure the parser pivots on ------------------------------------
+obj_open="{"
+obj_close="}"
+quote="\""
+colon=":"
+comma=","
+backslash_quote="\\\""
+backslash_u="\\u0041"
+backslash_bad="\\"
+
+# --- Values that stress each downstream consumer ----------------------------
+# 32-hex → hex_to_bytes() success; anything else → its reject path
+hex32="0123456789abcdef0123456789abcdef"
+hex_odd="abc"
+hex_nonhex="zzzz"
+# strtol edges for iat/exp
+num_zero="0"
+num_neg="-1"
+num_huge="99999999999999999999999999"
+# S256 is the only method the OAuth layer accepts downstream
+v_s256="S256"
+v_plain="plain"

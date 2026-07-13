@@ -1,0 +1,5 @@
+GET /health HTTP/1.0
+X-Empty:
+X-Spaces:    padded   
+Host: x
+

@@ -1,0 +1,3 @@
+HEAD /health HTTP/1.0
+Host: x
+

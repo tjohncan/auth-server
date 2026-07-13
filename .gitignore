@@ -27,6 +27,30 @@ test-db
 test-crypto
 test-email
 
+# Fuzzing and sanitizer artifacts.
+# The seed corpus (test/fuzz/corpus/) and the crash seeds (test/fuzz/crashes/) ARE
+# tracked — they are the regression tests. Everything below is machine-generated.
+auth-server-asan
+fuzz-replay
+fuzz-replay-http
+fuzz-replay-jwt
+fuzz_http
+fuzz_jwt
+fuzz_http_replay
+.fuzz-work/
+fuzz-*.log
+
+# Reproducers libFuzzer drops in the CWD when run by hand...
+crash-*
+leak-*
+timeout-*
+oom-*
+# ...but a reproducer saved into the regression dir is a test, and must be committable.
+# (test/fuzz/run.sh points -artifact_prefix at crashes/<target>/ so new finds land
+# there by default.) Unignore the dir and everything nested under it.
+!test/fuzz/crashes/
+!test/fuzz/crashes/**
+
 # SQLite amalgamation (downloaded via vendor/setup_notes.txt)
 vendor/sqlite/*
 !vendor/sqlite/.gitkeep

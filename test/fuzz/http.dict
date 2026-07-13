@@ -1,0 +1,72 @@
+# libFuzzer/AFL dictionary for the HTTP request parser.
+#
+# Without this, the mutator has to rediscover tokens like "Content-Length:" one
+# random byte at a time, and spends its whole budget in the shallow reject paths.
+# With it, it splices whole protocol tokens in and gets to the interesting code.
+# Pass with: -dict=test/fuzz/http.dict
+#
+# Format: "literal", with \xNN escapes. Keep entries short — they are building
+# blocks for the mutator, not requests.
+
+# --- Structure: the bytes the parser actually pivots on --------------------
+crlf="\x0d\x0a"
+crlfcrlf="\x0d\x0a\x0d\x0a"
+lf="\x0a"
+cr="\x0d"
+colon_sp=": "
+colon=":"
+space=" "
+query="?"
+tab="\x09"
+nul="\x00"
+
+# --- Methods (parse_method) ------------------------------------------------
+m_get="GET "
+m_head="HEAD "
+m_post="POST "
+m_put="PUT "
+m_delete="DELETE "
+m_connect="CONNECT "
+m_options="OPTIONS "
+m_trace="TRACE "
+m_patch="PATCH "
+
+# --- Versions (parse_request_line accepts only 1.0/1.1) --------------------
+v10=" HTTP/1.0"
+v11=" HTTP/1.1"
+v20=" HTTP/2.0"
+v09=" HTTP/0.9"
+
+# --- Headers the parser and its accessors look up by name ------------------
+h_clen="Content-Length: "
+h_ctype="Content-Type: "
+h_host="Host: "
+h_realip="X-Real-IP: "
+h_xff="X-Forwarded-For: "
+h_auth="Authorization: "
+h_cookie="Cookie: "
+h_conn="Connection: "
+h_te="Transfer-Encoding: "
+
+# --- Content-Length values that stress the strtol() validation -------------
+cl_zero="0"
+cl_neg="-1"
+cl_plus="+1"
+cl_huge="999999999999999999999"
+cl_hex="0x10"
+cl_trail="1 "
+cl_junk="1a"
+
+# --- X-Forwarded-For shapes that stress the 46-byte memcpy -----------------
+xff_chain="1.2.3.4, 5.6.7.8"
+xff_comma=","
+xff_v6="2001:0db8:0000:0000:0000:ff00:0042:8329"
+
+# --- Real paths, so the fuzzer reaches realistic request lines -------------
+p_token="/token"
+p_authorize="/authorize"
+p_userinfo="/userinfo"
+p_revoke="/revoke"
+p_introspect="/introspect"
+p_health="/health"
+p_login="/login"
