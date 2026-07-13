@@ -85,23 +85,23 @@
 
     <!-- Panel 3: Token Revocation -->
     <div id="panel-revoke" class="panel">
-        <p class="desc">Revoke an access token using client credentials. Per RFC 7009, the endpoint always returns <code>200 OK</code> regardless of whether the token was valid, already revoked, or the credentials were wrong — preventing information disclosure.</p>
-        <div class="note warn">Only confidential clients can revoke tokens. Public clients do not have client keys and cannot authenticate to this endpoint.</div>
+        <p class="desc">Revoke an access token or a refresh token. The endpoint answers <code>200 OK</code> whether or not the token existed — revoking an unknown token is not an error, and saying so would let anyone probe which tokens are real. Confidential clients must authenticate; public clients revoke with their client ID alone.</p>
+        <div class="note warn">Revoking a refresh token also revokes the access tokens issued under the same grant.</div>
         <div class="field">
-            <label>Access Token <span class="req">*</span></label>
-            <textarea id="rev-token" placeholder="Paste access token"></textarea>
+            <label>Access or Refresh Token <span class="req">*</span></label>
+            <textarea id="rev-token" placeholder="Paste the token to revoke"></textarea>
         </div>
         <div class="field">
             <label>Client ID <span class="req">*</span></label>
             <input type="text" id="rev-client-id" placeholder="32-character hex UUID">
         </div>
         <div class="field">
-            <label>Client Key ID <span class="req">*</span></label>
-            <input type="text" id="rev-key-id" placeholder="32-character hex UUID">
+            <label>Client Key ID</label>
+            <input type="text" id="rev-key-id" placeholder="Confidential clients only — leave blank if public">
         </div>
         <div class="field">
-            <label>Client Secret <span class="req">*</span></label>
-            <input type="password" id="rev-secret" placeholder="Client key secret" autocomplete="off">
+            <label>Client Secret</label>
+            <input type="password" id="rev-secret" placeholder="Confidential clients only — leave blank if public" autocomplete="off">
         </div>
         <div id="rev-error" class="field-error"></div>
         <button class="run-btn" data-action="run-revoke">Revoke</button>

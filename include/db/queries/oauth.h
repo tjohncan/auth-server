@@ -467,7 +467,12 @@ int oauth_access_token_is_active(db_handle_t *db, const char *token);
  * - Validates token belongs to authenticated client_pin
  * - Returns success even if token doesn't exist (prevents enumeration)
  * - Idempotent (revoking already-revoked token succeeds)
- * - Does NOT revoke related tokens (single token only, not chain)
+ * - Revoking a REFRESH token cascades to the access tokens issued under the same
+ *   grant (RFC 7009 Section 2.1). Without that cascade a logout is theatre: the
+ *   refresh token dies while an access token lifted out of storage keeps working
+ *   until it expires. Revoking an ACCESS token revokes only that token.
+ * - Does NOT revoke the whole rotation chain — that is oauth_revoke_token_chain(),
+ *   which exists for replay detection, a different (hostile) event.
  *
  * Parameters:
  *   db              - Database handle

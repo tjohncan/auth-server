@@ -125,13 +125,15 @@ async function runReplay() {
 }
 
 async function runRevoke() {
-    var err = requireFields([['rev-token', 'Token'], ['rev-client-id', 'Client ID'], ['rev-key-id', 'Client Key ID'], ['rev-secret', 'Client Secret']]);
+    var err = requireFields([['rev-token', 'Token'], ['rev-client-id', 'Client ID']]);
     showError('rev', err);
     if (err) return;
 
+    /* Credentials are optional: confidential clients must authenticate, public clients
+     * revoke with client_id alone. buildParams drops the blanks. */
     var params = buildParams(
-        { token: tokenVal('rev-token'), client_id: val('rev-client-id'), client_key_id: val('rev-key-id'), client_secret: val('rev-secret') },
-        {}
+        { token: tokenVal('rev-token'), client_id: val('rev-client-id') },
+        { client_key_id: val('rev-key-id'), client_secret: val('rev-secret') }
     );
     var r = await apiPost('/revoke', params);
     showResult('rev', '/revoke', params, r.status, r.text, r.json);

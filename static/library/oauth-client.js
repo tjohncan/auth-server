@@ -338,11 +338,53 @@ class OAuthClient {
 
     /**
      * Clear stored tokens, PKCE data, and cancel any scheduled refresh
+     *
+     * NOTE: this is local-only. It makes *this browser* forget the tokens; it does not
+     * make the server forget them. The refresh token stays valid until it expires, so
+     * anyone who copied it out of storage keeps a working credential. To actually end
+     * the session, call logout().
      */
     clearTokens() {
         this._tokenStorage.removeItem(this.tokenKey);
         sessionStorage.removeItem(this.pkceKey);
         this._cancelRefresh();
+    }
+
+    /**
+     * Log out: revoke the refresh token at the server, then clear local state.
+     *
+     * This is what clearTokens() alone cannot do. Forgetting a token locally leaves it
+     * alive server-side for the remainder of its TTL — so "log out" would not actually
+     * log anyone out, and a token lifted from storage beforehand would keep working.
+     * Revoking first is what closes that window.
+     *
+     * Best-effort by design: if the revocation request fails (offline, server down), the
+     * local session is cleared anyway. A user who asks to log out must always end up
+     * logged out on the device in front of them, whatever the network is doing.
+     *
+     * @returns {Promise<void>}
+     */
+    async logout() {
+        const tokens = this.getTokens();
+
+        if (tokens && tokens.refresh_token) {
+            try {
+                await fetch(`${this.authUrl}/revoke`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: new URLSearchParams({
+                        token: tokens.refresh_token,
+                        token_type_hint: 'refresh_token',
+                        client_id: this.clientId
+                    })
+                });
+            } catch (e) {
+                /* Network failure. Fall through and clear locally anyway — never trap a
+                 * user inside a session they have asked to leave. */
+            }
+        }
+
+        this.clearTokens();
     }
 
     /* ======================================================================
