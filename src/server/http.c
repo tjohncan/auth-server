@@ -324,7 +324,10 @@ const char *http_request_get_client_ip(const HttpRequest *req, const char *socke
      * sink treats a NULL source_ip as unknown (binds SQL NULL), so unknown is
      * representable. Direct-connection identity, where the socket peer IS the client, is
      * needed only for localhost-only endpoints and is enforced separately by
-     * is_localhost() on req->remote_ip — which cannot be spoofed by these headers. */
+     * is_localhost() on req->remote_ip — which cannot be spoofed by these headers.
+     *
+     * TODO: socket_ip is therefore vestigial — every caller passes NULL, so this
+     * always returns NULL. The parameter could be dropped. */
     return socket_ip;
 }
 
