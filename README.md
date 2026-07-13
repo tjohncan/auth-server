@@ -558,6 +558,14 @@ traffic picture and can shed load before it ever reaches a worker. Duplicating i
 spend a database write per failed guess and still be the weaker of the two.
 MFA attempts and email-token issuance *are* throttled in-server,
 because those are bounded per-account actions rather than an open front door.
+If you delegate a job to the edge, the edge has to actually do it: the shipped nginx config
+enforces a strict per-IP limit on `/login` specifically (10r/m, burst 10), separate from the
+generous limit on ordinary traffic. Per-IP limiting does not stop a distributed or
+credential-stuffing attack — that is what a WAF in front of nginx is for — but it closes the
+single-IP hole, which a generic site-wide limit does not. It does assume nginx can see the
+client's address, which holds when nginx is the edge (as it is in the shipped compose file);
+if you front it with a load balancer, configure `real_ip` first or every user lands in the same
+bucket. See `deployment/nginx/nginx.conf`.
 
 **TOTP codes are not single-use within their window.**
 RFC 6238 §5.2 suggests rejecting any code at or below the last accepted time step. We don't:
