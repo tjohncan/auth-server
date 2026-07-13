@@ -79,10 +79,14 @@ echo "Building ${BIN} (clang + libFuzzer + ASan + UBSan)..."
 # -fno-sanitize-recover=undefined is load-bearing: by DEFAULT UBSan only prints a
 # diagnostic and keeps running, so libFuzzer never sees a crash and a run with real
 # undefined behavior in it still reports "no findings". This makes UB abort.
+#
+# No -Ivendor/sqlite / -DDB_BACKEND_SQLITE: neither harness compiles a database TU, so
+# both fuzz targets build on a fresh clone before the SQLite amalgamation is vendored
+# (the Makefile exempts them from that requirement too). Keep this in step with the
+# fuzz-regress rule, which likewise omits them.
 # shellcheck disable=SC2086
 clang -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined \
-      -fno-omit-frame-pointer -g -O1 \
-      -Iinclude -Ivendor/sqlite -DDB_BACKEND_SQLITE \
+      -fno-omit-frame-pointer -g -O1 -Iinclude \
       ${SRCS} -lcrypto -o "${BIN}"
 
 DICT_ARG=()
