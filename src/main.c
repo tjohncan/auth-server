@@ -112,6 +112,10 @@ static int router_request_handler(Connection *conn,
 
     if (req.method == HTTP_UNKNOWN) {
         log_warn("[Connection %lu] Failed to parse HTTP request", conn->connection_id);
+        /* A rejected parse can still have allocated (and freed) headers on the way
+         * out. cleanup() is idempotent and NULL-safe, so call it on every path
+         * rather than relying on the parser to leave nothing behind when it fails. */
+        http_request_cleanup(&req);
         OPENSSL_cleanse(request_copy, request_len);
         free(request_copy);
 

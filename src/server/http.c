@@ -60,7 +60,12 @@ static char *find_header_end(char *data, size_t length) {
 }
 
 /*
- * Parse request line: "GET /path?query HTTP/1.0\r\n"
+ * Parse request line: "GET /path?query HTTP/1.0"
+ *
+ * Precondition: line is NUL-terminated at the end of the request line — the caller
+ * splits it from the header block first. Without that, a request line missing its
+ * version ("GET /path\r\n...") sends the scan for the second space on into the
+ * header block, where it plants a NUL that desyncs the header walk.
  *
  * Modifies buffer in place (inserts null terminators).
  */
@@ -89,11 +94,8 @@ static bool parse_request_line(char *line, HttpRequest *req) {
         req->query_string = NULL;
     }
 
-    /* HTTP version - validate and discard */
+    /* HTTP version - validate and discard. Already NUL-terminated (see precondition). */
     char *version_start = space2 + 1;
-    char *crlf = strstr(version_start, "\r\n");
-    /* crlf guaranteed to exist - find_header_end() already found \r\n\r\n */
-    if (crlf) *crlf = '\0';
 
     /* Accept HTTP/1.0 or HTTP/1.1, but always respond with HTTP/1.0
      * HTTP/1.1 clients MUST accept HTTP/1.0 responses (RFC 7230)
@@ -150,24 +152,28 @@ HttpRequest http_request_parse(char *raw, size_t length) {
         return req;
     }
 
-    /* Count headers BEFORE modifying buffer */
+    /* Split the request line off from the header block, BEFORE modifying either.
+     * parse_request_line() relies on this terminator to stay inside its own line. */
     char *first_header = strstr(raw, "\r\n");
     if (!first_header) {
         req.method = HTTP_UNKNOWN;
         return req;
     }
+    *first_header = '\0';
     first_header += 2;
 
-    char *scan = first_header;
-    while (*scan != '\r' && *scan != '\0') {
-        req.header_count++;
+    /* Count header lines to size the allocation. This is only an upper bound —
+     * header_count below counts the lines we actually store. */
+    int max_headers = 0;
+    for (char *scan = first_header; *scan != '\r' && *scan != '\0'; ) {
+        max_headers++;
         scan = strstr(scan, "\r\n");
         if (!scan) break;
         scan += 2;
     }
 
     /* Protect resources from malicious/malformed high header counts */
-    if (req.header_count > HTTP_MAX_HEADERS) {
+    if (max_headers > HTTP_MAX_HEADERS) {
         req.method = HTTP_UNKNOWN;
         return req;
     }
@@ -178,37 +184,40 @@ HttpRequest http_request_parse(char *raw, size_t length) {
         return req;
     }
 
-    /* Allocate headers and save pointers before parse_header_line inserts NULs */
-    if (req.header_count > 0) {
-        req.headers = malloc(req.header_count * sizeof(HttpHeader));
+    if (max_headers > 0) {
+        /* calloc, not malloc: a slot we never fill must read as NULL, not as a
+         * garbage pointer that the next strcasecmp() dereferences. */
+        req.headers = calloc((size_t)max_headers, sizeof(HttpHeader));
         if (!req.headers) {
             req.method = HTTP_UNKNOWN;
             return req;
         }
 
-        /* Save pointers to each header line (before parse_header_line modifies buffer) */
-        char **header_lines = malloc(req.header_count * sizeof(char*));
-        if (!header_lines) {
-            free(req.headers);
-            req.headers = NULL;  /* Prevent dangling pointer */
-            req.method = HTTP_UNKNOWN;
-            return req;
-        }
+        /* Single pass: capture the next line's start BEFORE parse_header_line()
+         * NUL-terminates this one, since that write destroys the "\r\n" we search for.
+         * header_count only advances past a slot parse_header_line() actually filled,
+         * so it can never outrun the initialized region of the array. */
+        char *line = first_header;
+        while (req.header_count < max_headers && *line != '\r' && *line != '\0') {
+            char *next = strstr(line, "\r\n");
+            if (next) next += 2;
 
-        char *line_ptr = first_header;
-        for (int i = 0; i < req.header_count; i++) {
-            header_lines[i] = line_ptr;
-            line_ptr = strstr(line_ptr, "\r\n");
-            if (!line_ptr) break;
-            line_ptr += 2;
-        }
+            if (!parse_header_line(line, &req.headers[req.header_count])) {
+                /* Header line with no colon — malformed (RFC 7230 §3.2). Reject the
+                 * request rather than skip the line: this server sits behind a reverse
+                 * proxy by design, and an origin that quietly tolerates a header block
+                 * the proxy read differently is where request smuggling starts. */
+                free(req.headers);
+                req.headers = NULL;
+                req.header_count = 0;
+                req.method = HTTP_UNKNOWN;
+                return req;
+            }
+            req.header_count++;
 
-        /* NOW parse each header (modifies buffer) */
-        for (int i = 0; i < req.header_count; i++) {
-            parse_header_line(header_lines[i], &req.headers[i]);
+            if (!next) break;
+            line = next;
         }
-
-        free(header_lines);
     }
 
     /* Body (if present) */
@@ -248,7 +257,14 @@ void http_request_cleanup(HttpRequest *req) {
 }
 
 const char *http_request_get_header(const HttpRequest *req, const char *name) {
+    if (!req->headers) return NULL;
+
     for (int i = 0; i < req->header_count; i++) {
+        /* The parser fills every slot it counts, so a NULL name should be
+         * unreachable. Check anyway: this call sits directly downstream of
+         * attacker bytes, and the cost of being wrong here is a wild read. */
+        if (!req->headers[i].name) continue;
+
         if (strcasecmp(req->headers[i].name, name) == 0) {
             return req->headers[i].value;
         }
