@@ -627,10 +627,13 @@ resource server or an org admin can create that link.
 **A malformed header line fails the whole request; it is not skipped.**
 A line in the header block with no colon (including an obsolete `obs-fold` continuation) gets
 a 400, rather than being quietly ignored the way a lenient parser would. RFC 7230 §3.2.4
-explicitly sanctions this. The reasoning is that this server is *required* to sit behind a
-reverse proxy for TLS, and when the proxy and the origin disagree about what counts as a
-header, you get request smuggling. Rejecting the ambiguous line closes that gap at the
-origin, and no legitimate client sends one.
+explicitly sanctions this. Request *framing* — the control that actually stops smuggling — is
+enforced earlier, at the socket layer (`src/server/event_loop.c`): conflicting `Content-Length`
+headers and any `Transfer-Encoding` are rejected outright, and the connection is closed after a
+single request (HTTP/1.0, no keep-alive), so there is no reused connection to smuggle into.
+This rejection is narrower and is header-interpretation hygiene: it removes the divergence
+between a front-end proxy that might fold or tolerate a malformed line and an origin that would
+otherwise ignore it. No legitimate client sends such a line, so failing closed costs nothing.
 
 ## Design Philosophy
 
