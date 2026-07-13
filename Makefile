@@ -16,7 +16,9 @@ ifeq ($(DB_BACKEND),sqlite)
     CFLAGS += -Ivendor/sqlite -DDB_BACKEND_SQLITE
     DB_VENDOR_SRCS = vendor/sqlite/sqlite3.c
     ifeq ($(wildcard vendor/sqlite/sqlite3.c),)
-        ifneq ($(MAKECMDGOALS),clean)
+        # The fuzz targets compile only the parser and its two utils — no database.
+        # Exempt them so a fresh clone can fuzz before vendoring the amalgamation.
+        ifeq ($(filter clean fuzz fuzz-regress,$(MAKECMDGOALS)),)
             $(error SQLite amalgamation not found at vendor/sqlite/sqlite3.c — see vendor/setup_notes.txt)
         endif
     endif
@@ -91,7 +93,8 @@ release: clean $(TARGET)
 # Clean build artifacts
 clean:
 	rm -f src/*.o src/**/*.o src/**/**/*.o vendor/**/*.o $(TARGET) test-str test-http test-router test-db test-crypto test-email
-	@echo "Cleaned build artifacts"
+	rm -rf fuzz-replay fuzz-replay-http fuzz-replay-jwt fuzz_http fuzz_jwt fuzz_http_replay auth-server-asan .fuzz-work
+	@echo "Cleaned build artifacts (crash seeds in test/fuzz/crashes/ are kept — they are tests)"
 
 # Test programs
 test-str:
@@ -125,6 +128,62 @@ endif
 test: test-str test-http test-router test-db test-crypto
 	@echo "All tests built! Running..."
 	./test-str && ./test-http && ./test-router && ./test-db && ./test-crypto
+	@$(MAKE) --no-print-directory fuzz-regress
+
+# ============================================================================
+# Fuzzing and sanitizers (see test/fuzz/README.md)
+# ============================================================================
+#
+# These build with ASan+UBSan, which is incompatible with _FORTIFY_SOURCE, so they
+# carry their own flags instead of reusing SECURITY_FLAGS.
+#
+# -fno-sanitize-recover=undefined matters: by default UBSan only PRINTS a diagnostic
+# and keeps running, so a check that greps for a crash reports "clean" on code that
+# is quietly undefined. This makes UB abort like ASan does.
+#
+# Per fuzz target: the harness, and the extra TUs it links (the http parser needs no
+# database or crypto; the jwt decoder needs the hmac/base64/json stack). Each target
+# owns its own corpus/ and crashes/ subdirectory.
+FUZZ_SAN         = -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer
+FUZZ_HTTP_SRCS   = test/fuzz/fuzz_http.c src/server/http.c src/util/str.c src/util/json.c
+FUZZ_JWT_SRCS    = test/fuzz/fuzz_jwt.c src/crypto/jwt.c src/crypto/hmac.c src/crypto/random.c \
+                   src/crypto/sha256.c src/util/data.c src/util/str.c src/util/json.c src/util/log.c
+FUZZ_TIME       ?= 60
+FUZZ_TARGET     ?= http
+
+# Replay every saved crash and seed through its parser under ASan+UBSan. Needs only
+# gcc, runs in seconds, and is what makes test/fuzz/crashes/ a real regression test
+# instead of a folder of souvenirs. Runs as part of `make test`.
+fuzz-regress:
+	@$(CC) -std=c11 -g -O1 -Iinclude $(FUZZ_SAN) -DFUZZ_STANDALONE \
+	    $(FUZZ_HTTP_SRCS) -lcrypto -o fuzz-replay-http
+	@$(CC) -std=c11 -g -O1 -Iinclude $(FUZZ_SAN) -DFUZZ_STANDALONE \
+	    $(FUZZ_JWT_SRCS) -lcrypto -o fuzz-replay-jwt
+	@echo "=== Fuzz regression seeds (ASan+UBSan) ==="
+	@fail=0; for target in http jwt; do \
+	    for f in test/fuzz/crashes/$$target/* test/fuzz/corpus/$$target/*; do \
+	        [ -f "$$f" ] || continue; \
+	        if ./fuzz-replay-$$target "$$f" >/dev/null 2>&1; then \
+	            printf '  \342\234\223 %s\n' "$$f"; \
+	        else \
+	            printf '  \342\234\227 %s  <-- SANITIZER FIRED\n' "$$f"; \
+	            ./fuzz-replay-$$target "$$f" 2>&1 | head -20; \
+	            fail=1; \
+	        fi; \
+	    done; \
+	done; \
+	if [ $$fail -ne 0 ]; then echo "FAILED: a known-bad input is crashing again."; exit 1; fi; \
+	echo "=== All seeds clean ==="
+
+# Coverage-guided fuzz run. Needs clang (libFuzzer). Pick target and budget:
+#   make fuzz                              # http, 60s
+#   make fuzz FUZZ_TARGET=jwt FUZZ_TIME=3600
+fuzz:
+	@./test/fuzz/run.sh $(FUZZ_TARGET) $(FUZZ_TIME)
+
+# ASan+UBSan build of the whole server, to drive by hand (login, OAuth, sandbox).
+sanitize:
+	@./test/sanitize.sh
 
 # Show help
 help:
@@ -141,5 +200,11 @@ help:
 	@echo "  make test           - Build and run all tests (excludes test-email)"
 	@echo "  make clean          - Remove build artifacts"
 	@echo "  make help           - Show this help"
+	@echo ""
+	@echo "Memory safety (see test/fuzz/README.md):"
+	@echo "  make fuzz-regress   - Replay saved crash seeds under ASan+UBSan (gcc, seconds)"
+	@echo "  make fuzz           - Coverage-guided fuzz (clang; FUZZ_TARGET=http|jwt, FUZZ_TIME=60)"
+	@echo "  make sanitize       - Build the whole server with ASan+UBSan to drive by hand"
 
-.PHONY: all debug release clean help test test-str test-http test-router test-db test-crypto test-email
+.PHONY: all debug release clean help test test-str test-http test-router test-db test-crypto test-email \
+        fuzz fuzz-regress sanitize

@@ -460,7 +460,16 @@ test/
 ├── test_str.c          # String utilities unit tests
 ├── test_db.c           # Database integration test
 ├── test_crypto.c       # Crypto test (random, password hashing, hmac, jwt)
-└── test_email.c   # Infrastructure/deployment convenience check; not in standard "make test" battery 
+├── test_email.c   # Infrastructure/deployment convenience check; not in standard "make test" battery 
+├── sanitize.sh         # Build the whole server with ASan+UBSan, to drive by hand
+└── fuzz/               # Coverage-guided fuzzing (see fuzz/README.md)
+    ├── fuzz_http.c     # Harness: HTTP request parser
+    ├── fuzz_jwt.c      # Harness: authorization-code JWT decoder
+    ├── http.dict       # Token dictionaries for the mutator
+    ├── jwt.dict
+    ├── run.sh          # Build + run a target to a time budget + print a report card
+    ├── corpus/<target>/    # Seed corpus, per target (committed)
+    └── crashes/<target>/   # Regression seeds, per target — replayed by `make test`
 
 data/  # Git-ignored default home for SQLite database
 
@@ -505,8 +514,21 @@ vendor/
 - `make test-router` - Router tests
 - `make test-db` - Database integration test
 - `make test-crypto` - Crypto tests (random generation, password hashing, hmac, jwt)
-- `make test` - All of the above!
+- `make test` - All of the above, plus `fuzz-regress`
 - `make test-email` - Deliver a test email through the deployed "send script" (optional infrastructure)
+
+**Memory Safety:**
+
+Two components take untrusted bytes and pick them apart with pointer arithmetic and
+hand-rolled parsing: the HTTP request parser (socket-facing) and the authorization-code
+JWT decoder (base64url + JSON). Both are fuzzed under ASan+UBSan. See
+[`test/fuzz/README.md`](test/fuzz/README.md).
+
+- `make fuzz-regress` - Replay every saved crash + seed under ASan+UBSan. Needs only gcc,
+  runs in seconds, and is part of `make test`.
+- `make fuzz` - Coverage-guided search for new bugs (needs clang; `FUZZ_TARGET=http|jwt`,
+  `FUZZ_TIME=3600` to soak).
+- `make sanitize` - Build the whole server with ASan+UBSan and drive it by hand.
 
 ## Linux-Specific Features
 
@@ -601,6 +623,17 @@ There is no consent screen: `/authorize` issues a code immediately for an authen
 authorized user. Authorization is enforced structurally instead — a user must be explicitly
 linked to a client (`client_user`) before `/authorize` will issue anything, and only a
 resource server or an org admin can create that link.
+
+**A malformed header line fails the whole request; it is not skipped.**
+A line in the header block with no colon (including an obsolete `obs-fold` continuation) gets
+a 400, rather than being quietly ignored the way a lenient parser would. RFC 7230 §3.2.4
+explicitly sanctions this. Request *framing* — the control that actually stops smuggling — is
+enforced earlier, at the socket layer (`src/server/event_loop.c`): conflicting `Content-Length`
+headers and any `Transfer-Encoding` are rejected outright, and the connection is closed after a
+single request (HTTP/1.0, no keep-alive), so there is no reused connection to smuggle into.
+This rejection is narrower and is header-interpretation hygiene: it removes the divergence
+between a front-end proxy that might fold or tolerate a malformed line and an origin that would
+otherwise ignore it. No legitimate client sends such a line, so failing closed costs nothing.
 
 ## Design Philosophy
 

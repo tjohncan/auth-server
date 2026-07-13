@@ -1,0 +1,71 @@
+name: tests
+
+# Pull requests only, plus a manual button.
+on:
+  pull_request:
+  workflow_dispatch:
+
+# A new push to the same PR cancels the in-flight run — no point finishing a test
+# of code that's already been superseded.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+# Read-only token: this job builds and tests, it never writes to the repo.
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # The suite links OpenSSL (libcrypto) and Argon2, and compiles the SQLite
+      # amalgamation. build-essential brings gcc plus libasan/libubsan, which the
+      # fuzz-regress stage of `make test` needs (it replays the crash seeds under
+      # ASan+UBSan). unzip is for the amalgamation archive below.
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libssl-dev libargon2-dev unzip
+          gcc --version
+
+      # SQLite is vendored as a downloaded amalgamation, not committed source
+      # (see vendor/setup_notes.txt). These are that file's exact commands and
+      # pinned version, so this step also proves those instructions still work.
+      - name: Vendor the SQLite amalgamation
+        run: |
+          mkdir -p vendor/sqlite
+          curl -o sqlite3.zip https://www.sqlite.org/2026/sqlite-amalgamation-3510200.zip
+          unzip -jo sqlite3.zip "*/sqlite3.c" "*/sqlite3.h" -d vendor/sqlite
+          rm sqlite3.zip
+
+      # test-db and test-crypto call config_load("auth.conf"). auth.conf is gitignored
+      # (it's the live, per-deployment config); the committed example is a complete
+      # SQLite config whose db_path (./data/auth.db) and schema_dir (./sql) both exist
+      # in a fresh checkout, so a straight copy is all CI needs.
+      - name: Provide a test configuration
+        run: cp auth.conf.example auth.conf
+
+      # One run. `make test` builds and runs every suite (str, http, router, db,
+      # crypto), then replays the fuzz regression seeds under ASan+UBSan via
+      # fuzz-regress. pipefail so make's exit code survives the pipe through tee —
+      # the default shell is `bash -e`, which would otherwise see only tee succeed.
+      - name: Build and run the test suite
+        run: |
+          set -o pipefail
+          make test 2>&1 | tee /tmp/test.log
+
+      # The Makefile compiles with -Wall -Wextra but not -Werror, so a warning prints
+      # and the build still passes. Hold the line here instead: fail on any warning in
+      # our own code. The pattern matches the compiler's "path:line:col: warning:"
+      # diagnostic, so runtime log lines (INFO/WARN/ERROR) never trip it; the SQLite
+      # amalgamation is third-party and excluded.
+      - name: Fail on compiler warnings in project code
+        run: |
+          if grep -En ':[0-9]+:[0-9]+: warning:' /tmp/test.log | grep -v 'vendor/sqlite'; then
+            echo "::error::compiler emitted warnings in project code"
+            exit 1
+          fi
+          echo "No warnings in project code."

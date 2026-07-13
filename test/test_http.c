@@ -254,6 +254,66 @@ void test_malformed_requests(void) {
         http_request_cleanup(&parsed);
         printf("✓ No-path request handled without crash\n");
     }
+
+    /* Test 9: a header line with no colon must reject the whole request, not be
+     * skipped (RFC 7230 §3.2.4). Regression seed: test/fuzz/crashes/http/01. */
+    {
+        char req[] = "POST /token HTTP/1.0\r\nNotAHeaderLine\r\n\r\nabc";
+        HttpRequest parsed = http_request_parse(req, strlen(req));
+        assert(parsed.method == HTTP_UNKNOWN);
+        http_request_cleanup(&parsed);
+        printf("✓ Colon-less header line rejects the request\n");
+    }
+
+    /* Test 10: a request line with no version must be rejected without letting the
+     * parse of that line reach into the header block. Regression seed:
+     * test/fuzz/crashes/http/02. */
+    {
+        char req[] = "GET /p\r\nA: HTTP/1.0\r\nB: z\r\n\r\n";
+        HttpRequest parsed = http_request_parse(req, strlen(req));
+        assert(parsed.method == HTTP_UNKNOWN);
+        http_request_cleanup(&parsed);
+        printf("✓ Request line cannot scan into the header block\n");
+    }
+
+    /* Test 11: the core invariant behind both regressions above — every slot counted
+     * in header_count is fully initialized, so get_header() can walk them all. */
+    {
+        char req[] =
+            "GET /health HTTP/1.0\r\n"
+            "Host: x\r\n"
+            "X-Empty:\r\n"
+            "Content-Length: 0\r\n"
+            "\r\n";
+
+        HttpRequest parsed = http_request_parse(req, strlen(req));
+        assert(parsed.method == HTTP_GET);
+        assert(parsed.header_count == 3);
+        for (int i = 0; i < parsed.header_count; i++) {
+            assert(parsed.headers[i].name != NULL);
+            assert(parsed.headers[i].value != NULL);
+        }
+        assert(strcmp(http_request_get_header(&parsed, "content-length"), "0") == 0);
+        assert(http_request_get_header(&parsed, "Nonexistent") == NULL);
+        http_request_cleanup(&parsed);
+        printf("✓ Every counted header slot is initialized\n");
+    }
+
+    /* Test 12: a colon-less line FOLLOWED by a valid header must still be rejected, and
+     * the colon-less line must not absorb the next line's colon. Each header line is
+     * parsed in isolation, so this rejects directly. */
+    {
+        char req[] =
+            "GET / HTTP/1.0\r\n"
+            "NotAHeaderLine\r\n"
+            "Host: x\r\n"
+            "\r\n";
+
+        HttpRequest parsed = http_request_parse(req, strlen(req));
+        assert(parsed.method == HTTP_UNKNOWN);
+        http_request_cleanup(&parsed);
+        printf("✓ Colon-less line does not absorb a later header\n");
+    }
 }
 
 int main(void) {
