@@ -435,6 +435,29 @@ int oauth_introspect_token(db_handle_t *db,
                            long long *out_issued_at);
 
 /*
+ * Check whether an access token is still active
+ *
+ * Access tokens are self-contained ES256 JWTs, so signature and expiry can be
+ * verified offline. Two things cannot be: revocation, and the liveness of the
+ * issuing client — both live in the database. Endpoints that accept a Bearer
+ * token (e.g. GET /userinfo) must consult this to honor POST /revoke,
+ * replay-chain revocation, and client deactivation; otherwise a revoked token,
+ * or a token belonging to a deactivated client, keeps working until exp.
+ *
+ * Applies the same liveness predicate as oauth_introspect_token(), but takes no
+ * resource_server_pin — it answers only "is this token still valid at all", not
+ * "is it valid for a given audience".
+ *
+ * Parameters:
+ *   db    - Database handle
+ *   token - Access token string (hashed internally for lookup)
+ *
+ * Returns: 1 if active, 0 if revoked/expired/unknown/client-deactivated,
+ *          -1 on error
+ */
+int oauth_access_token_is_active(db_handle_t *db, const char *token);
+
+/*
  * Revoke a single token (RFC 7009 Token Revocation)
  *
  * Revokes an access or refresh token owned by the authenticated client/resource server.
@@ -444,7 +467,12 @@ int oauth_introspect_token(db_handle_t *db,
  * - Validates token belongs to authenticated client_pin
  * - Returns success even if token doesn't exist (prevents enumeration)
  * - Idempotent (revoking already-revoked token succeeds)
- * - Does NOT revoke related tokens (single token only, not chain)
+ * - Revoking a REFRESH token cascades to the access tokens issued under the same
+ *   grant (RFC 7009 Section 2.1). Without that cascade a logout is theatre: the
+ *   refresh token dies while an access token lifted out of storage keeps working
+ *   until it expires. Revoking an ACCESS token revokes only that token.
+ * - Does NOT revoke the whole rotation chain — that is oauth_revoke_token_chain(),
+ *   which exists for replay detection, a different (hostile) event.
  *
  * Parameters:
  *   db              - Database handle

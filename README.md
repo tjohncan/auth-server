@@ -219,7 +219,7 @@ HTTP endpoints for user authentication and management.
 - **Files**: `session_http.c`
 - **Responsibility**: JSON parsing, secure cookie setting, session validation, HTTP responses
 - **Used by**: Router (called for session-authenticated endpoints)
-- **Design**: Sets HttpOnly, Secure, SameSite=Strict session cookie with 7-day default TTL
+- **Design**: Sets HttpOnly, Secure, SameSite=Lax session cookie with 7-day default TTL
 - **Security**: Never exposes internal database PINs to browser, only UUIDs
 
 Examples:
@@ -545,6 +545,62 @@ See **[sql/README.md](sql/README.md)** for full schema documentation. Key design
 - Partial unique indexes enforce single-use semantics
 - Refresh token rotation with chain tracking for replay detection
 - Registered redirect URI validation (exact match, no wildcards)
+
+## Deliberate Tradeoffs
+
+Where this server knowingly departs from a specification or a widely-expected default,
+it is recorded here with the reasoning. None of the below is an oversight.
+
+**Rate limiting is the edge's job, not the server's.**
+There is no in-server throttling or account lockout on `/login`. Brute-force defense belongs
+to the reverse proxy or WAF in front of us (see `deployment/nginx/`), which sees the whole
+traffic picture and can shed load before it ever reaches a worker. Duplicating it here would
+spend a database write per failed guess and still be the weaker of the two.
+MFA attempts and email-token issuance *are* throttled in-server,
+because those are bounded per-account actions rather than an open front door.
+If you delegate a job to the edge, the edge has to actually do it: the shipped nginx config
+enforces a strict per-IP limit on `/login` specifically (10r/m, burst 10), separate from the
+generous limit on ordinary traffic. Per-IP limiting does not stop a distributed or
+credential-stuffing attack — that is what a WAF in front of nginx is for — but it closes the
+single-IP hole, which a generic site-wide limit does not. It does assume nginx can see the
+client's address, which holds when nginx is the edge (as it is in the shipped compose file);
+if you front it with a load balancer, configure `real_ip` first or every user lands in the same
+bucket. See `deployment/nginx/nginx.conf`.
+
+**TOTP codes are not single-use within their window.**
+RFC 6238 §5.2 suggests rejecting any code at or below the last accepted time step. We don't:
+a code stays valid for its full ~90s window, and if two parties can both prove possession of
+the secret, both get in. Single-use doesn't stop an attacker who *has* the secret — they wait
+30 seconds. It doesn't stop real-time relay phishing either: the bot beats the human it's
+proxying, so the attacker gets in regardless and the *victim* is the one who gets rejected.
+What it reliably produces is a race between legitimate co-holders of the same seed. Guessing,
+as opposed to observing, is capped by per-method rate limiting.
+
+**Changing a password does not sign you out everywhere.**
+A password change rotates the credential and nothing else; live sessions and refresh chains
+survive it. Compromise recovery has stronger, explicit paths here — account deactivation
+(localhost-only) and token revocation — and password change isn't asked to carry that weight.
+Mass invalidation is a cost paid by every user on every routine rotation, in order to evict an
+attacker who, in the case that actually matters, already knows the new password.
+
+**Defaults are permissive; policy is the deployer's.**
+The shipped `encryption_key` is a public placeholder and `password_min_length` is 1. The server
+warns and runs. `git clone && make && run` has to work, or nobody gets far enough to evaluate
+the project; taxing every newcomer to protect a deployer who ignored both a startup warning
+*and* a documented config line is the wrong trade. Field encryption's threat model is bounded
+and stated: keep PII out of plain view of whoever is reading the database — not defeat an
+attacker who holds the database *and* the configuration.
+
+**PKCE (S256) is mandatory for every `authorization_code` client, including confidential ones.**
+RFC 6749 makes PKCE optional, and RFC 7636 permits the weaker `plain` method. We require it,
+S256-only, for public and confidential clients alike, per OAuth 2.1. This is a deliberate
+incompatibility: a legacy client that omits `code_challenge` is refused, not downgraded.
+
+**This is a first-party identity provider, not a third-party OAuth broker.**
+There is no consent screen: `/authorize` issues a code immediately for an authenticated,
+authorized user. Authorization is enforced structurally instead — a user must be explicitly
+linked to a client (`client_user`) before `/authorize` will issue anything, and only a
+resource server or an org admin can create that link.
 
 ## Design Philosophy
 

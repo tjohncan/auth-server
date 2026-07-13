@@ -116,6 +116,81 @@ static char *form_get_param(const char *body, const char *key) {
     return value;
 }
 
+/*
+ * Authenticate the client at the token endpoint (RFC 6749 Section 6).
+ *
+ * Confidential clients must present client_key_id + client_secret on every token
+ * call — the refresh token alone must not suffice, because at a confidential
+ * client the token store and the client secret live in separate places. Public
+ * clients hold no secret and pass straight through: PKCE plus refresh-token
+ * rotation are their protection.
+ *
+ * Shared by every grant that needs it, so the authorization_code and
+ * refresh_token paths cannot drift apart.
+ *
+ * Allocates nothing. The caller still owns the credential strings it parsed out
+ * of the form body and must free them on both success and failure.
+ *
+ * out_client may be NULL if the caller only needs the yes/no answer; when non-NULL
+ * it receives the looked-up client (callers that need client.pin, e.g. /revoke).
+ *
+ * Returns NULL on success, or an error response for the caller to return.
+ */
+static HttpResponse *authenticate_token_client(db_handle_t *db,
+                                                const HttpRequest *req,
+                                                const unsigned char *client_id,
+                                                const char *client_key_id_str,
+                                                const char *client_secret,
+                                                const char *operation,
+                                                oauth_client_info_t *out_client) {
+    /* Zero first: out_client is only meaningful when this returns NULL. A caller that
+     * ignored the error and read it anyway would otherwise get uninitialized stack. */
+    if (out_client) memset(out_client, 0, sizeof(*out_client));
+
+    oauth_client_info_t client;
+    int lookup = oauth_client_lookup(db, client_id, &client);
+    if (lookup == -2) {
+        /* The database failed — do not blame the caller for it. Telling a client with a
+         * perfectly good client_id "Client not found" over a transient DB fault would send
+         * it off to debug a request that was never wrong. */
+        log_error("Database error looking up client during token-endpoint authentication");
+        return response_json_error(500, "Internal server error");
+    }
+    if (lookup != 0) {
+        return response_oauth_error(400, "invalid_client", "Client not found");
+    }
+
+    if (out_client) *out_client = client;
+
+    if (strcmp(client.client_type, "confidential") != 0) {
+        return NULL;  /* Public client — PKCE + rotation are its protection */
+    }
+
+    /* RFC 6749 Section 5.2: absent or unusable client authentication is
+     * invalid_client, not invalid_request — the request is well-formed, it is the
+     * client that failed to authenticate. */
+    if (!client_key_id_str || !client_secret) {
+        return response_oauth_error(401, "invalid_client",
+            "client_key_id and client_secret required for confidential clients");
+    }
+
+    unsigned char client_key_id[16];
+    if (hex_to_bytes(client_key_id_str, client_key_id, 16) != 0) {
+        return response_oauth_error(401, "invalid_client", "Invalid client_key_id format");
+    }
+
+    long long client_pin, key_pin;
+    if (oauth_client_authenticate(db, client_id, client_key_id, client_secret,
+                                   &client_pin, &key_pin) != 1) {
+        return response_oauth_error(401, "invalid_client", "Client authentication failed");
+    }
+
+    log_key_usage(db, KEY_USAGE_CLIENT, key_pin, operation,
+                  http_request_get_client_ip(req, NULL),
+                  http_request_get_header(req, "User-Agent"));
+    return NULL;
+}
+
 /* ============================================================================
  * Token Endpoint
  * ========================================================================== */
@@ -203,9 +278,11 @@ HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params) {
                                          "code and redirect_uri required for authorization_code grant");
         }
 
-        /* Look up client to determine type (before consuming auth code) */
-        oauth_client_info_t client;
-        if (oauth_client_lookup(db, client_id, &client) != 0) {
+        /* Authenticate the client before consuming the auth code */
+        HttpResponse *auth_err = authenticate_token_client(db, req, client_id,
+                                                            client_key_id_str, client_secret,
+                                                            "authorization_code", NULL);
+        if (auth_err) {
             free(grant_type);
             cleanse_free(code);
             free(redirect_uri);
@@ -213,52 +290,7 @@ HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params) {
             free(resource);
             free(client_key_id_str);
             cleanse_free(client_secret);
-            return response_oauth_error(400, "invalid_client", "Client not found");
-        }
-
-        /* Authenticate confidential clients before consuming auth code */
-        if (strcmp(client.client_type, "confidential") == 0) {
-            if (!client_key_id_str || !client_secret) {
-                free(grant_type);
-                cleanse_free(code);
-                free(redirect_uri);
-                cleanse_free(code_verifier);
-                free(resource);
-                free(client_key_id_str);
-                cleanse_free(client_secret);
-                return response_oauth_error(400, "invalid_request",
-                    "client_key_id and client_secret required for confidential clients");
-            }
-
-            unsigned char client_key_id[16];
-            if (hex_to_bytes(client_key_id_str, client_key_id, 16) != 0) {
-                free(grant_type);
-                cleanse_free(code);
-                free(redirect_uri);
-                cleanse_free(code_verifier);
-                free(resource);
-                free(client_key_id_str);
-                cleanse_free(client_secret);
-                return response_oauth_error(400, "invalid_request", "Invalid client_key_id format");
-            }
-
-            long long client_pin, key_pin;
-            int auth_result = oauth_client_authenticate(db, client_id, client_key_id,
-                                                         client_secret, &client_pin, &key_pin);
-            if (auth_result != 1) {
-                free(grant_type);
-                cleanse_free(code);
-                free(redirect_uri);
-                cleanse_free(code_verifier);
-                free(resource);
-                free(client_key_id_str);
-                cleanse_free(client_secret);
-                return response_oauth_error(401, "invalid_client", "Client authentication failed");
-            }
-
-            log_key_usage(db, KEY_USAGE_CLIENT, key_pin, "authorization_code",
-                          http_request_get_client_ip(req, NULL),
-                          http_request_get_header(req, "User-Agent"));
+            return auth_err;
         }
 
         free(client_key_id_str);
@@ -306,11 +338,15 @@ HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params) {
         char *refresh_token = form_get_param(body, "refresh_token");
         char *scope = form_get_param(body, "scope");
         char *resource = form_get_param(body, "resource");  /* RFC 8707 */
+        char *client_key_id_str = form_get_param(body, "client_key_id");
+        char *client_secret = form_get_param(body, "client_secret");
 
         if (!refresh_token) {
             free(grant_type);
             free(scope);
             free(resource);
+            free(client_key_id_str);
+            cleanse_free(client_secret);
             return response_oauth_error(400, "invalid_request",
                                          "refresh_token parameter is required");
         }
@@ -321,8 +357,27 @@ HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params) {
             cleanse_free(refresh_token);
             free(scope);
             free(resource);
+            free(client_key_id_str);
+            cleanse_free(client_secret);
             return response_oauth_error(400, "invalid_scope", scope_err);
         }
+
+        /* Authenticate the client before rotating the refresh token */
+        HttpResponse *auth_err = authenticate_token_client(db, req, client_id,
+                                                            client_key_id_str, client_secret,
+                                                            "refresh_token", NULL);
+        if (auth_err) {
+            free(grant_type);
+            cleanse_free(refresh_token);
+            free(scope);
+            free(resource);
+            free(client_key_id_str);
+            cleanse_free(client_secret);
+            return auth_err;
+        }
+
+        free(client_key_id_str);
+        cleanse_free(client_secret);
 
         oauth_token_response_t token_resp;
         int rc = oauth_refresh_access_token(db, client_id, refresh_token, scope, resource, &token_resp);
@@ -373,7 +428,10 @@ HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params) {
             free(client_secret);
             free(scope);
             free(resource);
-            return response_oauth_error(400, "invalid_request",
+            /* invalid_client, matching authenticate_token_client() — absent credentials
+             * are a failure to authenticate, not a malformed request (RFC 6749 §5.2).
+             * All three grants must answer the same way to the same mistake. */
+            return response_oauth_error(401, "invalid_client",
                                          "client_key_id and client_secret required for client_credentials grant");
         }
 
@@ -397,7 +455,7 @@ HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params) {
             free(client_secret);
             free(scope);
             free(resource);
-            return response_oauth_error(400, "invalid_request", "Invalid client_key_id format");
+            return response_oauth_error(401, "invalid_client", "Invalid client_key_id format");
         }
         free(client_key_id_str);
 
@@ -1091,7 +1149,10 @@ HttpResponse *revoke_handler(const HttpRequest *req, const RouteParams *params) 
 
     const char *body = req->body ? req->body : "";
 
-    /* Parse required parameters */
+    /* Parse required parameters. Credentials are required only for confidential
+     * clients — a public client holds no secret, so demanding one here would leave it
+     * permanently unable to revoke its own tokens (RFC 7009 Section 2.1 expects a
+     * public client to identify itself with client_id alone). */
     char *token = form_get_param(body, "token");
     char *client_id_str = form_get_param(body, "client_id");
     char *client_key_id_str = form_get_param(body, "client_key_id");
@@ -1100,15 +1161,14 @@ HttpResponse *revoke_handler(const HttpRequest *req, const RouteParams *params) 
     /* Parse optional parameter */
     char *token_type_hint = form_get_param(body, "token_type_hint");
 
-    if (!token || !client_id_str || !client_key_id_str || !client_secret) {
+    if (!token || !client_id_str) {
         cleanse_free(token);
         free(client_id_str);
         free(client_key_id_str);
-        if (client_secret) OPENSSL_cleanse(client_secret, strlen(client_secret));
-        free(client_secret);
+        cleanse_free(client_secret);
         free(token_type_hint);
         return response_oauth_error(400, "invalid_request",
-                                     "token, client_id, client_key_id, and client_secret required");
+                                     "token and client_id required");
     }
 
     /* Parse client_id UUID */
@@ -1117,48 +1177,44 @@ HttpResponse *revoke_handler(const HttpRequest *req, const RouteParams *params) 
         cleanse_free(token);
         free(client_id_str);
         free(client_key_id_str);
-        OPENSSL_cleanse(client_secret, strlen(client_secret));
-        free(client_secret);
+        cleanse_free(client_secret);
         free(token_type_hint);
         return response_oauth_error(400, "invalid_request", "Invalid client_id format");
     }
     free(client_id_str);
 
-    /* Parse client_key_id UUID */
-    unsigned char client_key_id[16];
-    if (hex_to_bytes(client_key_id_str, client_key_id, 16) != 0) {
-        cleanse_free(token);
-        free(client_key_id_str);
-        OPENSSL_cleanse(client_secret, strlen(client_secret));
-        free(client_secret);
-        free(token_type_hint);
-        return response_oauth_error(400, "invalid_request", "Invalid client_key_id format");
-    }
+    /* Authenticate: enforced for confidential clients, waved through for public ones.
+     *
+     * A public client_id is not a secret, so this endpoint is effectively open — but
+     * that grants an attacker nothing. Revocation requires the exact token string, the
+     * query is scoped to the named client, and tokens are 256-bit CSPRNG output. An
+     * attacker who could supply a valid token could simply use it; destroying it would
+     * be self-harm. Guessing is infeasible. The residual concern is that this is an
+     * unauthenticated write path, which the edge rate-limits (see deployment/nginx/). */
+    oauth_client_info_t client;
+    HttpResponse *auth_err = authenticate_token_client(db, req, client_id,
+                                                        client_key_id_str, client_secret,
+                                                        "revoke", &client);
     free(client_key_id_str);
+    cleanse_free(client_secret);
 
-    /* Authenticate client */
-    long long client_pin;
-    long long key_pin = 0;
-    int auth_result = oauth_handler_client_authenticate(db, client_id, client_key_id,
-                                                         client_secret, &client_pin, &key_pin);
-
-    OPENSSL_cleanse(client_secret, strlen(client_secret));
-    free(client_secret);
-
-    if (auth_result != 1) {
+    if (auth_err) {
+        /* Report client authentication failures. RFC 7009 Section 2.2 requires 200 for an
+         * invalid *token* — the client can do nothing about that and the goal (the token
+         * is not usable) already holds. It does NOT extend that silence to the *client*:
+         * Section 2.2.1 defers to RFC 6749 Section 5.2, i.e. invalid_client.
+         *
+         * Swallowing this into a 200 would tell a confidential client that forgot its
+         * secret "revoked!" while its token stayed alive — a silent failure at exactly the
+         * moment a user believes they have logged out. */
         cleanse_free(token);
         free(token_type_hint);
         log_warn("Client authentication failed for revoke request");
-        /* Per RFC 7009: return 200 OK even on auth failure to prevent enumeration */
-        return response_json_ok("{}");
+        return auth_err;
     }
 
-    log_key_usage(db, KEY_USAGE_CLIENT, key_pin, "revoke",
-                  http_request_get_client_ip(req, NULL),
-                  http_request_get_header(req, "User-Agent"));
-
     /* Revoke the token */
-    int revoke_result = oauth_handler_revoke_token(db, token, token_type_hint, client_pin);
+    int revoke_result = oauth_handler_revoke_token(db, token, token_type_hint, client.pin);
 
     cleanse_free(token);
     free(token_type_hint);
@@ -1420,6 +1476,22 @@ HttpResponse *userinfo_handler(const HttpRequest *req, const RouteParams *params
         return response_bearer_error("invalid_token", "Invalid or expired token");
     }
     signing_key_free(key);
+
+    /* Signature and exp are now verified, but a self-contained JWT cannot carry
+     * revocation state — consult the token record so /revoke and replay-chain
+     * revocation are honored here as they are at /introspect.
+     *
+     * Distinguish "token is dead" from "we could not tell": a transient database
+     * error must not answer 401, or a well-behaved client would discard a
+     * perfectly good token and force the user to log in again over a DB hiccup. */
+    int token_active = oauth_access_token_is_active(db, token);
+    if (token_active < 0) {
+        log_error("Failed to check access token state for userinfo");
+        return response_json_error(500, "Internal server error");
+    }
+    if (token_active == 0) {
+        return response_bearer_error("invalid_token", "Invalid or expired token");
+    }
 
     /* Extract user UUID from sub claim */
     if (claims.sub[0] == '\0') {

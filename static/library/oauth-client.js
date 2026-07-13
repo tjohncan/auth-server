@@ -51,11 +51,24 @@
  * 4. Your server receives access_token + refresh_token in the response,
  *    stores them in its own session, and uses them for API calls.
  *
- * 5. Your server manages token refresh (POST /token with grant_type=refresh_token)
- *    when the access token expires.
+ * 5. Your server manages token refresh when the access token expires:
+ *    POST /token
+ *    grant_type=refresh_token&refresh_token=REFRESH_TOKEN
+ *    &client_id=ID&client_key_id=KEY_ID&client_secret=SECRET
+ *
+ *    Confidential clients must authenticate on refresh too (RFC 6749 Section 6) —
+ *    the refresh token alone is not sufficient. Public clients (the class this
+ *    library implements) hold no secret and send only client_id; PKCE and refresh
+ *    token rotation are their protection.
  *
  * PKCE is required for all authorization code clients (OAuth 2.1).
  */
+
+/* How long a cross-tab refresh lock is considered fresh. A tab waiting on another
+ * tab's refresh must be willing to wait at least this long, or it will give up on a
+ * session that is still perfectly good. */
+const LOCK_TTL_MS = 10000;
+
 class OAuthClient {
     /**
      * @param {Object} config - Configuration options
@@ -222,8 +235,9 @@ class OAuthClient {
         });
 
         if (!response.ok) {
-            const errorData = await response.json();
-            throw new Error(errorData.error || `HTTP ${response.status}`);
+            const errorData = await this._safeJson(response);
+            throw new Error((errorData && errorData.error) ||
+                            `HTTP ${response.status} ${response.statusText}`);
         }
 
         const tokens = await response.json();
@@ -239,6 +253,13 @@ class OAuthClient {
         this.storeTokens(tokenData);
         sessionStorage.removeItem(this.pkceKey);
         this._scheduleRefresh(tokenData);
+
+        // Strip ?code=&state= from the address bar. The code is single-use and already
+        // spent, but leaving it in the URL leaves it in browser history, in bookmarks,
+        // and in the Referer header of the next outbound request.
+        if (window.history && window.history.replaceState) {
+            window.history.replaceState({}, document.title, window.location.pathname);
+        }
 
         return tokenData;
     }
@@ -260,8 +281,48 @@ class OAuthClient {
      * @returns {Object|null} Token data or null if not found
      */
     getTokens() {
-        const stored = this._tokenStorage.getItem(this.tokenKey);
-        return stored ? JSON.parse(stored) : null;
+        return this._safeParse(this._tokenStorage.getItem(this.tokenKey));
+    }
+
+    /**
+     * Parse a value read out of storage without throwing.
+     *
+     * Storage is shared with every other script on the origin and survives across
+     * versions of this library, so its contents are not fully under our control. A
+     * single corrupt value must not throw — least of all inside a 'storage' event
+     * listener, where the exception surfaces with no useful stack and no caller to
+     * catch it. Treat unparseable as absent.
+     *
+     * @private
+     * @param {string|null} raw
+     * @returns {Object|null}
+     */
+    _safeParse(raw) {
+        if (!raw) return null;
+        try {
+            return JSON.parse(raw);
+        } catch (e) {
+            return null;
+        }
+    }
+
+    /**
+     * Read a JSON response body without throwing on a non-JSON body.
+     *
+     * An error response does not have to be JSON: a proxy or load balancer in front
+     * of the auth server may return an HTML 502/504. Calling response.json() on that
+     * throws a SyntaxError, which then masks the real HTTP status in the thrown error.
+     *
+     * @private
+     * @param {Response} response
+     * @returns {Promise<Object|null>}
+     */
+    async _safeJson(response) {
+        try {
+            return await response.json();
+        } catch (e) {
+            return null;
+        }
     }
 
     /**
@@ -277,11 +338,53 @@ class OAuthClient {
 
     /**
      * Clear stored tokens, PKCE data, and cancel any scheduled refresh
+     *
+     * NOTE: this is local-only. It makes *this browser* forget the tokens; it does not
+     * make the server forget them. The refresh token stays valid until it expires, so
+     * anyone who copied it out of storage keeps a working credential. To actually end
+     * the session, call logout().
      */
     clearTokens() {
         this._tokenStorage.removeItem(this.tokenKey);
         sessionStorage.removeItem(this.pkceKey);
         this._cancelRefresh();
+    }
+
+    /**
+     * Log out: revoke the refresh token at the server, then clear local state.
+     *
+     * This is what clearTokens() alone cannot do. Forgetting a token locally leaves it
+     * alive server-side for the remainder of its TTL — so "log out" would not actually
+     * log anyone out, and a token lifted from storage beforehand would keep working.
+     * Revoking first is what closes that window.
+     *
+     * Best-effort by design: if the revocation request fails (offline, server down), the
+     * local session is cleared anyway. A user who asks to log out must always end up
+     * logged out on the device in front of them, whatever the network is doing.
+     *
+     * @returns {Promise<void>}
+     */
+    async logout() {
+        const tokens = this.getTokens();
+
+        if (tokens && tokens.refresh_token) {
+            try {
+                await fetch(`${this.authUrl}/revoke`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: new URLSearchParams({
+                        token: tokens.refresh_token,
+                        token_type_hint: 'refresh_token',
+                        client_id: this.clientId
+                    })
+                });
+            } catch (e) {
+                /* Network failure. Fall through and clear locally anyway — never trap a
+                 * user inside a session they have asked to leave. */
+            }
+        }
+
+        this.clearTokens();
     }
 
     /* ======================================================================
@@ -302,7 +405,8 @@ class OAuthClient {
         if (event.key !== this.tokenKey) return;
 
         if (event.newValue) {
-            const tokens = JSON.parse(event.newValue);
+            const tokens = this._safeParse(event.newValue);
+            if (!tokens) return;  /* Corrupt value — ignore rather than throw in a listener */
             this._scheduleRefresh(tokens);
             if (this.onTokenRefresh) this.onTokenRefresh(tokens);
         } else {
@@ -329,12 +433,9 @@ class OAuthClient {
         const now = Date.now();
 
         // Check for existing fresh lock held by another tab
-        const existing = this._tokenStorage.getItem(this._lockKey);
-        if (existing) {
-            const lock = JSON.parse(existing);
-            if (now - lock.ts < 10000) {
-                return false;
-            }
+        const lock = this._safeParse(this._tokenStorage.getItem(this._lockKey));
+        if (lock && now - lock.ts < LOCK_TTL_MS) {
+            return false;
         }
 
         // Write our claim
@@ -345,9 +446,8 @@ class OAuthClient {
         await new Promise(r => setTimeout(r, 50));
 
         // Verify we still hold the lock
-        const check = this._tokenStorage.getItem(this._lockKey);
-        if (!check) return false;
-        return JSON.parse(check).tabId === this._tabId;
+        const check = this._safeParse(this._tokenStorage.getItem(this._lockKey));
+        return !!check && check.tabId === this._tabId;
     }
 
     /**
@@ -355,9 +455,8 @@ class OAuthClient {
      * @private
      */
     _releaseRefreshLock() {
-        const raw = this._tokenStorage.getItem(this._lockKey);
-        if (raw) {
-            const lock = JSON.parse(raw);
+        const lock = this._safeParse(this._tokenStorage.getItem(this._lockKey));
+        if (lock) {
             if (lock.tabId === this._tabId) {
                 this._tokenStorage.removeItem(this._lockKey);
             }
@@ -376,7 +475,11 @@ class OAuthClient {
      * @throws {Error} If tokens are cleared or timeout reached
      */
     async _waitForRefreshedTokens(originalExpiresAt) {
-        for (let i = 0; i < 25; i++) {
+        /* Wait at least as long as the winner tab is allowed to hold the lock. Giving
+         * up sooner would mean a slow-but-healthy refresh looks like a dead session. */
+        const attempts = Math.ceil(LOCK_TTL_MS / 200);
+
+        for (let i = 0; i < attempts; i++) {
             await new Promise(r => setTimeout(r, 200));
             const tokens = this.getTokens();
             if (!tokens) {
@@ -388,6 +491,15 @@ class OAuthClient {
                 return tokens;
             }
         }
+
+        /* The other tab never landed new tokens (it stalled, or its request failed).
+         * That is not the same as the session being over: do not evict a user whose
+         * current access token is still valid. Only a genuinely expired token is dead. */
+        const tokens = this.getTokens();
+        if (tokens && tokens.expires_at > Date.now()) {
+            return tokens;
+        }
+
         this._handleSessionExpired();
         throw new Error('Token refresh timed out waiting for another tab');
     }
@@ -469,9 +581,18 @@ class OAuthClient {
         });
 
         if (!response.ok) {
-            this.clearTokens();
-            this._handleSessionExpired();
-            throw new Error('Token refresh failed');
+            /* Only a 4xx means the grant itself is dead (revoked, replayed, expired) —
+             * that is when the tokens must go. A 5xx is the server or a proxy having a
+             * bad moment; the refresh token is very likely still good. Clearing on 5xx
+             * would log every user out of every tab during a brief outage, and they
+             * would all have to re-authenticate for no reason. Surface the error and
+             * let the caller retry instead. */
+            if (response.status >= 400 && response.status < 500) {
+                this.clearTokens();
+                this._handleSessionExpired();
+                throw new Error(`Token refresh rejected (HTTP ${response.status})`);
+            }
+            throw new Error(`Token refresh failed (HTTP ${response.status}) — not clearing session`);
         }
 
         const data = await response.json();

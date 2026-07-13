@@ -6,7 +6,10 @@
 #include <openssl/crypto.h>
 #include <string.h>
 
-/* Cached EVP_MAC — fetched once, reused for all HMAC operations (thread-safe) */
+/* Cached EVP_MAC — fetched once, reused for all HMAC operations. The lazy fetch
+ * below needs no lock: main() calls encrypt_init() (which HMACs for HKDF) before
+ * spawning any worker, so g_mac is always warmed single-threaded. Preserve that
+ * ordering, or make this a pthread_once. */
 static EVP_MAC *g_mac = NULL;
 
 /*

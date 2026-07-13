@@ -194,7 +194,16 @@ int main(void) {
     jwt_set_clock_skew_seconds(config->jwt_clock_skew_seconds);
     log_info("JWT clock skew tolerance: %d seconds", config->jwt_clock_skew_seconds);
 
-    /* Initialize field encryption */
+    /* DESIGN DECISION: the default encryption key warns; it does not refuse to boot.
+     * Field encryption's threat model is bounded and stated — keep PII out of plain
+     * view of whoever is reading the database — not defeat an attacker holding the
+     * database *and* the config. The default key is public on purpose: a fresh clone
+     * has to build and run, or nobody gets far enough to evaluate the project. Taxing
+     * every newcomer to protect a deployer who ignored both a startup warning and a
+     * documented config line is the wrong trade. The same philosophy governs the other
+     * permissive defaults, notably password_min_length (ships at 1). Policy is the
+     * deployer's call; this server ships ready to run, not ready to ship. Revisit if
+     * we add a strict/production mode that refuses known-default secrets. */
     if (strcmp(config->encryption_key, "customize_me") == 0) {
         log_warn("Using default encryption key — set encryption_key in auth.conf or AUTH_ENCRYPTION_KEY env");
     }

@@ -1122,6 +1122,10 @@ int user_set_primary_email(db_handle_t *db, long long user_account_pin,
     return 0;
 }
 
+/* DESIGN DECISION: this deliberately does NOT invalidate existing sessions or
+ * refresh tokens. Password change is credential hygiene here, not incident
+ * response — see the rationale above user_change_password() in
+ * include/db/queries/user.h before "fixing" it. */
 int user_change_password(db_handle_t *db, long long user_account_pin,
                          const unsigned char *user_account_id,
                          const char *current_password,

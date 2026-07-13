@@ -292,6 +292,34 @@ int user_set_primary_email(db_handle_t *db, long long user_account_pin,
  *          0 if current password is invalid,
  *          -1 on error,
  *          -2 if new password below minimum length
+ *
+ * DESIGN DECISION: this does NOT invalidate existing sessions or refresh tokens.
+ *
+ * Most systems close every session on password change. We deliberately do not:
+ * a password change here rotates the credential and nothing else, and live
+ * browser sessions and refresh-token chains survive it.
+ *
+ * A password change in this system is credential hygiene, not incident response.
+ * The recovery paths for an actual compromise are explicit and stronger —
+ * account deactivation (localhost-only, see admin_http.c) and token revocation
+ * (POST /revoke, plus automatic replay-chain revocation). Password change is not
+ * asked to carry that weight.
+ *
+ * The cost of mass invalidation, meanwhile, is paid by everyone every time: a
+ * user rotating their password as routine hygiene would be signed out of every
+ * device they own, on every rotation. We are not willing to do that to an honest
+ * user in order to evict a hypothetical attacker whom, in the case that actually
+ * matters, this would not evict anyway — an attacker who changed the password
+ * already knows the new one, and the victim is already locked out.
+ *
+ * Accepted: if an attacker holds a live session and the user responds by changing
+ * their password *and nothing else*, the attacker survives until that session
+ * expires (see session_ttl_seconds).
+ *
+ * Revisit if: account-takeover recovery becomes a first-class goal. The shape is
+ * then not "close everything" but "close everything except the caller's own
+ * session" — the requesting cookie identifies the session to spare, evicting the
+ * attacker without signing the honest user out of the device in front of them.
  */
 int user_change_password(db_handle_t *db, long long user_account_pin,
                          const unsigned char *user_account_id,

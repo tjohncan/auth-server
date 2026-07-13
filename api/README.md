@@ -715,7 +715,7 @@ Or with email (requires `EMAIL_SUPPORT`):
 **Success Response — no MFA** (200 OK):
 ```http
 HTTP/1.1 200 OK
-Set-Cookie: session=<token>; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=604800
+Set-Cookie: session=<token>; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=604800
 Content-Type: application/json
 
 {"message": "Login successful"}
@@ -724,7 +724,7 @@ Content-Type: application/json
 **Success Response — user requires MFA** (200 OK):
 ```http
 HTTP/1.1 200 OK
-Set-Cookie: session=<token>; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=604800
+Set-Cookie: session=<token>; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=604800
 Content-Type: application/json
 
 {
@@ -747,9 +747,17 @@ When `mfa_required` is true, the session cookie is set but the session's `mfa_co
 
 **Session Cookie**:
 - Name: `session`
-- Attributes: `HttpOnly; Secure; SameSite=Strict`
+- Attributes: `HttpOnly; Secure; SameSite=Lax`
 - Lifetime: 7 days (604800 seconds)
 - Used for subsequent OAuth2 authorization flow
+
+`SameSite=Lax` is deliberate, not a weakened `Strict`. `/authorize` is reached by a cross-site
+*top-level navigation* from the relying party's app. `Strict` withholds the session cookie on
+exactly that navigation, so a user holding a perfectly valid session would arrive at `/authorize`
+looking logged-out and get bounced to `/login` — silent SSO could never work. `Lax` sends the
+cookie on top-level GET navigations (which `/authorize` is) while still withholding it on
+cross-site POST, so the state-changing endpoints (`/login`, `/logout`, `/api/user/*`) keep their
+CSRF protection.
 
 **Example**:
 ```bash
@@ -832,18 +840,29 @@ Content-Type: application/x-www-form-urlencoded
 grant_type=refresh_token&
 refresh_token=<refresh_token>&
 client_id=<client_id>&
+client_key_id=<client_key_id>&        # confidential clients only
+client_secret=<client_secret>&        # confidential clients only
 scope=<optional_scope>
 ```
 
 **Parameters**:
 
-| Parameter     | Required  | Description                                  |
-|---------------|-----------|----------------------------------------------|
-| grant_type    | Yes       | Must be `refresh_token`                      |
-| refresh_token | Yes       | Valid refresh token                          |
-| client_id     | Yes       | Client UUID (hex-encoded)                    |
-| scope         | No        | Requested scope (must be subset of original) |
-| resource      | No        | Resource server address (RFC 8707)           |
+| Parameter     | Required           | Description                                  |
+|---------------|--------------------|----------------------------------------------|
+| grant_type    | Yes                | Must be `refresh_token`                      |
+| refresh_token | Yes                | Valid refresh token                          |
+| client_id     | Yes                | Client UUID (hex-encoded)                    |
+| client_key_id | Confidential only  | Client key UUID (hex-encoded)                |
+| client_secret | Confidential only  | Client secret                                |
+| scope         | No                 | Requested scope (must be subset of original) |
+| resource      | No                 | Resource server address (RFC 8707)           |
+
+**Client authentication** (RFC 6749 Section 6): confidential clients **must** authenticate on
+refresh, exactly as they do on the authorization code exchange. A refresh token alone is not
+sufficient — at a confidential client the token store and the client secret live in separate
+places, so requiring the secret keeps a token-store breach from yielding usable tokens.
+Public clients hold no secret and refresh with the refresh token alone (PKCE + rotation are
+their protection).
 
 **Success Response** (200 OK):
 ```json
@@ -1052,8 +1071,15 @@ curl http://localhost:8080/.well-known/jwks.json
 
 OAuth2 token revocation endpoint (RFC 7009). Allows clients to revoke access or refresh tokens.
 
-**Security**: Requires client authentication (client_id + client_key_id + client_secret). 
-Clients can only revoke their own tokens.
+**Security**: Confidential clients must authenticate (`client_key_id` + `client_secret`). Public
+clients identify themselves with `client_id` alone — they hold no secret, and requiring one would
+leave them permanently unable to revoke their own tokens, so a "logged out" user's refresh token
+would stay alive until it expired. Clients can only revoke their own tokens.
+
+Because a public `client_id` is not a secret, this endpoint is effectively open — which grants an
+attacker nothing. Revocation requires the exact token string, tokens are 256-bit CSPRNG output,
+and anyone able to supply a valid token could simply *use* it rather than destroy it. The endpoint
+is rate-limited at the edge (see `deployment/nginx/`) so it cannot be hammered.
 
 **Request**:
 ```http
@@ -1063,19 +1089,19 @@ Content-Type: application/x-www-form-urlencoded
 token=<token>&
 token_type_hint=<hint>&
 client_id=<client_id>&
-client_key_id=<client_key_id>&
-client_secret=<client_secret>
+client_key_id=<client_key_id>&        # confidential clients only
+client_secret=<client_secret>         # confidential clients only
 ```
 
 **Parameters**:
 
-| Parameter       | Required  | Description                                                             |
-|-----------------|-----------|-------------------------------------------------------------------------|
-| token           | Yes       | The token to revoke (access or refresh token)                           |
-| token_type_hint | No        | Hint about token type: `access_token` or `refresh_token` (optimization) |
-| client_id       | Yes       | Client UUID (hex-encoded)                                               |
-| client_key_id   | Yes       | Client key UUID (hex-encoded)                                           |
-| client_secret   | Yes       | Client secret for authentication                                        |
+| Parameter       | Required           | Description                                                             |
+|-----------------|--------------------|-------------------------------------------------------------------------|
+| token           | Yes                | The token to revoke (access or refresh token)                           |
+| token_type_hint | No                 | Hint about token type: `access_token` or `refresh_token` (optimization) |
+| client_id       | Yes                | Client UUID (hex-encoded)                                               |
+| client_key_id   | Confidential only  | Client key UUID (hex-encoded)                                           |
+| client_secret   | Confidential only  | Client secret for authentication                                        |
 
 **Success Response** (200 OK):
 ```json
@@ -1083,16 +1109,27 @@ client_secret=<client_secret>
 ```
 
 **Notes**:
-- Per RFC 7009, this endpoint **always returns 200 OK**, even if:
-  - The token is invalid or already revoked
-  - The token doesn't exist
-  - Authentication fails
-- This prevents information disclosure to unauthorized parties
-- Only the token owner (authenticated client) can revoke tokens
-- Revocation is idempotent (revoking an already-revoked token succeeds)
-- This endpoint revokes **only the specified token**, not related tokens in the chain
+- **An unknown or already-revoked token is answered with 200 OK**, not an error. Per RFC 7009
+  §2.2 a client can do nothing useful with such an error, and the goal — that the token is not
+  usable — already holds. Answering otherwise would let anyone probe which tokens are real.
+- **A client authentication failure IS reported** (`invalid_client`), per RFC 7009 §2.2.1. A
+  confidential client that omits or fumbles its secret is told so, rather than being handed a
+  `200 OK` while its token quietly stays alive.
+- **Revoking a refresh token also revokes the access tokens issued under the same grant**
+  (RFC 7009 §2.1). This is what makes a logout an actual logout: without it the refresh token
+  dies while an access token lifted from storage keeps working until it expires. Revoking an
+  *access* token revokes only that token.
+- Only the token's own client can revoke it — the lookup is scoped to the `client_id` supplied.
+- Revocation is idempotent.
 
-**Example**:
+**Example** (public client — no secret):
+```bash
+curl -X POST http://localhost:8080/revoke \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "token=8xLOxBtZp8...&token_type_hint=refresh_token&client_id=abc123"
+```
+
+**Example** (confidential client):
 ```bash
 curl -X POST http://localhost:8080/revoke \
   -H "Content-Type: application/x-www-form-urlencoded" \
@@ -1190,6 +1227,8 @@ OpenID Connect UserInfo endpoint (OIDC Core Section 5.3). Returns claims about t
 
 **Security**: Bearer token authentication. The access token (ES256 JWT) must be provided in the Authorization header. The token is verified against the server's current (and prior) signing keys.
 
+Signature and expiry are verified from the JWT itself, but a self-contained token cannot carry revocation state — so the token record is also consulted. A token revoked via `POST /revoke`, auto-revoked by replay-chain revocation, or belonging to a client that has since been deactivated, is rejected here immediately rather than remaining usable until `exp`. This applies the same liveness predicate as `POST /introspect`.
+
 **Request**:
 ```http
 GET /userinfo HTTP/1.1
@@ -1216,7 +1255,7 @@ Authorization: Bearer eyJhbGciOiJFUzI1NiIs...
 | server_time        | integer | Server Unix timestamp (custom extension)                               |
 
 **Error Responses**:
-- `401 Unauthorized` — Missing, invalid, or expired Bearer token; or user not found
+- `401 Unauthorized` — Missing, invalid, expired, or **revoked** Bearer token; or user not found
 
 **Example**:
 ```bash
@@ -1731,7 +1770,7 @@ Log out current user (close browser session).
 
 **Response Headers**:
 ```
-Set-Cookie: session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0
+Set-Cookie: session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0
 ```
 
 **Error Response** (401 Unauthorized):
@@ -2199,7 +2238,7 @@ Consume a passwordless login token and create a session.
 | token | string | Yes      | Passwordless login token |
 
 **Success Response** (303 See Other):
-- Sets `session` cookie (HttpOnly, Secure, SameSite=Strict)
+- Sets `session` cookie (HttpOnly, Secure, SameSite=Lax)
 - Redirects to `/authorize?{return_to}` if return_to was stored, otherwise `/`
 
 **Behavior**:
