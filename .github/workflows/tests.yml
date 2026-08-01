@@ -5,8 +5,7 @@ on:
   pull_request:
   workflow_dispatch:
 
-# A new push to the same PR cancels the in-flight run — no point finishing a test
-# of code that's already been superseded.
+# A new push to the same PR cancels the in-flight run.
 concurrency:
   group: tests-${{ github.ref }}
   cancel-in-progress: true
@@ -18,6 +17,7 @@ permissions:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -31,9 +31,8 @@ jobs:
           sudo apt-get install -y build-essential libssl-dev libargon2-dev unzip
           gcc --version
 
-      # SQLite is vendored as a downloaded amalgamation, not committed source
-      # (see vendor/setup_notes.txt). These are that file's exact commands and
-      # pinned version, so this step also proves those instructions still work.
+      # SQLite is vendored as a downloaded amalgamation, not committed source.
+      # See vendor/setup_notes.txt — matching commands here proves those instructions.
       - name: Vendor the SQLite amalgamation
         run: |
           mkdir -p vendor/sqlite
@@ -48,9 +47,9 @@ jobs:
       - name: Provide a test configuration
         run: cp auth.conf.example auth.conf
 
-      # One run. `make test` builds and runs every suite (str, http, router, db,
-      # crypto), then replays the fuzz regression seeds under ASan+UBSan via
-      # fuzz-regress. pipefail so make's exit code survives the pipe through tee —
+      # `make test` builds and runs every suite (str, http, router, db, crypto), then
+      # replays the fuzz regression seeds under ASan+UBSan via fuzz-regress.
+      # pipefail so make's exit code survives the pipe through tee —
       # the default shell is `bash -e`, which would otherwise see only tee succeed.
       - name: Build and run the test suite
         run: |
@@ -58,13 +57,13 @@ jobs:
           make test 2>&1 | tee /tmp/test.log
 
       # The Makefile compiles with -Wall -Wextra but not -Werror, so a warning prints
-      # and the build still passes. Hold the line here instead: fail on any warning in
-      # our own code. The pattern matches the compiler's "path:line:col: warning:"
-      # diagnostic, so runtime log lines (INFO/WARN/ERROR) never trip it; the SQLite
-      # amalgamation is third-party and excluded.
+      # and the build still passes. Here, fail on any warning.
+      # The pattern matches the compiler's "path:line:col: warning:" diagnostic,
+      # but avoids tripping over WARN log lines the server itself writes to this log.
+      # The SQLite amalgamation is third-party and excluded.
       - name: Fail on compiler warnings in project code
         run: |
-          if grep -En ':[0-9]+:[0-9]+: warning:' /tmp/test.log | grep -v 'vendor/sqlite'; then
+          if grep -v 'vendor/sqlite' /tmp/test.log | grep -E -A4 ':[0-9]+:[0-9]+: warning:'; then
             echo "::error::compiler emitted warnings in project code"
             exit 1
           fi
