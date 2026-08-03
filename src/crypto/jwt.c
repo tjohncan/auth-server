@@ -129,19 +129,21 @@ static int parse_json_string(const char *json, const char *key, char *out, size_
 
     size_t len = end - start;
     if (len >= out_len) {
-        return -1;  /* Value too long */
+        return -1;  /* Value too long for the caller's buffer */
     }
 
-    /* Copy escaped string and unescape it */
-    char escaped[JWT_MAX_CLAIM_VALUE_LENGTH];
-    if (len >= sizeof(escaped)) {
-        return -1;  /* Value too long for temp buffer */
-    }
+    /* Stage the raw (still-escaped) bytes in the caller's own buffer, then unescape in
+     * place. Aliasing input and output is safe: json_unescape_string() writes at an
+     * index that never exceeds its read index — every escape sequence is >= 2 bytes and
+     * yields 1 — so it can only ever overwrite bytes it has already consumed.
+     *
+     * This replaces a fixed char[JWT_MAX_CLAIM_VALUE_LENGTH] staging buffer that capped
+     * every claim at 255 bytes no matter what the caller could hold, silently truncating
+     * auth_request_claims_t.redirect_uri (char[512]) to an undecodable code. */
+    memcpy(out, start, len);
+    out[len] = '\0';
 
-    memcpy(escaped, start, len);
-    escaped[len] = '\0';
-
-    if (json_unescape_string(escaped, out, out_len) != 0) {
+    if (json_unescape_string(out, out, out_len) != 0) {
         return -1;  /* Unescape failed */
     }
 

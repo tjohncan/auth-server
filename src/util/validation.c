@@ -369,7 +369,11 @@ int validate_redirect_uri(const char *uri, char *error_msg, size_t error_len) {
         return -1;
     }
 
-    /* Stricter length limit than generic URLs — must fit in JWT claim buffer */
+    /* Stricter length limit than generic URLs: the redirect URI is carried inside the
+     * stateless authorization code, so it must fit auth_request_claims_t.redirect_uri
+     * (char[512], include/crypto/jwt.h). 500 leaves room for the NUL and a little slack.
+     * The 2000-byte ck_client_redirect_uri_len constraint in the schema is a backstop
+     * behind this, not the operative limit. */
     if (strlen(uri) > 500) {
         if (error_msg && error_len > 0) {
             snprintf(error_msg, error_len, "Redirect URI cannot exceed 500 characters");

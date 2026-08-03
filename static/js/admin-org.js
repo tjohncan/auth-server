@@ -753,6 +753,13 @@ async function editClient(clientId) {
 }
 
 async function addRedirectURI(clientId) {
+    /* maxlength is deliberately not synced to the server's 500-character
+     * validate_redirect_uri limit. It mirrors the storage backstop
+     * (ck_client_redirect_uri_len) to keep a pasted novel out of the request body;
+     * the server owns the semantic limit and returns it verbatim ("Redirect URI
+     * cannot exceed 500 characters"), which the catch below surfaces via showAlert.
+     * Syncing the two would just add a second place to edit, with nothing to catch
+     * the drift when the server limit moves. */
     const { modal, close } = showModal('Add Redirect URI', `
         <form id="addURIForm">
             <div class="form-group">

@@ -1211,6 +1211,46 @@ int main(void) {
     }
     log_info("Prior secret fallback: PASS\n");
 
+    /* Test: redirect_uri longer than JWT_MAX_CLAIM_VALUE_LENGTH
+     *
+     * 400 bytes is past the old 255-byte cliff, inside what validate_redirect_uri
+     * permits (500), and inside the claim field itself (auth_request_claims_t
+     * .redirect_uri, char[512]). parse_json_string used to stage every claim through a
+     * fixed char[JWT_MAX_CLAIM_VALUE_LENGTH] regardless of the caller's capacity, so the
+     * encode side wrote a URI the decode side could never read back: /authorize
+     * succeeded and /token then failed 100% of the time as "invalid authorization code",
+     * pointing operators at signatures and clock skew rather than at URI length.
+     * Guards the encode and decode limits against drifting apart again. */
+    log_info("Test: Auth request JWT round-trips a 400-character redirect_uri");
+
+    auth_request_claims_t long_claims = ar_claims;
+    memset(long_claims.redirect_uri, 0, sizeof(long_claims.redirect_uri));
+
+    const char *long_uri_prefix = "https://app.example.com/callback?next=";
+    size_t long_uri_prefix_len = strlen(long_uri_prefix);
+    memcpy(long_claims.redirect_uri, long_uri_prefix, long_uri_prefix_len);
+    memset(long_claims.redirect_uri + long_uri_prefix_len, 'x', 400 - long_uri_prefix_len);
+    long_claims.redirect_uri[400] = '\0';
+    assert(strlen(long_claims.redirect_uri) == 400);
+
+    char long_token[JWT_MAX_TOKEN_LENGTH];
+    if (jwt_encode_auth_request(&long_claims, ar_secret, sizeof(ar_secret),
+                                 long_token, sizeof(long_token)) != 0) {
+        log_error("Auth request JWT encoding failed for a 400-character redirect_uri");
+        return 1;
+    }
+
+    auth_request_claims_t long_decoded = {0};
+    if (jwt_decode_auth_request(long_token, ar_secret_b64, NULL, &long_decoded) != 0) {
+        log_error("Auth request JWT decoding failed for a 400-character redirect_uri");
+        return 1;
+    }
+
+    assert(strcmp(long_decoded.redirect_uri, long_claims.redirect_uri) == 0);
+    assert(strlen(long_decoded.redirect_uri) == 400);
+    log_info("Long redirect_uri round-trip (%zu bytes): PASS\n",
+             strlen(long_decoded.redirect_uri));
+
     log_info("==========================================================");
     log_info("=== All Tests Passed! ===");
     log_info("==========================================================");
