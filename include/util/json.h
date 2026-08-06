@@ -75,6 +75,25 @@ int json_get_bool(const char *json, const char *key, int *out_value);
  */
 size_t json_escape(char *dst, size_t dst_size, const char *src);
 
+/*
+ * json_escaped_len - Exact byte length of the JSON-escaped form of src
+ *
+ * Counts what json_escape() would write, excluding the null terminator, using
+ * the same escape table. A buffer of json_escaped_len(src) + 1 bytes holds the
+ * result exactly.
+ *
+ * Callers need this because json_escape() cannot report truncation: it clamps
+ * to dst_size and its return value is therefore always < dst_size, so testing
+ * that return against the buffer size detects nothing. Measure first, then
+ * escape.
+ *
+ * Parameters:
+ *   src - Source string to measure (NULL returns 0)
+ *
+ * Returns: Bytes the escaped form requires, excluding the null terminator
+ */
+size_t json_escaped_len(const char *src);
+
 /* ============================================================================
  * JsonBuf - Dynamic JSON response builder
  *

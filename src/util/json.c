@@ -322,6 +322,18 @@ size_t json_escape(char *dst, size_t dst_size, const char *src) {
     return written;
 }
 
+size_t json_escaped_len(const char *src) {
+    if (!src) return 0;
+
+    size_t len = 0;
+    for (const unsigned char *p = (const unsigned char *)src; *p; p++) {
+        const EscapeEntry *entry = &JSON_ESCAPE_TABLE[*p];
+        len += entry->seq ? entry->len : 1;
+    }
+
+    return len;
+}
+
 /* ============================================================================
  * JsonBuf - Dynamic JSON response builder
  * ============================================================================ */
@@ -403,10 +415,17 @@ void jsonbuf_appendf(JsonBuf *jb, const char *fmt, ...) {
 void jsonbuf_append_escaped(JsonBuf *jb, const char *src) {
     if (!jb || jb->error || !src) return;
 
-    size_t src_len = strlen(src);
-    /* Worst case: every char becomes \uXXXX (6x) */
-    size_t max_escaped = src_len * 6 + 1;
-    size_t needed = jb->len + max_escaped;
+    /* Size the growth to what the escaped form actually needs. The previous
+     * estimate assumed the 6x worst case (every byte becoming \uXXXX), which for
+     * ordinary text overstates the requirement by roughly six times and can trip
+     * the JSONBUF_MAX_CAP ceiling in jsonbuf_grow() — setting jb->error and
+     * dropping the response — on input that would have fit comfortably.
+     *
+     * A side effect worth relying on: this leaves cap - len >= escaped_len + 1,
+     * so json_escape() below cannot truncate and its return is always the exact
+     * escaped length. This function no longer depends on the clamping behaviour
+     * of that return value to advance jb->len. */
+    size_t needed = jb->len + json_escaped_len(src) + 1;
 
     if (needed > jb->cap) {
         jsonbuf_grow(jb, needed);

@@ -191,6 +191,49 @@ void test_json_escape(void) {
     printf("Safe text unchanged: '%s'\n", buf);
 }
 
+void test_json_escaped_len(void) {
+    printf("\n=== Testing json_escaped_len ===\n\n");
+
+    char buf[256];
+    size_t written, need;
+
+    assert(json_escaped_len("") == 0);
+    assert(json_escaped_len(NULL) == 0);
+    assert(json_escaped_len("abc 123") == 7);       /* nothing escapes */
+    assert(json_escaped_len("say \"hi\"") == 10);   /* two quotes, +1 each */
+    assert(json_escaped_len("\t") == 2);            /* \t */
+    assert(json_escaped_len("\x01") == 6);          /* escapes to six bytes */
+    printf("Measured plain, quoted, \\t and \\u0001 forms\n");
+
+    /* Agreement with json_escape() given room to work */
+    const char *mixed = "line\t\"one\"\x01";
+    need = json_escaped_len(mixed);
+    written = json_escape(buf, sizeof(buf), mixed);
+    assert(need == written);
+    printf("Measured %zu, json_escape wrote %zu -> '%s'\n", need, written, buf);
+
+    /* The check json_escape() cannot make for you. Given a destination that is
+     * too small it truncates, yet still reports a count below dst_size — so the
+     * natural-looking `written < dst_size` test is true for every input, which is
+     * exactly why the guard in jwt.c's json_escape_string() never fired. */
+    const char *needs_room = "\x01\x01\x01";        /* three six-byte escapes = 18 bytes */
+    char small[8];
+    need = json_escaped_len(needs_room);
+    written = json_escape(small, sizeof(small), needs_room);
+    assert(need == 18);
+    assert(written < sizeof(small));                /* old test: reports success */
+    assert(need >= sizeof(small));                  /* truth: it did not fit */
+    printf("Truncated into buf[%zu]: wrote %zu, actually needed %zu\n",
+           sizeof(small), written, need);
+
+    /* Exact fit: json_escaped_len() + 1 is enough, and not a byte more */
+    char exact[19];
+    written = json_escape(exact, sizeof(exact), needs_room);
+    assert(written == 18);
+    assert(strcmp(exact, "\\u0001\\u0001\\u0001") == 0);
+    printf("Exact fit into buf[%zu]: '%s'\n", sizeof(exact), exact);
+}
+
 void test_json_unescape(void) {
     printf("\n=== Testing json_unescape ===\n\n");
 
@@ -235,6 +278,7 @@ int main(void) {
     test_memmem_nocase();
     test_str_html_escape();
     test_json_escape();
+    test_json_escaped_len();
     test_json_unescape();
 
     printf("\n=== All tests complete ===\n");

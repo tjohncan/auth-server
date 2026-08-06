@@ -1251,6 +1251,81 @@ int main(void) {
     log_info("Long redirect_uri round-trip (%zu bytes): PASS\n",
              strlen(long_decoded.redirect_uri));
 
+    /* Test: every byte either round-trips or is refused at mint time
+     *
+     * The property under test is that no input can produce a token this server
+     * signs but cannot read back — an authorization code that mints and never
+     * redeems, which is how the truncated redirect_uri above presented in the
+     * field. json_escape() renders 0x01 as a six-byte \u escape and 0x08 as a
+     * two-byte one; json_unescape_string() in jwt.c reads neither and returns -1,
+     * so before the guard in json_escape_string() either byte encoded cleanly
+     * into a token every later decode rejected.
+     *
+     * Sweeping the whole byte domain rather than sampling it, because the claim
+     * being made is about all bytes, and because the interesting direction is the
+     * one sampling misses: \t, \n and \r both escape and decode, so they must
+     * keep round-tripping. They are the bytes most likely to be swept into a
+     * reject list later by someone tightening control-character handling, and a
+     * test that only checked "refused bytes stay refused" would not notice. The
+     * rule is therefore asserted in both directions for every byte.
+     *
+     * Refusals log an error by design; that output is expected. */
+    log_info("Test: Auth request JWT claim byte domain (0x01-0xFF)");
+
+    int probe_accepted = 0;
+    int probe_refused = 0;
+
+    for (int b = 1; b < 256; b++) {
+        auth_request_claims_t probe = ar_claims;
+        probe.scope[0] = 'a';
+        probe.scope[1] = (char)b;
+        probe.scope[2] = 'z';
+        probe.scope[3] = '\0';
+
+        char probe_token[JWT_MAX_TOKEN_LENGTH];
+        int encoded = jwt_encode_auth_request(&probe, ar_secret, sizeof(ar_secret),
+                                              probe_token, sizeof(probe_token));
+
+        /* Exactly the bytes json_escape() renders as \u00XX, \b or \f, and no
+         * others. Widening the escape table without widening the unescaper trips
+         * this; so does over-tightening the guard onto \t, \n or \r. */
+        int should_refuse = (b < 0x20 && b != '\t' && b != '\n' && b != '\r');
+        if (should_refuse != (encoded != 0)) {
+            log_error("Byte 0x%02X: expected %s at mint, got %s", b,
+                      should_refuse ? "refusal" : "acceptance",
+                      encoded != 0 ? "refusal" : "acceptance");
+            return 1;
+        }
+
+        if (encoded != 0) {
+            probe_refused++;
+            continue;
+        }
+
+        /* Whatever minted must redeem, byte for byte. */
+        auth_request_claims_t probe_decoded = {0};
+        if (jwt_decode_auth_request(probe_token, ar_secret_b64, NULL, &probe_decoded) != 0) {
+            log_error("Mint-but-never-redeem: byte 0x%02X encoded but failed to decode", b);
+            return 1;
+        }
+        if (strcmp(probe_decoded.scope, probe.scope) != 0) {
+            log_error("Byte 0x%02X survived encode/decode but changed value", b);
+            return 1;
+        }
+        probe_accepted++;
+    }
+
+    /* 28 = 0x01-0x08, 0x0B, 0x0C, 0x0E-0x1F. A change here means the escape
+     * table moved; make it deliberately, not by accident. */
+    if (probe_accepted != 227 || probe_refused != 28) {
+        log_error("Claim byte tally changed: %d redeemable, %d refused (expected 227/28)",
+                  probe_accepted, probe_refused);
+        return 1;
+    }
+
+    log_info("Claim bytes: %d redeemable, %d refused at mint, 0 mint-but-never-redeem: PASS\n",
+             probe_accepted, probe_refused);
+
     log_info("==========================================================");
     log_info("=== All Tests Passed! ===");
     log_info("==========================================================");

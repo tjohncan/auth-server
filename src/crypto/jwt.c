@@ -26,13 +26,62 @@ void jwt_set_clock_skew_seconds(int seconds) {
 /* Fixed JWT header for HS256 */
 #define JWT_HEADER "{\"alg\":\"HS256\",\"typ\":\"JWT\"}"
 
-/* Helper: Escape JSON string (quotes and backslashes) */
+/*
+ * Helper: Escape a claim value for embedding in the payload JSON.
+ *
+ * Fails rather than emit a value this file cannot read back, in two cases:
+ *
+ *   1. The escaped form does not fit output_len. json_escape() cannot report
+ *      this itself — it clamps to the destination and so always returns a count
+ *      below its own dst_size, which made the previous `written < output_len`
+ *      test true for every possible input. json_escaped_len() measures first.
+ *
+ *   2. The value contains a control byte that json_escape() renders as \u00XX,
+ *      \b or \f. json_unescape_string() below reads only \" \\ \/ \n \r \t and
+ *      returns -1 on anything else, so such a claim would encode cleanly and
+ *      then be undecodable: an authorization code that can be minted but never
+ *      redeemed, the same failure mode as the truncated redirect_uri. Refusing
+ *      at mint time turns a silent dead token into a logged error.
+ *
+ * Excluding those bytes leaves \" and \\ as the widest escapes at 2 bytes each,
+ * so every esc_* buffer in the two payload builders is sized at twice its claim
+ * field, which covers the worst case with a byte to spare.
+ */
 static int json_escape_string(const char *input, char *output, size_t output_len) {
-    size_t written = json_escape(output, output_len, input);
-    return (written < output_len) ? 0 : -1;
+    for (const unsigned char *p = (const unsigned char *)input; *p != '\0'; p++) {
+        if (*p < 0x20 && *p != '\t' && *p != '\n' && *p != '\r') {
+            return -1;  /* Would render as \u00XX, \b or \f — see (2) above */
+        }
+    }
+
+    if (json_escaped_len(input) >= output_len) {
+        return -1;  /* Escaped form would be truncated */
+    }
+
+    json_escape(output, output_len, input);
+    return 0;
 }
 
-/* Helper: Unescape JSON string */
+/*
+ * Helper: Unescape a claim value parsed out of the payload JSON.
+ *
+ * Deliberately narrower than RFC 8259 — no \uXXXX, no \b, no \f — and narrower
+ * than json_unescape() in util/json.c, which handles all three. That is safe
+ * only because of two things, both of which must hold for it to stay safe:
+ * json_escape_string() above refuses to encode any claim that would need those
+ * sequences, and production callers reach this function only after the payload's
+ * HMAC has been verified (crypto_hmac_compare, jwt_decode_auth_request_with_secret),
+ * so the only payloads parsed here are ones this file produced. Widening the
+ * escape side without widening this one reintroduces mint-but-never-redeem
+ * tokens.
+ *
+ * Note that the boundary is custody of the signing secret, not well-formedness:
+ * anything holding the key can author arbitrary payload bytes and they will
+ * clear the gate. test/fuzz/fuzz_jwt.c does exactly that on purpose — it owns a
+ * fixed secret and signs fuzzer-authored payloads — because memory safety here
+ * has to hold for any bytes at all, independent of the argument above. That is
+ * what the jwt corpus under ASan+UBSan establishes.
+ */
 static int json_unescape_string(const char *input, char *output, size_t output_len) {
     size_t out_pos = 0;
 
@@ -846,7 +895,7 @@ static int build_auth_request_payload_json(const auth_request_claims_t *claims,
     char esc_scope[JWT_MAX_CLAIM_VALUE_LENGTH * 2];
     char esc_code_challenge[256];
     char esc_code_challenge_method[32];
-    char esc_nonce[64];
+    char esc_nonce[66];  /* 2 x nonce[33]; 64 was a byte short of the worst case */
 
     if (json_escape_string(claims->redirect_uri, esc_redirect_uri, sizeof(esc_redirect_uri)) != 0 ||
         json_escape_string(claims->scope, esc_scope, sizeof(esc_scope)) != 0 ||
