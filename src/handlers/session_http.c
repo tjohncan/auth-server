@@ -853,13 +853,28 @@ HttpResponse *verify_email_page_handler(const HttpRequest *req,
                  "<em class=\"text-muted\">not set</em>");
     }
 
+    /* Escape the token even though it has already been matched against a stored
+     * SHA-256 hash and so cannot carry attacker bytes. This is uniformity, not a
+     * live XSS fix: template_render does not escape by default — USERNAME_DISPLAY
+     * just above is deliberately raw HTML — so "is this substitution escaped?" has
+     * to be answerable at each call site, and three of the four token pages were
+     * answering it differently from the fourth.
+     *
+     * 128 is ample because the token is 43 characters of base64url, an alphabet
+     * holding none of & < > " ' — so escaping is a straight copy. 43 characters that
+     * each escaped to &quot; would need 259. The headroom comes from how tokens are
+     * generated, not from 128 being a generous number. */
+    char escaped_token[128];
+    str_html_escape(escaped_token, sizeof(escaped_token), token);
+    cleanse_free(token);
+
     HttpResponse *resp = response_template(200, "pages/verify-email.html",
         "EMAIL", escaped_email,
         "USERNAME_DISPLAY", username_display,
         "USER_ID", user_id_hex,
-        "TOKEN", token,
+        "TOKEN", escaped_token,
         NULL);
-    cleanse_free(token);
+    OPENSSL_cleanse(escaped_token, sizeof(escaped_token));
     return resp ? resp : response_json_error(500, "Template error");
 }
 
@@ -1026,11 +1041,18 @@ HttpResponse *reset_password_page_handler(const HttpRequest *req,
         return resp ? resp : response_json_error(400, "Invalid token");
     }
 
+    /* Escaped for uniformity with the other token pages; see the note in
+     * verify_email_page_handler. The token matched a stored hash before we got
+     * here, so this is consistency rather than a live XSS fix. */
+    char escaped_token[128];
+    str_html_escape(escaped_token, sizeof(escaped_token), token);
+    cleanse_free(token);
+
     char min_len[12];
     snprintf(min_len, sizeof(min_len), "%d", crypto_password_min_length());
     HttpResponse *resp = response_template(200, "pages/reset-password.html",
-        "TOKEN", token, "MIN_LENGTH", min_len, NULL);
-    cleanse_free(token);
+        "TOKEN", escaped_token, "MIN_LENGTH", min_len, NULL);
+    OPENSSL_cleanse(escaped_token, sizeof(escaped_token));
     return resp ? resp : response_json_error(500, "Template error");
 }
 
@@ -1162,14 +1184,21 @@ HttpResponse *accept_invitation_page_handler(const HttpRequest *req,
                  sizeof(account_info));
     }
 
+    /* Escaped for uniformity with the other token pages; see the note in
+     * verify_email_page_handler. ACCOUNT_INFO just below stays raw by design — its
+     * components are escaped individually as they are appended. */
+    char escaped_token[128];
+    str_html_escape(escaped_token, sizeof(escaped_token), token);
+    cleanse_free(token);
+
     char min_len[12];
     snprintf(min_len, sizeof(min_len), "%d", crypto_password_min_length());
     HttpResponse *resp = response_template(200, "pages/accept-invitation.html",
-        "TOKEN", token,
+        "TOKEN", escaped_token,
         "ACCOUNT_INFO", account_info,
         "MIN_LENGTH", min_len,
         NULL);
-    cleanse_free(token);
+    OPENSSL_cleanse(escaped_token, sizeof(escaped_token));
     return resp ? resp : response_json_error(500, "Template error");
 }
 
