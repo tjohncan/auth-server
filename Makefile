@@ -16,9 +16,10 @@ ifeq ($(DB_BACKEND),sqlite)
     CFLAGS += -Ivendor/sqlite -DDB_BACKEND_SQLITE
     DB_VENDOR_SRCS = vendor/sqlite/sqlite3.c
     ifeq ($(wildcard vendor/sqlite/sqlite3.c),)
-        # The fuzz targets compile only the parser and its two utils — no database.
-        # Exempt them so a fresh clone can fuzz before vendoring the amalgamation.
-        ifeq ($(filter clean fuzz fuzz-regress,$(MAKECMDGOALS)),)
+        # The fuzz targets and test-str compile only the parser and a few utils — no
+        # database. Exempt them so a fresh clone can fuzz and run the string/JSON tests
+        # before vendoring a 9 MB amalgamation that neither of them links.
+        ifeq ($(filter clean fuzz fuzz-regress test-str,$(MAKECMDGOALS)),)
             $(error SQLite amalgamation not found at vendor/sqlite/sqlite3.c — see vendor/setup_notes.txt)
         endif
     endif
