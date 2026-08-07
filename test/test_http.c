@@ -51,7 +51,7 @@ void test_request_parsing(void) {
         "POST /api/login HTTP/1.0\r\n"
         "Host: localhost\r\n"
         "Content-Type: application/json\r\n"
-        "Content-Length: 27\r\n"
+        "Content-Length: 28\r\n"
         "\r\n"
         "{\"user\":\"test\",\"pass\":\"123\"}";
 
@@ -60,8 +60,14 @@ void test_request_parsing(void) {
     assert(parsed3.method == HTTP_POST);
     assert(strcmp(parsed3.path, "/api/login") == 0);
     assert(parsed3.body != NULL);
-    assert(parsed3.body_length == 27);
+    assert(parsed3.body_length == 28);
     assert(strncmp(parsed3.body, "{\"user\":\"test\"", 14) == 0);
+    /* Exact fit, the ordinary production case: Content-Length equals the actual body,
+     * so the terminator lands on raw[length] — the caller's own NUL, and the tightest
+     * point of the bounds argument in http_request_parse. Test 6 owns the truncating
+     * case; without this one, both body tests were truncation tests. */
+    assert(strlen(parsed3.body) == 28);
+    assert(strcmp(parsed3.body, "{\"user\":\"test\",\"pass\":\"123\"}") == 0);
     assert(strcmp(http_request_get_header(&parsed3, "Content-Type"), "application/json") == 0);
 
     printf("✓ POST with JSON body parsed correctly\n");
@@ -233,6 +239,11 @@ void test_malformed_requests(void) {
         assert(parsed.method == HTTP_POST);
         assert(parsed.body_length == 5);
         assert(strncmp(parsed.body, "hello", 5) == 0);
+        /* The clamp has to be visible to consumers, every one of which reads the body
+         * as a C string. Without a terminator at body_length the strncmp above still
+         * passes while json_get_string() goes on parsing " extra bytes here". */
+        assert(strcmp(parsed.body, "hello") == 0);
+        assert(strlen(parsed.body) == parsed.body_length);
         http_request_cleanup(&parsed);
         printf("✓ Body truncated to Content-Length\n");
     }

@@ -70,15 +70,22 @@ typedef struct {
  *            Do NOT free the buffer while using the parsed request.
  *
  * Parameters:
- *   raw    - Raw HTTP request bytes (WILL BE MODIFIED!)
- *   length - Length of raw bytes
+ *   raw    - Raw HTTP request bytes (WILL BE MODIFIED!). MUST be NUL-terminated at
+ *            raw[length], so the allocation has to be length + 1 bytes. The parser's
+ *            line walks rely on that terminator, and the body is terminated in place
+ *            at its declared Content-Length.
+ *   length - Length of raw bytes, not counting that terminator
  *
  * Returns: HttpRequest struct (stack-allocated), or .method = HTTP_UNKNOWN on error
  *
- * Example:
+ * Example. Note the buffer must already hold a COMPLETE request — the server
+ * accumulates across reads in event_loop.c and calls this once, so the single
+ * read() below is illustration, not a usable framing strategy:
  *   char buffer[4096];
- *   ssize_t n = read(socket, buffer, sizeof(buffer));
- *   HttpRequest req = http_request_parse(buffer, n);
+ *   ssize_t n = read(socket, buffer, sizeof(buffer) - 1);   // leave room for the NUL
+ *   if (n < 0) { ... }
+ *   buffer[n] = '\0';                                       // required, see `raw`
+ *   HttpRequest req = http_request_parse(buffer, (size_t)n);
  *   if (req.method == HTTP_UNKNOWN) {
  *       // Parse error
  *   }

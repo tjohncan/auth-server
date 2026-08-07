@@ -248,6 +248,18 @@ HttpRequest http_request_parse(char *raw, size_t length) {
             }
             /* If parse failed, ignore Content-Length (use actual body_length) */
         }
+
+        /* Content-Length is authoritative, so terminate the body at it. Without this the
+         * clamp above is decorative: every consumer reads req.body as a C string
+         * (json_get_string and friends take a const char *), and the only NUL is the one
+         * the caller placed at the end of the entire request buffer — so bytes sent past
+         * the declared length are still parsed as part of the JSON.
+         *
+         * Writing at body + body_length is always in bounds. Unclamped it lands exactly
+         * on that caller-supplied terminator (body_offset + (length - body_offset) ==
+         * length), and the clamp only ever moves it earlier. See the precondition on
+         * `raw` in include/server/http.h. */
+        req.body[req.body_length] = '\0';
     } else {
         req.body = NULL;
         req.body_length = 0;
