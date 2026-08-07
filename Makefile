@@ -146,7 +146,7 @@ test: test-str test-http test-router test-db test-crypto
 # database or crypto; the jwt decoder needs the hmac/base64/json stack). Each target
 # owns its own corpus/ and crashes/ subdirectory.
 FUZZ_SAN         = -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer
-FUZZ_HTTP_SRCS   = test/fuzz/fuzz_http.c src/server/http.c src/util/str.c src/util/json.c
+FUZZ_HTTP_SRCS   = test/fuzz/fuzz_http.c src/server/http.c src/util/str.c src/util/json.c src/util/log.c
 FUZZ_JWT_SRCS    = test/fuzz/fuzz_jwt.c src/crypto/jwt.c src/crypto/hmac.c src/crypto/random.c \
                    src/crypto/sha256.c src/util/data.c src/util/str.c src/util/json.c src/util/log.c
 FUZZ_TIME       ?= 60

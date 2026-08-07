@@ -37,7 +37,7 @@ fi
 # source lists here (not in the harness) is what lets one runner serve both targets.
 case "${TARGET}" in
     http)
-        SRCS="test/fuzz/fuzz_http.c src/server/http.c src/util/str.c src/util/json.c"
+        SRCS="test/fuzz/fuzz_http.c src/server/http.c src/util/str.c src/util/json.c src/util/log.c"
         DICT="test/fuzz/http.dict"
         DESC="http_request_parse + accessors"
         MAXLEN=65536

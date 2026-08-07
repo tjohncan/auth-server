@@ -144,6 +144,59 @@ void test_response_building(void) {
 
     free(serialized3);
     http_response_free(resp3);
+
+    /* Test 4: CR or LF in a header field is refused, not serialized
+     *
+     * A value carrying "\r\n" would close its header line early and let the remainder
+     * be read as further headers or as the body — response splitting. Nothing reaches
+     * these setters carrying one today (redirect URIs are control-character validated,
+     * query parameters are percent-encoded), but that is a property of a few call sites
+     * rather than of this layer.
+     *
+     * add_header and set_header carry separate, duplicated guard blocks — set_header's
+     * replace path never funnels through add_header — so each is exercised for an
+     * unsafe name, an unsafe value, and NULL. A copy-paste slip in one copy (checking
+     * value twice instead of name then value, say) would otherwise pass the suite.
+     *
+     * The refusals log an error by design; that output is expected. */
+    HttpResponse *resp4 = http_response_new(302);
+    http_response_set_header(resp4, "Location", "https://example.com/ok");
+    /* unsafe values: add, set-append, and set-replace over a good value */
+    http_response_add_header(resp4, "X-Split", "a\r\nX-Injected: yes");
+    http_response_set_header(resp4, "X-New", "b\r\nX-Injected: yes");
+    http_response_set_header(resp4, "Location", "https://evil.test/\r\nSet-Cookie: x=1");
+    /* unsafe names, both doors */
+    http_response_add_header(resp4, "X-Bad-Add\r\nName", "harmless");
+    http_response_set_header(resp4, "X-Bad-Set\r\nName", "harmless");
+    /* NULL, both doors — str_dup used to be handed it unchecked */
+    http_response_add_header(resp4, "X-Null-Add", NULL);
+    http_response_set_header(resp4, "X-Null-Set", NULL);
+
+    size_t len4;
+    char *serialized4 = http_response_serialize(resp4, &len4);
+    assert(serialized4 != NULL);
+
+    printf("\nResponse 4 (%zu bytes):\n%.*s\n", len4, (int)len4, serialized4);
+
+    /* The good header survives, the unsafe replace left it intact, and nothing
+     * injected made it into the output. */
+    assert(strstr(serialized4, "Location: https://example.com/ok\r\n") != NULL);
+    assert(strstr(serialized4, "X-Injected") == NULL);
+    assert(strstr(serialized4, "Set-Cookie") == NULL);
+    assert(strstr(serialized4, "evil.test") == NULL);
+    assert(strstr(serialized4, "X-Split") == NULL);
+    assert(strstr(serialized4, "X-New") == NULL);
+    assert(strstr(serialized4, "X-Bad-Add") == NULL);
+    assert(strstr(serialized4, "X-Bad-Set") == NULL);
+    assert(strstr(serialized4, "X-Null-Add") == NULL);
+    assert(strstr(serialized4, "X-Null-Set") == NULL);
+    /* Nothing split a name across lines either: no bare "Name:" line appeared */
+    assert(strstr(serialized4, "Name: harmless") == NULL);
+
+    printf("✓ CR/LF in header fields refused (no response splitting)\n");
+
+    free(serialized4);
+    http_response_free(resp4);
 }
 
 void test_real_world_request(void) {

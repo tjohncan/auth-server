@@ -1,6 +1,7 @@
 #include "server/http.h"
 #include "util/json.h"
 #include "util/str.h"
+#include "util/log.h"
 #include <string.h>
 #include <strings.h>  /* for strcasecmp */
 #include <stdlib.h>
@@ -467,7 +468,33 @@ void http_response_free(HttpResponse *resp) {
     free(resp);
 }
 
+/*
+ * A CR or LF anywhere in a header field would terminate the line early during
+ * serialization, letting the remainder be read as further headers or as the body —
+ * response splitting. Everything reaching these setters today is already
+ * control-character-checked (validate_url_field) or percent-encoded (str_url_encode)
+ * upstream, but that is a property of a handful of call sites rather than of this
+ * layer, and it has to be re-verified by hand every time a header is added. Enforce it
+ * once, here, so no call site can reintroduce it.
+ *
+ * Also rejects NULL, which str_dup() below would otherwise be handed.
+ */
+static bool header_field_is_safe(const char *field) {
+    return field && !strpbrk(field, "\r\n");
+}
+
 void http_response_add_header(HttpResponse *resp, const char *name, const char *value) {
+    /* Check the name first so the value's rejection can name it without the name
+     * itself being able to inject line breaks into the log. */
+    if (!header_field_is_safe(name)) {
+        log_error("Refusing response header: CR, LF, or NULL in header name");
+        return;
+    }
+    if (!header_field_is_safe(value)) {
+        log_error("Refusing response header %s: CR, LF, or NULL in value", name);
+        return;
+    }
+
     if (resp->header_count >= resp->header_capacity) {
         int new_capacity = resp->header_capacity == 0 ? 8 : resp->header_capacity * 2;
         HttpHeader *new_headers = realloc(resp->headers, new_capacity * sizeof(HttpHeader));
@@ -489,6 +516,17 @@ void http_response_add_header(HttpResponse *resp, const char *name, const char *
 }
 
 void http_response_set_header(HttpResponse *resp, const char *name, const char *value) {
+    /* The replace branch below does not funnel through add_header(), so it needs the
+     * same guard. Checked up front so an unsafe value cannot replace a good one. */
+    if (!header_field_is_safe(name)) {
+        log_error("Refusing response header: CR, LF, or NULL in header name");
+        return;
+    }
+    if (!header_field_is_safe(value)) {
+        log_error("Refusing response header %s: CR, LF, or NULL in value", name);
+        return;
+    }
+
     /* Check if header already exists (replace it) */
     for (int i = 0; i < resp->header_count; i++) {
         if (strcasecmp(resp->headers[i].name, name) == 0) {
