@@ -301,17 +301,25 @@ int resource_server_list_all(db_handle_t *db, long long user_account_pin,
 
     /* Build query with optional is_active filter */
     char sql[1024];
-    int pos = snprintf(sql, sizeof(sql), "%s", is_org_key_auth ? sql_org_key : sql_session);
+    size_t pos = 0;
+    int build_rc = 0;
+    build_rc |= str_appendf(sql, sizeof(sql), &pos, "%s",
+                            is_org_key_auth ? sql_org_key : sql_session);
 
     /* Add is_active filter if specified */
     int param_count = 3;  /* Next parameter after ?1 (org_id) and ?2 (auth_pin) */
     if (filter_is_active) {
-        pos += snprintf(sql + pos, sizeof(sql) - pos, "AND rs.is_active = " P"%d ", param_count++);
+        build_rc |= str_appendf(sql, sizeof(sql), &pos, "AND rs.is_active = " P"%d ", param_count++);
     }
 
-    snprintf(sql + pos, sizeof(sql) - pos,
+    build_rc |= str_appendf(sql, sizeof(sql), &pos,
         "ORDER BY rs.code_name "
         "LIMIT " P"%d OFFSET " P"%d", param_count, param_count + 1);
+
+    if (build_rc != 0) {
+        log_error("resource_server_list_all SQL exceeded its %zu-byte buffer", sizeof(sql));
+        return -1;
+    }
 
     db_stmt_t *stmt = NULL;
     if (db_prepare(db, &stmt, sql) != 0) {
@@ -545,49 +553,50 @@ int resource_server_update(db_handle_t *db, const unsigned char *server_id,
 
     /* Build UPDATE query dynamically */
     char sql[3072];
-    int pos = 0;
+    size_t pos = 0;
+    int build_rc = 0;
     int param = 3;  /* ?1 is server_id, ?2 is auth PIN (user or key) */
     int conditions = 0;
     int address_check_param = 0;  /* Track address param for uniqueness check */
 
     /* Start with UPDATE SET */
-    pos += snprintf(sql + pos, sizeof(sql) - pos,
+    build_rc |= str_appendf(sql, sizeof(sql), &pos,
         "UPDATE " TBL_RESOURCE_SERVER " SET updated_at = " NOW "");
 
     /* Add SET clauses */
     if (display_name) {
-        pos += snprintf(sql + pos, sizeof(sql) - pos, ", display_name = " P"%d", param++);
+        build_rc |= str_appendf(sql, sizeof(sql), &pos, ", display_name = " P"%d", param++);
     }
     if (address) {
-        pos += snprintf(sql + pos, sizeof(sql) - pos, ", address = " P"%d", param++);
+        build_rc |= str_appendf(sql, sizeof(sql), &pos, ", address = " P"%d", param++);
     }
     if (note) {
         if (note[0] == '\0') {
-            pos += snprintf(sql + pos, sizeof(sql) - pos, ", note = NULL");
+            build_rc |= str_appendf(sql, sizeof(sql), &pos, ", note = NULL");
         } else {
-            pos += snprintf(sql + pos, sizeof(sql) - pos, ", note = " P"%d", param++);
+            build_rc |= str_appendf(sql, sizeof(sql), &pos, ", note = " P"%d", param++);
         }
     }
     if (is_active) {
-        pos += snprintf(sql + pos, sizeof(sql) - pos, ", is_active = " P"%d", param++);
+        build_rc |= str_appendf(sql, sizeof(sql), &pos, ", is_active = " P"%d", param++);
     }
     if (allow_user_provisioning) {
-        pos += snprintf(sql + pos, sizeof(sql) - pos, ", allow_user_provisioning = " P"%d", param++);
+        build_rc |= str_appendf(sql, sizeof(sql), &pos, ", allow_user_provisioning = " P"%d", param++);
     }
 
     /* Build WHERE clause with dual-auth security check */
-    pos += snprintf(sql + pos, sizeof(sql) - pos, " WHERE id = " P"1 AND EXISTS (");
+    build_rc |= str_appendf(sql, sizeof(sql), &pos, " WHERE id = " P"1 AND EXISTS (");
 
     if (is_org_key_auth) {
         /* Org key auth - verify key is active */
-        pos += snprintf(sql + pos, sizeof(sql) - pos,
+        build_rc |= str_appendf(sql, sizeof(sql), &pos,
             "SELECT 1 FROM " TBL_ORGANIZATION_KEY " ok "
             "WHERE ok.organization_pin = " TBL_RESOURCE_SERVER ".organization_pin "
             "AND ok.pin = " P"2 "
             "AND ok.is_active = " BOOL_TRUE);
     } else {
         /* Session auth - verify user is org admin */
-        pos += snprintf(sql + pos, sizeof(sql) - pos,
+        build_rc |= str_appendf(sql, sizeof(sql), &pos,
             "SELECT 1 FROM " TBL_ORGANIZATION_ADMIN " oa "
             "JOIN " TBL_USER_ACCOUNT " ua ON ua.pin = oa.user_account_pin "
             "WHERE oa.organization_pin = " TBL_RESOURCE_SERVER ".organization_pin "
@@ -595,12 +604,12 @@ int resource_server_update(db_handle_t *db, const unsigned char *server_id,
             "AND ua.is_active = " BOOL_TRUE);
     }
 
-    pos += snprintf(sql + pos, sizeof(sql) - pos, ") ");
+    build_rc |= str_appendf(sql, sizeof(sql), &pos, ") ");
 
     /* Add uniqueness check for address if being updated */
     if (address) {
         address_check_param = param++;
-        pos += snprintf(sql + pos, sizeof(sql) - pos,
+        build_rc |= str_appendf(sql, sizeof(sql), &pos,
             "AND NOT EXISTS ("
                 "SELECT 1 FROM " TBL_RESOURCE_SERVER " other "
                 "WHERE other.organization_pin = " TBL_RESOURCE_SERVER ".organization_pin "
@@ -613,7 +622,7 @@ int resource_server_update(db_handle_t *db, const unsigned char *server_id,
     /* Add uniqueness check when reactivating (is_active -> TRUE) */
     /* Check existing address doesn't collide with active records */
     if (is_active && *is_active == 1) {
-        pos += snprintf(sql + pos, sizeof(sql) - pos,
+        build_rc |= str_appendf(sql, sizeof(sql), &pos,
             "AND NOT EXISTS ("
                 "SELECT 1 FROM " TBL_RESOURCE_SERVER " other "
                 "WHERE other.organization_pin = " TBL_RESOURCE_SERVER ".organization_pin "
@@ -623,52 +632,57 @@ int resource_server_update(db_handle_t *db, const unsigned char *server_id,
             ") ");
     }
 
-    pos += snprintf(sql + pos, sizeof(sql) - pos, "AND (");
+    build_rc |= str_appendf(sql, sizeof(sql), &pos, "AND (");
 
     /* Add WHERE conditions (prevent no-op updates) */
     param = 3;
     if (display_name) {
         if (conditions++ > 0) {
-            pos += snprintf(sql + pos, sizeof(sql) - pos, " OR ");
+            build_rc |= str_appendf(sql, sizeof(sql), &pos, " OR ");
         }
-        pos += snprintf(sql + pos, sizeof(sql) - pos,
+        build_rc |= str_appendf(sql, sizeof(sql), &pos,
             "display_name IS DISTINCT FROM " P"%d", param++);
     }
     if (address) {
         if (conditions++ > 0) {
-            pos += snprintf(sql + pos, sizeof(sql) - pos, " OR ");
+            build_rc |= str_appendf(sql, sizeof(sql), &pos, " OR ");
         }
-        pos += snprintf(sql + pos, sizeof(sql) - pos,
+        build_rc |= str_appendf(sql, sizeof(sql), &pos,
             "address IS DISTINCT FROM " P"%d", param++);
     }
     if (note) {
         if (conditions++ > 0) {
-            pos += snprintf(sql + pos, sizeof(sql) - pos, " OR ");
+            build_rc |= str_appendf(sql, sizeof(sql), &pos, " OR ");
         }
         if (note[0] == '\0') {
-            pos += snprintf(sql + pos, sizeof(sql) - pos, "note IS NOT NULL");
+            build_rc |= str_appendf(sql, sizeof(sql), &pos, "note IS NOT NULL");
         } else {
-            pos += snprintf(sql + pos, sizeof(sql) - pos,
+            build_rc |= str_appendf(sql, sizeof(sql), &pos,
                 "note IS DISTINCT FROM " P"%d", param++);
         }
     }
     if (is_active) {
         if (conditions++ > 0) {
-            pos += snprintf(sql + pos, sizeof(sql) - pos, " OR ");
+            build_rc |= str_appendf(sql, sizeof(sql), &pos, " OR ");
         }
-        pos += snprintf(sql + pos, sizeof(sql) - pos,
+        build_rc |= str_appendf(sql, sizeof(sql), &pos,
             "is_active IS DISTINCT FROM " P"%d", param++);
     }
     if (allow_user_provisioning) {
         if (conditions++ > 0) {
-            pos += snprintf(sql + pos, sizeof(sql) - pos, " OR ");
+            build_rc |= str_appendf(sql, sizeof(sql), &pos, " OR ");
         }
-        pos += snprintf(sql + pos, sizeof(sql) - pos,
+        build_rc |= str_appendf(sql, sizeof(sql), &pos,
             "allow_user_provisioning IS DISTINCT FROM " P"%d", param++);
     }
 
     /* Close WHERE clause */
-    snprintf(sql + pos, sizeof(sql) - pos, ")");
+    build_rc |= str_appendf(sql, sizeof(sql), &pos, ")");
+
+    if (build_rc != 0) {
+        log_error("resource_server_update SQL exceeded its %zu-byte buffer", sizeof(sql));
+        return -1;
+    }
 
     /* Prepare statement */
     db_stmt_t *stmt = NULL;
@@ -858,11 +872,12 @@ int resource_server_key_list(db_handle_t *db,
 
     /* Build query with optional is_active filter */
     char sql[1024];
-    int pos;
+    size_t pos = 0;
+    int build_rc = 0;
 
     if (is_org_key_auth) {
         /* Org key authentication - verify key is active */
-        pos = snprintf(sql, sizeof(sql),
+        build_rc |= str_appendf(sql, sizeof(sql), &pos,
             "SELECT rsk.id, rsk.is_active, rsk.generated_at, rsk.note, "
             "COUNT(*) OVER() as total_count "
             "FROM " TBL_RESOURCE_SERVER_KEY " rsk "
@@ -873,7 +888,7 @@ int resource_server_key_list(db_handle_t *db,
             "AND ok.is_active = " BOOL_TRUE " ");
     } else {
         /* Session authentication - verify user is org admin */
-        pos = snprintf(sql, sizeof(sql),
+        build_rc |= str_appendf(sql, sizeof(sql), &pos,
             "SELECT rsk.id, rsk.is_active, rsk.generated_at, rsk.note, "
             "COUNT(*) OVER() as total_count "
             "FROM " TBL_RESOURCE_SERVER_KEY " rsk "
@@ -888,12 +903,17 @@ int resource_server_key_list(db_handle_t *db,
     /* Add is_active filter if specified */
     int param_count = 3;  /* Next parameter after ?1 (rs_id) and ?2 (auth_pin) */
     if (filter_is_active) {
-        pos += snprintf(sql + pos, sizeof(sql) - pos, "AND rsk.is_active = " P"%d ", param_count++);
+        build_rc |= str_appendf(sql, sizeof(sql), &pos, "AND rsk.is_active = " P"%d ", param_count++);
     }
 
-    snprintf(sql + pos, sizeof(sql) - pos,
+    build_rc |= str_appendf(sql, sizeof(sql), &pos,
         "ORDER BY rsk.generated_at DESC, rsk.pin DESC "
         "LIMIT " P"%d OFFSET " P"%d", param_count, param_count + 1);
+
+    if (build_rc != 0) {
+        log_error("resource_server_key_list SQL exceeded its %zu-byte buffer", sizeof(sql));
+        return -1;
+    }
 
     db_stmt_t *stmt = NULL;
     if (db_prepare(db, &stmt, sql) != 0) {

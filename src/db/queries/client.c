@@ -424,17 +424,25 @@ int client_list_all(db_handle_t *db, long long user_account_pin,
 
     /* Build query with optional is_active filter */
     char sql[1024];
-    int pos = snprintf(sql, sizeof(sql), "%s", is_org_key_auth ? sql_org_key : sql_session);
+    size_t pos = 0;
+    int build_rc = 0;
+    build_rc |= str_appendf(sql, sizeof(sql), &pos, "%s",
+                            is_org_key_auth ? sql_org_key : sql_session);
 
     /* Add is_active filter if specified */
     int param_count = 3;  /* Next parameter after ?1 (org_id) and ?2 (auth_pin) */
     if (filter_is_active) {
-        pos += snprintf(sql + pos, sizeof(sql) - pos, "AND c.is_active = " P"%d ", param_count++);
+        build_rc |= str_appendf(sql, sizeof(sql), &pos, "AND c.is_active = " P"%d ", param_count++);
     }
 
-    snprintf(sql + pos, sizeof(sql) - pos,
+    build_rc |= str_appendf(sql, sizeof(sql), &pos,
         "ORDER BY c.code_name "
         "LIMIT " P"%d OFFSET " P"%d", param_count, param_count + 1);
+
+    if (build_rc != 0) {
+        log_error("client_list_all SQL exceeded its %zu-byte buffer", sizeof(sql));
+        return -1;
+    }
 
     db_stmt_t *stmt = NULL;
     if (db_prepare(db, &stmt, sql) != 0) {
@@ -735,72 +743,73 @@ int client_update(db_handle_t *db, const unsigned char *client_id,
 
     /* Build UPDATE query dynamically */
     char sql[3072];
-    int pos = 0;
+    size_t pos = 0;
+    int build_rc = 0;
     int param = 3;  /* ?1 is client_id, ?2 is auth PIN (user or key) */
     int conditions = 0;
 
     /* Start with UPDATE SET */
-    pos += snprintf(sql + pos, sizeof(sql) - pos,
+    build_rc |= str_appendf(sql, sizeof(sql), &pos,
         "UPDATE " TBL_CLIENT " SET updated_at = " NOW "");
 
     /* Add SET clauses */
     if (display_name) {
-        pos += snprintf(sql + pos, sizeof(sql) - pos, ", display_name = " P"%d", param++);
+        build_rc |= str_appendf(sql, sizeof(sql), &pos, ", display_name = " P"%d", param++);
     }
     if (note) {
         if (note[0] == '\0') {
-            pos += snprintf(sql + pos, sizeof(sql) - pos, ", note = NULL");
+            build_rc |= str_appendf(sql, sizeof(sql), &pos, ", note = NULL");
         } else {
-            pos += snprintf(sql + pos, sizeof(sql) - pos, ", note = " P"%d", param++);
+            build_rc |= str_appendf(sql, sizeof(sql), &pos, ", note = " P"%d", param++);
         }
     }
     if (require_mfa) {
-        pos += snprintf(sql + pos, sizeof(sql) - pos, ", require_mfa = " P"%d", param++);
+        build_rc |= str_appendf(sql, sizeof(sql), &pos, ", require_mfa = " P"%d", param++);
     }
     if (access_token_ttl_seconds) {
-        pos += snprintf(sql + pos, sizeof(sql) - pos, ", access_token_ttl_seconds = " P"%d", param++);
+        build_rc |= str_appendf(sql, sizeof(sql), &pos, ", access_token_ttl_seconds = " P"%d", param++);
     }
     if (issue_refresh_tokens) {
-        pos += snprintf(sql + pos, sizeof(sql) - pos, ", issue_refresh_tokens = " P"%d", param++);
+        build_rc |= str_appendf(sql, sizeof(sql), &pos, ", issue_refresh_tokens = " P"%d", param++);
     }
     if (refresh_token_ttl_seconds) {
         if (*refresh_token_ttl_seconds < 0) {
-            pos += snprintf(sql + pos, sizeof(sql) - pos, ", refresh_token_ttl_seconds = NULL");
+            build_rc |= str_appendf(sql, sizeof(sql), &pos, ", refresh_token_ttl_seconds = NULL");
         } else {
-            pos += snprintf(sql + pos, sizeof(sql) - pos, ", refresh_token_ttl_seconds = " P"%d", param++);
+            build_rc |= str_appendf(sql, sizeof(sql), &pos, ", refresh_token_ttl_seconds = " P"%d", param++);
         }
     }
     if (maximum_session_seconds) {
         if (*maximum_session_seconds < 0) {
-            pos += snprintf(sql + pos, sizeof(sql) - pos, ", maximum_session_seconds = NULL");
+            build_rc |= str_appendf(sql, sizeof(sql), &pos, ", maximum_session_seconds = NULL");
         } else {
-            pos += snprintf(sql + pos, sizeof(sql) - pos, ", maximum_session_seconds = " P"%d", param++);
+            build_rc |= str_appendf(sql, sizeof(sql), &pos, ", maximum_session_seconds = " P"%d", param++);
         }
     }
     if (secret_rotation_seconds) {
         if (*secret_rotation_seconds < 0) {
-            pos += snprintf(sql + pos, sizeof(sql) - pos, ", secret_rotation_seconds = NULL");
+            build_rc |= str_appendf(sql, sizeof(sql), &pos, ", secret_rotation_seconds = NULL");
         } else {
-            pos += snprintf(sql + pos, sizeof(sql) - pos, ", secret_rotation_seconds = " P"%d", param++);
+            build_rc |= str_appendf(sql, sizeof(sql), &pos, ", secret_rotation_seconds = " P"%d", param++);
         }
     }
     if (is_active) {
-        pos += snprintf(sql + pos, sizeof(sql) - pos, ", is_active = " P"%d", param++);
+        build_rc |= str_appendf(sql, sizeof(sql), &pos, ", is_active = " P"%d", param++);
     }
 
     /* Build WHERE clause with dual-auth security check */
-    pos += snprintf(sql + pos, sizeof(sql) - pos, " WHERE id = " P"1 AND EXISTS (");
+    build_rc |= str_appendf(sql, sizeof(sql), &pos, " WHERE id = " P"1 AND EXISTS (");
 
     if (is_org_key_auth) {
         /* Org key auth - verify key is active */
-        pos += snprintf(sql + pos, sizeof(sql) - pos,
+        build_rc |= str_appendf(sql, sizeof(sql), &pos,
             "SELECT 1 FROM " TBL_ORGANIZATION_KEY " ok "
             "WHERE ok.organization_pin = " TBL_CLIENT ".organization_pin "
             "AND ok.pin = " P"2 "
             "AND ok.is_active = " BOOL_TRUE);
     } else {
         /* Session auth - verify user is org admin */
-        pos += snprintf(sql + pos, sizeof(sql) - pos,
+        build_rc |= str_appendf(sql, sizeof(sql), &pos,
             "SELECT 1 FROM " TBL_ORGANIZATION_ADMIN " oa "
             "JOIN " TBL_USER_ACCOUNT " ua ON ua.pin = oa.user_account_pin "
             "WHERE oa.organization_pin = " TBL_CLIENT ".organization_pin "
@@ -808,12 +817,12 @@ int client_update(db_handle_t *db, const unsigned char *client_id,
             "AND ua.is_active = " BOOL_TRUE);
     }
 
-    pos += snprintf(sql + pos, sizeof(sql) - pos, ") ");
+    build_rc |= str_appendf(sql, sizeof(sql), &pos, ") ");
 
     /* Add uniqueness check when reactivating (is_active -> TRUE) */
     /* Check existing code_name doesn't collide with active records */
     if (is_active && *is_active == 1) {
-        pos += snprintf(sql + pos, sizeof(sql) - pos,
+        build_rc |= str_appendf(sql, sizeof(sql), &pos,
             "AND NOT EXISTS ("
                 "SELECT 1 FROM " TBL_CLIENT " other "
                 "WHERE other.organization_pin = " TBL_CLIENT ".organization_pin "
@@ -823,95 +832,100 @@ int client_update(db_handle_t *db, const unsigned char *client_id,
             ") ");
     }
 
-    pos += snprintf(sql + pos, sizeof(sql) - pos, "AND (");
+    build_rc |= str_appendf(sql, sizeof(sql), &pos, "AND (");
 
     /* Add WHERE conditions (prevent no-op updates) */
     param = 3;
     if (display_name) {
         if (conditions++ > 0) {
-            pos += snprintf(sql + pos, sizeof(sql) - pos, " OR ");
+            build_rc |= str_appendf(sql, sizeof(sql), &pos, " OR ");
         }
-        pos += snprintf(sql + pos, sizeof(sql) - pos,
+        build_rc |= str_appendf(sql, sizeof(sql), &pos,
             "display_name IS DISTINCT FROM " P"%d", param++);
     }
     if (note) {
         if (conditions++ > 0) {
-            pos += snprintf(sql + pos, sizeof(sql) - pos, " OR ");
+            build_rc |= str_appendf(sql, sizeof(sql), &pos, " OR ");
         }
         if (note[0] == '\0') {
-            pos += snprintf(sql + pos, sizeof(sql) - pos, "note IS NOT NULL");
+            build_rc |= str_appendf(sql, sizeof(sql), &pos, "note IS NOT NULL");
         } else {
-            pos += snprintf(sql + pos, sizeof(sql) - pos,
+            build_rc |= str_appendf(sql, sizeof(sql), &pos,
                 "note IS DISTINCT FROM " P"%d", param++);
         }
     }
     if (require_mfa) {
         if (conditions++ > 0) {
-            pos += snprintf(sql + pos, sizeof(sql) - pos, " OR ");
+            build_rc |= str_appendf(sql, sizeof(sql), &pos, " OR ");
         }
-        pos += snprintf(sql + pos, sizeof(sql) - pos,
+        build_rc |= str_appendf(sql, sizeof(sql), &pos,
             "require_mfa IS DISTINCT FROM " P"%d", param++);
     }
     if (access_token_ttl_seconds) {
         if (conditions++ > 0) {
-            pos += snprintf(sql + pos, sizeof(sql) - pos, " OR ");
+            build_rc |= str_appendf(sql, sizeof(sql), &pos, " OR ");
         }
-        pos += snprintf(sql + pos, sizeof(sql) - pos,
+        build_rc |= str_appendf(sql, sizeof(sql), &pos,
             "access_token_ttl_seconds IS DISTINCT FROM " P"%d", param++);
     }
     if (issue_refresh_tokens) {
         if (conditions++ > 0) {
-            pos += snprintf(sql + pos, sizeof(sql) - pos, " OR ");
+            build_rc |= str_appendf(sql, sizeof(sql), &pos, " OR ");
         }
-        pos += snprintf(sql + pos, sizeof(sql) - pos,
+        build_rc |= str_appendf(sql, sizeof(sql), &pos,
             "issue_refresh_tokens IS DISTINCT FROM " P"%d", param++);
     }
     if (refresh_token_ttl_seconds) {
         if (conditions++ > 0) {
-            pos += snprintf(sql + pos, sizeof(sql) - pos, " OR ");
+            build_rc |= str_appendf(sql, sizeof(sql), &pos, " OR ");
         }
         if (*refresh_token_ttl_seconds < 0) {
-            pos += snprintf(sql + pos, sizeof(sql) - pos,
+            build_rc |= str_appendf(sql, sizeof(sql), &pos,
                 "refresh_token_ttl_seconds IS NOT NULL");
         } else {
-            pos += snprintf(sql + pos, sizeof(sql) - pos,
+            build_rc |= str_appendf(sql, sizeof(sql), &pos,
                 "refresh_token_ttl_seconds IS DISTINCT FROM " P"%d", param++);
         }
     }
     if (maximum_session_seconds) {
         if (conditions++ > 0) {
-            pos += snprintf(sql + pos, sizeof(sql) - pos, " OR ");
+            build_rc |= str_appendf(sql, sizeof(sql), &pos, " OR ");
         }
         if (*maximum_session_seconds < 0) {
-            pos += snprintf(sql + pos, sizeof(sql) - pos,
+            build_rc |= str_appendf(sql, sizeof(sql), &pos,
                 "maximum_session_seconds IS NOT NULL");
         } else {
-            pos += snprintf(sql + pos, sizeof(sql) - pos,
+            build_rc |= str_appendf(sql, sizeof(sql), &pos,
                 "maximum_session_seconds IS DISTINCT FROM " P"%d", param++);
         }
     }
     if (secret_rotation_seconds) {
         if (conditions++ > 0) {
-            pos += snprintf(sql + pos, sizeof(sql) - pos, " OR ");
+            build_rc |= str_appendf(sql, sizeof(sql), &pos, " OR ");
         }
         if (*secret_rotation_seconds < 0) {
-            pos += snprintf(sql + pos, sizeof(sql) - pos,
+            build_rc |= str_appendf(sql, sizeof(sql), &pos,
                 "secret_rotation_seconds IS NOT NULL");
         } else {
-            pos += snprintf(sql + pos, sizeof(sql) - pos,
+            build_rc |= str_appendf(sql, sizeof(sql), &pos,
                 "secret_rotation_seconds IS DISTINCT FROM " P"%d", param++);
         }
     }
     if (is_active) {
         if (conditions++ > 0) {
-            pos += snprintf(sql + pos, sizeof(sql) - pos, " OR ");
+            build_rc |= str_appendf(sql, sizeof(sql), &pos, " OR ");
         }
-        pos += snprintf(sql + pos, sizeof(sql) - pos,
+        build_rc |= str_appendf(sql, sizeof(sql), &pos,
             "is_active IS DISTINCT FROM " P"%d", param++);
     }
 
     /* Close WHERE clause */
-    snprintf(sql + pos, sizeof(sql) - pos, ")");
+    build_rc |= str_appendf(sql, sizeof(sql), &pos, ")");
+
+    if (build_rc != 0) {
+        log_error("client_update SQL exceeded its %zu-byte buffer", sizeof(sql));
+        return -1;
+    }
 
     /* Prepare statement */
     db_stmt_t *stmt = NULL;
@@ -1809,11 +1823,12 @@ int client_key_list(db_handle_t *db,
 
     /* Build query with optional is_active filter */
     char sql[1024];
-    int pos;
+    size_t pos = 0;
+    int build_rc = 0;
 
     if (is_org_key_auth) {
         /* Org key authentication - verify key is active */
-        pos = snprintf(sql, sizeof(sql),
+        build_rc |= str_appendf(sql, sizeof(sql), &pos,
             "SELECT ck.id, ck.is_active, ck.generated_at, ck.note, "
             "COUNT(*) OVER() as total_count "
             "FROM " TBL_CLIENT_KEY " ck "
@@ -1824,7 +1839,7 @@ int client_key_list(db_handle_t *db,
             "AND ok.is_active = " BOOL_TRUE " ");
     } else {
         /* Session authentication - verify user is org admin */
-        pos = snprintf(sql, sizeof(sql),
+        build_rc |= str_appendf(sql, sizeof(sql), &pos,
             "SELECT ck.id, ck.is_active, ck.generated_at, ck.note, "
             "COUNT(*) OVER() as total_count "
             "FROM " TBL_CLIENT_KEY " ck "
@@ -1839,12 +1854,17 @@ int client_key_list(db_handle_t *db,
     /* Add is_active filter if specified */
     int param_count = 3;  /* Next parameter after ?1 (client_id) and ?2 (auth_pin) */
     if (filter_is_active) {
-        pos += snprintf(sql + pos, sizeof(sql) - pos, "AND ck.is_active = " P"%d ", param_count++);
+        build_rc |= str_appendf(sql, sizeof(sql), &pos, "AND ck.is_active = " P"%d ", param_count++);
     }
 
-    snprintf(sql + pos, sizeof(sql) - pos,
+    build_rc |= str_appendf(sql, sizeof(sql), &pos,
         "ORDER BY ck.generated_at DESC, ck.pin DESC "
         "LIMIT " P"%d OFFSET " P"%d", param_count, param_count + 1);
+
+    if (build_rc != 0) {
+        log_error("client_key_list SQL exceeded its %zu-byte buffer", sizeof(sql));
+        return -1;
+    }
 
     db_stmt_t *stmt = NULL;
     if (db_prepare(db, &stmt, sql) != 0) {

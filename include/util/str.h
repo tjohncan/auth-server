@@ -32,6 +32,39 @@
 size_t str_copy(char *dst, size_t dst_size, const char *src);
 
 /*
+ * str_appendf - Append a formatted string to a fixed buffer, advancing an offset
+ *
+ * Replaces the unsafe idiom
+ *
+ *     pos += snprintf(buf + pos, sizeof(buf) - pos, ...);
+ *
+ * snprintf returns the length it WOULD have written, so one truncating call pushes pos
+ * past the end of the buffer; the next then forms `buf + pos` out of bounds and
+ * underflows `sizeof(buf) - pos` to a huge size_t, giving an unbounded write.
+ *
+ * On success returns 0 and advances *pos past the bytes written. On truncation or
+ * encoding error returns -1, restores the terminator at *pos, and leaves *pos
+ * unchanged — so the buffer holds exactly those appends that succeeded, and a caller
+ * that ignores the return value still cannot walk off the end.
+ *
+ * Parameters:
+ *   buf  - Destination buffer
+ *   size - Total size of buf (including space for the null terminator)
+ *   pos  - In/out: current offset into buf; advanced only on success
+ *   fmt  - printf-style format string
+ *
+ * Returns: 0 on success, -1 on truncation, encoding error, or bad arguments
+ *
+ * Example:
+ *   char buf[64];
+ *   size_t pos = 0;
+ *   if (str_appendf(buf, sizeof(buf), &pos, "id=%d", id) != 0)     return -1;
+ *   if (str_appendf(buf, sizeof(buf), &pos, "&name=%s", name) != 0) return -1;
+ */
+int str_appendf(char *buf, size_t size, size_t *pos, const char *fmt, ...)
+    __attribute__((format(printf, 4, 5)));
+
+/*
  * str_dup - Duplicate a string (allocates memory)
  *
  * Creates a copy of the string in heap memory.

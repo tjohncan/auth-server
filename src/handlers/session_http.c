@@ -1132,23 +1132,34 @@ HttpResponse *accept_invitation_page_handler(const HttpRequest *req,
         return resp ? resp : response_json_error(400, "Invalid token");
     }
 
-    /* Build account info HTML */
+    /* Build account info HTML.
+     *
+     * Unlike the SQL builders, a short result here is cosmetic rather than wrong: the
+     * page renders with less detail. str_appendf discards a partial write, so what
+     * lands is always a whole number of <p> elements — never a half-open tag — which
+     * is what makes continuing on failure safe for something rendered as raw HTML. */
     char account_info[2560];
     account_info[0] = '\0';
-    int pos = 0;
+    size_t pos = 0;
+    int build_rc = 0;
 
     if (result.username[0]) {
         char escaped[512];
         str_html_escape(escaped, sizeof(escaped), result.username);
-        pos += snprintf(account_info + pos, sizeof(account_info) - pos,
+        build_rc |= str_appendf(account_info, sizeof(account_info), &pos,
                         "<p>Username: <strong>%s</strong></p>", escaped);
     }
 
     if (result.email_address[0]) {
         char escaped[1536];
         str_html_escape(escaped, sizeof(escaped), result.email_address);
-        pos += snprintf(account_info + pos, sizeof(account_info) - pos,
+        build_rc |= str_appendf(account_info, sizeof(account_info), &pos,
                         "<p>Email: <strong>%s</strong></p>", escaped);
+    }
+
+    if (build_rc != 0) {
+        log_warn("Invitation page account info truncated to fit its %zu-byte buffer",
+                 sizeof(account_info));
     }
 
     char min_len[12];
