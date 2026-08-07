@@ -347,6 +347,12 @@ class OAuthClient {
     clearTokens() {
         this._tokenStorage.removeItem(this.tokenKey);
         sessionStorage.removeItem(this.pkceKey);
+        /* Release rather than removeItem: this is reachable while *another* tab holds
+         * the lock (an app calling it directly, or _executeRefresh clearing on a 4xx),
+         * and deleting the key outright would stomp that tab's claim and let a third
+         * tab start a competing refresh. _releaseRefreshLock() clears it only if this
+         * tab is the owner. */
+        this._releaseRefreshLock();
         this._cancelRefresh();
     }
 
@@ -466,8 +472,9 @@ class OAuthClient {
     /**
      * Wait for another tab to complete its token refresh
      *
-     * Polls storage every 200ms for up to 5 seconds. Resolves as soon
-     * as the stored tokens change (the other tab finished refreshing).
+     * Polls storage every 200ms for as long as a lock can be held (LOCK_TTL_MS,
+     * currently 10 seconds). Resolves as soon as the stored tokens change (the
+     * other tab finished refreshing).
      *
      * @private
      * @param {number} originalExpiresAt - expires_at before refresh, used to detect change
