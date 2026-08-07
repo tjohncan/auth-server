@@ -191,13 +191,15 @@ class OAuthClient {
             throw new Error('Missing code or state parameter');
         }
 
-        // Validate state format: "clientId.randomValue"
-        const stateParts = state.split('.');
-        if (stateParts.length !== 2) {
+        /* state is "<clientId>.<random>". Split on the first dot only: the client_id is
+         * the fixed-width half, so everything after the first separator is the random
+         * half whatever it happens to contain. */
+        const dot = state.indexOf('.');
+        if (dot < 0) {
             throw new Error('Invalid state format');
         }
-
-        const [stateClientId, stateRandom] = stateParts;
+        const stateClientId = state.slice(0, dot);
+        const stateRandom = state.slice(dot + 1);
 
         // Validate client_id matches
         if (stateClientId !== this.clientId) {
@@ -432,6 +434,13 @@ class OAuthClient {
      *
      * Stale locks (from crashed/closed tabs) expire after 10 seconds.
      *
+     * A fresh lock held by THIS tab is refused just like one held by another tab, and
+     * that is deliberate. Two concurrent refreshAccessToken() calls can both clear the
+     * _refreshPromise guard, since there is an await between that check and the
+     * assignment — and letting the second one re-acquire would put two refreshes of the
+     * same rotating refresh token in flight. Sending the loser to
+     * _waitForRefreshedTokens is slower, but it is the correct outcome.
+     *
      * @private
      * @returns {Promise<boolean>} True if this tab acquired the lock
      */
@@ -624,9 +633,31 @@ class OAuthClient {
         if (!tokens || !tokens.refresh_token || !tokens.expires_at) return;
 
         const msUntilExpiry = tokens.expires_at - Date.now();
-        const refreshIn = msUntilExpiry - (this.refreshBufferSeconds * 1000);
+
+        /* Never let the buffer swallow the whole lifetime. A token whose TTL is at or
+         * below refreshBufferSeconds would otherwise compute a non-positive delay on
+         * every pass, and this function — whose entire job is "a refresh is now
+         * scheduled" — would return having armed nothing, silently ending the proactive
+         * chain and leaving only lazy refresh via fetchWithToken. Capping the buffer at
+         * half the remaining life always leaves a positive delay to schedule.
+         *
+         * Arming a short timer instead would be worse: it would refresh every second for
+         * exactly the configuration that triggered the problem. */
+        const bufferMs = Math.min(this.refreshBufferSeconds * 1000, msUntilExpiry / 2);
+        const refreshIn = msUntilExpiry - bufferMs;
 
         if (refreshIn <= 0) {
+            /* The cap above guarantees refreshIn >= msUntilExpiry / 2, so this is now
+             * reachable only for an already-expired token — real clock skew or a
+             * server misconfiguration — and refreshing at once is the right response.
+             *
+             * One residual worth knowing about: reached from the tail of
+             * _executeRefresh, _refreshPromise is still set (refreshAccessToken clears
+             * it in a finally that has not run yet), so this call dedupes to the
+             * in-flight promise and arms nothing. The client then falls back to lazy
+             * refresh via fetchWithToken until the next storeTokens. Left as is
+             * deliberately: the alternative is arming a timer for a token that is
+             * already dead. */
             this.refreshAccessToken().catch(() => {});
             return;
         }
@@ -681,7 +712,15 @@ class OAuthClient {
             }
         });
 
-        // Retry once on 401 — token may have been revoked server-side
+        /* Retry once on 401 — the token may have been revoked server-side between the
+         * expiry check and the request.
+         *
+         * options is replayed verbatim, which is only safe for a re-sendable body. A
+         * ReadableStream body is consumed by the first attempt, so replaying it would
+         * send an empty body and turn the 401 into a confusing 400. Nothing in this repo
+         * passes a stream, and type-gating the retry costs more than the bug is worth —
+         * but an app that starts streaming request bodies through fetchWithToken needs
+         * to know this retry is not stream-safe. */
         if (response.status === 401 && tokens.refresh_token) {
             tokens = await this.refreshAccessToken();
             return fetch(url, {
