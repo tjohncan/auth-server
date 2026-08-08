@@ -24,9 +24,29 @@ ifeq ($(DB_BACKEND),sqlite)
         endif
     endif
 else ifeq ($(DB_BACKEND),postgresql)
-    CFLAGS += -DDB_BACKEND_POSTGRESQL -I$(shell pg_config --includedir)
+    # Resolved once with :=, not per-expansion. CFLAGS is recursive (see the = above),
+    # so an inline $(shell) here re-runs pg_config for every rule that expands CFLAGS.
+    PG_INCLUDEDIR := $(shell pg_config --includedir 2>/dev/null)
+    CFLAGS += -DDB_BACKEND_POSTGRESQL
     LDFLAGS += -lpq
     DB_VENDOR_SRCS =
+    ifeq ($(PG_INCLUDEDIR),)
+        # Same shape as the amalgamation check above. The append lives in the else
+        # rather than after this block because a bare -isystem consumes the NEXT flag
+        # as its argument: -fstack-protector-strong silently becomes an include
+        # directory and the build succeeds unhardened, with no diagnostic. The exempt
+        # targets below still compile C, so skipping the $(error) must not leave the
+        # bad flag behind.
+        ifeq ($(filter clean fuzz fuzz-regress test-str,$(MAKECMDGOALS)),)
+            $(error pg_config not found — install libpq-dev)
+        endif
+    else
+        # -isystem, not -I: libpq is third-party, and -I would put its headers on the
+        # user include chain where -Wall -Wextra applies to them. src/db/db.c includes
+        # <libpq-fe.h> and is the only consumer, so nothing depends on the user-path
+        # search. -Iinclude still precedes this, so resolution order is unchanged.
+        CFLAGS += -isystem $(PG_INCLUDEDIR)
+    endif
 else
     $(error Invalid DB_BACKEND: $(DB_BACKEND). Must be 'sqlite' or 'postgresql')
 endif

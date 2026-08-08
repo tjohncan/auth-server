@@ -36,7 +36,7 @@ jobs:
       - name: Vendor the SQLite amalgamation
         run: |
           mkdir -p vendor/sqlite
-          curl -o sqlite3.zip https://www.sqlite.org/2026/sqlite-amalgamation-3510200.zip
+          curl -fsSL -o sqlite3.zip https://www.sqlite.org/2026/sqlite-amalgamation-3510200.zip
           unzip -jo sqlite3.zip "*/sqlite3.c" "*/sqlite3.h" -d vendor/sqlite
           rm sqlite3.zip
 
@@ -65,6 +65,42 @@ jobs:
         run: |
           if grep -v 'vendor/sqlite' /tmp/test.log | grep -E -A4 ':[0-9]+:[0-9]+: warning:'; then
             echo "::error::compiler emitted warnings in project code"
+            exit 1
+          fi
+          echo "No warnings in project code."
+
+  # The backend is a compile-time choice, so half the #ifdefs in src/db/ are invisible
+  # to the job above. This one compiles the other half. It deliberately does not run
+  # tests: those need a live PostgreSQL server, and the risk this guards is a build
+  # break in backend-conditional code, which a compile catches on its own.
+  # Runs in parallel with build-and-test, and is the lighter of the two — no
+  # amalgamation to download or compile, no ASan replay.
+  build-postgresql:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      # libpq-dev carries both halves of what the Makefile wants: pg_config, which
+      # resolves the include path, and libpq itself for -lpq.
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libssl-dev libargon2-dev libpq-dev
+          pg_config --includedir
+
+      - name: Build against PostgreSQL
+        run: |
+          set -o pipefail
+          DB_BACKEND=postgresql make 2>&1 | tee /tmp/pg.log
+
+      # Same gate as above, without the vendor filter: no third-party source is
+      # compiled here, and libpq's headers come in via -isystem so its diagnostics
+      # (if any ever appear) are suppressed rather than filtered.
+      - name: Fail on compiler warnings in project code
+        run: |
+          if grep -E -A4 ':[0-9]+:[0-9]+: warning:' /tmp/pg.log; then
+            echo "::error::compiler emitted warnings in the PostgreSQL build"
             exit 1
           fi
           echo "No warnings in project code."
