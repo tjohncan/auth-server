@@ -711,6 +711,15 @@ static HttpResponse *response_template(int status, const char *name, ...) {
     if (!html) return NULL;
 
     HttpResponse *resp = http_response_new(status);
+    if (!resp) {
+        /* set_body_owned() would have taken ownership of html; nothing has yet.
+         * Cleansed rather than plain-freed because these pages render tokens, which
+         * is what http_response_free() does for the body on the success path.
+         * NULL is already this function's failure mode (see the render check above)
+         * and every caller handles it. */
+        cleanse_free(html);
+        return NULL;
+    }
     http_response_set_header(resp, "Content-Type", CONTENT_TYPE_HTML);
     http_response_set_body_owned(resp, html, strlen(html));
     return resp;
@@ -1533,6 +1542,14 @@ HttpResponse *passwordless_login_handler(const HttpRequest *req,
     }
 
     HttpResponse *resp = http_response_new(303);
+    if (!resp) {
+        /* Not a clean unwind: the session row is already committed, so this leaves one
+         * behind that no cookie ever reached. It ages out on its own TTL, and the
+         * alternative was dereferencing NULL. */
+        log_error("Failed to allocate response for passwordless login");
+        OPENSSL_cleanse(cookie_header, sizeof(cookie_header));
+        return response_json_error(500, "Internal server error");
+    }
     http_response_add_header(resp, "Set-Cookie", cookie_header);
     OPENSSL_cleanse(cookie_header, sizeof(cookie_header));
     http_response_set_header(resp, "Location", location);
