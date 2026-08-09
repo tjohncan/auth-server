@@ -119,7 +119,9 @@ int org_list_all_unscoped(db_handle_t *db,
 
     /* Build query with optional is_active filter (no user authorization) */
     char sql[1024];
-    int pos = snprintf(sql, sizeof(sql),
+    size_t pos = 0;
+    int build_rc = 0;
+    build_rc |= str_appendf(sql, sizeof(sql), &pos,
         "SELECT o.id, o.pin, o.code_name, o.display_name, o.note, o.is_active, "
         "COUNT(*) OVER() as total_count "
         "FROM " TBL_ORGANIZATION " o ");
@@ -127,12 +129,17 @@ int org_list_all_unscoped(db_handle_t *db,
     /* Add WHERE clause if is_active filter specified */
     int param_count = 1;
     if (filter_is_active) {
-        pos += snprintf(sql + pos, sizeof(sql) - pos, "WHERE o.is_active = " P"%d ", param_count++);
+        build_rc |= str_appendf(sql, sizeof(sql), &pos, "WHERE o.is_active = " P"%d ", param_count++);
     }
 
-    snprintf(sql + pos, sizeof(sql) - pos,
+    build_rc |= str_appendf(sql, sizeof(sql), &pos,
         "ORDER BY o.code_name "
         "LIMIT " P"%d OFFSET " P"%d", param_count, param_count + 1);
+
+    if (build_rc != 0) {
+        log_error("org_list_all_unscoped SQL exceeded its %zu-byte buffer", sizeof(sql));
+        return -1;
+    }
 
     db_stmt_t *stmt = NULL;
     if (db_prepare(db, &stmt, sql) != 0) {
@@ -263,17 +270,25 @@ int org_list_all(db_handle_t *db, long long user_account_pin,
 
     /* Build query with optional is_active filter */
     char sql[1024];
-    int pos = snprintf(sql, sizeof(sql), "%s", is_org_key_auth ? sql_org_key : sql_session);
+    size_t pos = 0;
+    int build_rc = 0;
+    build_rc |= str_appendf(sql, sizeof(sql), &pos, "%s",
+                            is_org_key_auth ? sql_org_key : sql_session);
 
     /* Add is_active filter if specified */
     int param_count = 2;  /* Next parameter after ?1 */
     if (filter_is_active) {
-        pos += snprintf(sql + pos, sizeof(sql) - pos, "AND o.is_active = " P"%d ", param_count++);
+        build_rc |= str_appendf(sql, sizeof(sql), &pos, "AND o.is_active = " P"%d ", param_count++);
     }
 
-    snprintf(sql + pos, sizeof(sql) - pos,
+    build_rc |= str_appendf(sql, sizeof(sql), &pos,
         "ORDER BY o.code_name "
         "LIMIT " P"%d OFFSET " P"%d", param_count, param_count + 1);
+
+    if (build_rc != 0) {
+        log_error("org_list_all SQL exceeded its %zu-byte buffer", sizeof(sql));
+        return -1;
+    }
 
     db_stmt_t *stmt = NULL;
     if (db_prepare(db, &stmt, sql) != 0) {
@@ -485,42 +500,43 @@ int org_update(db_handle_t *db, const unsigned char *org_id,
 
     /* Build UPDATE query dynamically - single buffer, build sequentially */
     char sql[2048];
-    int pos = 0;
+    size_t pos = 0;
+    int build_rc = 0;
     int param = 3;  /* ?1 is org_id, ?2 is auth PIN (user or key) */
     int conditions = 0;
 
     /* Start with UPDATE SET */
-    pos += snprintf(sql + pos, sizeof(sql) - pos,
+    build_rc |= str_appendf(sql, sizeof(sql), &pos,
         "UPDATE " TBL_ORGANIZATION " SET updated_at = " NOW "");
 
     /* Add SET clauses */
     if (display_name) {
-        pos += snprintf(sql + pos, sizeof(sql) - pos, ", display_name = " P"%d", param++);
+        build_rc |= str_appendf(sql, sizeof(sql), &pos, ", display_name = " P"%d", param++);
     }
     if (note) {
         if (note[0] == '\0') {
-            pos += snprintf(sql + pos, sizeof(sql) - pos, ", note = NULL");
+            build_rc |= str_appendf(sql, sizeof(sql), &pos, ", note = NULL");
         } else {
-            pos += snprintf(sql + pos, sizeof(sql) - pos, ", note = " P"%d", param++);
+            build_rc |= str_appendf(sql, sizeof(sql), &pos, ", note = " P"%d", param++);
         }
     }
     if (is_active) {
-        pos += snprintf(sql + pos, sizeof(sql) - pos, ", is_active = " P"%d", param++);
+        build_rc |= str_appendf(sql, sizeof(sql), &pos, ", is_active = " P"%d", param++);
     }
 
     /* Build WHERE clause with dual-auth security check */
-    pos += snprintf(sql + pos, sizeof(sql) - pos, " WHERE id = " P"1 AND EXISTS (");
+    build_rc |= str_appendf(sql, sizeof(sql), &pos, " WHERE id = " P"1 AND EXISTS (");
 
     if (is_org_key_auth) {
         /* Org key auth - verify key is active */
-        pos += snprintf(sql + pos, sizeof(sql) - pos,
+        build_rc |= str_appendf(sql, sizeof(sql), &pos,
             "SELECT 1 FROM " TBL_ORGANIZATION_KEY " ok "
             "WHERE ok.organization_pin = " TBL_ORGANIZATION ".pin "
             "AND ok.pin = " P"2 "
             "AND ok.is_active = " BOOL_TRUE);
     } else {
         /* Session auth - verify user is org admin */
-        pos += snprintf(sql + pos, sizeof(sql) - pos,
+        build_rc |= str_appendf(sql, sizeof(sql), &pos,
             "SELECT 1 FROM " TBL_ORGANIZATION_ADMIN " oa "
             "JOIN " TBL_USER_ACCOUNT " ua ON ua.pin = oa.user_account_pin "
             "WHERE oa.organization_pin = " TBL_ORGANIZATION ".pin "
@@ -528,38 +544,43 @@ int org_update(db_handle_t *db, const unsigned char *org_id,
             "AND ua.is_active = " BOOL_TRUE);
     }
 
-    pos += snprintf(sql + pos, sizeof(sql) - pos, ") AND (");
+    build_rc |= str_appendf(sql, sizeof(sql), &pos, ") AND (");
 
     /* Add WHERE conditions (prevent no-op updates) */
     param = 3;  /* Reset to match SET clause params */
     if (display_name) {
         if (conditions++ > 0) {
-            pos += snprintf(sql + pos, sizeof(sql) - pos, " OR ");
+            build_rc |= str_appendf(sql, sizeof(sql), &pos, " OR ");
         }
-        pos += snprintf(sql + pos, sizeof(sql) - pos,
+        build_rc |= str_appendf(sql, sizeof(sql), &pos,
             "display_name IS DISTINCT FROM " P"%d", param++);
     }
     if (note) {
         if (conditions++ > 0) {
-            pos += snprintf(sql + pos, sizeof(sql) - pos, " OR ");
+            build_rc |= str_appendf(sql, sizeof(sql), &pos, " OR ");
         }
         if (note[0] == '\0') {
-            pos += snprintf(sql + pos, sizeof(sql) - pos, "note IS NOT NULL");
+            build_rc |= str_appendf(sql, sizeof(sql), &pos, "note IS NOT NULL");
         } else {
-            pos += snprintf(sql + pos, sizeof(sql) - pos,
+            build_rc |= str_appendf(sql, sizeof(sql), &pos,
                 "note IS DISTINCT FROM " P"%d", param++);
         }
     }
     if (is_active) {
         if (conditions++ > 0) {
-            pos += snprintf(sql + pos, sizeof(sql) - pos, " OR ");
+            build_rc |= str_appendf(sql, sizeof(sql), &pos, " OR ");
         }
-        pos += snprintf(sql + pos, sizeof(sql) - pos,
+        build_rc |= str_appendf(sql, sizeof(sql), &pos,
             "is_active IS DISTINCT FROM " P"%d", param++);
     }
 
     /* Close WHERE clause */
-    snprintf(sql + pos, sizeof(sql) - pos, ")");
+    build_rc |= str_appendf(sql, sizeof(sql), &pos, ")");
+
+    if (build_rc != 0) {
+        log_error("org_update SQL exceeded its %zu-byte buffer", sizeof(sql));
+        return -1;
+    }
 
     /* Prepare statement */
     db_stmt_t *stmt = NULL;
@@ -783,23 +804,30 @@ int organization_key_list(db_handle_t *db,
     /* Build SQL with optional is_active filter */
     char sql[1024];
     int param_count = 2;
-    int sql_len = snprintf(sql, sizeof(sql),
+    size_t sql_len = 0;
+    int build_rc = 0;
+    build_rc |= str_appendf(sql, sizeof(sql), &sql_len,
         "SELECT ok.id, ok.is_active, ok.generated_at, ok.note, COUNT(*) OVER() as total_count "
         "FROM " TBL_ORGANIZATION_KEY " ok "
         "WHERE ok.organization_pin = " P"1");
 
     if (filter_is_active) {
-        sql_len += snprintf(sql + sql_len, sizeof(sql) - sql_len,
+        build_rc |= str_appendf(sql, sizeof(sql), &sql_len,
                            " AND ok.is_active = " P"%d", param_count++);
     }
 
-    sql_len += snprintf(sql + sql_len, sizeof(sql) - sql_len,
+    build_rc |= str_appendf(sql, sizeof(sql), &sql_len,
                        " ORDER BY ok.generated_at DESC, ok.pin DESC");
 
     if (limit > 0) {
-        sql_len += snprintf(sql + sql_len, sizeof(sql) - sql_len,
+        build_rc |= str_appendf(sql, sizeof(sql), &sql_len,
                            " LIMIT " P"%d OFFSET " P"%d", param_count, param_count + 1);
         param_count += 2;
+    }
+
+    if (build_rc != 0) {
+        log_error("organization_key_list SQL exceeded its %zu-byte buffer", sizeof(sql));
+        return -1;
     }
 
     db_stmt_t *stmt = NULL;

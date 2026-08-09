@@ -230,7 +230,7 @@ const expired = client.tokensExpired(tokens);  // Check specific tokens
 
 #### `clearTokens()`
 
-Removes tokens and PKCE data from storage and cancels any scheduled refresh.
+Removes tokens and PKCE data from storage, releases the cross-tab refresh lock if this tab holds it, and cancels any scheduled refresh.
 
 ```javascript
 client.clearTokens();
@@ -240,7 +240,9 @@ client.clearTokens();
 
 #### `destroy()`
 
-Cancels the scheduled refresh timer. Call when the client instance is no longer needed (e.g., on page unload or when switching accounts).
+Cancels the scheduled refresh timer and removes the cross-tab `storage` listener. Call when the client instance is no longer needed (e.g., on page unload or when switching accounts).
+
+Deliberately does **not** release the refresh lock. A tab destroyed mid-refresh keeps its claim until the 10-second TTL expires, and that window is what lets its in-flight response still land and write the new tokens for other tabs to pick up. Releasing eagerly would hand the lock to a tab that would then send the old refresh token — already invalidated by the in-flight rotation — and take a `4xx` that logs every tab out.
 
 ```javascript
 client.destroy();

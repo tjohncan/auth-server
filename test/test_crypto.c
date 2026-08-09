@@ -1211,6 +1211,121 @@ int main(void) {
     }
     log_info("Prior secret fallback: PASS\n");
 
+    /* Test: redirect_uri longer than JWT_MAX_CLAIM_VALUE_LENGTH
+     *
+     * 400 bytes is past the old 255-byte cliff, inside what validate_redirect_uri
+     * permits (500), and inside the claim field itself (auth_request_claims_t
+     * .redirect_uri, char[512]). parse_json_string used to stage every claim through a
+     * fixed char[JWT_MAX_CLAIM_VALUE_LENGTH] regardless of the caller's capacity, so the
+     * encode side wrote a URI the decode side could never read back: /authorize
+     * succeeded and /token then failed 100% of the time as "invalid authorization code",
+     * pointing operators at signatures and clock skew rather than at URI length.
+     * Guards the encode and decode limits against drifting apart again. */
+    log_info("Test: Auth request JWT round-trips a 400-character redirect_uri");
+
+    auth_request_claims_t long_claims = ar_claims;
+    memset(long_claims.redirect_uri, 0, sizeof(long_claims.redirect_uri));
+
+    const char *long_uri_prefix = "https://app.example.com/callback?next=";
+    size_t long_uri_prefix_len = strlen(long_uri_prefix);
+    memcpy(long_claims.redirect_uri, long_uri_prefix, long_uri_prefix_len);
+    memset(long_claims.redirect_uri + long_uri_prefix_len, 'x', 400 - long_uri_prefix_len);
+    long_claims.redirect_uri[400] = '\0';
+    assert(strlen(long_claims.redirect_uri) == 400);
+
+    char long_token[JWT_MAX_TOKEN_LENGTH];
+    if (jwt_encode_auth_request(&long_claims, ar_secret, sizeof(ar_secret),
+                                 long_token, sizeof(long_token)) != 0) {
+        log_error("Auth request JWT encoding failed for a 400-character redirect_uri");
+        return 1;
+    }
+
+    auth_request_claims_t long_decoded = {0};
+    if (jwt_decode_auth_request(long_token, ar_secret_b64, NULL, &long_decoded) != 0) {
+        log_error("Auth request JWT decoding failed for a 400-character redirect_uri");
+        return 1;
+    }
+
+    assert(strcmp(long_decoded.redirect_uri, long_claims.redirect_uri) == 0);
+    assert(strlen(long_decoded.redirect_uri) == 400);
+    log_info("Long redirect_uri round-trip (%zu bytes): PASS\n",
+             strlen(long_decoded.redirect_uri));
+
+    /* Test: every byte either round-trips or is refused at mint time
+     *
+     * The property under test is that no input can produce a token this server
+     * signs but cannot read back — an authorization code that mints and never
+     * redeems, which is how the truncated redirect_uri above presented in the
+     * field. json_escape() renders 0x01 as a six-byte \u escape and 0x08 as a
+     * two-byte one; json_unescape_string() in jwt.c reads neither and returns -1,
+     * so before the guard in json_escape_string() either byte encoded cleanly
+     * into a token every later decode rejected.
+     *
+     * Sweeping the whole byte domain rather than sampling it, because the claim
+     * being made is about all bytes, and because the interesting direction is the
+     * one sampling misses: \t, \n and \r both escape and decode, so they must
+     * keep round-tripping. They are the bytes most likely to be swept into a
+     * reject list later by someone tightening control-character handling, and a
+     * test that only checked "refused bytes stay refused" would not notice. The
+     * rule is therefore asserted in both directions for every byte.
+     *
+     * Refusals log an error by design; that output is expected. */
+    log_info("Test: Auth request JWT claim byte domain (0x01-0xFF)");
+
+    int probe_accepted = 0;
+    int probe_refused = 0;
+
+    for (int b = 1; b < 256; b++) {
+        auth_request_claims_t probe = ar_claims;
+        probe.scope[0] = 'a';
+        probe.scope[1] = (char)b;
+        probe.scope[2] = 'z';
+        probe.scope[3] = '\0';
+
+        char probe_token[JWT_MAX_TOKEN_LENGTH];
+        int encoded = jwt_encode_auth_request(&probe, ar_secret, sizeof(ar_secret),
+                                              probe_token, sizeof(probe_token));
+
+        /* Exactly the bytes json_escape() renders as \u00XX, \b or \f, and no
+         * others. Widening the escape table without widening the unescaper trips
+         * this; so does over-tightening the guard onto \t, \n or \r. */
+        int should_refuse = (b < 0x20 && b != '\t' && b != '\n' && b != '\r');
+        if (should_refuse != (encoded != 0)) {
+            log_error("Byte 0x%02X: expected %s at mint, got %s", b,
+                      should_refuse ? "refusal" : "acceptance",
+                      encoded != 0 ? "refusal" : "acceptance");
+            return 1;
+        }
+
+        if (encoded != 0) {
+            probe_refused++;
+            continue;
+        }
+
+        /* Whatever minted must redeem, byte for byte. */
+        auth_request_claims_t probe_decoded = {0};
+        if (jwt_decode_auth_request(probe_token, ar_secret_b64, NULL, &probe_decoded) != 0) {
+            log_error("Mint-but-never-redeem: byte 0x%02X encoded but failed to decode", b);
+            return 1;
+        }
+        if (strcmp(probe_decoded.scope, probe.scope) != 0) {
+            log_error("Byte 0x%02X survived encode/decode but changed value", b);
+            return 1;
+        }
+        probe_accepted++;
+    }
+
+    /* 28 = 0x01-0x08, 0x0B, 0x0C, 0x0E-0x1F. A change here means the escape
+     * table moved; make it deliberately, not by accident. */
+    if (probe_accepted != 227 || probe_refused != 28) {
+        log_error("Claim byte tally changed: %d redeemable, %d refused (expected 227/28)",
+                  probe_accepted, probe_refused);
+        return 1;
+    }
+
+    log_info("Claim bytes: %d redeemable, %d refused at mint, 0 mint-but-never-redeem: PASS\n",
+             probe_accepted, probe_refused);
+
     log_info("==========================================================");
     log_info("=== All Tests Passed! ===");
     log_info("==========================================================");

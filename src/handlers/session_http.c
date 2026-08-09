@@ -711,6 +711,15 @@ static HttpResponse *response_template(int status, const char *name, ...) {
     if (!html) return NULL;
 
     HttpResponse *resp = http_response_new(status);
+    if (!resp) {
+        /* set_body_owned() would have taken ownership of html; nothing has yet.
+         * Cleansed rather than plain-freed because these pages render tokens, which
+         * is what http_response_free() does for the body on the success path.
+         * NULL is already this function's failure mode (see the render check above)
+         * and every caller handles it. */
+        cleanse_free(html);
+        return NULL;
+    }
     http_response_set_header(resp, "Content-Type", CONTENT_TYPE_HTML);
     http_response_set_body_owned(resp, html, strlen(html));
     return resp;
@@ -853,13 +862,28 @@ HttpResponse *verify_email_page_handler(const HttpRequest *req,
                  "<em class=\"text-muted\">not set</em>");
     }
 
+    /* Escape the token even though it has already been matched against a stored
+     * SHA-256 hash and so cannot carry attacker bytes. This is uniformity, not a
+     * live XSS fix: template_render does not escape by default — USERNAME_DISPLAY
+     * just above is deliberately raw HTML — so "is this substitution escaped?" has
+     * to be answerable at each call site, and three of the four token pages were
+     * answering it differently from the fourth.
+     *
+     * 128 is ample because the token is 43 characters of base64url, an alphabet
+     * holding none of & < > " ' — so escaping is a straight copy. 43 characters that
+     * each escaped to &quot; would need 259. The headroom comes from how tokens are
+     * generated, not from 128 being a generous number. */
+    char escaped_token[128];
+    str_html_escape(escaped_token, sizeof(escaped_token), token);
+    cleanse_free(token);
+
     HttpResponse *resp = response_template(200, "pages/verify-email.html",
         "EMAIL", escaped_email,
         "USERNAME_DISPLAY", username_display,
         "USER_ID", user_id_hex,
-        "TOKEN", token,
+        "TOKEN", escaped_token,
         NULL);
-    cleanse_free(token);
+    OPENSSL_cleanse(escaped_token, sizeof(escaped_token));
     return resp ? resp : response_json_error(500, "Template error");
 }
 
@@ -1026,11 +1050,18 @@ HttpResponse *reset_password_page_handler(const HttpRequest *req,
         return resp ? resp : response_json_error(400, "Invalid token");
     }
 
+    /* Escaped for uniformity with the other token pages; see the note in
+     * verify_email_page_handler. The token matched a stored hash before we got
+     * here, so this is consistency rather than a live XSS fix. */
+    char escaped_token[128];
+    str_html_escape(escaped_token, sizeof(escaped_token), token);
+    cleanse_free(token);
+
     char min_len[12];
     snprintf(min_len, sizeof(min_len), "%d", crypto_password_min_length());
     HttpResponse *resp = response_template(200, "pages/reset-password.html",
-        "TOKEN", token, "MIN_LENGTH", min_len, NULL);
-    cleanse_free(token);
+        "TOKEN", escaped_token, "MIN_LENGTH", min_len, NULL);
+    OPENSSL_cleanse(escaped_token, sizeof(escaped_token));
     return resp ? resp : response_json_error(500, "Template error");
 }
 
@@ -1132,33 +1163,51 @@ HttpResponse *accept_invitation_page_handler(const HttpRequest *req,
         return resp ? resp : response_json_error(400, "Invalid token");
     }
 
-    /* Build account info HTML */
+    /* Build account info HTML.
+     *
+     * Unlike the SQL builders, a short result here is cosmetic rather than wrong: the
+     * page renders with less detail. str_appendf discards a partial write, so what
+     * lands is always a whole number of <p> elements — never a half-open tag — which
+     * is what makes continuing on failure safe for something rendered as raw HTML. */
     char account_info[2560];
     account_info[0] = '\0';
-    int pos = 0;
+    size_t pos = 0;
+    int build_rc = 0;
 
     if (result.username[0]) {
         char escaped[512];
         str_html_escape(escaped, sizeof(escaped), result.username);
-        pos += snprintf(account_info + pos, sizeof(account_info) - pos,
+        build_rc |= str_appendf(account_info, sizeof(account_info), &pos,
                         "<p>Username: <strong>%s</strong></p>", escaped);
     }
 
     if (result.email_address[0]) {
         char escaped[1536];
         str_html_escape(escaped, sizeof(escaped), result.email_address);
-        pos += snprintf(account_info + pos, sizeof(account_info) - pos,
+        build_rc |= str_appendf(account_info, sizeof(account_info), &pos,
                         "<p>Email: <strong>%s</strong></p>", escaped);
     }
+
+    if (build_rc != 0) {
+        log_warn("Invitation page account info truncated to fit its %zu-byte buffer",
+                 sizeof(account_info));
+    }
+
+    /* Escaped for uniformity with the other token pages; see the note in
+     * verify_email_page_handler. ACCOUNT_INFO just below stays raw by design — its
+     * components are escaped individually as they are appended. */
+    char escaped_token[128];
+    str_html_escape(escaped_token, sizeof(escaped_token), token);
+    cleanse_free(token);
 
     char min_len[12];
     snprintf(min_len, sizeof(min_len), "%d", crypto_password_min_length());
     HttpResponse *resp = response_template(200, "pages/accept-invitation.html",
-        "TOKEN", token,
+        "TOKEN", escaped_token,
         "ACCOUNT_INFO", account_info,
         "MIN_LENGTH", min_len,
         NULL);
-    cleanse_free(token);
+    OPENSSL_cleanse(escaped_token, sizeof(escaped_token));
     return resp ? resp : response_json_error(500, "Template error");
 }
 
@@ -1493,6 +1542,14 @@ HttpResponse *passwordless_login_handler(const HttpRequest *req,
     }
 
     HttpResponse *resp = http_response_new(303);
+    if (!resp) {
+        /* Not a clean unwind: the session row is already committed, so this leaves one
+         * behind that no cookie ever reached. It ages out on its own TTL, and the
+         * alternative was dereferencing NULL. */
+        log_error("Failed to allocate response for passwordless login");
+        OPENSSL_cleanse(cookie_header, sizeof(cookie_header));
+        return response_json_error(500, "Internal server error");
+    }
     http_response_add_header(resp, "Set-Cookie", cookie_header);
     OPENSSL_cleanse(cookie_header, sizeof(cookie_header));
     http_response_set_header(resp, "Location", location);

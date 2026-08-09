@@ -31,6 +31,77 @@ void test_str_copy(void) {
     printf("Copied '%s' to buffer[10]: '%s' (%zu bytes incl. term.)\n", input, output, written);
 }
 
+void test_str_appendf(void) {
+    printf("\n=== Testing str_appendf ===\n\n");
+
+    char buf[16];
+    size_t pos;
+
+    /* Normal accumulation */
+    pos = 0; buf[0] = '\0';
+    assert(str_appendf(buf, sizeof(buf), &pos, "a=%d", 1) == 0);
+    assert(str_appendf(buf, sizeof(buf), &pos, "&b=%s", "xy") == 0);
+    assert(strcmp(buf, "a=1&b=xy") == 0);
+    assert(pos == strlen(buf));
+    printf("Accumulated '%s' (pos=%zu)\n", buf, pos);
+
+    /* Truncation leaves pos where it was and keeps only whole appends */
+    size_t before = pos;
+    assert(str_appendf(buf, sizeof(buf), &pos, "&c=%s", "0123456789") == -1);
+    assert(pos == before);
+    assert(strcmp(buf, "a=1&b=xy") == 0);
+    printf("Refused an overlong append; buffer intact: '%s' (pos=%zu)\n", buf, pos);
+
+    /* ...so a later, smaller append still lands from the unchanged offset */
+    assert(str_appendf(buf, sizeof(buf), &pos, "&c=%d", 7) == 0);
+    assert(strcmp(buf, "a=1&b=xy&c=7") == 0);
+    printf("Smaller append still fits: '%s'\n", buf);
+
+    /* Exact fit: 15 bytes plus NUL into buf[16] */
+    pos = 0; buf[0] = '\0';
+    assert(str_appendf(buf, sizeof(buf), &pos, "%s", "123456789012345") == 0);
+    assert(pos == 15 && strlen(buf) == 15);
+    printf("Exact fit (15 into buf[16]): '%s'\n", buf);
+
+    /* One byte past exact fit */
+    pos = 0; buf[0] = '\0';
+    assert(str_appendf(buf, sizeof(buf), &pos, "%s", "1234567890123456") == -1);
+    assert(pos == 0 && buf[0] == '\0');
+    printf("One byte over refused; buffer emptied\n");
+
+    /* The whole point. `pos += snprintf(buf + pos, sizeof(buf) - pos, ...)` would put
+     * pos far past sizeof(buf) on the first of these, and the second would then form
+     * buf + pos out of bounds with sizeof(buf) - pos underflowed to a huge size_t.
+     * Here pos cannot move at all, so a hundred of them are still harmless. */
+    pos = 0; buf[0] = '\0';
+    for (int i = 0; i < 100; i++) {
+        str_appendf(buf, sizeof(buf), &pos, "%s", "aaaaaaaaaaaaaaaaaaaaaaaa");
+    }
+    assert(pos == 0);
+    assert(pos < sizeof(buf));
+    printf("100 overlong appends: pos still %zu, never past %zu\n", pos, sizeof(buf));
+
+    /* Entry guard: a caller that advanced pos itself still cannot make us write out
+     * of bounds. str_appendf's own invariant keeps pos < size, so this is unreachable
+     * from the calls above — which is exactly why it is worth pinning, since it is
+     * what makes the header's "cannot walk off the end" promise true for a caller
+     * that manipulates pos directly. */
+    pos = sizeof(buf);
+    assert(str_appendf(buf, sizeof(buf), &pos, "x") == -1);
+    assert(pos == sizeof(buf));
+    pos = sizeof(buf) + 100;
+    assert(str_appendf(buf, sizeof(buf), &pos, "x") == -1);
+    assert(pos == sizeof(buf) + 100);
+    printf("Entry guard holds for pos at and past the end of the buffer\n");
+
+    /* Bad arguments */
+    pos = 0;
+    assert(str_appendf(NULL, sizeof(buf), &pos, "x") == -1);
+    assert(str_appendf(buf, 0, &pos, "x") == -1);
+    assert(str_appendf(buf, sizeof(buf), NULL, "x") == -1);
+    printf("NULL and zero-size arguments refused\n");
+}
+
 void test_str_dup(void) {
     printf("\n=== Testing str_dup ===\n\n");
 
@@ -191,6 +262,49 @@ void test_json_escape(void) {
     printf("Safe text unchanged: '%s'\n", buf);
 }
 
+void test_json_escaped_len(void) {
+    printf("\n=== Testing json_escaped_len ===\n\n");
+
+    char buf[256];
+    size_t written, need;
+
+    assert(json_escaped_len("") == 0);
+    assert(json_escaped_len(NULL) == 0);
+    assert(json_escaped_len("abc 123") == 7);       /* nothing escapes */
+    assert(json_escaped_len("say \"hi\"") == 10);   /* two quotes, +1 each */
+    assert(json_escaped_len("\t") == 2);            /* \t */
+    assert(json_escaped_len("\x01") == 6);          /* escapes to six bytes */
+    printf("Measured plain, quoted, \\t and \\u0001 forms\n");
+
+    /* Agreement with json_escape() given room to work */
+    const char *mixed = "line\t\"one\"\x01";
+    need = json_escaped_len(mixed);
+    written = json_escape(buf, sizeof(buf), mixed);
+    assert(need == written);
+    printf("Measured %zu, json_escape wrote %zu -> '%s'\n", need, written, buf);
+
+    /* The check json_escape() cannot make for you. Given a destination that is
+     * too small it truncates, yet still reports a count below dst_size — so the
+     * natural-looking `written < dst_size` test is true for every input, which is
+     * exactly why the guard in jwt.c's json_escape_string() never fired. */
+    const char *needs_room = "\x01\x01\x01";        /* three six-byte escapes = 18 bytes */
+    char small[8];
+    need = json_escaped_len(needs_room);
+    written = json_escape(small, sizeof(small), needs_room);
+    assert(need == 18);
+    assert(written < sizeof(small));                /* old test: reports success */
+    assert(need >= sizeof(small));                  /* truth: it did not fit */
+    printf("Truncated into buf[%zu]: wrote %zu, actually needed %zu\n",
+           sizeof(small), written, need);
+
+    /* Exact fit: json_escaped_len() + 1 is enough, and not a byte more */
+    char exact[19];
+    written = json_escape(exact, sizeof(exact), needs_room);
+    assert(written == 18);
+    assert(strcmp(exact, "\\u0001\\u0001\\u0001") == 0);
+    printf("Exact fit into buf[%zu]: '%s'\n", sizeof(exact), exact);
+}
+
 void test_json_unescape(void) {
     printf("\n=== Testing json_unescape ===\n\n");
 
@@ -229,12 +343,14 @@ int main(void) {
     log_info("TESTING - String Utilities");
 
     test_str_copy();
+    test_str_appendf();
     test_str_dup();
     test_str_split();
     test_str_url_encode_decode();
     test_memmem_nocase();
     test_str_html_escape();
     test_json_escape();
+    test_json_escaped_len();
     test_json_unescape();
 
     printf("\n=== All tests complete ===\n");

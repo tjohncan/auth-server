@@ -51,7 +51,7 @@ void test_request_parsing(void) {
         "POST /api/login HTTP/1.0\r\n"
         "Host: localhost\r\n"
         "Content-Type: application/json\r\n"
-        "Content-Length: 27\r\n"
+        "Content-Length: 28\r\n"
         "\r\n"
         "{\"user\":\"test\",\"pass\":\"123\"}";
 
@@ -60,8 +60,14 @@ void test_request_parsing(void) {
     assert(parsed3.method == HTTP_POST);
     assert(strcmp(parsed3.path, "/api/login") == 0);
     assert(parsed3.body != NULL);
-    assert(parsed3.body_length == 27);
+    assert(parsed3.body_length == 28);
     assert(strncmp(parsed3.body, "{\"user\":\"test\"", 14) == 0);
+    /* Exact fit, the ordinary production case: Content-Length equals the actual body,
+     * so the terminator lands on raw[length] — the caller's own NUL, and the tightest
+     * point of the bounds argument in http_request_parse. Test 6 owns the truncating
+     * case; without this one, both body tests were truncation tests. */
+    assert(strlen(parsed3.body) == 28);
+    assert(strcmp(parsed3.body, "{\"user\":\"test\",\"pass\":\"123\"}") == 0);
     assert(strcmp(http_request_get_header(&parsed3, "Content-Type"), "application/json") == 0);
 
     printf("✓ POST with JSON body parsed correctly\n");
@@ -138,6 +144,59 @@ void test_response_building(void) {
 
     free(serialized3);
     http_response_free(resp3);
+
+    /* Test 4: CR or LF in a header field is refused, not serialized
+     *
+     * A value carrying "\r\n" would close its header line early and let the remainder
+     * be read as further headers or as the body — response splitting. Nothing reaches
+     * these setters carrying one today (redirect URIs are control-character validated,
+     * query parameters are percent-encoded), but that is a property of a few call sites
+     * rather than of this layer.
+     *
+     * add_header and set_header carry separate, duplicated guard blocks — set_header's
+     * replace path never funnels through add_header — so each is exercised for an
+     * unsafe name, an unsafe value, and NULL. A copy-paste slip in one copy (checking
+     * value twice instead of name then value, say) would otherwise pass the suite.
+     *
+     * The refusals log an error by design; that output is expected. */
+    HttpResponse *resp4 = http_response_new(302);
+    http_response_set_header(resp4, "Location", "https://example.com/ok");
+    /* unsafe values: add, set-append, and set-replace over a good value */
+    http_response_add_header(resp4, "X-Split", "a\r\nX-Injected: yes");
+    http_response_set_header(resp4, "X-New", "b\r\nX-Injected: yes");
+    http_response_set_header(resp4, "Location", "https://evil.test/\r\nSet-Cookie: x=1");
+    /* unsafe names, both doors */
+    http_response_add_header(resp4, "X-Bad-Add\r\nName", "harmless");
+    http_response_set_header(resp4, "X-Bad-Set\r\nName", "harmless");
+    /* NULL, both doors — str_dup used to be handed it unchecked */
+    http_response_add_header(resp4, "X-Null-Add", NULL);
+    http_response_set_header(resp4, "X-Null-Set", NULL);
+
+    size_t len4;
+    char *serialized4 = http_response_serialize(resp4, &len4);
+    assert(serialized4 != NULL);
+
+    printf("\nResponse 4 (%zu bytes):\n%.*s\n", len4, (int)len4, serialized4);
+
+    /* The good header survives, the unsafe replace left it intact, and nothing
+     * injected made it into the output. */
+    assert(strstr(serialized4, "Location: https://example.com/ok\r\n") != NULL);
+    assert(strstr(serialized4, "X-Injected") == NULL);
+    assert(strstr(serialized4, "Set-Cookie") == NULL);
+    assert(strstr(serialized4, "evil.test") == NULL);
+    assert(strstr(serialized4, "X-Split") == NULL);
+    assert(strstr(serialized4, "X-New") == NULL);
+    assert(strstr(serialized4, "X-Bad-Add") == NULL);
+    assert(strstr(serialized4, "X-Bad-Set") == NULL);
+    assert(strstr(serialized4, "X-Null-Add") == NULL);
+    assert(strstr(serialized4, "X-Null-Set") == NULL);
+    /* Nothing split a name across lines either: no bare "Name:" line appeared */
+    assert(strstr(serialized4, "Name: harmless") == NULL);
+
+    printf("✓ CR/LF in header fields refused (no response splitting)\n");
+
+    free(serialized4);
+    http_response_free(resp4);
 }
 
 void test_real_world_request(void) {
@@ -233,6 +292,11 @@ void test_malformed_requests(void) {
         assert(parsed.method == HTTP_POST);
         assert(parsed.body_length == 5);
         assert(strncmp(parsed.body, "hello", 5) == 0);
+        /* The clamp has to be visible to consumers, every one of which reads the body
+         * as a C string. Without a terminator at body_length the strncmp above still
+         * passes while json_get_string() goes on parsing " extra bytes here". */
+        assert(strcmp(parsed.body, "hello") == 0);
+        assert(strlen(parsed.body) == parsed.body_length);
         http_request_cleanup(&parsed);
         printf("✓ Body truncated to Content-Length\n");
     }

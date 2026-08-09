@@ -533,41 +533,53 @@ static int build_error_redirect(const char *redirect_uri,
         return -1;
     }
 
-    int offset = snprintf(out_location, location_len, "%s", redirect_uri);
-    if (offset < 0 || (size_t)offset >= location_len) {
+    /* URL-encode all query parameters per RFC 3986.
+     *
+     * encoded_state is sized so the ENCODING can never silently truncate: percent-
+     * encoding expands up to 3x, and state reaches us from a 512-byte decode buffer
+     * (see the /authorize handler), so 3 * 512 + 1 is the smallest size that always
+     * holds it. At 512 a long state of mostly-reserved characters lost its tail here,
+     * and the client then reported a CSRF state mismatch for what was really a length
+     * problem. Whether the ASSEMBLED location fits is a separate question, and one
+     * str_appendf answers explicitly below rather than by truncating. */
+    char encoded_error[128];
+    char encoded_desc[768];
+    char encoded_state[1537];
+
+    if (str_url_encode(encoded_error, sizeof(encoded_error), error) < 0) {
+        return -1;
+    }
+    if (description &&
+        str_url_encode(encoded_desc, sizeof(encoded_desc), description) < 0) {
+        return -1;
+    }
+    if (state && str_url_encode(encoded_state, sizeof(encoded_state), state) < 0) {
+        return -1;
+    }
+
+    size_t offset = 0;
+    if (str_appendf(out_location, location_len, &offset, "%s", redirect_uri) != 0) {
         return -1;
     }
 
     /* Check if redirect_uri already has query params */
     char separator = strchr(out_location, '?') ? '&' : '?';
 
-    /* URL-encode all query parameters per RFC 3986 */
-    char encoded_error[128];
-    str_url_encode(encoded_error, sizeof(encoded_error), error);
-    offset += snprintf(out_location + offset, location_len - offset,
-                       "%cerror=%s", separator, encoded_error);
-    if (offset < 0 || (size_t)offset >= location_len) {
+    if (str_appendf(out_location, location_len, &offset,
+                    "%cerror=%s", separator, encoded_error) != 0) {
         return -1;
     }
 
-    if (description) {
-        char encoded_desc[768];
-        str_url_encode(encoded_desc, sizeof(encoded_desc), description);
-        offset += snprintf(out_location + offset, location_len - offset,
-                           "&error_description=%s", encoded_desc);
-        if (offset < 0 || (size_t)offset >= location_len) {
-            return -1;
-        }
+    if (description &&
+        str_appendf(out_location, location_len, &offset,
+                    "&error_description=%s", encoded_desc) != 0) {
+        return -1;
     }
 
-    if (state) {
-        char encoded_state[512];
-        str_url_encode(encoded_state, sizeof(encoded_state), state);
-        offset += snprintf(out_location + offset, location_len - offset,
-                           "&state=%s", encoded_state);
-        if (offset < 0 || (size_t)offset >= location_len) {
-            return -1;
-        }
+    if (state &&
+        str_appendf(out_location, location_len, &offset,
+                    "&state=%s", encoded_state) != 0) {
+        return -1;
     }
 
     return 0;
@@ -813,7 +825,8 @@ HttpResponse *authorize_handler(const HttpRequest *req, const RouteParams *param
         }
 
         /* No MFA methods enrolled - redirect with access_denied */
-        char location[2048];
+        char location[4096];  /* matches the success path below; a maximal state
+                               * encodes to 1533 bytes and would not fit 2048 */
         if (build_error_redirect(redirect_uri, "access_denied",
                                   "MFA required but no methods enrolled",
                                   state[0] ? state : NULL,
@@ -840,7 +853,8 @@ HttpResponse *authorize_handler(const HttpRequest *req, const RouteParams *param
     if (rc == -5) {
         /* User not linked to this client — redirect with access_denied
          * (redirect_uri is already validated, post-trust error per RFC 6749 §4.1.2.1) */
-        char location[2048];
+        char location[4096];  /* matches the success path below; a maximal state
+                               * encodes to 1533 bytes and would not fit 2048 */
         if (build_error_redirect(redirect_uri, "access_denied",
                                   "User is not authorized for this client",
                                   state[0] ? state : NULL,
@@ -860,7 +874,8 @@ HttpResponse *authorize_handler(const HttpRequest *req, const RouteParams *param
 
     if (rc != 0) {
         /* Validation error - redirect with invalid_request */
-        char location[2048];
+        char location[4096];  /* matches the success path below; a maximal state
+                               * encodes to 1533 bytes and would not fit 2048 */
         if (build_error_redirect(redirect_uri, "invalid_request",
                                   "Invalid authorization request", state[0] ? state : NULL,
                                   location, sizeof(location)) != 0) {
@@ -877,31 +892,61 @@ HttpResponse *authorize_handler(const HttpRequest *req, const RouteParams *param
         return resp;
     }
 
-    /* Build redirect URI with code and state (URL-encoded) */
+    /* Build redirect URI with code and state (URL-encoded).
+     *
+     * str_url_encode() terminates its buffer even when it returns -1, so dropping that
+     * return does not read garbage — it hands the client a *truncated* authorization
+     * code, which /token can never redeem. That is the same silent-truncation failure
+     * S1 fixed one layer down, so fail loudly here instead. */
     char encoded_code[2048];
-    str_url_encode(encoded_code, sizeof(encoded_code), auth_response.code);
+    char encoded_state[1537];  /* 3 * the 512-byte state buffer; see build_error_redirect */
+    encoded_state[0] = '\0';
 
+    if (str_url_encode(encoded_code, sizeof(encoded_code), auth_response.code) < 0 ||
+        (auth_response.state &&
+         str_url_encode(encoded_state, sizeof(encoded_state), auth_response.state) < 0)) {
+        oauth_authorize_response_free(&auth_response);
+        OPENSSL_cleanse(encoded_code, sizeof(encoded_code));
+        log_error("Authorization code or state did not fit its URL-encoding buffer");
+        return response_json_error(500, "Internal server error");
+    }
+
+    /* Appends are ORed and checked once rather than after each call: str_appendf
+     * leaves offset untouched on failure, so a later append cannot compound an
+     * earlier one, and the buffer holds only whole fragments either way. */
     char location[4096];
-    int offset = snprintf(location, sizeof(location), "%s", redirect_uri);
+    location[0] = '\0';
+    size_t offset = 0;
+    int build_rc = 0;
+
+    build_rc |= str_appendf(location, sizeof(location), &offset, "%s", redirect_uri);
 
     /* Check if redirect_uri already has query params */
     char separator = strchr(location, '?') ? '&' : '?';
 
-    offset += snprintf(location + offset, sizeof(location) - offset,
-                       "%ccode=%s", separator, encoded_code);
+    build_rc |= str_appendf(location, sizeof(location), &offset,
+                            "%ccode=%s", separator, encoded_code);
 
     if (auth_response.state) {
-        char encoded_state[512];
-        str_url_encode(encoded_state, sizeof(encoded_state), auth_response.state);
-        offset += snprintf(location + offset, sizeof(location) - offset,
-                           "&state=%s", encoded_state);
+        build_rc |= str_appendf(location, sizeof(location), &offset,
+                                "&state=%s", encoded_state);
     }
 
     oauth_authorize_response_free(&auth_response);
 
+    if (build_rc != 0) {
+        /* location holds a partial redirect that still contains the code */
+        OPENSSL_cleanse(encoded_code, sizeof(encoded_code));
+        OPENSSL_cleanse(location, sizeof(location));
+        log_error("Authorization redirect exceeded its %zu-byte buffer", sizeof(location));
+        return response_json_error(500, "Internal server error");
+    }
+
     /* Create 302 redirect response */
     HttpResponse *resp = http_response_new(302);
     if (!resp) {
+        OPENSSL_cleanse(encoded_code, sizeof(encoded_code));
+        OPENSSL_cleanse(location, sizeof(location));
         log_error("Failed to create HTTP response");
         return response_json_error(500, "Internal server error");
     }
@@ -1066,10 +1111,15 @@ HttpResponse *jwks_handler(const HttpRequest *req, const RouteParams *params) {
 
     /* Start building JWKS JSON */
     char jwks[4096];
-    int offset = snprintf(jwks, sizeof(jwks),
+    size_t offset = 0;
+    if (str_appendf(jwks, sizeof(jwks), &offset,
         "{\"keys\":[{\"kty\":\"EC\",\"use\":\"sig\",\"crv\":\"P-256\","
         "\"kid\":\"%s\",\"x\":\"%s\",\"y\":\"%s\",\"alg\":\"ES256\"}",
-        current_kid, current_x, current_y);
+        current_kid, current_x, current_y) != 0) {
+        signing_key_free(key);
+        log_error("JWKS buffer too small for the current key");
+        return response_json_error(500, "Internal server error");
+    }
 
     /* Add prior key if present */
     if (key->prior_public_key) {
@@ -1082,21 +1132,34 @@ HttpResponse *jwks_handler(const HttpRequest *req, const RouteParams *params) {
             char prior_kid[32];
             snprintf(prior_kid, sizeof(prior_kid), "%lld", (long long)key->prior_generated_at);
 
-            offset += snprintf(jwks + offset, sizeof(jwks) - offset,
+            /* On truncation str_appendf leaves offset and the buffer untouched, so
+             * this degrades to the same outcome as the conversion failure below:
+             * a valid JWKS carrying the current key only. */
+            if (str_appendf(jwks, sizeof(jwks), &offset,
                 ",{\"kty\":\"EC\",\"use\":\"sig\",\"crv\":\"P-256\","
                 "\"kid\":\"%s\",\"x\":\"%s\",\"y\":\"%s\",\"alg\":\"ES256\"}",
-                prior_kid, prior_x, prior_y);
+                prior_kid, prior_x, prior_y) != 0) {
+                log_warn("JWKS buffer too small for prior key, omitting from JWKS");
+            }
         } else {
             log_warn("Failed to convert prior public key to JWK, omitting from JWKS");
         }
     }
 
-    offset += snprintf(jwks + offset, sizeof(jwks) - offset, "]}");
+    if (str_appendf(jwks, sizeof(jwks), &offset, "]}") != 0) {
+        signing_key_free(key);
+        log_error("JWKS buffer too small to close the document");
+        return response_json_error(500, "Internal server error");
+    }
 
     signing_key_free(key);
 
-    /* Update thread-local cache */
-    memcpy(jwks_cache, jwks, (size_t)offset + 1);
+    /* Update thread-local cache. Bounded by the destination rather than by offset:
+     * the old memcpy(jwks_cache, jwks, offset + 1) trusted an accumulated snprintf
+     * return, so a single truncating append would have over-read jwks AND overflowed
+     * this 4096-byte thread-local. str_copy clamps to the destination and always
+     * terminates, so the bound holds no matter what the two buffer sizes become. */
+    str_copy(jwks_cache, sizeof(jwks_cache), jwks);
     jwks_cache_time = now;
 
     /* Create response with cache headers */

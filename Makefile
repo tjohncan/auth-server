@@ -16,16 +16,37 @@ ifeq ($(DB_BACKEND),sqlite)
     CFLAGS += -Ivendor/sqlite -DDB_BACKEND_SQLITE
     DB_VENDOR_SRCS = vendor/sqlite/sqlite3.c
     ifeq ($(wildcard vendor/sqlite/sqlite3.c),)
-        # The fuzz targets compile only the parser and its two utils — no database.
-        # Exempt them so a fresh clone can fuzz before vendoring the amalgamation.
-        ifeq ($(filter clean fuzz fuzz-regress,$(MAKECMDGOALS)),)
+        # The fuzz targets and test-str compile only the parser and a few utils — no
+        # database. Exempt them so a fresh clone can fuzz and run the string/JSON tests
+        # before vendoring a 9 MB amalgamation that neither of them links.
+        ifeq ($(filter clean fuzz fuzz-regress test-str,$(MAKECMDGOALS)),)
             $(error SQLite amalgamation not found at vendor/sqlite/sqlite3.c — see vendor/setup_notes.txt)
         endif
     endif
 else ifeq ($(DB_BACKEND),postgresql)
-    CFLAGS += -DDB_BACKEND_POSTGRESQL -I$(shell pg_config --includedir)
+    # Resolved once with :=, not per-expansion. CFLAGS is recursive (see the = above),
+    # so an inline $(shell) here re-runs pg_config for every rule that expands CFLAGS.
+    PG_INCLUDEDIR := $(shell pg_config --includedir 2>/dev/null)
+    CFLAGS += -DDB_BACKEND_POSTGRESQL
     LDFLAGS += -lpq
     DB_VENDOR_SRCS =
+    ifeq ($(PG_INCLUDEDIR),)
+        # Same shape as the amalgamation check above. The append lives in the else
+        # rather than after this block because a bare -isystem consumes the NEXT flag
+        # as its argument: -fstack-protector-strong silently becomes an include
+        # directory and the build succeeds unhardened, with no diagnostic. The exempt
+        # targets below still compile C, so skipping the $(error) must not leave the
+        # bad flag behind.
+        ifeq ($(filter clean fuzz fuzz-regress test-str,$(MAKECMDGOALS)),)
+            $(error pg_config not found — install libpq-dev)
+        endif
+    else
+        # -isystem, not -I: libpq is third-party, and -I would put its headers on the
+        # user include chain where -Wall -Wextra applies to them. src/db/db.c includes
+        # <libpq-fe.h> and is the only consumer, so nothing depends on the user-path
+        # search. -Iinclude still precedes this, so resolution order is unchanged.
+        CFLAGS += -isystem $(PG_INCLUDEDIR)
+    endif
 else
     $(error Invalid DB_BACKEND: $(DB_BACKEND). Must be 'sqlite' or 'postgresql')
 endif
@@ -145,7 +166,7 @@ test: test-str test-http test-router test-db test-crypto
 # database or crypto; the jwt decoder needs the hmac/base64/json stack). Each target
 # owns its own corpus/ and crashes/ subdirectory.
 FUZZ_SAN         = -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer
-FUZZ_HTTP_SRCS   = test/fuzz/fuzz_http.c src/server/http.c src/util/str.c src/util/json.c
+FUZZ_HTTP_SRCS   = test/fuzz/fuzz_http.c src/server/http.c src/util/str.c src/util/json.c src/util/log.c
 FUZZ_JWT_SRCS    = test/fuzz/fuzz_jwt.c src/crypto/jwt.c src/crypto/hmac.c src/crypto/random.c \
                    src/crypto/sha256.c src/util/data.c src/util/str.c src/util/json.c src/util/log.c
 FUZZ_TIME       ?= 60

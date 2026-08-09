@@ -2,6 +2,8 @@
 #include <string.h>  /* for strlen */
 #include <stdlib.h>  /* for malloc, free */
 #include <ctype.h>   /* for tolower */
+#include <stdio.h>   /* for vsnprintf */
+#include <stdarg.h>  /* for va_list */
 
 /* ============================================================================
  * str_copy - Copy a string to already-allocated memory
@@ -21,6 +23,41 @@ size_t str_copy(char *dst, size_t dst_size, const char *src) {
     memcpy(dst, src, copy_len);  /* Copy the bytes (quickly!) */
     dst[copy_len] = '\0';  /* Terminate */
     return (copy_len + 1);
+}
+
+/* ============================================================================
+ * str_appendf - Append formatted text to a fixed buffer, advancing an offset
+ * ============================================================================
+
+The safe replacement for `pos += snprintf(buf + pos, size - pos, ...)`. See the
+contract in util/str.h; the load-bearing part is that *pos only ever moves on
+success, so it can never come to exceed size.
+
+*/
+int str_appendf(char *buf, size_t size, size_t *pos, const char *fmt, ...) {
+    if (!buf || !pos || !fmt || size == 0) { return -1; }
+
+    /* Already full. Returning here also keeps the buf[*pos] writes below in bounds. */
+    if (*pos >= size) { return -1; }
+
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf + *pos, size - *pos, fmt, ap);
+    va_end(ap);
+
+    if (n < 0) {              /* Encoding error */
+        buf[*pos] = '\0';
+        return -1;
+    }
+
+    if ((size_t)n >= size - *pos) {
+        /* Truncated. Drop the partial write so the buffer holds only whole appends. */
+        buf[*pos] = '\0';
+        return -1;
+    }
+
+    *pos += (size_t)n;
+    return 0;
 }
 
 /*
