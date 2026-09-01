@@ -10,6 +10,7 @@
 #include "db/init/db_history.h"
 #include "crypto/password.h"
 #include "crypto/jwt.h"
+#include "crypto/signing_keys.h"
 #include "crypto/encrypt.h"
 #include "crypto/hmac.h"
 #include "server/event_loop.h"
@@ -29,6 +30,7 @@
 
 static void worker_thread_cleanup(void) {
     crypto_jwt_thread_cleanup();
+    signing_key_thread_cleanup();
 }
 
 static EventLoopPool * volatile global_pool = NULL;

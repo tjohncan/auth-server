@@ -123,4 +123,14 @@ void signing_key_free(signing_key_t *key);
  */
 const char *signing_key_active_private(const signing_key_t *key);
 
+/*
+ * Release this thread's cached signing keys
+ *
+ * Each worker caches the key row it last validated against the database, so it
+ * holds live ES256 private keys and HMAC secrets for its lifetime. Call once
+ * per worker on exit, beside crypto_jwt_thread_cleanup(); signing_key_free()
+ * cleanses the material on the way out.
+ */
+void signing_key_thread_cleanup(void);
+
 #endif /* CRYPTO_SIGNING_KEYS_H */

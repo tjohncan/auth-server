@@ -194,8 +194,19 @@ cleanup:
 
 /*
  * Load key from database (returns NULL if not found, caller frees result)
+ *
+ * out_current_ts / out_prior_ts receive the generated_at columns as raw text,
+ * caller frees. They come from this statement rather than a separate read so
+ * the timestamps and the key material can never describe different generations
+ * of the row; see the per-worker cache below for why that matters. Either may
+ * be NULL on return: prior_generated_at when the column is NULL, and both when
+ * the row was not found or a copy could not be allocated.
  */
-static signing_key_t *load_key_from_db(db_handle_t *db, signing_key_type_t type) {
+static signing_key_t *load_key_from_db(db_handle_t *db, signing_key_type_t type,
+                                       char **out_current_ts, char **out_prior_ts) {
+    *out_current_ts = NULL;
+    *out_prior_ts = NULL;
+
     const char *table = (type == SIGNING_KEY_AUTH_REQUEST)
                         ? TBL_AUTH_REQUEST_SIGNING
                         : TBL_ACCESS_TOKEN_SIGNING;
@@ -255,6 +266,9 @@ static signing_key_t *load_key_from_db(db_handle_t *db, signing_key_type_t type)
         key->current_generated_at = parse_timestamp(current_ts);
         key->prior_generated_at = (prior_ts && db_column_type(stmt, 3) != DB_NULL)
                                    ? parse_timestamp(prior_ts) : 0;
+
+        if (current_ts) *out_current_ts = str_dup(current_ts);
+        if (prior_ts && db_column_type(stmt, 3) != DB_NULL) *out_prior_ts = str_dup(prior_ts);
     } else {
         /* ES256 keypairs */
         const char *current_priv = (const char *)db_column_text(stmt, 0);
@@ -281,6 +295,9 @@ static signing_key_t *load_key_from_db(db_handle_t *db, signing_key_type_t type)
         key->current_generated_at = parse_timestamp(current_ts);
         key->prior_generated_at = (prior_ts && db_column_type(stmt, 5) != DB_NULL)
                                    ? parse_timestamp(prior_ts) : 0;
+
+        if (current_ts) *out_current_ts = str_dup(current_ts);
+        if (prior_ts && db_column_type(stmt, 5) != DB_NULL) *out_prior_ts = str_dup(prior_ts);
     }
 
     db_finalize(stmt);
@@ -410,6 +427,183 @@ static int rotate_key(db_handle_t *db, signing_key_type_t type,
 }
 
 /* ============================================================================
+ * Per-worker key cache
+ * ============================================================================
+ *
+ * signing_key_get_or_rotate() used to open BEGIN IMMEDIATE — the database-wide
+ * write lock on SQLite — on every call, because it might rotate. It almost
+ * never does: once per 24 hours for auth-request keys, once per 60 days for
+ * access-token keys. Every other call declared write intent in order to run a
+ * SELECT, which is the one thing WAL mode exists to make unnecessary.
+ *
+ * The cache below is validated against the database on every single use rather
+ * than trusted for an interval. It holds the generated_at columns as raw text;
+ * a bare SELECT of those same two columns either matches, in which case the
+ * cached material is still the row, or it does not, in which case we take the
+ * write lock and reload.
+ *
+ * The invariant that makes the pair sufficient is that current_generated_at
+ * strictly increases across every write this code performs, and every one of
+ * those writes rewrites prior_generated_at as well — rotate_key sets both in
+ * either branch, insert_new_key starts them. So a rotation, a deletion or a
+ * regeneration is picked up on the very next request. What the pair cannot see
+ * is a hand-edit that swaps key material while leaving current_generated_at
+ * inside the same one-second tick, datetime('now') being second-granular.
+ * Against a TTL that is still no contest: a TTL is wrong for its entire
+ * interval on every one of these, including the ones caught here immediately.
+ *
+ * Raw text and not the parsed time_t, which is not a stylistic preference:
+ * parse_timestamp() returns 0 for anything it cannot read, so two different
+ * malformed values would compare equal, and its "%d-%d-%d %d:%d:%d" discards
+ * everything after the seconds field, so on PostgreSQL — where NOW() carries
+ * sub-second precision — two writes inside the same second would compare equal.
+ * Both are cache hits across a change that really happened, which is the only
+ * direction that matters when the cached object is a signing key.
+ */
+
+typedef struct {
+    signing_key_t *key;          /* the materialised row, owned here */
+    char *current_generated_at;  /* raw column text, never parsed */
+    char *prior_generated_at;    /* NULL when the column is NULL */
+    int has_prior;               /* distinguishes a NULL column from empty text */
+} signing_key_cache_t;
+
+static _Thread_local signing_key_cache_t g_key_cache[2];  /* indexed by signing_key_type_t */
+
+/*
+ * Deep copy of a key structure.
+ *
+ * Callers own what signing_key_get_or_rotate() hands them and release it with
+ * signing_key_free(), and the cache keeps the original, so the cache returns a
+ * copy rather than changing that contract. Rewriting ownership semantics at
+ * seven call sites on a branch that also changes token issuance is how a double
+ * free ships; a calloc and a few str_dups is nothing against the write-lock
+ * round trip being removed.
+ */
+static signing_key_t *clone_signing_key(const signing_key_t *src) {
+    if (!src) {
+        return NULL;
+    }
+
+    signing_key_t *copy = calloc(1, sizeof(signing_key_t));
+    if (!copy) {
+        return NULL;
+    }
+
+    copy->type = src->type;
+    copy->current_generated_at = src->current_generated_at;
+    copy->prior_generated_at = src->prior_generated_at;
+
+    /* A failed str_dup leaves the copy partly populated; signing_key_free is
+       per-field NULL-safe, so hand it the whole thing. */
+    if ((src->current_secret      && !(copy->current_secret      = str_dup(src->current_secret)))      ||
+        (src->prior_secret        && !(copy->prior_secret        = str_dup(src->prior_secret)))        ||
+        (src->current_private_key && !(copy->current_private_key = str_dup(src->current_private_key))) ||
+        (src->current_public_key  && !(copy->current_public_key  = str_dup(src->current_public_key)))  ||
+        (src->prior_private_key   && !(copy->prior_private_key   = str_dup(src->prior_private_key)))   ||
+        (src->prior_public_key    && !(copy->prior_public_key    = str_dup(src->prior_public_key)))) {
+        log_error("Failed to allocate memory for signing key copy");
+        signing_key_free(copy);
+        return NULL;
+    }
+
+    return copy;
+}
+
+/*
+ * Empty a cache entry, cleansing key material on the way out.
+ */
+static void cache_invalidate(signing_key_cache_t *entry) {
+    signing_key_free(entry->key);
+    free(entry->current_generated_at);
+    free(entry->prior_generated_at);
+    entry->key = NULL;
+    entry->current_generated_at = NULL;
+    entry->prior_generated_at = NULL;
+    entry->has_prior = 0;
+}
+
+/*
+ * Does the cached entry still describe the row in the database?
+ *
+ * A bare SELECT with no BEGIN: in WAL mode that takes a shared read lock, blocks
+ * nothing, and is never blocked by a writer. It selects the same two columns raw,
+ * exactly as load_key_from_db does. Rendering them differently here — through
+ * UNIX_TS(), say — would compare epoch text against "YYYY-MM-DD HH:MM:SS", the
+ * cache would never once hit, and the symptom would be that the change appeared
+ * to do nothing rather than anything resembling a bug.
+ *
+ * Anything that is not a matching row is a miss, deliberately including no row
+ * at all: a deleted row has to route to the reload path rather than fall through
+ * on the strength of a copy of something that is gone.
+ */
+static int cache_matches_db(db_handle_t *db, signing_key_type_t type,
+                            const signing_key_cache_t *entry) {
+    const char *table = (type == SIGNING_KEY_AUTH_REQUEST)
+                        ? TBL_AUTH_REQUEST_SIGNING
+                        : TBL_ACCESS_TOKEN_SIGNING;
+
+    char sql[256];
+    snprintf(sql, sizeof(sql),
+             "SELECT current_generated_at, prior_generated_at "
+             "FROM %s WHERE singleton = " BOOL_TRUE, table);
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        return 0;
+    }
+
+    if (db_step(stmt) != DB_ROW) {
+        db_finalize(stmt);
+        return 0;
+    }
+
+    /* Compared in place: the column pointers stay valid until finalize on both
+       backends, so this neither copies nor risks truncating a long timestamp
+       into a false match. */
+    const char *current_ts = (const char *)db_column_text(stmt, 0);
+    const char *prior_ts = (const char *)db_column_text(stmt, 1);
+    int has_prior = (prior_ts && db_column_type(stmt, 1) != DB_NULL);
+
+    int matches = current_ts
+                  && strcmp(current_ts, entry->current_generated_at) == 0
+                  && has_prior == entry->has_prior
+                  && (!has_prior || strcmp(prior_ts, entry->prior_generated_at) == 0);
+
+    db_finalize(stmt);
+    return matches;
+}
+
+/*
+ * Take ownership of a freshly loaded row and hand the caller its own copy.
+ *
+ * Cannot fail: if the copy or the timestamps are unavailable the entry is left
+ * empty and the caller receives the original, which is precisely the uncached
+ * behaviour this replaces.
+ */
+static void cache_store_and_return(signing_key_type_t type, signing_key_t *key,
+                                   char *current_ts, char *prior_ts,
+                                   signing_key_t **out_key) {
+    signing_key_cache_t *entry = &g_key_cache[type];
+    cache_invalidate(entry);
+
+    signing_key_t *copy = current_ts ? clone_signing_key(key) : NULL;
+    if (!copy) {
+        free(current_ts);
+        free(prior_ts);
+        *out_key = key;
+        return;
+    }
+
+    entry->key = key;
+    entry->current_generated_at = current_ts;
+    entry->prior_generated_at = prior_ts;
+    entry->has_prior = (prior_ts != NULL);
+
+    *out_key = copy;
+}
+
+/* ============================================================================
  * Public API
  * ============================================================================ */
 
@@ -427,6 +621,23 @@ int signing_key_get_or_rotate(db_handle_t *db, signing_key_type_t type,
                                ? AUTH_REQUEST_ROTATION_SECONDS
                                : ACCESS_TOKEN_ROTATION_SECONDS;
 
+    /*
+     * Validate the cached row against the database before using it.
+     * current_generated_at is read fresh on every call, so the rotation check
+     * below fires exactly as promptly as it did when this function took the
+     * write lock unconditionally.
+     */
+    signing_key_cache_t *entry = &g_key_cache[type];
+    if (entry->key && cache_matches_db(db, type, entry)
+        && time(NULL) - entry->key->current_generated_at < rotation_interval) {
+        signing_key_t *copy = clone_signing_key(entry->key);
+        if (copy) {
+            *out_key = copy;
+            return 0;
+        }
+        /* Could not copy: fall through and reload the slow way. */
+    }
+
     /* Start transaction (prevents concurrent rotation) */
     if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
         log_error("Failed to begin transaction for key rotation");
@@ -434,7 +645,9 @@ int signing_key_get_or_rotate(db_handle_t *db, signing_key_type_t type,
     }
 
     /* Load existing key */
-    signing_key_t *key = load_key_from_db(db, type);
+    char *current_ts = NULL;
+    char *prior_ts = NULL;
+    signing_key_t *key = load_key_from_db(db, type, &current_ts, &prior_ts);
 
     if (!key) {
         /* First run: no key exists, generate and insert */
@@ -479,13 +692,13 @@ int signing_key_get_or_rotate(db_handle_t *db, signing_key_type_t type,
         free(public_key);
 
         /* Reload from DB to get timestamp */
-        key = load_key_from_db(db, type);
+        key = load_key_from_db(db, type, &current_ts, &prior_ts);
         if (!key) {
             log_error("Failed to reload newly inserted key");
             return -1;
         }
 
-        *out_key = key;
+        cache_store_and_return(type, key, current_ts, prior_ts, out_key);
         return 0;
     }
 
@@ -494,6 +707,13 @@ int signing_key_get_or_rotate(db_handle_t *db, signing_key_type_t type,
     time_t age = now - key->current_generated_at;
 
     if (age >= rotation_interval) {
+        /* The row is about to be replaced, so its timestamps are dead from here.
+           Releasing them now leaves every error path below unchanged. */
+        free(current_ts);
+        free(prior_ts);
+        current_ts = NULL;
+        prior_ts = NULL;
+
         /* Rotation needed */
         log_info("Rotating %s key (age: %ld seconds, threshold: %ld seconds)",
                  type == SIGNING_KEY_AUTH_REQUEST ? "auth_request_signing" : "access_token_signing",
@@ -551,13 +771,13 @@ int signing_key_get_or_rotate(db_handle_t *db, signing_key_type_t type,
         free(new_public_key);
 
         signing_key_free(key);
-        key = load_key_from_db(db, type);
+        key = load_key_from_db(db, type, &current_ts, &prior_ts);
         if (!key) {
             log_error("Failed to reload rotated key");
             return -1;
         }
 
-        *out_key = key;
+        cache_store_and_return(type, key, current_ts, prior_ts, out_key);
         return 0;
     }
 
@@ -565,10 +785,12 @@ int signing_key_get_or_rotate(db_handle_t *db, signing_key_type_t type,
     if (db_execute_trusted(db, "COMMIT") != 0) {
         log_error("Failed to commit key load transaction");
         signing_key_free(key);
+        free(current_ts);
+        free(prior_ts);
         return -1;
     }
 
-    *out_key = key;
+    cache_store_and_return(type, key, current_ts, prior_ts, out_key);
     return 0;
 }
 
@@ -591,6 +813,12 @@ const char *signing_key_active_private(const signing_key_t *key) {
     }
 
     return key->current_private_key;
+}
+
+void signing_key_thread_cleanup(void) {
+    for (int i = 0; i < 2; i++) {
+        cache_invalidate(&g_key_cache[i]);
+    }
 }
 
 void signing_key_free(signing_key_t *key) {
