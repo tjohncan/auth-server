@@ -102,6 +102,16 @@ $(TARGET): $(OBJS)
 %.o: %.c
 	$(CC) $(CFLAGS) $(SECURITY_FLAGS) -c $< -o $@
 
+# The rule above says foo.o depends on foo.c and nothing else, so editing a header
+# leaves every object whose .c file was not also touched linked as-is. A changed struct
+# then has two different layouts in one binary: silent memory corruption at runtime
+# rather than a build error. Depend all project objects on all project headers instead.
+# Coarse, but no coarser than the `make clean` the docs already prescribe, and cheaper:
+# filter-out keeps the SQLite amalgamation, which includes no project header and is the
+# slow part of a full rebuild, out of it. := for the same reason as PG_INCLUDEDIR above.
+HEADERS := $(shell find include -name '*.h')
+$(filter-out vendor/%,$(OBJS)): $(HEADERS)
+
 # Debug build (security flags applied except _FORTIFY_SOURCE which requires -O1+)
 debug: CFLAGS += $(DEBUG_FLAGS)
 debug: SECURITY_FLAGS = -fstack-protector-strong -fPIE -Wformat -Wformat-security

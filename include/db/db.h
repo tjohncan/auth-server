@@ -46,7 +46,8 @@ int db_disconnect(db_handle_t *db);
  *
  * Returns: 0 on success, negative on error
  */
-int db_execute_trusted(db_handle_t *db, const char *sql, ...);
+int db_execute_trusted(db_handle_t *db, const char *sql, ...)
+    __attribute__((format(printf, 2, 3)));
 
 /*
  * Execute SQL statement directly (no formatting)
@@ -66,7 +67,8 @@ int db_execute_direct(db_handle_t *db, const char *sql);
  *
  * Returns: 0 on success, negative on error
  */
-int db_query(db_handle_t *db, db_result_t **result, const char *sql, ...);
+int db_query(db_handle_t *db, db_result_t **result, const char *sql, ...)
+    __attribute__((format(printf, 3, 4)));
 
 /*
  * Get number of rows in result
