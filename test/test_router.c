@@ -301,7 +301,14 @@ void test_cors_preflight(Router *router) {
     assert(resp->status_code == 204);
     assert(resp->body == NULL || resp->body_length == 0);
     assert(strcmp(header_value(resp, "Access-Control-Allow-Origin"), "*") == 0);
+    /* Every method the router will actually answer on these paths must be listed,
+     * or a browser refuses the preflight for the one that is missing. HEAD is
+     * CORS-safelisted so no browser preflights it today, but leaving it out would
+     * be an internal disagreement between this list and what the router does. */
     assert(strstr(header_value(resp, "Access-Control-Allow-Methods"), "GET") != NULL);
+    assert(strstr(header_value(resp, "Access-Control-Allow-Methods"), "HEAD") != NULL);
+    assert(strstr(header_value(resp, "Access-Control-Allow-Methods"), "POST") != NULL);
+    assert(strstr(header_value(resp, "Access-Control-Allow-Methods"), "OPTIONS") != NULL);
     assert(strstr(header_value(resp, "Access-Control-Allow-Headers"), "Authorization") != NULL);
     assert(strstr(header_value(resp, "Access-Control-Allow-Headers"), "Content-Type") != NULL);
     assert(header_value(resp, "Access-Control-Allow-Credentials") == NULL);
@@ -337,6 +344,81 @@ void test_cors_boot_validation(void) {
     printf("✓ reports every unregistered CORS path, 0 when all present\n");
 }
 
+
+/* ============================================================================
+ * HEAD
+ * ============================================================================ */
+
+void test_head_requests(Router *router) {
+    printf("\n=== Test: HEAD falls back to the GET route ===\n");
+
+    HttpResponse *get = request(router, "GET /health HTTP/1.0\r\n\r\n");
+    assert(get);
+    assert(get->status_code == 200);
+    assert(get->body && get->body_length > 0);
+    const char *get_len = header_value(get, "Content-Length");
+    assert(get_len != NULL);
+    char expected_len[32];
+    snprintf(expected_len, sizeof(expected_len), "%s", get_len);
+
+    HttpResponse *head = request(router, "HEAD /health HTTP/1.0\r\n\r\n");
+    assert(head);
+    assert(head->status_code == 200);
+
+    /* RFC 7231 4.3.2: same headers as GET, no body. Content-Length in particular
+     * must be what GET would have sent, not 0 — that is what makes a HEAD useful
+     * to whatever is probing with it. */
+    assert(head->body == NULL);
+    assert(head->body_length == 0);
+    assert(header_value(head, "Content-Length") != NULL);
+    assert(strcmp(header_value(head, "Content-Length"), expected_len) == 0);
+
+    /* And the headers really are the same set, not a subset. */
+    assert(head->header_count == get->header_count);
+
+    http_response_free(get);
+    http_response_free(head);
+    printf("✓ HEAD /health: 200, no body, Content-Length still %s\n", expected_len);
+
+    /* Serialization must emit the headers and stop at the blank line. */
+    head = request(router, "HEAD /health HTTP/1.0\r\n\r\n");
+    size_t out_len = 0;
+    char *wire = http_response_serialize(head, &out_len);
+    assert(wire);
+    assert(strstr(wire, "Content-Length:") != NULL);
+    assert(out_len >= 4 && memcmp(wire + out_len - 4, "\r\n\r\n", 4) == 0);
+    free(wire);
+    http_response_free(head);
+    printf("✓ serialized HEAD response ends at the blank line\n");
+
+    /* An unrouted path is still a 404 under HEAD. */
+    head = request(router, "HEAD /nope HTTP/1.0\r\n\r\n");
+    assert(head);
+    assert(head->status_code == 404);
+    assert(head->body == NULL);
+    http_response_free(head);
+    printf("✓ HEAD on an unrouted path is 404 with no body\n");
+
+    /*
+     * The regression this commit could cause. HEAD is handled after
+     * dispatch_route and before the CORS attachment, precisely so that a HEAD on
+     * a public endpoint keeps the header commit 5 added. Handling it as an early
+     * return, the way OPTIONS is, would silently drop it here.
+     */
+    head = request(router, "HEAD /userinfo HTTP/1.0\r\n\r\n");
+    assert(head);
+    assert(header_value(head, "Access-Control-Allow-Origin") != NULL);
+    assert(strcmp(header_value(head, "Access-Control-Allow-Origin"), "*") == 0);
+    assert(head->body == NULL);
+    http_response_free(head);
+
+    head = request(router, "HEAD /health HTTP/1.0\r\n\r\n");
+    assert(head);
+    assert(header_value(head, "Access-Control-Allow-Origin") == NULL);
+    http_response_free(head);
+    printf("✓ HEAD keeps CORS on /userinfo and still has none on /health\n");
+}
+
 int main(void) {
     log_init(LOG_INFO);
     log_info("Router Test Suite");
@@ -364,6 +446,7 @@ int main(void) {
     test_cors_header_on_public_paths(router);
     test_cors_preflight(router);
     test_cors_boot_validation();
+    test_head_requests(router);
 #if ROUTER_USE_PATH_PARAMS
     test_path_params(router);
     test_multiple_params(router);

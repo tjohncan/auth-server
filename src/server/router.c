@@ -8,6 +8,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdbool.h>
+#include <openssl/crypto.h>
 
 /* ============================================================================
  * Configuration
@@ -641,7 +642,7 @@ static HttpResponse *cors_preflight(const char *path) {
     }
 
     http_response_set_header(resp, "Access-Control-Allow-Origin", "*");
-    http_response_set_header(resp, "Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    http_response_set_header(resp, "Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS");
     http_response_set_header(resp, "Access-Control-Allow-Headers", "Authorization, Content-Type");
 
     return resp;
@@ -661,6 +662,45 @@ HttpResponse *router_dispatch(Router *router, const HttpRequest *req) {
     }
 
     HttpResponse *resp = dispatch_route(router, req);
+
+    /*
+     * HEAD: nothing registers it, so fall back to the GET route for the same
+     * path. RFC 7231 4.3.2 wants the same headers GET would send, Content-Length
+     * included, with only the body omitted.
+     *
+     * Deliberately NOT an early return the way OPTIONS is above. The CORS header
+     * is attached below and is keyed on the path, so a HEAD that returned early
+     * would silently lose it on the four public endpoints — and no test that
+     * only checked GET would notice.
+     */
+    if (req->method == HTTP_HEAD && resp && resp->status_code == 404) {
+        HttpRequest as_get = *req;
+        as_get.method = HTTP_GET;
+
+        HttpResponse *from_get = dispatch_route(router, &as_get);
+        if (from_get) {
+            http_response_free(resp);
+            resp = from_get;
+        }
+    }
+
+    /*
+     * Drop the body, keep the headers. Freed by hand rather than through
+     * http_response_set_body(resp, "", 0), which sets Content-Length as a side
+     * effect and would rewrite it to 0 — a well-formed response with the wrong
+     * length, which nothing would flag. Serialization guards the body on
+     * body_length > 0 and Content-Length is a stored header, so zeroing one does
+     * not touch the other.
+     *
+     * Cleansed first because http_response_free() would have, and /userinfo and
+     * /api/user/profile are GET routes whose bodies carry user data.
+     */
+    if (req->method == HTTP_HEAD && resp && resp->body) {
+        OPENSSL_cleanse(resp->body, resp->body_length);
+        free(resp->body);
+        resp->body = NULL;
+        resp->body_length = 0;
+    }
 
     /* Attached per path, never per client: the question is whether a browser at
        some origin may read this response, which is a property of the endpoint.
