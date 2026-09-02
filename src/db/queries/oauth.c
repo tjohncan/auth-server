@@ -1163,7 +1163,13 @@ int oauth_resolve_resource_server(db_handle_t *db, long long client_pin,
         if (rc == DB_ROW) {
             *out_resource_server_pin = db_column_int64(stmt, 0);
             const unsigned char *id_blob = db_column_blob(stmt, 1);
-            if (id_blob) memcpy(out_resource_server_id, id_blob, 16);
+            int id_blob_len = db_column_bytes(stmt, 1);
+            if (id_blob_len != 16) {
+                log_error("Invalid resource server ID length: %d", id_blob_len);
+                db_finalize(stmt);
+                return -1;
+            }
+            memcpy(out_resource_server_id, id_blob, 16);
             db_finalize(stmt);
             log_debug("Resolved resource server by address: address='%s', pin=%lld",
                      resource_address, *out_resource_server_pin);
@@ -1209,7 +1215,13 @@ int oauth_resolve_resource_server(db_handle_t *db, long long client_pin,
         if (rc == DB_ROW) {
             *out_resource_server_pin = db_column_int64(stmt, 0);
             const unsigned char *id_blob = db_column_blob(stmt, 1);
-            if (id_blob) memcpy(out_resource_server_id, id_blob, 16);
+            int id_blob_len = db_column_bytes(stmt, 1);
+            if (id_blob_len != 16) {
+                log_error("Invalid resource server ID length: %d", id_blob_len);
+                db_finalize(stmt);
+                return -1;
+            }
+            memcpy(out_resource_server_id, id_blob, 16);
             db_finalize(stmt);
             log_debug("Resolved single linked resource server: pin=%lld",
                      *out_resource_server_pin);
