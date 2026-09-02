@@ -1,3 +1,6 @@
+/* memmem is a GNU extension */
+#define _GNU_SOURCE
+
 #include "server/http.h"
 #include "util/json.h"
 #include "util/str.h"
@@ -342,6 +345,42 @@ const char *http_request_get_client_ip(const HttpRequest *req, const char *socke
      * TODO: socket_ip is therefore vestigial — every caller passes NULL, so this
      * always returns NULL. The parameter could be dropped. */
     return socket_ip;
+}
+
+size_t http_find_header_end(const char *buffer, size_t length, size_t already_scanned) {
+    if (!buffer || length < 4) {
+        return 0;
+    }
+
+    /* A resume point at or past the end of the buffer is a caller bug: a read
+       always adds at least one byte, so already_scanned is strictly less than
+       length on every real call. Fall back to a full scan, because the two ways
+       of being wrong are not symmetric — a redundant pass costs one scan, while
+       resuming too far forward skips the delimiter entirely and the request then
+       hangs until the idle timeout instead of erroring. The likeliest way to
+       introduce it is capturing the previous length AFTER the increment rather
+       than before it, which lands exactly on the equal case. */
+    if (already_scanned >= length) {
+        already_scanned = 0;
+    }
+
+    /* Three, not four: the delimiter is four bytes, so up to three of them may
+       already be sitting at the tail of what was scanned last time. Exactly
+       three — at the previous call no delimiter existed below already_scanned,
+       so any delimiter now must start at or after already_scanned - 3. */
+    size_t from = already_scanned > 3 ? already_scanned - 3 : 0;
+
+    /* Redundant since the guard above forces already_scanned < length, which
+       already bounds from at length - 4. It was load-bearing while that guard
+       was `>` rather than `>=`: already_scanned == length gave from = length - 3
+       and this is what kept memmem in bounds. Kept so that relaxing the guard
+       cannot reintroduce an over-read. */
+    if (from > length - 4) {
+        from = length - 4;
+    }
+
+    const char *end = memmem(buffer + from, length - from, "\r\n\r\n", 4);
+    return end ? (size_t)(end - buffer) + 4 : 0;
 }
 
 /* ============================================================================

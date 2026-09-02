@@ -380,6 +380,115 @@ void test_malformed_requests(void) {
     }
 }
 
+
+/*
+ * Feed `raw` to http_find_header_end in `chunk` byte pieces, the way handle_read
+ * receives it, and return the total length at which the delimiter was reported.
+ * 0 means never found.
+ */
+static size_t feed_in_chunks(const char *raw, size_t len, size_t chunk) {
+    size_t have = 0;
+    size_t scanned = 0;
+
+    while (have < len) {
+        size_t take = (len - have < chunk) ? len - have : chunk;
+        have += take;
+
+        size_t end = http_find_header_end(raw, have, scanned);
+        if (end) {
+            /* The offset must be the true one, not merely non-zero. */
+            assert(end == (size_t)(strstr(raw, "\r\n\r\n") - raw) + 4);
+            return have;
+        }
+        scanned = have;
+    }
+
+    return 0;
+}
+
+void test_header_end_scan(void) {
+    printf("\n=== Test: Resumable header-end scan ===\n");
+
+    const char *raw =
+        "POST /token HTTP/1.1\r\n"
+        "Host: auth.example.test\r\n"
+        "Content-Type: application/x-www-form-urlencoded\r\n"
+        "Content-Length: 5\r\n"
+        "\r\n"
+        "grant";
+    size_t len = strlen(raw);
+    size_t true_end = (size_t)(strstr(raw, "\r\n\r\n") - raw) + 4;
+
+    /* One shot */
+    assert(http_find_header_end(raw, len, 0) == true_end);
+
+    /* Not there yet: any prefix that stops inside the header block. */
+    assert(http_find_header_end(raw, true_end - 1, 0) == 0);
+    assert(http_find_header_end(raw, 4, 0) == 0);
+    assert(http_find_header_end(raw, 0, 0) == 0);
+    assert(http_find_header_end(raw, 3, 0) == 0);   /* shorter than the delimiter */
+    assert(http_find_header_end(NULL, 10, 0) == 0);
+
+    /*
+     * The one that matters. Every possible two-chunk split, including the four
+     * that cut the delimiter itself. A resume offset that is even one byte too
+     * far forward misses those, and the failure is silent: the request never
+     * completes and never errors, it just hangs until the idle timeout.
+     */
+    for (size_t split = 0; split <= len; split++) {
+        size_t scanned = 0;
+        size_t found = 0;
+
+        if (split > 0) {
+            found = http_find_header_end(raw, split, 0);
+            scanned = split;
+        }
+        if (!found) {
+            found = http_find_header_end(raw, len, scanned);
+        }
+        assert(found == true_end);
+    }
+    printf("✓ all %zu two-chunk splits find the same offset\n", len + 1);
+
+    /* And the pathological delivery: one byte at a time, then a few chunk sizes.
+     * feed_in_chunks asserts the OFFSET is exact on every path; what is checked
+     * here is when it is noticed, which cannot be later than the chunk that
+     * carries the delimiter's last byte. */
+    assert(feed_in_chunks(raw, len, 1) == true_end);
+    for (size_t chunk = 2; chunk <= 9; chunk++) {
+        size_t at = feed_in_chunks(raw, len, chunk);
+        assert(at >= true_end && at < true_end + chunk);
+    }
+    printf("✓ byte-at-a-time reports it at exactly byte %zu, and never late\n", true_end);
+
+    /* An unterminated block is never falsely reported, at any resume point. */
+    const char *no_end = "GET / HTTP/1.1\r\nHost: a\r\nX: y\r\n";
+    size_t no_end_len = strlen(no_end);
+    for (size_t k = 0; k <= no_end_len; k++) {
+        assert(http_find_header_end(no_end, no_end_len, k) == 0);
+    }
+    printf("✓ unterminated block reports 0 from every resume offset\n");
+
+    /* A resume offset at or past the end of the buffer is a caller bug, and must
+     * fall back to a full scan rather than skip past the delimiter. `len` is the
+     * one that matters: it is what capturing the previous length one line too
+     * late would produce. */
+    assert(http_find_header_end(raw, len, len) == true_end);
+    assert(http_find_header_end(raw, len, len + 1) == true_end);
+    assert(http_find_header_end(raw, len, len + 4096) == true_end);
+    assert(http_find_header_end(raw, len, (size_t)-1) == true_end);
+    printf("✓ a resume offset at or past the end falls back to a full scan\n");
+
+    /* Body bytes that happen to contain the delimiter must not move the answer
+       once the real one has been found earlier in the buffer. */
+    const char *twice =
+        "POST /x HTTP/1.1\r\nA: 1\r\n\r\nbody\r\n\r\nmore";
+    size_t twice_len = strlen(twice);
+    size_t first = (size_t)(strstr(twice, "\r\n\r\n") - twice) + 4;
+    assert(http_find_header_end(twice, twice_len, 0) == first);
+    printf("✓ the FIRST delimiter wins when the body contains another\n");
+}
+
 int main(void) {
     log_init(LOG_INFO);
     log_info("HTTP Parser Test Suite");
@@ -388,6 +497,7 @@ int main(void) {
     test_response_building();
     test_real_world_request();
     test_malformed_requests();
+    test_header_end_scan();
 
     printf("\n=== All Tests Passed! ===\n\n");
 

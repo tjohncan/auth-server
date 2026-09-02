@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 
 #include "server/event_loop.h"
+#include "server/http.h"
 #include "util/log.h"
 #include "util/str.h"
 #include "db/db_pool.h"
@@ -31,6 +32,20 @@
 #define DEFAULT_MAX_REQUEST_SIZE (1 * 1024 * 1024)  /* 1MB */
 #define DEFAULT_CONNECTION_TIMEOUT_MS 30000         /* 30 seconds */
 #define INITIAL_READ_BUFFER_SIZE 4096               /* 4KB initial buffer */
+
+/* Ceiling on an UNTERMINATED header block. The check fires once bytes_read passes
+ * this, and since the buffer doubles (4, 8, 16, 32 KB) and the test runs after the
+ * recv, at most 32 KB is ever held. That is the same header-block total nginx
+ * allows by default — large_client_header_buffers is `4 8k`, four buffers of 8 KB
+ * each, with any single line capped at 8 KB — so this is not a guess at what is
+ * generous, it is the ceiling the edge in front of us already enforces.
+ * Without it a client can
+ * make every connection buffer max_request_size of headers that will never be
+ * parsed, and each new byte triggers a rescan of everything received so far —
+ * and it cannot time out, because last_activity is refreshed on every recv.
+ * Applies only before the delimiter is found; after it the body is entitled to
+ * grow to max_request_size, which is what that limit is for. */
+#define MAX_HEADER_BYTES 16384
 #define MAX_EPOLL_EVENTS 1024                       /* Process up to 1024 events per epoll_wait */
 
 /* ============================================================================
@@ -185,6 +200,8 @@ static Connection *connection_create(int fd, const char *remote_ip, uint64_t con
     }
     conn->read_buffer_size = INITIAL_READ_BUFFER_SIZE;
     conn->bytes_read = 0;
+    conn->header_end = 0;
+    conn->total_needed = 0;
 
     /* Copy remote IP */
     str_copy(conn->remote_ip, sizeof(conn->remote_ip), remote_ip);
@@ -508,65 +525,76 @@ static int handle_read(Connection *conn, size_t max_request_size) {
             return -1;
         }
 
+        size_t scanned_before = conn->bytes_read;
         conn->bytes_read += n;
         clock_gettime(CLOCK_MONOTONIC, &conn->last_activity);
 
-        /* Check if we have complete HTTP headers (ends with \r\n\r\n) */
-        if (conn->bytes_read >= 4) {
-            char *end = memmem(conn->read_buffer, conn->bytes_read, "\r\n\r\n", 4);
-            if (end) {
-                /* Found end of headers! */
-                size_t header_end_offset = (end - conn->read_buffer) + 4;
+        /* Locate the end of the header block ONCE. Resuming rather than
+         * restarting is what keeps this linear: a header block that never
+         * terminates otherwise rescans everything received so far on every
+         * single byte. */
+        if (!conn->header_end) {
+            conn->header_end = http_find_header_end(conn->read_buffer, conn->bytes_read,
+                                                    scanned_before);
 
-                /* Check for Content-Length to see if there's a body */
-                size_t content_length = 0;
-                int cl_result = extract_content_length(conn->read_buffer, header_end_offset, &content_length);
-
-                if (cl_result == -2) {
-                    /* Multiple/conflicting Content-Length headers (request smuggling attack) */
-                    log_warn("Rejecting request with conflicting Content-Length headers from connection %lu",
-                            conn->connection_id);
+            if (!conn->header_end) {
+                if (conn->bytes_read > MAX_HEADER_BYTES) {
+                    log_warn("Header block exceeds %d bytes on connection %lu, closing",
+                             MAX_HEADER_BYTES, conn->connection_id);
                     return -1;
                 }
+                continue;  /* headers still incomplete */
+            }
 
-                /* Reject Transfer-Encoding (chunked, etc.) - this server does not
-                 * support chunked transfer coding. If behind a reverse proxy,
-                 * it should reassemble chunks and forward with Content-Length.
-                 * A direct request with Transfer-Encoding is either a misconfigured
-                 * client or a request smuggling attempt. */
-                if (memmem_nocase(conn->read_buffer, header_end_offset,
-                           "\r\nTransfer-Encoding", 19) != NULL) {
-                    log_warn("Rejecting request with Transfer-Encoding header from connection %lu",
-                            conn->connection_id);
-                    return -1;
-                }
+            /* Everything below reads the header block, so it runs once per
+             * request rather than once per chunk. */
+            size_t content_length = 0;
+            int cl_result = extract_content_length(conn->read_buffer, conn->header_end,
+                                                   &content_length);
 
-                if (cl_result == 0) {
-                    /* Request has a body - need header_end + content_length bytes total */
-                    size_t total_needed = header_end_offset + content_length;
+            if (cl_result == -2) {
+                /* Multiple/conflicting Content-Length headers (request smuggling attack) */
+                log_warn("Rejecting request with conflicting Content-Length headers from connection %lu",
+                        conn->connection_id);
+                return -1;
+            }
 
-                    if (total_needed > max_request_size) {
-                        log_warn("Request body too large (%zu bytes) from connection %lu",
-                                content_length, conn->connection_id);
-                        return -1;
-                    }
+            /* Reject Transfer-Encoding (chunked, etc.) - this server does not
+             * support chunked transfer coding. If behind a reverse proxy,
+             * it should reassemble chunks and forward with Content-Length.
+             * A direct request with Transfer-Encoding is either a misconfigured
+             * client or a request smuggling attempt. */
+            if (memmem_nocase(conn->read_buffer, conn->header_end,
+                       "\r\nTransfer-Encoding", 19) != NULL) {
+                log_warn("Rejecting request with Transfer-Encoding header from connection %lu",
+                        conn->connection_id);
+                return -1;
+            }
 
-                    if (conn->bytes_read >= total_needed) {
-                        /* Have complete request including body */
-                        log_debug("Received complete request with body (%zu bytes) from connection %lu",
-                                 conn->bytes_read, conn->connection_id);
-                        return 1;
-                    }
+            if (cl_result != 0) {
+                /* No Content-Length (cl_result == -1), request is complete (GET/HEAD/etc.) */
+                log_debug("Received complete request (%zu bytes) from connection %lu",
+                         conn->bytes_read, conn->connection_id);
+                return 1;
+            }
 
-                    /* Need more bytes for body - keep reading */
-                } else {
-                    /* No Content-Length (cl_result == -1), request is complete (GET/HEAD/etc.) */
-                    log_debug("Received complete request (%zu bytes) from connection %lu",
-                             conn->bytes_read, conn->connection_id);
-                    return 1;
-                }
+            conn->total_needed = conn->header_end + content_length;
+
+            if (conn->total_needed > max_request_size) {
+                log_warn("Request body too large (%zu bytes) from connection %lu",
+                        content_length, conn->connection_id);
+                return -1;
             }
         }
+
+        if (conn->bytes_read >= conn->total_needed) {
+            /* Have complete request including body */
+            log_debug("Received complete request with body (%zu bytes) from connection %lu",
+                     conn->bytes_read, conn->connection_id);
+            return 1;
+        }
+
+        /* Need more bytes for body - keep reading */
     }
 }
 

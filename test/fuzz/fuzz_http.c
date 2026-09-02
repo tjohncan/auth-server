@@ -38,6 +38,25 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
 
     http_request_cleanup(&req);
 
+    /* The socket layer's resumable header-end scan (src/server/event_loop.c calls
+     * it once per recv). Driven with a resume offset derived from the input so
+     * in-range, boundary and out-of-range values all get explored — an out-of-
+     * range one is a caller bug that must degrade to a full scan rather than read
+     * past the buffer. Whatever it returns must point just past a real CRLFCRLF;
+     * it may legitimately differ from a full scan's answer when the buffer holds
+     * more than one, since resuming skips the earlier ones. */
+    {
+        size_t resume = size ? (size_t)data[0] * 64u : 0;
+        size_t found = http_find_header_end((const char *)data, size, resume);
+        if (found && (found < 4 || found > size ||
+                      memcmp(data + found - 4, "\r\n\r\n", 4) != 0)) {
+            abort();
+        }
+        if (http_find_header_end((const char *)data, size, 0) == 0 && found != 0) {
+            abort();   /* resuming found one where scanning everything did not */
+        }
+    }
+
     free(buf);
     return 0;
 }

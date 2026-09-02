@@ -135,6 +135,28 @@ const char *http_request_get_header(const HttpRequest *req, const char *name);
  */
 const char *http_request_get_client_ip(const HttpRequest *req, const char *socket_ip);
 
+/*
+ * http_find_header_end - Find the end of the header block, resumably
+ *
+ * Searches for CRLFCRLF and returns the offset just PAST it, or 0 if the header
+ * block is not terminated yet. 0 is unambiguous: a terminated block is at least
+ * four bytes, so a real answer is never 0.
+ *
+ * `already_scanned` is how many bytes were in the buffer the last time this
+ * returned 0. The search restarts three bytes before that rather than at that
+ * offset, because a CRLFCRLF can straddle the boundary between two reads — miss
+ * that and the request never completes and never errors, it just hangs until the
+ * idle timeout. Pass 0 to scan the whole buffer.
+ *
+ * Parameters:
+ *   buffer          - Bytes received so far
+ *   length          - How many of them are valid
+ *   already_scanned - Buffer length at the previous unsuccessful call
+ *
+ * Returns: offset just past the delimiter, or 0 if not found
+ */
+size_t http_find_header_end(const char *buffer, size_t length, size_t already_scanned);
+
 /* ============================================================================
  * HTTP Response - Build responses to send
  * ============================================================================ */
