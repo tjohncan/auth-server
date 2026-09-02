@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <assert.h>
 
 /* ============================================================================
@@ -198,6 +199,144 @@ void test_404(Router *router) {
  * Main
  * ============================================================================ */
 
+
+/* ============================================================================
+ * CORS
+ * ============================================================================ */
+
+static const char *header_value(const HttpResponse *resp, const char *name) {
+    for (int i = 0; i < resp->header_count; i++) {
+        if (strcasecmp(resp->headers[i].name, name) == 0) {
+            return resp->headers[i].value;
+        }
+    }
+    return NULL;
+}
+
+static HttpResponse *request(Router *router, const char *raw) {
+    char buf[512];
+    snprintf(buf, sizeof(buf), "%s", raw);
+    HttpRequest req = http_request_parse(buf, strlen(buf));
+    HttpResponse *resp = router_dispatch(router, &req);
+    http_request_cleanup(&req);
+    return resp;
+}
+
+/*
+ * Pin the set. Adding a fifth path has to fail here first, which forces somebody
+ * to look at the endpoint rather than discover it in production.
+ */
+void test_cors_set_is_pinned(void) {
+    printf("\n=== Test: CORS path set is pinned ===\n");
+
+    static const char *const expected[] = {
+        "/token",
+        "/revoke",
+        "/userinfo",
+        "/.well-known/jwks.json",
+    };
+    const int expected_count = (int)(sizeof(expected) / sizeof(expected[0]));
+
+    assert(CORS_PUBLIC_PATH_COUNT == expected_count);
+    for (int i = 0; i < expected_count; i++) {
+        assert(strcmp(CORS_PUBLIC_PATHS[i], expected[i]) == 0);
+    }
+
+    /* A pinned list alone would not catch a future cookie-authenticated endpoint
+       whose name nobody thought to add here, so keep a prefix check as a second
+       belt. Neither guard subsumes the other. */
+    static const char *const forbidden_prefixes[] = {
+        "/api/user", "/api/admin", "/api/rs", "/login",
+    };
+    for (int i = 0; i < CORS_PUBLIC_PATH_COUNT; i++) {
+        for (size_t p = 0; p < sizeof(forbidden_prefixes) / sizeof(forbidden_prefixes[0]); p++) {
+            assert(strncmp(CORS_PUBLIC_PATHS[i], forbidden_prefixes[p],
+                           strlen(forbidden_prefixes[p])) != 0);
+        }
+    }
+
+    assert(router_path_allows_cors("/token") == 1);
+    assert(router_path_allows_cors("/userinfo") == 1);
+    assert(router_path_allows_cors("/login") == 0);
+    assert(router_path_allows_cors("/api/user/profile") == 0);
+    assert(router_path_allows_cors("/authorize") == 0);
+    assert(router_path_allows_cors("/token/extra") == 0);   /* exact match only */
+    assert(router_path_allows_cors(NULL) == 0);
+
+    printf("✓ exactly 4 paths, none cookie-authenticated, exact match only\n");
+}
+
+void test_cors_header_on_public_paths(Router *router) {
+    printf("\n=== Test: CORS header only on the public paths ===\n");
+
+    HttpResponse *resp = request(router, "GET /userinfo HTTP/1.0\r\n\r\n");
+    assert(resp);
+    assert(header_value(resp, "Access-Control-Allow-Origin") != NULL);
+    assert(strcmp(header_value(resp, "Access-Control-Allow-Origin"), "*") == 0);
+    /* `*` is only safe because credentials are never allowed alongside it. */
+    assert(header_value(resp, "Access-Control-Allow-Credentials") == NULL);
+    http_response_free(resp);
+
+    resp = request(router, "GET /health HTTP/1.0\r\n\r\n");
+    assert(resp);
+    assert(header_value(resp, "Access-Control-Allow-Origin") == NULL);
+    http_response_free(resp);
+
+    /* A 404 on a CORS path still carries it — the browser has to be able to read
+       the error, which is the whole failure mode this item is about. */
+    resp = request(router, "POST /token HTTP/1.0\r\n\r\n");
+    assert(resp);
+    assert(header_value(resp, "Access-Control-Allow-Origin") != NULL);
+    http_response_free(resp);
+
+    printf("✓ header present on /userinfo and /token, absent on /health\n");
+    printf("✓ no Access-Control-Allow-Credentials anywhere\n");
+}
+
+void test_cors_preflight(Router *router) {
+    printf("\n=== Test: OPTIONS preflight ===\n");
+
+    HttpResponse *resp = request(router, "OPTIONS /userinfo HTTP/1.0\r\n\r\n");
+    assert(resp);
+    assert(resp->status_code == 204);
+    assert(resp->body == NULL || resp->body_length == 0);
+    assert(strcmp(header_value(resp, "Access-Control-Allow-Origin"), "*") == 0);
+    assert(strstr(header_value(resp, "Access-Control-Allow-Methods"), "GET") != NULL);
+    assert(strstr(header_value(resp, "Access-Control-Allow-Headers"), "Authorization") != NULL);
+    assert(strstr(header_value(resp, "Access-Control-Allow-Headers"), "Content-Type") != NULL);
+    assert(header_value(resp, "Access-Control-Allow-Credentials") == NULL);
+    http_response_free(resp);
+
+    /* Gated on the same array as the header, so a path outside it is still a 404. */
+    resp = request(router, "OPTIONS /login HTTP/1.0\r\n\r\n");
+    assert(resp);
+    assert(resp->status_code == 404);
+    assert(header_value(resp, "Access-Control-Allow-Origin") == NULL);
+    http_response_free(resp);
+
+    printf("✓ 204 with allow-methods and allow-headers on /userinfo\n");
+    printf("✓ 404 and no header for OPTIONS on a non-CORS path\n");
+}
+
+void test_cors_boot_validation(void) {
+    printf("\n=== Test: boot validation catches a missing route ===\n");
+
+    Router *empty = router_create();
+    assert(router_validate_cors_paths(empty) == CORS_PUBLIC_PATH_COUNT);
+    router_destroy(empty);
+
+    Router *full = router_create();
+    for (int i = 0; i < CORS_PUBLIC_PATH_COUNT; i++) {
+        router_add(full, HTTP_GET, CORS_PUBLIC_PATHS[i], health_handler);
+    }
+    assert(router_validate_cors_paths(full) == 0);
+    router_destroy(full);
+
+    assert(router_validate_cors_paths(NULL) == -1);
+
+    printf("✓ reports every unregistered CORS path, 0 when all present\n");
+}
+
 int main(void) {
     log_init(LOG_INFO);
     log_info("Router Test Suite");
@@ -206,6 +345,12 @@ int main(void) {
     printf("\n--- Setting up router ---\n");
     Router *router = router_create();
     router_add(router, HTTP_GET, "/health", health_handler);
+    router_add(router, HTTP_GET, "/userinfo", health_handler);
+    router_add(router, HTTP_POST, "/revoke", health_handler);
+    router_add(router, HTTP_GET, "/.well-known/jwks.json", health_handler);
+    /* /token is deliberately NOT registered here: a CORS path with no matching
+       route must still get the header on its 404, or the browser cannot read the
+       error either. */
 #if ROUTER_USE_PATH_PARAMS
     router_add(router, HTTP_GET, "/users/:id", get_user_handler);
     router_add(router, HTTP_GET, "/users/:user_id/posts/:post_id", get_post_handler);
@@ -215,6 +360,10 @@ int main(void) {
     /* Run tests */
     test_exact_match(router);
     test_404(router);
+    test_cors_set_is_pinned();
+    test_cors_header_on_public_paths(router);
+    test_cors_preflight(router);
+    test_cors_boot_validation();
 #if ROUTER_USE_PATH_PARAMS
     test_path_params(router);
     test_multiple_params(router);

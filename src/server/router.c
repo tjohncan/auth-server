@@ -413,12 +413,7 @@ void router_add(Router *router, HttpMethod method, const char *path, RouteHandle
     log_info("  %-7s %s", method_to_string(method), path);
 }
 
-HttpResponse *router_dispatch(Router *router, const HttpRequest *req) {
-    if (!router || !req) {
-        log_error("Invalid router_dispatch parameters");
-        return response_json_error(500, "Internal Server Error");
-    }
-
+static HttpResponse *dispatch_route(Router *router, const HttpRequest *req) {
     log_debug("Dispatching: %s %s", req->method_str, req->path);
 
     /* Step 1: Exact hash match */
@@ -559,6 +554,128 @@ HttpResponse *router_dispatch(Router *router, const HttpRequest *req) {
     /* No route matched */
     log_debug("No route matched for %s %s", req->method_str, req->path);
     return response_json_error(404, "Not Found");
+}
+
+/* ============================================================================
+ * CORS
+ * ============================================================================ */
+
+const char *const CORS_PUBLIC_PATHS[] = {
+    "/token",
+    "/revoke",
+    "/userinfo",
+    "/.well-known/jwks.json",
+};
+
+const int CORS_PUBLIC_PATH_COUNT =
+    (int)(sizeof(CORS_PUBLIC_PATHS) / sizeof(CORS_PUBLIC_PATHS[0]));
+
+int router_path_allows_cors(const char *path) {
+    if (!path) {
+        return 0;
+    }
+
+    for (int i = 0; i < CORS_PUBLIC_PATH_COUNT; i++) {
+        if (strcmp(path, CORS_PUBLIC_PATHS[i]) == 0) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+/*
+ * Is this path registered for any method?
+ */
+static bool router_has_path(const Router *router, const char *path) {
+    RouteNode *node = router->buckets[hash_path(path)];
+
+    while (node) {
+        if (strcmp(node->route.path_pattern, path) == 0) {
+            return true;
+        }
+        node = node->next;
+    }
+
+    return false;
+}
+
+int router_validate_cors_paths(const Router *router) {
+    if (!router) {
+        return -1;
+    }
+
+    int missing = 0;
+    for (int i = 0; i < CORS_PUBLIC_PATH_COUNT; i++) {
+        if (!router_has_path(router, CORS_PUBLIC_PATHS[i])) {
+            log_error("CORS path '%s' is not a registered route", CORS_PUBLIC_PATHS[i]);
+            missing++;
+        }
+    }
+
+    return missing;
+}
+
+/*
+ * Answer a CORS preflight
+ *
+ * Only /userinfo actually preflights — it sends Authorization, which is not on
+ * the CORS safelist. /token and /revoke are form-encoded POSTs, which are simple
+ * requests the browser sends without asking. All four are answered anyway, from
+ * the same array, so the cross-origin surface has exactly one definition.
+ *
+ * No Access-Control-Max-Age: browsers then re-ask often, which is the cheap and
+ * boring direction. A deployer who wants preflights cached can add it at the
+ * edge without touching this.
+ */
+static HttpResponse *cors_preflight(const char *path) {
+    if (!router_path_allows_cors(path)) {
+        log_debug("OPTIONS for non-CORS path %s", path ? path : "(null)");
+        return response_json_error(404, "Not Found");
+    }
+
+    HttpResponse *resp = http_response_new(204);
+    if (!resp) {
+        log_error("Failed to allocate preflight response");
+        return response_json_error(500, "Internal Server Error");
+    }
+
+    http_response_set_header(resp, "Access-Control-Allow-Origin", "*");
+    http_response_set_header(resp, "Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    http_response_set_header(resp, "Access-Control-Allow-Headers", "Authorization, Content-Type");
+
+    return resp;
+}
+
+HttpResponse *router_dispatch(Router *router, const HttpRequest *req) {
+    if (!router || !req) {
+        log_error("Invalid router_dispatch parameters");
+        return response_json_error(500, "Internal Server Error");
+    }
+
+    /* Nothing registers OPTIONS, so a preflight would otherwise 404 — and a 404
+       without CORS headers is unreadable to the browser regardless of what it
+       says. Gated on the same array as the header below, never a second list. */
+    if (req->method == HTTP_OPTIONS) {
+        return cors_preflight(req->path);
+    }
+
+    HttpResponse *resp = dispatch_route(router, req);
+
+    /* Attached per path, never per client: the question is whether a browser at
+       some origin may read this response, which is a property of the endpoint.
+       Branching on the caller would make the same URL sometimes carry the header
+       and sometimes not, needing Vary to cache correctly, and would buy nothing
+       since a server-side client ignores it either way.
+
+       Deliberately no Access-Control-Allow-Credentials. `*` plus credentials is
+       refused by the Fetch standard, and that refusal is the entire reason `*`
+       is safe here. */
+    if (resp && router_path_allows_cors(req->path)) {
+        http_response_set_header(resp, "Access-Control-Allow-Origin", "*");
+    }
+
+    return resp;
 }
 
 /* ============================================================================

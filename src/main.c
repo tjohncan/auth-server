@@ -427,6 +427,16 @@ int main(void) {
     router_add(router, HTTP_POST, "/api/rs/users/lookup", rs_lookup_user_handler);
     router_add(router, HTTP_POST, "/api/rs/client-users/list", rs_list_client_users_handler);
 
+    /* Every CORS path must be a route, or the header silently never appears */
+    if (router_validate_cors_paths(router) != 0) {
+        log_error("CORS path set does not match the registered routes");
+        router_destroy(router);
+        db_pool_shutdown();
+        encrypt_cleanup();
+        config_free(config);
+        return 1;
+    }
+
     /* Register static files from ./static/ directory */
     register_static_files(router, config);
 
