@@ -39,6 +39,9 @@
 #define JWKS_CACHE_CONTROL_SECONDS     1800  /* 30 minutes — HTTP Cache-Control max-age */
 #define JWKS_ACTIVATION_DELAY_SECONDS  2700  /* 45 minutes — sign with prior key until elapsed */
 
+/* Longest kid this server emits: a decimal time_t, its sign and a terminator */
+#define SIGNING_KEY_KID_MAX 32
+
 /*
  * Signing key types
  */
@@ -122,6 +125,35 @@ void signing_key_free(signing_key_t *key);
  * Returns: PEM private key string to use for signing (do not free)
  */
 const char *signing_key_active_private(const signing_key_t *key);
+
+/*
+ * Format a key's generation timestamp as its key ID
+ *
+ * One rule shared by the JWKS document and the token header, so a token can
+ * never name a key by a scheme the published key set does not use.
+ *
+ * Returns: 0 on success, -1 if the buffer is too small
+ */
+int signing_key_format_kid(time_t generated_at, char *out_kid, size_t kid_len);
+
+/*
+ * Get the key ID naming whichever key signing_key_active_private() returned
+ *
+ * Pass back the pointer that function gave you. It is matched against the key
+ * set rather than re-deciding current-versus-prior, so the header cannot name a
+ * key other than the one that signed — including across the instant the
+ * activation delay elapses, where two separate evaluations could disagree.
+ *
+ * Parameters:
+ *   key            - Signing key structure (must be SIGNING_KEY_ACCESS_TOKEN type)
+ *   active_private - The PEM pointer returned by signing_key_active_private()
+ *   out_kid        - Output buffer, SIGNING_KEY_KID_MAX is always enough
+ *   kid_len        - Size of the output buffer
+ *
+ * Returns: 0 on success, -1 on error
+ */
+int signing_key_active_kid(const signing_key_t *key, const char *active_private,
+                           char *out_kid, size_t kid_len);
 
 /*
  * Release this thread's cached signing keys

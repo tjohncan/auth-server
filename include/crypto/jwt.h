@@ -121,6 +121,10 @@ int jwt_validate(const char *token,
  * Parameters:
  *   claims          - JWT claims (sub, aud, exp, scope, client_id, etc.)
  *   private_key_pem - Private key in PEM format (ECDSA P-256)
+ *   kid             - Key ID naming this key in the published JWKS, emitted in
+ *                     the header so a verifier holding more than one key can
+ *                     select rather than guess. Must be the id of the key
+ *                     private_key_pem belongs to; see signing_key_active_kid().
  *   out_token       - Output buffer for JWT string
  *   token_len       - Size of output buffer (must be >= JWT_MAX_TOKEN_LENGTH)
  *
@@ -134,10 +138,11 @@ int jwt_validate(const char *token,
  *   snprintf(claims.scope, sizeof(claims.scope), "read write");
  *
  *   char token[JWT_MAX_TOKEN_LENGTH];
- *   jwt_encode_es256(&claims, private_key_pem, token, sizeof(token));
+ *   jwt_encode_es256(&claims, private_key_pem, kid, token, sizeof(token));
  */
 int jwt_encode_es256(const jwt_claims_t *claims,
                      const char *private_key_pem,
+                     const char *kid,
                      char *out_token, size_t token_len);
 
 /*

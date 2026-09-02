@@ -572,7 +572,10 @@ int oauth_exchange_authorization_code(db_handle_t *db,
         return -1;
     }
 
-    if (jwt_encode_es256(&claims, signing_key_active_private(signing_key),
+    const char *active_private = signing_key_active_private(signing_key);
+    char kid[SIGNING_KEY_KID_MAX];
+    if (signing_key_active_kid(signing_key, active_private, kid, sizeof(kid)) != 0 ||
+        jwt_encode_es256(&claims, active_private, kid,
                          access_token, JWT_MAX_TOKEN_LENGTH) != 0) {
         OPENSSL_cleanse(access_token, JWT_MAX_TOKEN_LENGTH); free(access_token);
         signing_key_free(signing_key);
@@ -842,7 +845,10 @@ int oauth_refresh_access_token(db_handle_t *db,
         return -1;
     }
 
-    if (jwt_encode_es256(&claims, signing_key_active_private(signing_key),
+    const char *active_private = signing_key_active_private(signing_key);
+    char kid[SIGNING_KEY_KID_MAX];
+    if (signing_key_active_kid(signing_key, active_private, kid, sizeof(kid)) != 0 ||
+        jwt_encode_es256(&claims, active_private, kid,
                          access_token, JWT_MAX_TOKEN_LENGTH) != 0) {
         OPENSSL_cleanse(access_token, JWT_MAX_TOKEN_LENGTH); free(access_token);
         signing_key_free(signing_key);
@@ -984,7 +990,10 @@ int oauth_client_credentials(db_handle_t *db,
         return -1;
     }
 
-    if (jwt_encode_es256(&claims, signing_key_active_private(signing_key),
+    const char *active_private = signing_key_active_private(signing_key);
+    char kid[SIGNING_KEY_KID_MAX];
+    if (signing_key_active_kid(signing_key, active_private, kid, sizeof(kid)) != 0 ||
+        jwt_encode_es256(&claims, active_private, kid,
                          access_token, JWT_MAX_TOKEN_LENGTH) != 0) {
         OPENSSL_cleanse(access_token, JWT_MAX_TOKEN_LENGTH); free(access_token);
         signing_key_free(signing_key);

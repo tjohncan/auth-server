@@ -815,6 +815,46 @@ const char *signing_key_active_private(const signing_key_t *key) {
     return key->current_private_key;
 }
 
+int signing_key_format_kid(time_t generated_at, char *out_kid, size_t kid_len) {
+    if (!out_kid || kid_len == 0) {
+        return -1;
+    }
+
+    int n = snprintf(out_kid, kid_len, "%lld", (long long)generated_at);
+    if (n < 0 || (size_t)n >= kid_len) {
+        log_error("Key ID buffer too small");
+        return -1;
+    }
+
+    return 0;
+}
+
+int signing_key_active_kid(const signing_key_t *key, const char *active_private,
+                           char *out_kid, size_t kid_len) {
+    if (!key || key->type != SIGNING_KEY_ACCESS_TOKEN || !active_private) {
+        return -1;
+    }
+
+    /*
+     * Matched by pointer against the key set rather than by re-running the
+     * activation-delay condition. Two evaluations of that condition would agree
+     * everywhere except the instant it elapses, and naming the wrong key is
+     * worse than naming none: a verifier would confidently select a key that did
+     * not sign, where with no kid it would at least have to try both. This also
+     * picks up the first-run case for free, since active_private is then the
+     * current key and prior_private_key is NULL.
+     */
+    if (active_private == key->prior_private_key) {
+        return signing_key_format_kid(key->prior_generated_at, out_kid, kid_len);
+    }
+    if (active_private == key->current_private_key) {
+        return signing_key_format_kid(key->current_generated_at, out_kid, kid_len);
+    }
+
+    log_error("Signing key does not belong to this key set");
+    return -1;
+}
+
 void signing_key_thread_cleanup(void) {
     for (int i = 0; i < 2; i++) {
         cache_invalidate(&g_key_cache[i]);

@@ -1105,9 +1105,15 @@ HttpResponse *jwks_handler(const HttpRequest *req, const RouteParams *params) {
         return response_json_error(500, "Internal server error");
     }
 
-    /* Build kid (key ID) from timestamp */
-    char current_kid[32];
-    snprintf(current_kid, sizeof(current_kid), "%lld", (long long)key->current_generated_at);
+    /* Build kid (key ID) from timestamp — the same helper the token header uses,
+       so the two can never name the same key differently */
+    char current_kid[SIGNING_KEY_KID_MAX];
+    if (signing_key_format_kid(key->current_generated_at,
+                               current_kid, sizeof(current_kid)) != 0) {
+        signing_key_free(key);
+        log_error("Failed to format current key id");
+        return response_json_error(500, "Internal server error");
+    }
 
     /* Start building JWKS JSON */
     char jwks[4096];
@@ -1129,13 +1135,15 @@ HttpResponse *jwks_handler(const HttpRequest *req, const RouteParams *params) {
         if (ec_public_key_to_jwk(key->prior_public_key,
                                   prior_x, sizeof(prior_x),
                                   prior_y, sizeof(prior_y)) == 0) {
-            char prior_kid[32];
-            snprintf(prior_kid, sizeof(prior_kid), "%lld", (long long)key->prior_generated_at);
+            char prior_kid[SIGNING_KEY_KID_MAX];
 
             /* On truncation str_appendf leaves offset and the buffer untouched, so
              * this degrades to the same outcome as the conversion failure below:
-             * a valid JWKS carrying the current key only. */
-            if (str_appendf(jwks, sizeof(jwks), &offset,
+             * a valid JWKS carrying the current key only. Formatting the kid can
+             * only fail the same way, so it joins the same guard. */
+            if (signing_key_format_kid(key->prior_generated_at,
+                                       prior_kid, sizeof(prior_kid)) != 0 ||
+                str_appendf(jwks, sizeof(jwks), &offset,
                 ",{\"kty\":\"EC\",\"use\":\"sig\",\"crv\":\"P-256\","
                 "\"kid\":\"%s\",\"x\":\"%s\",\"y\":\"%s\",\"alg\":\"ES256\"}",
                 prior_kid, prior_x, prior_y) != 0) {
