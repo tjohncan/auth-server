@@ -408,6 +408,12 @@ create table security.organization_admin (
 , constraint fk_organization_admin_user_account foreign key (user_account_pin) references security.user_account(pin)
 );
 
+-- org_list_all() filters this table by user alone ("the organizations I
+-- administer"). uix_organization_admin leads with organization_pin, so the
+-- leftmost-prefix rule means it cannot serve that query and the planner scans.
+create index idx_organization_admin_user
+  on security.organization_admin(user_account_pin);
+
 -- ============================================================================
 -- SESSION - Browser sessions, authorization flows, and tokens
 -- ============================================================================
