@@ -342,6 +342,23 @@ void test_cors_boot_validation(void) {
     assert(router_validate_cors_paths(NULL) == -1);
 
     printf("✓ reports every unregistered CORS path, 0 when all present\n");
+
+    /* An OPTIONS route would never be dispatched — router_dispatch answers
+     * OPTIONS from the CORS array and returns before consulting the table — so
+     * registration refuses it rather than letting it look registered. */
+    Router *opts = router_create();
+    router_add(opts, HTTP_OPTIONS, "/whatever", health_handler);
+    assert(router_validate_cors_paths(opts) == CORS_PUBLIC_PATH_COUNT);
+
+    HttpRequest req = http_request_parse((char[]){"OPTIONS /whatever HTTP/1.0\r\n\r\n"},
+                                         strlen("OPTIONS /whatever HTTP/1.0\r\n\r\n"));
+    HttpResponse *resp = router_dispatch(opts, &req);
+    assert(resp && resp->status_code == 404);
+    http_response_free(resp);
+    http_request_cleanup(&req);
+    router_destroy(opts);
+
+    printf("✓ registering an OPTIONS route is refused, not silently shadowed\n");
 }
 
 

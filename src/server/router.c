@@ -326,6 +326,18 @@ void router_add(Router *router, HttpMethod method, const char *path, RouteHandle
         return;
     }
 
+    /* router_dispatch answers OPTIONS centrally, from CORS_PUBLIC_PATHS, and
+       returns before consulting the table. A route registered here for OPTIONS
+       would therefore look registered and never run — the same silent-no-op that
+       router_validate_cors_paths() exists to prevent, pointed the other way.
+       Refuse it loudly instead. If OPTIONS routing is ever genuinely wanted, the
+       preflight branch in router_dispatch is what has to change. */
+    if (method == HTTP_OPTIONS) {
+        log_error("OPTIONS is answered by the CORS preflight path and is not "
+                  "dispatched from the route table; refusing to register %s", path);
+        return;
+    }
+
 #if ROUTER_USE_PATH_PARAMS
     /* Parameterized routes go into a separate list, not the hash table */
     if (path_has_params(path)) {
@@ -587,6 +599,13 @@ int router_path_allows_cors(const char *path) {
 
 /*
  * Is this path registered for any method?
+ *
+ * Walks the hash table only, never param_routes. Every CORS path is a literal
+ * today so this is exact, but a parameterized one would be reported missing and
+ * router_validate_cors_paths() would then refuse to boot on a correct
+ * configuration — a guard failing closed against valid input. Whoever adds a
+ * parameterized path to CORS_PUBLIC_PATHS has to teach this function about it
+ * first.
  */
 static bool router_has_path(const Router *router, const char *path) {
     RouteNode *node = router->buckets[hash_path(path)];

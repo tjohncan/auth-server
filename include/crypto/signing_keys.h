@@ -56,6 +56,12 @@ typedef enum {
  * Contains either HMAC secrets OR ECDSA keypairs (not both).
  * Check 'type' field to determine which fields are populated.
  */
+/*
+ * Every field here is copied by hand in clone_signing_key() (signing_keys.c),
+ * which is what the per-worker cache hands to callers. A field added below and
+ * not added there is dropped silently, and only on a cache HIT — so it would
+ * pass every test that misses the cache and fail once a worker is warm.
+ */
 typedef struct {
     signing_key_type_t type;
 
