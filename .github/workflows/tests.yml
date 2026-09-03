@@ -1,16 +1,18 @@
 name: tests
 
-# Pull requests only, plus a manual button.
+# Pull requests, pushes to main, and a manual button.
 on:
   pull_request:
+  push:
+    branches: [main]
   workflow_dispatch:
 
-# A new push to the same PR cancels the in-flight run.
+# A new push to the same PR cancels the in-flight run; runs on main are left to finish.
 concurrency:
   group: tests-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# Read-only token: this job builds and tests, it never writes to the repo.
+# Read-only token: this job builds and tests but never writes to the repo.
 permissions:
   contents: read
 
