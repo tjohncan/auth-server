@@ -71,6 +71,55 @@ jobs:
           fi
           echo "No warnings in project code."
 
+
+  # `make test` runs the unit suites uninstrumented and only replays the fuzz corpus
+  # under sanitizers. This job rebuilds three of the five with ASan+UBSan so the
+  # arithmetic that review is weakest at — the resumable header-end scan's boundary
+  # cases, and the routing added for CORS and HEAD — has a standing net under it
+  # rather than a hand check with a shelf life.
+  #
+  # Three, not five: none of these opens a database, so there is no live-database
+  # hazard and no config to provide. See the test-sanitized target for why db and
+  # crypto are left out. Runs in parallel with the other two jobs; measured at
+  # about 1m35s, against a 10-minute cap.
+  sanitized-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libssl-dev libargon2-dev unzip
+          gcc --version
+
+      # test-http and test-router link $(DB_SRCS) and the amalgamation, so this job
+      # needs it too even though none of the three suites opens a database.
+      - name: Vendor the SQLite amalgamation
+        run: |
+          mkdir -p vendor/sqlite
+          curl -fsSL -o sqlite3.zip https://www.sqlite.org/2026/sqlite-amalgamation-3510200.zip
+          unzip -jo sqlite3.zip "*/sqlite3.c" "*/sqlite3.h" -d vendor/sqlite
+          rm sqlite3.zip
+
+      # No auth.conf step: test-str, test-http and test-router never call
+      # config_load, which is the same reason they never touch a database.
+      - name: Build and run the sanitized suites
+        run: |
+          set -o pipefail
+          make test-sanitized 2>&1 | tee /tmp/san.log
+
+      # A sanitizer failure aborts the process, so a clean exit above is the pass.
+      # This catches the other direction: a build that emitted warnings on the way.
+      - name: Fail on compiler warnings in project code
+        run: |
+          if grep -v 'vendor/sqlite' /tmp/san.log | grep -E -A4 ':[0-9]+:[0-9]+: warning:'; then
+            echo "::error::compiler emitted warnings in the sanitized build"
+            exit 1
+          fi
+          echo "No warnings in project code."
+
   # The backend is a compile-time choice, so half the #ifdefs in src/db/ are invisible
   # to the job above. This one compiles the other half. It deliberately does not run
   # tests: those need a live PostgreSQL server, and the risk this guards is a build

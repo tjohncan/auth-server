@@ -161,6 +161,35 @@ test: test-str test-http test-router test-db test-crypto
 	./test-str && ./test-http && ./test-router && ./test-db && ./test-crypto
 	@$(MAKE) --no-print-directory fuzz-regress
 
+
+# Three of the five suites, rebuilt under ASan+UBSan.
+#
+# `make test` already replays the fuzz corpus under sanitizers, and stops there:
+# the unit suites themselves build without them. That leaves the arithmetic most
+# worth watching uninstrumented — the resumable header-end scan's boundary cases
+# and the routing added for CORS and HEAD — which is exactly the code where an
+# off-by-one is likeliest and review is weakest.
+#
+# str, http and router, deliberately not all five. None of the three opens a
+# database. test-db is left out because it writes to a scratch file and its value
+# is integration coverage rather than memory safety, and test-crypto because
+# Argon2 at 64 MiB under ASan costs real time for no arithmetic payoff.
+#
+# CFLAGS is assigned with `=`, so overriding it on the command line would replace
+# it wholesale and drop -Iinclude; appending through a target-specific variable is
+# the shape that works, the same one `debug:` uses. ASan is incompatible with
+# _FORTIFY_SOURCE, so SECURITY_FLAGS is replaced rather than extended — again the
+# same substitution `debug:` makes.
+test-sanitized: CFLAGS += -fsanitize=address,undefined -fno-sanitize-recover=undefined \
+                          -fno-omit-frame-pointer -g -O1
+test-sanitized: SECURITY_FLAGS = -fstack-protector-strong -fPIE -Wformat -Wformat-security
+test-sanitized: test-str test-http test-router
+	@echo "Running str, http and router under ASan+UBSan..."
+	ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 ./test-str
+	ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 ./test-http
+	ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 ./test-router
+	@echo "Sanitized suites clean."
+
 # ============================================================================
 # Fuzzing and sanitizers (see test/fuzz/README.md)
 # ============================================================================
@@ -238,4 +267,4 @@ help:
 	@echo "  make sanitize       - Build the whole server with ASan+UBSan to drive by hand"
 
 .PHONY: all debug release clean help test test-str test-http test-router test-db test-crypto test-email \
-        fuzz fuzz-regress sanitize
+        test-sanitized fuzz fuzz-regress sanitize

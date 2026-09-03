@@ -4,8 +4,133 @@
 #include "db/db_sql.h"
 #include "db/init/db_init.h"
 #include "db/init/db_history.h"
+#include "crypto/signing_keys.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+/*
+ * Signing-key cache — the claim is that it is VALIDATED on every use, never
+ * trusted for an interval.
+ *
+ * Runs against its own scratch database, deliberately not the handle above.
+ * The third case deletes the signing-key row, and this suite connects to
+ * config->db_path — which auth.conf.example ships as ./data/auth.db, which CI
+ * copies and every new contributor copies. Reusing that handle would make
+ * `make test` delete the live access-token signing key on a default setup. It
+ * would regenerate immediately, with no prior key, and every access token in
+ * circulation would stop verifying.
+ *
+ * Returns 0 on success.
+ */
+static int test_signing_key_cache(const config_t *config) {
+    const char *path = "./data/test_signing_cache.db";
+    const char *suffixes[] = {"", "-wal", "-shm"};
+    char scratch[128];
+
+    /* Remove the WAL and shared-memory files too. Leaving a stale -wal beside a
+       deleted database makes SQLite replay it into the new one, which silently
+       resurrects the very rows this test is about to assert are absent. */
+    for (size_t i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); i++) {
+        snprintf(scratch, sizeof(scratch), "%s%s", path, suffixes[i]);
+        unlink(scratch);
+    }
+
+    log_info("\nSigning-key cache tests (scratch database: %s)", path);
+
+    db_handle_t *sdb = NULL;
+    if (db_connect(&sdb, DB_TYPE_SQLITE, path) != 0) {
+        log_error("Signing-key cache: failed to open scratch database");
+        return 1;
+    }
+
+    const char *owner_role = config->db_owner_role ? config->db_owner_role : config->db_user;
+    if (db_init_schema(sdb, DB_TYPE_SQLITE, config->schema_dir, owner_role) < 0) {
+        log_error("Signing-key cache: failed to initialize scratch schema");
+        db_disconnect(sdb);
+        return 1;
+    }
+
+    signing_key_thread_cleanup();  /* start from an empty cache */
+
+    int failed = 1;
+    signing_key_t *first = NULL, *second = NULL, *third = NULL, *fourth = NULL;
+
+    /* 1. Two calls agree, so the cache is actually being consulted. */
+    if (signing_key_get_or_rotate(sdb, SIGNING_KEY_ACCESS_TOKEN, &first) != 0 || !first ||
+        signing_key_get_or_rotate(sdb, SIGNING_KEY_ACCESS_TOKEN, &second) != 0 || !second) {
+        log_error("Signing-key cache: could not obtain a key");
+        goto done;
+    }
+    if (!first->current_private_key || !second->current_private_key ||
+        strcmp(first->current_private_key, second->current_private_key) != 0) {
+        log_error("Signing-key cache: two calls returned different material");
+        goto done;
+    }
+    log_info("  repeat call returns the same key material (OK)");
+
+    /*
+     * 2. The load-bearing one. Move current_generated_at out of band and the very
+     * next call must observe it. This is the whole design: a cache validated
+     * against the row on every use rather than trusted for a period. If someone
+     * later "optimises" the validation SELECT away, every other assertion here
+     * still passes and this one does not.
+     */
+    if (db_execute_direct(sdb,
+            "UPDATE access_token_signing SET current_generated_at = "
+            "datetime(current_generated_at, '-1 second') WHERE singleton = " BOOL_TRUE) != 0) {
+        log_error("Signing-key cache: could not age the row");
+        goto done;
+    }
+    if (signing_key_get_or_rotate(sdb, SIGNING_KEY_ACCESS_TOKEN, &third) != 0 || !third) {
+        log_error("Signing-key cache: call after out-of-band update failed");
+        goto done;
+    }
+    if (third->current_generated_at != first->current_generated_at - 1) {
+        log_error("Signing-key cache: stale hit — expected generated_at %lld, got %lld",
+                  (long long)(first->current_generated_at - 1),
+                  (long long)third->current_generated_at);
+        goto done;
+    }
+    log_info("  out-of-band timestamp change observed on the next call (OK)");
+
+    /* 3. No row at all must route to the reload path, not serve a stale copy. */
+    if (db_execute_direct(sdb, "DELETE FROM access_token_signing") != 0) {
+        log_error("Signing-key cache: could not delete the row");
+        goto done;
+    }
+    if (signing_key_get_or_rotate(sdb, SIGNING_KEY_ACCESS_TOKEN, &fourth) != 0 || !fourth) {
+        log_error("Signing-key cache: did not regenerate after the row was deleted");
+        goto done;
+    }
+    if (!fourth->current_private_key ||
+        strcmp(fourth->current_private_key, first->current_private_key) == 0) {
+        log_error("Signing-key cache: served the deleted key");
+        goto done;
+    }
+    log_info("  deleted row regenerates rather than serving a stale key (OK)");
+
+    failed = 0;
+
+done:
+    signing_key_free(first);
+    signing_key_free(second);
+    signing_key_free(third);
+    signing_key_free(fourth);
+    signing_key_thread_cleanup();
+    db_disconnect(sdb);
+
+    for (size_t i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); i++) {
+        snprintf(scratch, sizeof(scratch), "%s%s", path, suffixes[i]);
+        unlink(scratch);
+    }
+
+    if (!failed) {
+        log_info("Signing-key cache tests passed!");
+    }
+    return failed;
+}
 
 int main(void) {
     log_init(LOG_INFO);
@@ -264,6 +389,11 @@ int main(void) {
     /* Disconnect */
     log_info("\nDisconnecting...");
     db_disconnect(db);
+
+    if (test_signing_key_cache(config) != 0) {
+        config_free(config);
+        return 1;
+    }
 
     /* Cleanup */
     config_free(config);
