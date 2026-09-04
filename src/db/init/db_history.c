@@ -13,7 +13,19 @@
 #define MAX_COLUMN_DEF_SIZE 1024
 #define MAX_TABLE_NAME_SIZE 128
 
-/* Safety margin for buffer overflow checks (enough for final statement + safety) */
+/* Safety margin for buffer overflow checks.
+ *
+ * The column loops below check every tenth iteration, so this has to cover ten
+ * column lines at once. Each is at most quoted_col (MAX_TABLE_NAME_SIZE * 2 =
+ * 256) plus type (MAX_TABLE_NAME_SIZE = 128) plus separators, so 386 bytes; ten
+ * of those is 3,860 against a margin of 4,096. Two hundred and thirty-six bytes
+ * of slack.
+ *
+ * Written down because it is arithmetic and not a rule of thumb, and because the
+ * slack is thin enough to lose by accident: doubling MAX_TABLE_NAME_SIZE to 256
+ * takes the worst case to 7,700 and this margin stops covering it. Whoever does
+ * that has to widen this in the same edit, or check every fifth iteration.
+ */
 #define DDL_BUFFER_SAFETY_MARGIN 4096
 
 /*
