@@ -90,6 +90,45 @@ void router_add(Router *router, HttpMethod method, const char *path, RouteHandle
 HttpResponse *router_dispatch(Router *router, const HttpRequest *req);
 
 /* ============================================================================
+ * CORS
+ * ============================================================================ */
+
+/*
+ * The paths a browser on another origin may read a response from
+ *
+ * This array is the entire cross-origin surface. It is deliberately a set of
+ * paths rather than a helper a handler could call, because a handler that can
+ * opt itself in is one plausible line away from being added to a
+ * cookie-authenticated endpoint. Adding an endpoint here means editing one
+ * greppable array and the test that pins it.
+ *
+ * All four authenticate by PKCE, by bearer token, or by a client secret in the
+ * request body. None reads a cookie, which is the thing `*` would be dangerous
+ * with — and the Fetch standard refuses a `*` response to any request made with
+ * credentials, so this cannot expose cookie-authenticated data even by mistake.
+ */
+extern const char *const CORS_PUBLIC_PATHS[];
+extern const int CORS_PUBLIC_PATH_COUNT;
+
+/*
+ * Is this exact path in the CORS set?
+ *
+ * Returns: 1 if it is, 0 otherwise
+ */
+int router_path_allows_cors(const char *path);
+
+/*
+ * Check every CORS path is a registered route
+ *
+ * Call once after registration. A typo in CORS_PUBLIC_PATHS otherwise fails
+ * open into silently sending no header, which presents as "the browser client
+ * still does not work" and costs an afternoon to trace back to here.
+ *
+ * Returns: 0 if all are registered, otherwise how many are missing (each logged)
+ */
+int router_validate_cors_paths(const Router *router);
+
+/* ============================================================================
  * Route Parameters API
  * ============================================================================ */
 

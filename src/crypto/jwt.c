@@ -414,9 +414,6 @@ int jwt_validate(const char *token,
  * ES256 (ECDSA P-256) JWT Implementation
  * ============================================================================ */
 
-/* Fixed JWT header for ES256 */
-#define JWT_HEADER_ES256 "{\"alg\":\"ES256\",\"typ\":\"JWT\"}"
-
 /*
  * Load private key from PEM string
  */
@@ -658,10 +655,21 @@ static int ecdsa_verify(EVP_PKEY *pkey, const unsigned char *data, size_t data_l
 
 int jwt_encode_es256(const jwt_claims_t *claims,
                      const char *private_key_pem,
+                     const char *kid,
                      char *out_token, size_t token_len) {
-    if (!claims || !private_key_pem || !out_token) {
+    if (!claims || !private_key_pem || !kid || !out_token) {
         log_error("Invalid arguments to jwt_encode_es256");
         return -1;
+    }
+
+    /* The kid is interpolated into a signed JSON header unescaped. Its only
+       producer formats an integer, so refuse anything that could not appear in a
+       JSON string rather than mint a token whose header does not parse. */
+    for (const char *c = kid; *c; c++) {
+        if (*c == '"' || *c == '\\' || (unsigned char)*c < 0x20) {
+            log_error("Invalid character in JWT key id");
+            return -1;
+        }
     }
 
     if (token_len < JWT_MAX_TOKEN_LENGTH) {
@@ -681,10 +689,21 @@ int jwt_encode_es256(const jwt_claims_t *claims,
         return -1;
     }
 
+    /* Build the header. Naming the signing key is what lets a verifier holding a
+       key set with more than one entry pick one; several stock libraries refuse
+       to guess and fail outright when the header omits it. */
+    char header_json[128];
+    int header_len = snprintf(header_json, sizeof(header_json),
+                              "{\"alg\":\"ES256\",\"typ\":\"JWT\",\"kid\":\"%s\"}", kid);
+    if (header_len < 0 || (size_t)header_len >= sizeof(header_json)) {
+        log_error("JWT header buffer overflow");
+        return -1;
+    }
+
     /* Base64url encode header */
     char header_b64[256];
     size_t header_b64_len = crypto_base64url_encode(
-        (unsigned char *)JWT_HEADER_ES256, strlen(JWT_HEADER_ES256),
+        (unsigned char *)header_json, (size_t)header_len,
         header_b64, sizeof(header_b64));
     if (header_b64_len == 0) {
         log_error("Failed to encode JWT header");

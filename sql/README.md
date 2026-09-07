@@ -7,6 +7,14 @@ OAuth2 authentication server with enterprise SSO, MFA, and passwordless login su
 - `postgresql/schema.sql` - PostgreSQL 14+ implementation
 - `postgresql/setup_reference.sql` - PostgreSQL prerequisite setup and optional hardening
 
+## Applying Schema Changes to an Existing Database
+
+**This project has no migration mechanism.** `db_init_schema()` checks whether the schema already
+exists and returns early when it does, so a database created by an earlier version never receives
+DDL added to these files afterwards. New deployments get the current schema;
+existing ones keep whatever they were created with.
+Any "upgrades" need to be applied by hand; `git log -- sql/` is the record of what changed.
+
 ## Overview
 
 This schema supports:

@@ -487,8 +487,10 @@ vendor/
 
 **Concurrency:**
 - Designed to handle high-concurrency load
-- Linear scaling with CPU cores
+- Linear scaling with CPU cores for parsing, routing and serialization
 - No context switching within event loop
+- Password verification and contended database writes are the exceptions — see
+  [Deliberate Tradeoffs](#deliberate-tradeoffs)
 
 **Memory:**
 - ~4KB per connection (initial buffer)
@@ -634,6 +636,37 @@ single request (HTTP/1.0, no keep-alive), so there is no reused connection to sm
 This rejection is narrower and is header-interpretation hygiene: it removes the divergence
 between a front-end proxy that might fold or tolerate a malformed line and an origin that would
 otherwise ignore it. No legitimate client sends such a line, so failing closed costs nothing.
+
+**Handlers run inside the event loop, so the expensive requests do not scale with cores.**
+Parsing, routing and serialization scale the way Performance Characteristics describes.
+Password verification does not. Argon2id runs at 64 MiB (`ARGON2_MEMORY_COST`) with the
+iteration count drawn from `secret_hash_min_iterations`..`max_iterations`, shipped as 4 —
+call it 80–200 ms of CPU per verification, depending on the machine. Handlers execute
+synchronously on the worker that accepted the connection, so for that interval the worker's
+entire `epoll` loop is stopped and every other connection it holds waits, including static
+files and `/health`. The practical ceiling is single-digit logins per second per core, and it
+does not move by adding connections.
+
+The parameters are not the thing to weaken.
+64 MiB and four passes are chosen to make offline cracking expensive;
+halving them to buy login throughput trades a real defence.
+Transient memory follows from the same figure — 64 MiB per password hash in flight,
+so **64 MiB × worker count** is the worst case to size a host against,
+and worker count is auto-detected from cores unless `server_workers` says otherwise.
+
+The same property arrives from a second direction at the database.
+A transaction that wants SQLite's write lock while another holds it
+retries internally for `sqlite3_busy_timeout` (2200 ms) before giving up,
+and because the handler is synchronous that is 2.2 seconds in which
+its worker serves nothing — then the request fails anyway. WAL mode keeps ordinary
+readers out of this entirely, but the write paths do not:
+account changes, MFA enrolment and token creation can all reach it under contention.
+
+Both are the same deliberate choice seen twice: no thread pool, no work queue,
+no handoff between accepting a connection and answering it.
+That shape is fixed; the knobs sit outside it — `server_workers`,
+`secret_hashing_algorithm`, and the iteration counts — so a deployer who wants
+different numbers turns those rather than the request path.
 
 ## Design Philosophy
 

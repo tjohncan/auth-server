@@ -572,7 +572,10 @@ int oauth_exchange_authorization_code(db_handle_t *db,
         return -1;
     }
 
-    if (jwt_encode_es256(&claims, signing_key_active_private(signing_key),
+    const char *active_private = signing_key_active_private(signing_key);
+    char kid[SIGNING_KEY_KID_MAX];
+    if (signing_key_active_kid(signing_key, active_private, kid, sizeof(kid)) != 0 ||
+        jwt_encode_es256(&claims, active_private, kid,
                          access_token, JWT_MAX_TOKEN_LENGTH) != 0) {
         OPENSSL_cleanse(access_token, JWT_MAX_TOKEN_LENGTH); free(access_token);
         signing_key_free(signing_key);
@@ -758,6 +761,26 @@ int oauth_refresh_access_token(db_handle_t *db,
         return -1;
     }
 
+    /* Step 6b: Verify user is linked to this client (skipped for universal clients) */
+    if (!client.is_universal) {
+        int link_rc = oauth_client_user_check(db, client.pin, token_data.user_account_pin);
+        if (link_rc < 0) {
+            cleanse_free(new_refresh_token);
+            signing_key_free(signing_key);
+            db_execute_trusted(db, "ROLLBACK");
+            log_error("Failed to check client_user link");
+            return -1;
+        }
+        if (link_rc == 0) {
+            cleanse_free(new_refresh_token);
+            signing_key_free(signing_key);
+            db_execute_trusted(db, "ROLLBACK");
+            log_info("User not linked to client: client=%s, user_pin=%lld",
+                     client.code_name, token_data.user_account_pin);
+            return -1;
+        }
+    }
+
     /* Step 7: Validate scope (if requested, must be subset of original) */
     const char *final_scope = token_data.scopes;
     if (scope && scope[0] != '\0') {
@@ -804,7 +827,16 @@ int oauth_refresh_access_token(db_handle_t *db,
 
     if (db_step(user_stmt) == DB_ROW) {
         const unsigned char *id_blob = db_column_blob(user_stmt, 0);
-        if (id_blob) memcpy(user_account_id, id_blob, 16);
+        int id_blob_len = db_column_bytes(user_stmt, 0);
+        if (id_blob_len != 16) {
+            log_error("Invalid user account ID length: %d", id_blob_len);
+            db_finalize(user_stmt);
+            cleanse_free(new_refresh_token);
+            signing_key_free(signing_key);
+            db_execute_trusted(db, "ROLLBACK");
+            return -1;
+        }
+        memcpy(user_account_id, id_blob, 16);
         db_finalize(user_stmt);
     } else {
         db_finalize(user_stmt);
@@ -842,7 +874,10 @@ int oauth_refresh_access_token(db_handle_t *db,
         return -1;
     }
 
-    if (jwt_encode_es256(&claims, signing_key_active_private(signing_key),
+    const char *active_private = signing_key_active_private(signing_key);
+    char kid[SIGNING_KEY_KID_MAX];
+    if (signing_key_active_kid(signing_key, active_private, kid, sizeof(kid)) != 0 ||
+        jwt_encode_es256(&claims, active_private, kid,
                          access_token, JWT_MAX_TOKEN_LENGTH) != 0) {
         OPENSSL_cleanse(access_token, JWT_MAX_TOKEN_LENGTH); free(access_token);
         signing_key_free(signing_key);
@@ -984,7 +1019,10 @@ int oauth_client_credentials(db_handle_t *db,
         return -1;
     }
 
-    if (jwt_encode_es256(&claims, signing_key_active_private(signing_key),
+    const char *active_private = signing_key_active_private(signing_key);
+    char kid[SIGNING_KEY_KID_MAX];
+    if (signing_key_active_kid(signing_key, active_private, kid, sizeof(kid)) != 0 ||
+        jwt_encode_es256(&claims, active_private, kid,
                          access_token, JWT_MAX_TOKEN_LENGTH) != 0) {
         OPENSSL_cleanse(access_token, JWT_MAX_TOKEN_LENGTH); free(access_token);
         signing_key_free(signing_key);

@@ -10,6 +10,7 @@
 #include "db/init/db_history.h"
 #include "crypto/password.h"
 #include "crypto/jwt.h"
+#include "crypto/signing_keys.h"
 #include "crypto/encrypt.h"
 #include "crypto/hmac.h"
 #include "server/event_loop.h"
@@ -29,6 +30,7 @@
 
 static void worker_thread_cleanup(void) {
     crypto_jwt_thread_cleanup();
+    signing_key_thread_cleanup();
 }
 
 static EventLoopPool * volatile global_pool = NULL;
@@ -424,6 +426,16 @@ int main(void) {
     /* POST aliases for GET endpoints (browsers cannot send GET with JSON body) */
     router_add(router, HTTP_POST, "/api/rs/users/lookup", rs_lookup_user_handler);
     router_add(router, HTTP_POST, "/api/rs/client-users/list", rs_list_client_users_handler);
+
+    /* Every CORS path must be a route, or the header silently never appears */
+    if (router_validate_cors_paths(router) != 0) {
+        log_error("CORS path set does not match the registered routes");
+        router_destroy(router);
+        db_pool_shutdown();
+        encrypt_cleanup();
+        config_free(config);
+        return 1;
+    }
 
     /* Register static files from ./static/ directory */
     register_static_files(router, config);

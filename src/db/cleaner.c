@@ -339,7 +339,7 @@ static int purge_batch(db_handle_t *db, table_cleaner_t *cleaner, int batch_size
         return -1;
     }
 
-    if (db_execute_trusted(db, sql) != 0) {
+    if (db_execute_direct(db, sql) != 0) {
         log_warn("Cleaner: failed to purge from %s", cleaner->table_name);
         return -1;
     }
@@ -357,7 +357,7 @@ static void vacuum_table(db_handle_t *db, cleaner_config_t *config,
     (void)cleaner;  /* Not used in SQLite (global vacuum, not per-table) */
     char sql[128];
     snprintf(sql, sizeof(sql), "PRAGMA incremental_vacuum(%d)", config->sqlite_vacuum_pages);
-    if (db_execute_trusted(db, sql) != 0) {
+    if (db_execute_direct(db, sql) != 0) {
         log_debug("Cleaner: incremental_vacuum failed (may not be enabled)");
     }
 #endif
@@ -367,7 +367,7 @@ static void vacuum_table(db_handle_t *db, cleaner_config_t *config,
     if (config->postgres_vacuum_enabled) {
         char sql[512];
         snprintf(sql, sizeof(sql), "VACUUM %s", cleaner->table_name);
-        if (db_execute_trusted(db, sql) != 0) {
+        if (db_execute_direct(db, sql) != 0) {
             log_debug("Cleaner: VACUUM failed for %s", cleaner->table_name);
         }
     }

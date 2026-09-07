@@ -57,6 +57,8 @@ typedef struct Connection {
     char *read_buffer;            /* Buffer for incoming data */
     size_t read_buffer_size;      /* Allocated size of read buffer */
     size_t bytes_read;            /* How much data we've read so far */
+    size_t header_end;            /* Offset just past CRLFCRLF, 0 until found */
+    size_t total_needed;          /* header_end + Content-Length, 0 if no body */
 
     char *write_buffer;           /* Serialized HTTP response */
     size_t write_buffer_size;     /* Total size of response */

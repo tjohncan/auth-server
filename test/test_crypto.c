@@ -636,7 +636,8 @@ int main(void) {
     strcpy(es256_claims.client_id, "123");  /* client_pin */
 
     char es256_token[JWT_MAX_TOKEN_LENGTH];
-    if (jwt_encode_es256(&es256_claims, current_private_pem,
+    const char *es256_kid = "1785341250";
+    if (jwt_encode_es256(&es256_claims, current_private_pem, es256_kid,
                          es256_token, sizeof(es256_token)) != 0) {
         log_error("ES256 JWT encoding failed");
         free(current_private_pem);
@@ -647,6 +648,62 @@ int main(void) {
     log_info("ES256 token created (length=%zu)", strlen(es256_token));
     log_info("Token: %.80s...", es256_token);  /* Show first 80 chars */
     log_info("ES256 encoding: PASS\n");
+
+    /* The header must name the signing key. Stock verifiers holding a key set
+     * with more than one entry read this field rather than trying each key, so
+     * a token without it is unusable to them — decode the first segment and
+     * check, rather than trusting that the format string was right. */
+    log_info("Test: ES256 header carries the key id");
+    {
+        const char *dot = strchr(es256_token, '.');
+        if (!dot) {
+            log_error("ES256 token has no header segment");
+            free(current_private_pem);
+            free(current_public_pem);
+            return 1;
+        }
+
+        unsigned char header_json[256];
+        int header_len = crypto_base64url_decode(es256_token, (size_t)(dot - es256_token),
+                                                 header_json, sizeof(header_json) - 1);
+        if (header_len <= 0) {
+            log_error("Failed to decode ES256 header segment");
+            free(current_private_pem);
+            free(current_public_pem);
+            return 1;
+        }
+        header_json[header_len] = '\0';
+
+        log_info("Header: %s", (char *)header_json);
+
+        char expected_kid[64];
+        snprintf(expected_kid, sizeof(expected_kid), "\"kid\":\"%s\"", es256_kid);
+        if (!strstr((char *)header_json, expected_kid)) {
+            log_error("ES256 header does not carry the expected kid");
+            free(current_private_pem);
+            free(current_public_pem);
+            return 1;
+        }
+        if (!strstr((char *)header_json, "\"alg\":\"ES256\"")) {
+            log_error("ES256 header lost its alg after adding kid");
+            free(current_private_pem);
+            free(current_public_pem);
+            return 1;
+        }
+
+        /* A kid that cannot appear in a JSON string must be refused, not escaped
+         * and not emitted — the header is signed, so a broken one is minted. */
+        char reject_token[JWT_MAX_TOKEN_LENGTH];
+        if (jwt_encode_es256(&es256_claims, current_private_pem, "bad\"kid",
+                             reject_token, sizeof(reject_token)) == 0) {
+            log_error("ES256 encoding accepted a kid containing a quote");
+            free(current_private_pem);
+            free(current_public_pem);
+            return 1;
+        }
+
+        log_info("ES256 kid in header: PASS\n");
+    }
 
     /* ES256 JWT decoding with current key */
     log_info("Test: ES256 JWT decoding and verification");
