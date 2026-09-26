@@ -287,24 +287,12 @@ HttpResponse *management_setups_handler(const HttpRequest *req, const RouteParam
     free(callback_url_encoded);
     free(api_url_encoded);
 
-    /* Parse session cookie */
-    const char *cookie_header = http_request_get_header(req, "Cookie");
-    char *session_token = NULL;
-    if (cookie_header) {
-        session_token = http_cookie_get_value(cookie_header, "session");
-    }
-
-    if (!session_token) {
-        return response_json_error(401, "Authentication required");
-    }
-
-    /* Get session info */
+    /* Same gate as every other /api/user endpoint: a user who requires MFA and
+     * has only passed the password gets 403 here, not their org/client topology.
+     * The console's picker sends that 403 to the MFA step. */
     oauth_session_info_t session;
-    if (oauth_session_get_by_token(db, session_token, &session) != 0) {
-        cleanse_free(session_token);
-        return response_json_error(401, "Invalid or expired session");
-    }
-    cleanse_free(session_token);
+    HttpResponse *auth_err = require_authenticated_session(req, db, &session);
+    if (auth_err) return auth_err;
 
     /* Get management UI setups */
     management_ui_setup_t *setups = NULL;

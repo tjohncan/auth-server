@@ -399,6 +399,13 @@ async function showPicker() {
             return;
         }
 
+        /* Logged in with the password but MFA not completed: the login page
+           runs the MFA step for the existing session and comes back here. */
+        if (response.status === 403) {
+            window.location.replace('/login?mfa_step=1&return=' + encodeURIComponent('/admin'));
+            return;
+        }
+
         if (!response.ok) {
             document.getElementById('pickerOverlay').style.display = 'block';
             pickerContent.innerHTML = `<p>Error: HTTP ${response.status}</p>`;
