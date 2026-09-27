@@ -571,7 +571,7 @@ administers; no key is created and no secret is returned.
 **GET /api/admin/resource-server-keys**
 List resource server API keys.
 
-Query: `resource_server_id` (required), `limit` (default 100, max 1000), `offset` (default 0), 
+Query: `resource_server_id` (required), `limit` (default 20, max 100), `offset` (default 0), 
     `is_active` (optional boolean filter)
 
 Returns: `keys` array with `id`, `key_id`, `is_active`, `generated_at`, `note` (never returns secret/salt/hash)
@@ -605,7 +605,7 @@ is created and no secret is returned.
 **GET /api/admin/client-keys**
 List client API keys.
 
-Query: `client_id` (required), `limit`, `offset`, `is_active`
+Query: `client_id` (required), `limit` (default 20, max 100), `offset` (default 0), `is_active`
 
 Returns: Same format as resource server keys list
 
