@@ -20,6 +20,22 @@
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
 
+/*
+ * Apply max_access_token_ttl_seconds to a client's configured TTL.
+ *
+ * Enforced here, at issuance, rather than only when a client is saved, so a
+ * client row saved while the cap was higher is covered too. The admin endpoints
+ * also refuse over-cap values so the stored number isn't a lie.
+ * Every grant calls this straight after oauth_client_lookup, so exp, the DB
+ * expiry and expires_in all see the same value.
+ */
+static void cap_access_token_ttl(oauth_client_info_t *client) {
+    int cap = g_config ? g_config->max_access_token_ttl_seconds : 0;
+    if (cap > 0 && client->access_token_ttl_seconds > cap) {
+        client->access_token_ttl_seconds = cap;
+    }
+}
+
 /* Cleanse and free a heap-allocated sensitive string */
 static void cleanse_free(char *s) {
     if (s) {
@@ -394,6 +410,7 @@ int oauth_exchange_authorization_code(db_handle_t *db,
         log_error("Client not found");
         return -1;
     }
+    cap_access_token_ttl(&client);
 
     /* Step 1b: Validate grant type */
     if (strcmp(client.grant_type, "authorization_code") != 0) {
@@ -678,6 +695,7 @@ int oauth_refresh_access_token(db_handle_t *db,
         log_error("Client not found");
         return -1;
     }
+    cap_access_token_ttl(&client);
 
     /* Check client issues refresh tokens */
     if (!client.issue_refresh_tokens) {
@@ -966,6 +984,7 @@ int oauth_client_credentials(db_handle_t *db,
         log_error("Client not found after successful authentication");
         return -1;
     }
+    cap_access_token_ttl(&client);
 
     /* Validate grant type is client_credentials */
     if (strcmp(client.grant_type, "client_credentials") != 0) {

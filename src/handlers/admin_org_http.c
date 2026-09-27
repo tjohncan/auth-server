@@ -872,6 +872,13 @@ HttpResponse *admin_create_client_handler(const HttpRequest *req, const RoutePar
         goto cleanup;
     }
 
+    if (access_ttl > g_config->max_access_token_ttl_seconds) {
+        snprintf(validation_error, sizeof(validation_error),
+                 "access_token_ttl_seconds cannot exceed %d", g_config->max_access_token_ttl_seconds);
+        resp = response_json_error(400, validation_error);
+        goto cleanup;
+    }
+
     /* Optional fields - default to 0/false if not provided */
     json_get_bool(req->body, "require_mfa", &require_mfa);
     json_get_bool(req->body, "issue_refresh_tokens", &issue_refresh);
@@ -987,6 +994,13 @@ HttpResponse *admin_update_client_handler(const HttpRequest *req, const RoutePar
     if (!display_name && !note && !require_mfa && !access_ttl && !issue_refresh &&
         !refresh_ttl && !max_session && !secret_rotation && !is_active) {
         resp = response_json_error(400, "At least one field must be provided");
+        goto cleanup;
+    }
+
+    if (access_ttl && *access_ttl > g_config->max_access_token_ttl_seconds) {
+        snprintf(validation_error, sizeof(validation_error),
+                 "access_token_ttl_seconds cannot exceed %d", g_config->max_access_token_ttl_seconds);
+        resp = response_json_error(400, validation_error);
         goto cleanup;
     }
 

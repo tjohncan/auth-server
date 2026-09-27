@@ -60,9 +60,13 @@ secret_hash_max_iterations = 4
 
 # OAuth2 token limits
 # Maximum TTL for client access tokens (in seconds)
-# Must be >= access token rotation interval to prevent double-rotation invalidation
-# Default: 5184000 (60 days)
-max_access_token_ttl_seconds = 5184000
+# Enforced at issuance (a client's longer TTL is cut to this) and when a client
+# is created or updated (a longer TTL is refused).
+# Must be <= the ES256 key rotation interval (60 days) minus its 45-minute
+# activation delay, or a long-lived token can outlive the key that signed it and
+# fail verification before its exp. Larger values are clamped at startup.
+# Default: 5097600 (59 days)
+max_access_token_ttl_seconds = 5097600
 
 # JWT clock skew tolerance (in seconds)
 # Allows tokens to be accepted if expired within this tolerance window

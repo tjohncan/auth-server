@@ -475,11 +475,19 @@ Body: `organization_id`, `code_name`, `display_name`, `client_type`, `grant_type
     `maximum_session_seconds` (enforced at `/authorize` — sessions older than this are rejected),
     `secret_rotation_seconds` (enforced at authentication — client keys older than this are rejected)
 
+`access_token_ttl_seconds` may not exceed the server's `max_access_token_ttl_seconds`
+(default 59 days); a larger value is refused with `400`. A client stored with a larger value
+before the limit existed gets tokens issued at the limit, and `expires_in` reports it.
+
 **PUT /api/admin/clients**
 Update client configuration.
 
 Query: `id` (required)
 Body: `display_name`, `note`, TTL/MFA settings, `is_active` (all optional)
+
+`access_token_ttl_seconds` has the same limit as on create. The console's edit form sends the
+stored TTL back with every change, so a client stored over the limit can't be edited there
+until its TTL is lowered.
 
 ### Client Redirect URIs
 

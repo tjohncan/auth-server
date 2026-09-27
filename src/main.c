@@ -181,6 +181,19 @@ int main(void) {
     /* Apply configured log level (parsed from config file / env var) */
     log_init(config->log_level);
 
+    /* An access token must stay verifiable for its whole life. Signing keeps the
+     * current and prior ES256 keys; after a rotation the old key still signs for
+     * the activation delay and is dropped at the next rotation, one interval
+     * later. So only a TTL of at most (interval - delay) is guaranteed to verify
+     * until exp. Anything longer can fail verification early, before its own
+     * expiry, with no error anywhere to explain it. */
+    const int max_verifiable_ttl = ACCESS_TOKEN_ROTATION_SECONDS - JWKS_ACTIVATION_DELAY_SECONDS;
+    if (config->max_access_token_ttl_seconds > max_verifiable_ttl) {
+        log_warn("max_access_token_ttl_seconds %d exceeds signing-key retention; using %d",
+                 config->max_access_token_ttl_seconds, max_verifiable_ttl);
+        config->max_access_token_ttl_seconds = max_verifiable_ttl;
+    }
+
     log_info("Configuration loaded:");
     log_info("  Server: %s:%d (workers=%d)", config->host, config->port, config->workers);
     log_info("  Database: %s", config->db_type == DB_TYPE_SQLITE ? "SQLite" : "PostgreSQL");
