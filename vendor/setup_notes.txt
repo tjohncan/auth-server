@@ -4,8 +4,14 @@
 # Run from the repository root:
 
 mkdir -p vendor/sqlite
-curl -o sqlite3.zip https://www.sqlite.org/2026/sqlite-amalgamation-3510200.zip
+curl -fsSL -o sqlite3.zip https://www.sqlite.org/2026/sqlite-amalgamation-3510200.zip
 unzip -jo sqlite3.zip "*/sqlite3.c" "*/sqlite3.h" -d vendor/sqlite
 rm sqlite3.zip
+sh vendor/verify-sqlite.sh
 
+# verify-sqlite.sh checks sqlite3.c against the SHA3-256 SQLite publishes for this
+# release, and sqlite3.h against a hash pinned from that same verified download,
+# and fails if either differs; do not build from files that fail it. The Docker
+# build and both CI jobs run the same check.
+#
 # Source: https://www.sqlite.org/download.html

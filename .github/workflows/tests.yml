@@ -35,12 +35,15 @@ jobs:
 
       # SQLite is vendored as a downloaded amalgamation, not committed source.
       # See vendor/setup_notes.txt — matching commands here proves those instructions.
+      # verify-sqlite.sh checks sqlite3.c against SQLite's published SHA3-256, and
+      # sqlite3.h against a hash pinned from that verified download (see the script).
       - name: Vendor the SQLite amalgamation
         run: |
           mkdir -p vendor/sqlite
           curl -fsSL -o sqlite3.zip https://www.sqlite.org/2026/sqlite-amalgamation-3510200.zip
           unzip -jo sqlite3.zip "*/sqlite3.c" "*/sqlite3.h" -d vendor/sqlite
           rm sqlite3.zip
+          sh vendor/verify-sqlite.sh
 
       # test-db and test-crypto call config_load("auth.conf"). auth.conf is gitignored
       # (it's the live, per-deployment config); the committed example is a complete
@@ -102,6 +105,7 @@ jobs:
           curl -fsSL -o sqlite3.zip https://www.sqlite.org/2026/sqlite-amalgamation-3510200.zip
           unzip -jo sqlite3.zip "*/sqlite3.c" "*/sqlite3.h" -d vendor/sqlite
           rm sqlite3.zip
+          sh vendor/verify-sqlite.sh
 
       # No auth.conf step: test-str, test-http and test-router never call
       # config_load, which is the same reason they never touch a database.

@@ -112,6 +112,20 @@ $(TARGET): $(OBJS)
 HEADERS := $(shell find include -name '*.h')
 $(filter-out vendor/%,$(OBJS)): $(HEADERS)
 
+# Nothing compiles the SQLite amalgamation until vendor/verify-sqlite.sh has checked
+# it against its pinned hashes, however it arrived. It runs on every build that could
+# compile it rather than once per stamp: hashing both files takes a fraction of a
+# second, and a stamp judged by file times would trust a replacement whose times were
+# restored, as unzip, cp -p and tar all do. Order-only, so a passing check never
+# forces a recompile. test/sanitize.sh, which compiles outside make, runs it too.
+ifeq ($(DB_BACKEND),sqlite)
+.PHONY: verify-sqlite
+verify-sqlite:
+	@sh vendor/verify-sqlite.sh
+
+vendor/sqlite/sqlite3.o test-http test-router test-db test-crypto: | verify-sqlite
+endif
+
 # Debug build (security flags applied except _FORTIFY_SOURCE which requires -O1+)
 debug: CFLAGS += $(DEBUG_FLAGS)
 debug: SECURITY_FLAGS = -fstack-protector-strong -fPIE -Wformat -Wformat-security
