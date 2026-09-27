@@ -51,9 +51,6 @@ static HttpResponse *response_html_error(int status_code, const char *message) {
     return resp;
 }
 
-/* Cookie name for session token */
-#define SESSION_COOKIE_NAME "session"
-
 /* Session token size: 32 bytes (256 bits) — matches session.c */
 #define SESSION_TOKEN_BYTES 32
 
@@ -86,6 +83,8 @@ static HttpResponse *require_authenticated_session(const HttpRequest *req,
 
     cleanse_free(session_token);
 
+    /* The preference rule, not the enrollment rule used for factor management;
+       see oauth_session_mfa_pending in db/queries/oauth.h for why there are two. */
     if (out_session->user_requires_mfa && !out_session->mfa_completed) {
         return response_json_error(403, "MFA verification required");
     }

@@ -122,6 +122,14 @@ Bootstrap the authentication system with initial organization and management UI.
 6. User account with hashed password
 7. Organization admin privilege for user
 
+The management UI client is created with `require_mfa` off, and should stay that way: the
+console is where users enroll their first MFA method, and `/authorize` turns away a user
+with no enrolled method when the client requires MFA. For admin work, MFA follows each
+admin's own `require` setting: with it on, `/login` asks for the factor before the console
+loads; having a factor does not by itself demand it. A `require_mfa` set on the management
+client anyway applies when the console signs in through `/authorize`, not to admin API
+calls, which authenticate by session cookie.
+
 **Example**:
 ```bash
 curl -X POST http://localhost:8080/api/admin/bootstrap \
@@ -414,7 +422,7 @@ Authenticated endpoints for organization administrators
     to manage resources, clients, and configurations. 
     Requires valid session cookie from `/login`.
 
-**Authentication**: Session cookie (user must be org admin)
+**Authentication**: Session cookie (user must be org admin; MFA must be completed if the user requires it)
 **Use Case**: Management UI operations
 **Access Control**: User must have org-admin role for the organization being managed
 
@@ -1452,7 +1460,7 @@ curl "http://localhost:8080/api/user/emails?limit=10&offset=10" \
 
 Add an email address to the current user's account.
 
-**Authentication**: Session cookie required (MFA must be completed if enrolled)
+**Authentication**: Session cookie required (MFA must be completed if the user requires it)
 
 **Request Body**:
 ```json
@@ -1520,7 +1528,7 @@ curl -X POST http://localhost:8080/api/user/emails \
 
 Remove an email address from the current user's account.
 
-**Authentication**: Session cookie required (MFA must be completed if enrolled)
+**Authentication**: Session cookie required (MFA must be completed if the user requires it)
 
 **Request Body**:
 ```json
@@ -1574,7 +1582,7 @@ curl -X DELETE http://localhost:8080/api/user/emails \
 
 Set or clear the primary email for the current user.
 
-**Authentication**: Session cookie required (MFA must be completed if enrolled)
+**Authentication**: Session cookie required (MFA must be completed if the user requires it)
 
 **Request Body**:
 ```json
@@ -1901,7 +1909,7 @@ are automatically cleaned up (squatter cleanup).
 
 Request a verification email for one of the current user's email addresses.
 
-**Authentication**: Session cookie required (MFA must be completed if enrolled)
+**Authentication**: Session cookie required (MFA must be completed if the user requires it)
 
 **Request Body**:
 ```json

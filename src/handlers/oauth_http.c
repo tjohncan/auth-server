@@ -738,7 +738,7 @@ HttpResponse *authorize_handler(const HttpRequest *req, const RouteParams *param
     const char *cookie_header = http_request_get_header(req, "Cookie");
     char *session_token = NULL;
     if (cookie_header) {
-        session_token = http_cookie_get_value(cookie_header, "session");
+        session_token = http_cookie_get_value(cookie_header, SESSION_COOKIE_NAME);
     }
 
     /* Call business logic (this validates redirect_uri is registered) */

@@ -128,6 +128,27 @@ typedef struct {
  *
  * A user with no factor yet is not gated: first enrollment is open to whoever
  * holds the password, by necessity — see "Deliberate Tradeoffs" in README.md.
+ *
+ * This is one of TWO MFA rules in the handlers:
+ *   - Managing factors (this function, used in mfa_http.c): gated on
+ *     ENROLLMENT. Anyone who has a factor proves it before touching factors.
+ *   - The user's own /api/user endpoints (session_http.c
+ *     require_authenticated_session): gated on the require_mfa PREFERENCE.
+ *     MFA is optional until the user, or a client at /authorize, requires it,
+ *     and enrolling must not lock a user out of their own profile.
+ * Those two differ deliberately; unifying them either way changes behavior.
+ *
+ * The cookie leg of the /api/admin endpoints (admin_org_http.c
+ * get_authenticated_user_pin) applies the preference rule as well, and that is
+ * policy: MFA guards admin work for an admin who has turned on require, and
+ * having a factor does not by itself demand it. For such an admin, /login asks
+ * for the factor before the console loads.
+ *
+ * The management UI client's own require_mfa stays off, for a separate reason:
+ * the console is where a first factor gets enrolled, and a client that requires
+ * MFA turns away users who have none. A require_mfa set on that client anyway is
+ * enforced by /authorize when the console signs in, not by the admin API, which
+ * authenticates by cookie and never learns which client the console came through.
  */
 static inline int oauth_session_mfa_pending(const oauth_session_info_t *session) {
     return session->user_has_mfa && !session->mfa_completed;

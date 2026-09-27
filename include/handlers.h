@@ -9,6 +9,10 @@
 /* Global configuration (set once in main.c, read-only thereafter) */
 extern const config_t *g_config;
 
+/* Name of the browser-session cookie, set at login and read by every
+ * session-authenticated handler. */
+#define SESSION_COOKIE_NAME "session"
+
 /*
  * Handler function declarations
  *

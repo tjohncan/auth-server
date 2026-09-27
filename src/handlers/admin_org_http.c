@@ -67,7 +67,7 @@ static int get_authenticated_user_pin(const HttpRequest *req, long long *out_use
     const char *cookie_header = http_request_get_header(req, "Cookie");
     char *session_token = NULL;
     if (cookie_header) {
-        session_token = http_cookie_get_value(cookie_header, "session");
+        session_token = http_cookie_get_value(cookie_header, SESSION_COOKIE_NAME);
     }
 
     if (!session_token) {
@@ -83,6 +83,7 @@ static int get_authenticated_user_pin(const HttpRequest *req, long long *out_use
         return -1;
     }
 
+    /* The preference rule; see oauth_session_mfa_pending in db/queries/oauth.h */
     if (session.user_requires_mfa && !session.mfa_completed) {
         return -1;
     }

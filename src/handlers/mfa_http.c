@@ -33,7 +33,7 @@ static HttpResponse *require_session(const HttpRequest *req, db_handle_t *db,
     const char *cookie_header = http_request_get_header(req, "Cookie");
     char *session_token = NULL;
     if (cookie_header) {
-        session_token = http_cookie_get_value(cookie_header, "session");
+        session_token = http_cookie_get_value(cookie_header, SESSION_COOKIE_NAME);
     }
 
     if (!session_token) {
@@ -245,7 +245,7 @@ HttpResponse *mfa_totp_confirm_handler(const HttpRequest *req, const RouteParams
      * call. For an additional method the gate above already required completion. */
     const char *confirm_cookie = http_request_get_header(req, "Cookie");
     if (confirm_cookie) {
-        char *session_token = http_cookie_get_value(confirm_cookie, "session");
+        char *session_token = http_cookie_get_value(confirm_cookie, SESSION_COOKIE_NAME);
         if (session_token) {
             oauth_session_set_mfa_completed(db, session_token);
             OPENSSL_cleanse(session_token, strlen(session_token));
@@ -341,7 +341,7 @@ HttpResponse *mfa_verify_handler(const HttpRequest *req, const RouteParams *para
         /* Mark session MFA as completed */
         const char *cookie_header = http_request_get_header(req, "Cookie");
         if (cookie_header) {
-            char *session_token = http_cookie_get_value(cookie_header, "session");
+            char *session_token = http_cookie_get_value(cookie_header, SESSION_COOKIE_NAME);
             if (session_token) {
                 oauth_session_set_mfa_completed(db, session_token);
                 OPENSSL_cleanse(session_token, strlen(session_token));
@@ -410,7 +410,7 @@ HttpResponse *mfa_recover_handler(const HttpRequest *req, const RouteParams *par
         /* Mark session MFA as completed */
         const char *cookie_header = http_request_get_header(req, "Cookie");
         if (cookie_header) {
-            char *session_token = http_cookie_get_value(cookie_header, "session");
+            char *session_token = http_cookie_get_value(cookie_header, SESSION_COOKIE_NAME);
             if (session_token) {
                 oauth_session_set_mfa_completed(db, session_token);
                 OPENSSL_cleanse(session_token, strlen(session_token));
