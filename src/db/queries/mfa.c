@@ -180,8 +180,8 @@ int mfa_method_get_by_id(db_handle_t *db,
     if (rc == DB_ROW) {
         /* Extract MFA method data */
         const unsigned char *id_blob = db_column_blob(stmt, 0);
-        if (!id_blob) {
-            log_error("NULL method ID in MFA lookup");
+        if (!id_blob || db_column_bytes(stmt, 0) != 16) {
+            log_error("NULL or malformed method ID in MFA lookup");
             db_finalize(stmt);
             return -1;
         }
@@ -287,7 +287,7 @@ int mfa_method_list(db_handle_t *db,
         memset(method, 0, sizeof(*method));
 
         const unsigned char *id_blob = db_column_blob(stmt, 0);
-        if (!id_blob) continue;
+        if (!id_blob || db_column_bytes(stmt, 0) != 16) continue;
         memcpy(method->id, id_blob, 16);
 
         method->pin = db_column_int64(stmt, 1);
@@ -689,8 +689,8 @@ int recovery_code_set_get_active(db_handle_t *db,
 
     if (rc == DB_ROW) {
         const unsigned char *id_blob = db_column_blob(stmt, 0);
-        if (!id_blob) {
-            log_error("NULL recovery code set ID");
+        if (!id_blob || db_column_bytes(stmt, 0) != 16) {
+            log_error("NULL or malformed recovery code set ID");
             db_finalize(stmt);
             return -1;
         }

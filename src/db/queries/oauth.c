@@ -1398,6 +1398,23 @@ int oauth_introspect_token(db_handle_t *db,
         return 0;  /* Not an error, just inactive token */
     }
 
+    /* Every id that is present must be exactly 16 bytes before the token is
+     * called active. Skipping a malformed one would leave the caller's zeroed
+     * buffer, and a zero user id is how a client_credentials token looks -- so
+     * a user token would introspect as active with no sub. Refuse instead.
+     * (The user id may be SQL NULL for client_credentials; that is not malformed.) */
+    for (int col = 1; col <= 3; col++) {
+        if (db_column_type(stmt, col) == DB_NULL) {
+            continue;
+        }
+        const void *blob = db_column_blob(stmt, col);
+        if (!blob || db_column_bytes(stmt, col) != 16) {
+            log_error("Token introspection: malformed id in column %d; reporting inactive", col);
+            db_finalize(stmt);
+            return 0;
+        }
+    }
+
     /* Token is active - extract details */
     *out_active = 1;
 
@@ -1409,23 +1426,25 @@ int oauth_introspect_token(db_handle_t *db,
         }
     }
 
-    /* Extract UUIDs (16-byte blobs) */
+    /* Extract UUIDs (16-byte blobs; lengths validated above). The checks stay at
+     * each copy so none of them depends on code above it. Blob then bytes, on the
+     * same column: on PostgreSQL, db_column_bytes reports the last decoded blob. */
     if (out_client_id) {
         const void *blob = db_column_blob(stmt, 1);
-        if (blob) memcpy(out_client_id, blob, 16);
+        if (blob && db_column_bytes(stmt, 1) == 16) memcpy(out_client_id, blob, 16);
     }
 
     if (out_user_id) {
         /* May be NULL for client_credentials tokens (LEFT JOIN) */
         if (db_column_type(stmt, 2) != DB_NULL) {
             const void *blob = db_column_blob(stmt, 2);
-            if (blob) memcpy(out_user_id, blob, 16);
+            if (blob && db_column_bytes(stmt, 2) == 16) memcpy(out_user_id, blob, 16);
         }
     }
 
     if (out_resource_server_id) {
         const void *blob = db_column_blob(stmt, 3);
-        if (blob) memcpy(out_resource_server_id, blob, 16);
+        if (blob && db_column_bytes(stmt, 3) == 16) memcpy(out_resource_server_id, blob, 16);
     }
 
     if (out_expires_at) {

@@ -868,9 +868,8 @@ int organization_key_list(db_handle_t *db,
         }
 
         const unsigned char *id_blob = db_column_blob(stmt, 0);
-        if (id_blob) {
-            memcpy(key.id, id_blob, 16);
-        }
+        if (!id_blob || db_column_bytes(stmt, 0) != 16) continue;
+        memcpy(key.id, id_blob, 16);
         key.is_active = db_column_int(stmt, 1);
 
         const char *generated_at = db_column_text(stmt, 2);

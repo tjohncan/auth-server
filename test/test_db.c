@@ -9,6 +9,7 @@
 #include "db/queries/client.h"
 #include "db/queries/resource_server.h"
 #include "db/queries/org.h"
+#include "db/queries/mfa.h"
 #include "crypto/password.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -307,6 +308,22 @@ static int test_deactivated_user_tokens(const config_t *config) {
     }
     log_info("  client_credentials token unaffected (OK)");
 
+    /* 4. A malformed user id must not degrade into "no user". A zero user id is
+       how a client_credentials token looks, so a user token would introspect
+       as active with no sub. It must read as inactive instead. */
+    if (db_execute_direct(sdb,
+            "UPDATE user_account SET is_active = 1, id = x'DEADBEEF'") != 0) {
+        log_error("Deactivation: could not corrupt the user id");
+        goto done;
+    }
+    active = -1;
+    if (oauth_introspect_token(sdb, "deact-user-token", NULL, 1, &active,
+                               NULL, NULL, NULL, NULL, NULL, NULL) != 0 || active != 0) {
+        log_error("Deactivation: token with a malformed user id introspected as active");
+        goto done;
+    }
+    log_info("  malformed user id: inactive, not a machine token (OK)");
+
     failed = 0;
 
 done:
@@ -507,6 +524,71 @@ done:
     db_disconnect(sdb);
     if (!failed) {
         log_info("Zero-row write reporting tests passed!");
+    }
+    return failed;
+}
+
+/*
+ * A malformed 16-byte id must be refused, not copied.
+ *
+ * SQLite's `id blob not null` constrains nullability, not length. For a short
+ * but non-empty blob sqlite3_column_blob returns a live pointer, so a NULL-only
+ * guard copies 16 bytes out of a shorter value -- adjacent process memory, into
+ * a response. The application never writes such an id; this plants one directly
+ * and checks the MFA reads (one of the families fixed together) skip it.
+ *
+ * Returns 0 on success.
+ */
+static int test_short_id_blobs(const config_t *config) {
+    log_info("\nShort id blob tests");
+
+    db_handle_t *sdb = open_test_db(config);
+    if (!sdb) {
+        log_error("Short id: could not open a test database");
+        return 1;
+    }
+
+    int failed = 1;
+    mfa_method_t *methods = NULL;
+
+    if (db_execute_direct(sdb,
+            "INSERT INTO user_account (id) VALUES (x'50000000000000000000000000000001');"
+            "INSERT INTO user_mfa (id, user_account_pin, mfa_method, display_name, secret) VALUES "
+            "  (x'60000000000000000000000000000001', 1, 'TOTP', 'good', 's'),"
+            "  (x'DEADBEEF', 1, 'TOTP', 'short', 's');") != 0) {
+        log_error("Short id: could not insert fixtures");
+        goto done;
+    }
+
+    int count = -1;
+    if (mfa_method_list(sdb, 1, 0, &methods, &count) != 0) {
+        log_error("Short id: mfa_method_list failed");
+        goto done;
+    }
+    const unsigned char good_id[16] = {0x60,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x01};
+    if (count != 1 || memcmp(methods[0].id, good_id, 16) != 0) {
+        log_error("Short id: list returned %d methods; the short-id row must be skipped", count);
+        goto done;
+    }
+    log_info("  list skips a method whose id is 4 bytes (OK)");
+
+    /* The guard must not reject the normal case. (A lookup BY a short id can't
+       be driven from here -- get_by_id binds exactly 16 bytes -- so the list is
+       the path that reaches the malformed row.) */
+    mfa_method_t one;
+    if (mfa_method_get_by_id(sdb, good_id, &one) != 0) {
+        log_error("Short id: well-formed id no longer resolves");
+        goto done;
+    }
+    log_info("  well-formed id still resolves (OK)");
+
+    failed = 0;
+
+done:
+    free(methods);
+    db_disconnect(sdb);
+    if (!failed) {
+        log_info("Short id blob tests passed!");
     }
     return failed;
 }
@@ -788,6 +870,11 @@ int main(void) {
     }
 
     if (test_deactivated_user_tokens(config) != 0) {
+        config_free(config);
+        return 1;
+    }
+
+    if (test_short_id_blobs(config) != 0) {
         config_free(config);
         return 1;
     }

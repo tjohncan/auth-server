@@ -417,12 +417,13 @@ int user_verify_password(db_handle_t *db, const char *username,
 
     long long pin = db_column_int64(stmt, 0);
     const unsigned char *id = db_column_blob(stmt, 1);
+    int id_len = db_column_bytes(stmt, 1);
     const char *salt_ptr = (const char *)db_column_text(stmt, 2);
     int iterations = db_column_int(stmt, 3);
     const char *hash_ptr = (const char *)db_column_text(stmt, 4);
 
-    if (!id || !salt_ptr || !hash_ptr) {
-        log_error("NULL fields in user_account");
+    if (!id || id_len != 16 || !salt_ptr || !hash_ptr) {
+        log_error("NULL or malformed fields in user_account");
         db_finalize(stmt);
         return -1;
     }
@@ -504,12 +505,13 @@ int user_verify_password_by_email(db_handle_t *db, const char *email,
 
     long long pin = db_column_int64(stmt, 0);
     const unsigned char *id = db_column_blob(stmt, 1);
+    int id_len = db_column_bytes(stmt, 1);
     const char *salt_ptr = (const char *)db_column_text(stmt, 2);
     int iterations = db_column_int(stmt, 3);
     const char *hash_ptr = (const char *)db_column_text(stmt, 4);
 
-    if (!id || !salt_ptr || !hash_ptr) {
-        log_error("NULL fields in user_account (email login)");
+    if (!id || id_len != 16 || !salt_ptr || !hash_ptr) {
+        log_error("NULL or malformed fields in user_account (email login)");
         db_finalize(stmt);
         return -1;
     }
@@ -638,12 +640,14 @@ int user_get_management_ui_setups(db_handle_t *db, long long user_account_pin,
         const char *org_code_name = (const char *)db_column_text(stmt, 0);
         const char *org_display_name = (const char *)db_column_text(stmt, 1);
         const unsigned char *client_id = db_column_blob(stmt, 2);
+        int client_id_len = db_column_bytes(stmt, 2);
         const char *client_code_name = (const char *)db_column_text(stmt, 3);
         const char *client_display_name = (const char *)db_column_text(stmt, 4);
         const char *rs_address = (const char *)db_column_text(stmt, 5);
 
-        /* Copy to struct (str_copy handles NULL; client_id must be checked) */
-        if (!client_id) continue;
+        /* Copy to struct (str_copy handles NULL; client_id must be checked --
+           for length too: a short blob is non-NULL and would over-read) */
+        if (!client_id || client_id_len != 16) continue;
         str_copy(setup.org_code_name, sizeof(setup.org_code_name), org_code_name);
         str_copy(setup.org_display_name, sizeof(setup.org_display_name), org_display_name);
         memcpy(setup.client_id, client_id, 16);
