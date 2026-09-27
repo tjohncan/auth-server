@@ -483,6 +483,19 @@ HttpResponse *http_response_new(int status_code) {
 
     http_response_set_header(resp, "X-Content-Type-Options", "nosniff");
 
+    /* Anti-framing, from the server itself rather than only the shipped nginx
+     * config: the documented load-balancer topology has no nginx, and the pages'
+     * CSP arrives in a <meta> tag, where browsers ignore frame-ancestors by
+     * design. The values are nginx's: the same X-Frame-Options, and the
+     * frame-ancestors directive of its CSP. Behind nginx both copies then reach
+     * the browser, which is harmless: identical X-Frame-Options values collapse,
+     * and multiple CSPs are all enforced, so this one cannot loosen nginx's.
+     * Nothing in the app frames itself. A handler that sets its own
+     * Content-Security-Policy with http_response_set_header replaces this one,
+     * so it has to carry frame-ancestors itself. */
+    http_response_set_header(resp, "X-Frame-Options", "SAMEORIGIN");
+    http_response_set_header(resp, "Content-Security-Policy", "frame-ancestors 'self'");
+
     return resp;
 }
 

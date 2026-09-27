@@ -127,6 +127,13 @@ with a systemd unit. The load balancer forwards HTTP traffic to port 8080.
 Internet → ALB (TLS + WAF) → EC2:8080 (auth-server)
 ```
 
+The server itself sends only three security headers: `X-Content-Type-Options: nosniff`,
+`X-Frame-Options: SAMEORIGIN` and `Content-Security-Policy: frame-ancestors 'self'`.
+Everything else the shipped nginx config adds (HSTS, Referrer-Policy,
+Permissions-Policy, and the full CSP as a header rather than the pages' `<meta>` tag)
+has to come from whatever sits in front of the server. With an ALB, that means
+configuring the load balancer's header settings or the WAF to add them.
+
 ### Bare Binary with systemd
 
 1. Install dependencies and build the binary (see [main top-level README](../README.md) for packages)
