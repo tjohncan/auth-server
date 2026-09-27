@@ -220,6 +220,99 @@ done:
     return failed;
 }
 
+/*
+ * Token liveness after account deactivation.
+ *
+ * api/README says a deactivated user's tokens "will fail introspection" —
+ * deactivation revokes nothing, so the check has to happen at use time, in every
+ * liveness query. Pins both of them, and that a client_credentials token (no
+ * user row) is not collateral damage of the user predicate.
+ *
+ * Returns 0 on success.
+ */
+static int test_deactivated_user_tokens(const config_t *config) {
+    log_info("\nDeactivated-user token tests");
+
+    db_handle_t *sdb = open_test_db(config);
+    if (!sdb) {
+        log_error("Deactivation: could not open a test database");
+        return 1;
+    }
+
+    int failed = 1;
+
+    /* One org, resource server, client and user; pins are all 1. */
+    if (db_execute_direct(sdb,
+            "INSERT INTO organization (id, code_name, display_name) "
+            "  VALUES (x'00000000000000000000000000000001', 'org', 'Org');"
+            "INSERT INTO resource_server (id, organization_pin, code_name, display_name, address) "
+            "  VALUES (x'00000000000000000000000000000002', 1, 'rs', 'RS', 'https://rs.example');"
+            "INSERT INTO client (id, organization_pin, code_name, client_type, grant_type, "
+            "                    display_name, access_token_ttl_seconds) "
+            "  VALUES (x'00000000000000000000000000000003', 1, 'cl', 'confidential', "
+            "          'authorization_code', 'Client', 3600);"
+            "INSERT INTO user_account (id) VALUES (x'00000000000000000000000000000004');") != 0) {
+        log_error("Deactivation: could not insert fixtures");
+        goto done;
+    }
+
+    unsigned char token_id[16];
+    if (oauth_token_create_access(sdb, 1, 1, 1, NULL, NULL, "deact-user-token", "read",
+                                  3600, token_id) != 0 ||
+        oauth_token_create_access(sdb, 1, 1, 0, NULL, NULL, "deact-machine-token", "read",
+                                  3600, token_id) != 0) {
+        log_error("Deactivation: could not create access tokens");
+        goto done;
+    }
+
+    int active = 0;
+
+    /* 1. Baseline: both live while the account is active. */
+    if (oauth_introspect_token(sdb, "deact-user-token", NULL, 1, &active,
+                               NULL, NULL, NULL, NULL, NULL, NULL) != 0 || !active ||
+        oauth_access_token_is_active(sdb, "deact-user-token") != 1) {
+        log_error("Deactivation: user token not active before deactivation");
+        goto done;
+    }
+    log_info("  active account: user token active (OK)");
+
+    /* 2. Deactivate, and the user's token must be dead to both. */
+    if (db_execute_direct(sdb, "UPDATE user_account SET is_active = 0") != 0) {
+        log_error("Deactivation: could not deactivate user");
+        goto done;
+    }
+    active = -1;
+    if (oauth_introspect_token(sdb, "deact-user-token", NULL, 1, &active,
+                               NULL, NULL, NULL, NULL, NULL, NULL) != 0 || active != 0) {
+        log_error("Deactivation: introspection still reports the token active");
+        goto done;
+    }
+    if (oauth_access_token_is_active(sdb, "deact-user-token") != 0) {
+        log_error("Deactivation: oauth_access_token_is_active still reports it active");
+        goto done;
+    }
+    log_info("  deactivated account: introspection and liveness both inactive (OK)");
+
+    /* 3. A client_credentials token has no user; the predicate must not kill it. */
+    active = 0;
+    if (oauth_introspect_token(sdb, "deact-machine-token", NULL, 1, &active,
+                               NULL, NULL, NULL, NULL, NULL, NULL) != 0 || !active ||
+        oauth_access_token_is_active(sdb, "deact-machine-token") != 1) {
+        log_error("Deactivation: client_credentials token wrongly inactive");
+        goto done;
+    }
+    log_info("  client_credentials token unaffected (OK)");
+
+    failed = 0;
+
+done:
+    db_disconnect(sdb);
+    if (!failed) {
+        log_info("Deactivated-user token tests passed!");
+    }
+    return failed;
+}
+
 int main(void) {
     log_init(LOG_INFO);
     log_info("Database Integration Test");
@@ -492,6 +585,11 @@ int main(void) {
     }
 
     if (test_mfa_management_gate(config) != 0) {
+        config_free(config);
+        return 1;
+    }
+
+    if (test_deactivated_user_tokens(config) != 0) {
         config_free(config);
         return 1;
     }

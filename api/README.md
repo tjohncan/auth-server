@@ -316,7 +316,7 @@ curl -X POST http://localhost:8080/api/admin/users/activate \
 
 Deactivate a user account. Idempotent — deactivating an already-inactive user succeeds silently without touching the row.
 
-Deactivated users cannot log in or create new sessions. Existing tokens are not revoked but will fail introspection and session checks (is_active is evaluated at use time).
+Deactivated users cannot log in or create new sessions. Existing tokens are not revoked but will fail introspection, `/userinfo`, refresh and session checks (is_active is evaluated at use time). A resource server that validates access tokens locally against `/.well-known/jwks.json` cannot see deactivation, because a self-contained token carries no liveness state, and will keep accepting one until its `exp`. Resource servers that need deactivation to take effect immediately should use `POST /introspect`.
 
 **Request Body**:
 ```json
