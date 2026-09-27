@@ -171,7 +171,7 @@ test: test-str test-http test-router test-db test-crypto
 # off-by-one is likeliest and review is weakest.
 #
 # str, http and router, deliberately not all five. None of the three opens a
-# database. test-db is left out because it writes to a scratch file and its value
+# database. test-db is left out because it opens the configured one and its value
 # is integration coverage rather than memory safety, and test-crypto because
 # Argon2 at 64 MiB under ASan costs real time for no arithmetic payoff.
 #

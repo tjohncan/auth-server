@@ -8,47 +8,39 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
+
+/*
+ * A database of the test's own: SQLite in memory, schema applied, gone when the
+ * handle closes. The tests below delete and rewrite rows on purpose, so they
+ * never run against the configured database, and nothing they do reaches a file.
+ *
+ * Returns NULL on failure.
+ */
+static db_handle_t *open_test_db(const config_t *config) {
+    db_handle_t *db = NULL;
+    if (db_connect(&db, DB_TYPE_SQLITE, ":memory:") != 0) {
+        return NULL;
+    }
+    const char *owner_role = config->db_owner_role ? config->db_owner_role : config->db_user;
+    if (db_init_schema(db, DB_TYPE_SQLITE, config->schema_dir, owner_role) < 0) {
+        db_disconnect(db);
+        return NULL;
+    }
+    return db;
+}
 
 /*
  * Signing-key cache — the claim is that it is VALIDATED on every use, never
  * trusted for an interval.
  *
- * Runs against its own scratch database, deliberately not the handle above.
- * The third case deletes the signing-key row, and this suite connects to
- * config->db_path — which auth.conf.example ships as ./data/auth.db, which CI
- * copies and every new contributor copies. Reusing that handle would make
- * `make test` delete the live access-token signing key on a default setup. It
- * would regenerate immediately, with no prior key, and every access token in
- * circulation would stop verifying.
- *
  * Returns 0 on success.
  */
 static int test_signing_key_cache(const config_t *config) {
-    const char *path = "./data/test_signing_cache.db";
-    const char *suffixes[] = {"", "-wal", "-shm"};
-    char scratch[128];
+    log_info("\nSigning-key cache tests");
 
-    /* Remove the WAL and shared-memory files too. Leaving a stale -wal beside a
-       deleted database makes SQLite replay it into the new one, which silently
-       resurrects the very rows this test is about to assert are absent. */
-    for (size_t i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); i++) {
-        snprintf(scratch, sizeof(scratch), "%s%s", path, suffixes[i]);
-        unlink(scratch);
-    }
-
-    log_info("\nSigning-key cache tests (scratch database: %s)", path);
-
-    db_handle_t *sdb = NULL;
-    if (db_connect(&sdb, DB_TYPE_SQLITE, path) != 0) {
-        log_error("Signing-key cache: failed to open scratch database");
-        return 1;
-    }
-
-    const char *owner_role = config->db_owner_role ? config->db_owner_role : config->db_user;
-    if (db_init_schema(sdb, DB_TYPE_SQLITE, config->schema_dir, owner_role) < 0) {
-        log_error("Signing-key cache: failed to initialize scratch schema");
-        db_disconnect(sdb);
+    db_handle_t *sdb = open_test_db(config);
+    if (!sdb) {
+        log_error("Signing-key cache: could not open a test database");
         return 1;
     }
 
@@ -121,11 +113,6 @@ done:
     signing_key_thread_cleanup();
     db_disconnect(sdb);
 
-    for (size_t i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); i++) {
-        snprintf(scratch, sizeof(scratch), "%s%s", path, suffixes[i]);
-        unlink(scratch);
-    }
-
     if (!failed) {
         log_info("Signing-key cache tests passed!");
     }
@@ -135,6 +122,14 @@ done:
 int main(void) {
     log_init(LOG_INFO);
     log_info("Database Integration Test");
+
+#ifdef DB_BACKEND_POSTGRESQL
+    /* The connection below is only built for SQLite's db_path, and the tests
+       above run on SQLite in memory. The PostgreSQL backend has no runtime
+       tests; saying so beats failing to connect. */
+    log_info("Skipped: test-db runs in the SQLite build only.");
+    return 0;
+#endif
 
     /* Load configuration */
     log_info("Loading configuration...");
