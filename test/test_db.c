@@ -12,6 +12,8 @@
 #include "db/queries/mfa.h"
 #include "crypto/password.h"
 #include "crypto/encrypt.h"
+#include "crypto/sha256.h"
+#include "db/queries/user.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -35,6 +37,299 @@ static db_handle_t *open_test_db(const config_t *config) {
         return NULL;
     }
     return db;
+}
+
+/* Read the first column of a one-row query, raw, as stored. */
+static int read_stored_value(db_handle_t *db, const char *sql, char *out, size_t out_size) {
+    db_stmt_t *stmt = NULL;
+    out[0] = '\0';
+    if (db_prepare(db, &stmt, sql) != 0) return -1;
+    int rc = db_step(stmt);
+    const char *v = (rc == DB_ROW) ? db_column_text(stmt, 0) : NULL;
+    if (v) snprintf(out, out_size, "%s", v);
+    db_finalize(stmt);
+    return (rc == DB_ROW && v) ? 0 : -1;
+}
+
+/* One organization, resource server and confidential client; pins are all 1. */
+#define FIXTURE_ORG_RS_CLIENT \
+    "INSERT INTO organization (id, code_name, display_name) " \
+    "  VALUES (x'00000000000000000000000000000001', 'org', 'Org');" \
+    "INSERT INTO resource_server (id, organization_pin, code_name, display_name, address) " \
+    "  VALUES (x'00000000000000000000000000000002', 1, 'rs', 'RS', 'https://rs.example');" \
+    "INSERT INTO client (id, organization_pin, code_name, client_type, grant_type, " \
+    "                    display_name, access_token_ttl_seconds) " \
+    "  VALUES (x'00000000000000000000000000000003', 1, 'cl', 'confidential', " \
+    "          'authorization_code', 'Client', 3600);"
+
+static const unsigned char FIXTURE_CLIENT_ID[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x03};
+
+/*
+ * Part of what README.md promises about storage, checked against what lands in
+ * the tables: a username is kept encrypted and found again through its blind
+ * index, whatever its case; a password verifies as itself and nothing else; and
+ * every bearer credential -- session, authorization code, refresh and access
+ * token -- is kept as its SHA-256, never as issued. Emails and MFA secrets are
+ * sealed the same way as usernames but are not checked here.
+ *
+ * Returns 0 on success.
+ */
+static int test_storage_at_rest(const config_t *config) {
+    log_info("\nStorage-at-rest tests");
+
+    db_handle_t *sdb = open_test_db(config);
+    if (!sdb) {
+        log_error("Storage: could not open a test database");
+        return 1;
+    }
+
+    int failed = 1;
+    char stored[512], opened[256], expected[SHA256_HEX_LENGTH];
+
+    /* 1. The username is stored encrypted, and opens to what was given */
+    unsigned char user_id[16];
+    if (user_create(sdb, "Alice", NULL, "correct horse", user_id) != 0) {
+        log_error("Storage: could not create a user");
+        goto done;
+    }
+    if (read_stored_value(sdb, "SELECT username FROM user_account", stored, sizeof(stored)) != 0 ||
+        strcmp(stored, "Alice") == 0 ||
+        decrypt_field(stored, opened, sizeof(opened)) != 0 || strcmp(opened, "Alice") != 0) {
+        log_error("Storage: username is not stored encrypted");
+        goto done;
+    }
+    log_info("  username encrypted at rest (OK)");
+
+    /* 2. Login finds the user through the blind index, whatever the case, and
+       the password verifies only as itself */
+    long long user_pin = 0;
+    if (user_verify_password(sdb, "alice", "correct horse", &user_pin, NULL) != 1 ||
+        user_verify_password(sdb, "ALICE", "correct horse", NULL, NULL) != 1) {
+        log_error("Storage: login by username failed");
+        goto done;
+    }
+    if (user_verify_password(sdb, "Alice", "correct horsE", NULL, NULL) != 0 ||
+        user_verify_password(sdb, "Alicia", "correct horse", NULL, NULL) != 0) {
+        log_error("Storage: a wrong password or an unknown username verified");
+        goto done;
+    }
+    log_info("  login by blind index, case-insensitive; wrong password refused (OK)");
+
+    /* 3. Every bearer credential is stored as its SHA-256 */
+    unsigned char code_id[16], id[16];
+    if (db_execute_direct(sdb, FIXTURE_ORG_RS_CLIENT) != 0 ||
+        oauth_session_create(sdb, user_pin, user_id, "raw-session-token", "password",
+                             NULL, NULL, 3600, id) != 0 ||
+        oauth_auth_code_create(sdb, 1, FIXTURE_CLIENT_ID, user_pin, user_id, "raw-auth-code",
+                               NULL, NULL, 600, code_id) != 0 ||
+        oauth_token_create_refresh(sdb, 1, user_pin, code_id, "raw-refresh-token", "read",
+                                   3600, id) != 0 ||
+        oauth_token_create_access(sdb, 1, 1, user_pin, code_id, NULL, "raw-access-token",
+                                  "read", 3600, id) != 0) {
+        log_error("Storage: could not issue credentials");
+        goto done;
+    }
+    const struct { const char *sql, *issued; } creds[] = {
+        { "SELECT session_token FROM browser",   "raw-session-token" },
+        { "SELECT code FROM authorization_code", "raw-auth-code" },
+        { "SELECT token FROM refresh_token",     "raw-refresh-token" },
+        { "SELECT token FROM access_token",      "raw-access-token" },
+    };
+    for (size_t i = 0; i < sizeof(creds) / sizeof(creds[0]); i++) {
+        if (crypto_sha256_hex(creds[i].issued, strlen(creds[i].issued),
+                              expected, sizeof(expected)) != 0 ||
+            read_stored_value(sdb, creds[i].sql, stored, sizeof(stored)) != 0 ||
+            strcmp(stored, expected) != 0) {
+            log_error("Storage: \"%s\" does not hold the SHA-256 of what was issued",
+                      creds[i].sql);
+            goto done;
+        }
+    }
+    log_info("  session, code, refresh and access tokens stored as SHA-256 (OK)");
+
+    failed = 0;
+
+done:
+    db_disconnect(sdb);
+    if (!failed) {
+        log_info("Storage-at-rest tests passed!");
+    }
+    return failed;
+}
+
+/*
+ * A credential is good until it is used up, revoked, closed or expired: an
+ * authorization code exchanges exactly once, a revoked or expired access token
+ * is inactive, and a closed or expired session is not found. Deactivation, the
+ * other way out, is test_deactivated_user_tokens.
+ *
+ * Returns 0 on success.
+ */
+static int test_credential_lifetimes(const config_t *config) {
+    log_info("\nCredential lifetime tests");
+
+    db_handle_t *sdb = open_test_db(config);
+    if (!sdb) {
+        log_error("Lifetimes: could not open a test database");
+        return 1;
+    }
+
+    int failed = 1;
+
+    if (db_execute_direct(sdb, FIXTURE_ORG_RS_CLIENT
+            "INSERT INTO user_account (id) VALUES (x'00000000000000000000000000000004');") != 0) {
+        log_error("Lifetimes: could not insert fixtures");
+        goto done;
+    }
+    const unsigned char user_id[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x04};
+    unsigned char id[16];
+
+    /* Credential tables are keyed by id blobs. Below, rows are picked out by
+       SQLite's rowid, which is insertion order: 1 stays good, 2 and 3 do not. */
+
+    /* 1. An authorization code exchanges once, and the second try is reported
+       as a replay; an expired one never exchanges */
+    oauth_auth_code_data_t code;
+    if (oauth_auth_code_create(sdb, 1, FIXTURE_CLIENT_ID, 1, user_id, "life-code",
+                               NULL, NULL, 600, id) != 0 ||
+        oauth_auth_code_create(sdb, 1, FIXTURE_CLIENT_ID, 1, user_id, "life-code-expired",
+                               NULL, NULL, 600, id) != 0 ||
+        db_execute_direct(sdb, "UPDATE authorization_code "
+                               "SET expected_expiry = datetime('now', '-1 second') "
+                               "WHERE rowid = 2") != 0) {
+        log_error("Lifetimes: could not create authorization codes");
+        goto done;
+    }
+    if (oauth_auth_code_consume(sdb, "life-code", &code) != 0 || code.user_account_pin != 1) {
+        log_error("Lifetimes: a fresh authorization code did not exchange");
+        goto done;
+    }
+    if (oauth_auth_code_consume(sdb, "life-code", &code) != 1) {
+        log_error("Lifetimes: a used authorization code was not reported as a replay");
+        goto done;
+    }
+    if (oauth_auth_code_consume(sdb, "life-code-expired", &code) != -1) {
+        log_error("Lifetimes: an expired authorization code exchanged");
+        goto done;
+    }
+    log_info("  authorization code: exchanges once, replay reported, expired refused (OK)");
+
+    /* 2. Access tokens: revoked and expired are inactive to both liveness checks */
+    const char *tokens[] = { "life-access", "life-access-revoked", "life-access-expired" };
+    for (size_t i = 0; i < sizeof(tokens) / sizeof(tokens[0]); i++) {
+        if (oauth_token_create_access(sdb, 1, 1, 1, NULL, NULL, tokens[i], "read",
+                                      3600, id) != 0) {
+            log_error("Lifetimes: could not create access tokens");
+            goto done;
+        }
+    }
+    if (db_execute_direct(sdb,
+            "UPDATE access_token SET is_revoked = 1 WHERE rowid = 2;"
+            "UPDATE access_token SET expected_expiry = datetime('now', '-1 second') "
+            "WHERE rowid = 3;") != 0) {
+        log_error("Lifetimes: could not revoke and expire access tokens");
+        goto done;
+    }
+    for (size_t i = 0; i < sizeof(tokens) / sizeof(tokens[0]); i++) {
+        int want = (i == 0), active = -1;
+        if (oauth_introspect_token(sdb, tokens[i], NULL, 1, &active,
+                                   NULL, NULL, NULL, NULL, NULL, NULL) != 0 ||
+            active != want || oauth_access_token_is_active(sdb, tokens[i]) != want) {
+            log_error("Lifetimes: %s should be %s", tokens[i], want ? "active" : "inactive");
+            goto done;
+        }
+    }
+    log_info("  access token: revoked and expired are inactive (OK)");
+
+    /* 3. Sessions: closed and expired are not found */
+    const char *sessions[] = { "life-session", "life-session-closed", "life-session-expired" };
+    for (size_t i = 0; i < sizeof(sessions) / sizeof(sessions[0]); i++) {
+        if (oauth_session_create(sdb, 1, user_id, sessions[i], "password",
+                                 NULL, NULL, 3600, id) != 0) {
+            log_error("Lifetimes: could not create sessions");
+            goto done;
+        }
+    }
+    if (db_execute_direct(sdb,
+            "UPDATE browser SET is_closed = 1 WHERE rowid = 2;"
+            "UPDATE browser SET expected_expiry = datetime('now', '-1 second') "
+            "WHERE rowid = 3;") != 0) {
+        log_error("Lifetimes: could not close and expire sessions");
+        goto done;
+    }
+    for (size_t i = 0; i < sizeof(sessions) / sizeof(sessions[0]); i++) {
+        oauth_session_info_t s;
+        int found = (oauth_session_get_by_token(sdb, sessions[i], &s) == 0);
+        if (found != (i == 0)) {
+            log_error("Lifetimes: %s should %sbe found", sessions[i], i == 0 ? "" : "not ");
+            goto done;
+        }
+    }
+    log_info("  session: closed and expired are not found (OK)");
+
+    failed = 0;
+
+done:
+    db_disconnect(sdb);
+    if (!failed) {
+        log_info("Credential lifetime tests passed!");
+    }
+    return failed;
+}
+
+/*
+ * Two guarantees the schema makes and the code leans on without checking:
+ * foreign keys are enforced -- SQLite leaves them off unless each connection
+ * asks, which db_connect does -- and require_mfa cannot be on without has_mfa,
+ * which oauth_session_mfa_pending relies on to cover both flags.
+ *
+ * Returns 0 on success.
+ */
+static int test_schema_constraints(const config_t *config) {
+    log_info("\nSchema constraint tests");
+
+    db_handle_t *sdb = open_test_db(config);
+    if (!sdb) {
+        log_error("Schema: could not open a test database");
+        return 1;
+    }
+
+    int failed = 1;
+
+    if (db_execute_direct(sdb,
+            "INSERT INTO user_account (id) VALUES (x'00000000000000000000000000000004');") != 0) {
+        log_error("Schema: could not insert a user");
+        goto done;
+    }
+
+    /* 1. A row pointing at a user that does not exist is refused */
+    if (db_execute_direct(sdb,
+            "INSERT INTO user_mfa (id, user_account_pin, mfa_method, display_name, secret) "
+            "VALUES (x'00000000000000000000000000000005', 999, 'TOTP', 'x', 's');") == 0) {
+        log_error("Schema: a row referencing a missing user was accepted; foreign keys are off");
+        goto done;
+    }
+    log_info("  foreign keys enforced (OK)");
+
+    /* 2. require_mfa is refused without has_mfa, and accepted with it */
+    if (db_execute_direct(sdb, "UPDATE user_account SET require_mfa = 1;") == 0) {
+        log_error("Schema: require_mfa was set without has_mfa");
+        goto done;
+    }
+    if (db_execute_direct(sdb, "UPDATE user_account SET has_mfa = 1, require_mfa = 1;") != 0) {
+        log_error("Schema: has_mfa with require_mfa was refused");
+        goto done;
+    }
+    log_info("  require_mfa needs has_mfa (OK)");
+
+    failed = 0;
+
+done:
+    db_disconnect(sdb);
+    if (!failed) {
+        log_info("Schema constraint tests passed!");
+    }
+    return failed;
 }
 
 /*
@@ -127,18 +422,6 @@ done:
     return failed;
 }
 
-/* Read one text column of the single signing-key row, raw, as stored. */
-static int read_stored_key(db_handle_t *db, const char *sql, char *out, size_t out_size) {
-    db_stmt_t *stmt = NULL;
-    out[0] = '\0';
-    if (db_prepare(db, &stmt, sql) != 0) return -1;
-    int rc = db_step(stmt);
-    const char *v = (rc == DB_ROW) ? db_column_text(stmt, 0) : NULL;
-    if (v) snprintf(out, out_size, "%s", v);
-    db_finalize(stmt);
-    return (rc == DB_ROW && v) ? 0 : -1;
-}
-
 /*
  * Signing keys are encrypted at rest, and a key that will not open fails
  * rather than being replaced.
@@ -177,19 +460,19 @@ static int test_signing_key_encryption(const config_t *config) {
         log_error("Key encryption: loaded private key is not a PEM");
         goto done;
     }
-    if (read_stored_key(sdb, "SELECT current_private_key FROM access_token_signing",
+    if (read_stored_value(sdb, "SELECT current_private_key FROM access_token_signing",
                         stored, sizeof(stored)) != 0 ||
         strncmp(stored, "e1:", 3) != 0 || strstr(stored, "PRIVATE KEY")) {
         log_error("Key encryption: private key stored unsealed: %.40s", stored);
         goto done;
     }
-    if (read_stored_key(sdb, "SELECT current_secret FROM auth_request_signing",
+    if (read_stored_value(sdb, "SELECT current_secret FROM auth_request_signing",
                         stored, sizeof(stored)) != 0 ||
         strncmp(stored, "e1:", 3) != 0 || strcmp(stored + 3, hmac->current_secret) == 0) {
         log_error("Key encryption: HMAC secret stored unsealed");
         goto done;
     }
-    if (read_stored_key(sdb, "SELECT current_public_key FROM access_token_signing",
+    if (read_stored_value(sdb, "SELECT current_public_key FROM access_token_signing",
                         stored, sizeof(stored)) != 0 ||
         strncmp(stored, "-----BEGIN PUBLIC KEY-----", 26) != 0) {
         log_error("Key encryption: public key should stay plaintext");
@@ -198,7 +481,7 @@ static int test_signing_key_encryption(const config_t *config) {
     log_info("  private material sealed at rest, public key plaintext (OK)");
 
     /* 2. Rotation moves the sealed value into prior, and it still opens */
-    if (read_stored_key(sdb, "SELECT current_private_key FROM access_token_signing",
+    if (read_stored_value(sdb, "SELECT current_private_key FROM access_token_signing",
                         stored_before, sizeof(stored_before)) != 0 ||
         db_execute_direct(sdb,
             "UPDATE access_token_signing SET current_generated_at = "
@@ -207,7 +490,7 @@ static int test_signing_key_encryption(const config_t *config) {
         log_error("Key encryption: rotation failed");
         goto done;
     }
-    if (read_stored_key(sdb, "SELECT prior_private_key FROM access_token_signing",
+    if (read_stored_value(sdb, "SELECT prior_private_key FROM access_token_signing",
                         stored, sizeof(stored)) != 0 ||
         strcmp(stored, stored_before) != 0 ||
         !rotated->prior_private_key ||
@@ -229,7 +512,7 @@ static int test_signing_key_encryption(const config_t *config) {
         log_error("Key encryption: a plaintext row was accepted");
         goto done;
     }
-    if (read_stored_key(sdb, "SELECT current_secret FROM auth_request_signing",
+    if (read_stored_value(sdb, "SELECT current_secret FROM auth_request_signing",
                         stored, sizeof(stored)) != 0 ||
         strcmp(stored, "legacy-plaintext-secret") != 0) {
         log_error("Key encryption: the legacy row was overwritten");
@@ -1012,9 +1295,18 @@ int main(void) {
     log_info("\nDisconnecting...");
     db_disconnect(db);
 
-    /* Signing keys are sealed with the field-encryption key, as in main.c */
-    if (encrypt_init(config->encryption_key) != 0) {
-        log_error("Failed to initialize field encryption");
+    /* Field encryption and password hashing, set up as main.c does: usernames and
+       signing keys are sealed with the one, passwords and API keys hashed with
+       the other */
+    if (encrypt_init(config->encryption_key) != 0 || crypto_password_init(config) != 0) {
+        log_error("Failed to initialize field encryption or password hashing");
+        config_free(config);
+        return 1;
+    }
+
+    if (test_storage_at_rest(config) != 0 ||
+        test_credential_lifetimes(config) != 0 ||
+        test_schema_constraints(config) != 0) {
         config_free(config);
         return 1;
     }
@@ -1044,8 +1336,7 @@ int main(void) {
         return 1;
     }
 
-    /* Key creation hashes the secret, so the password module needs its config */
-    if (crypto_password_init(config) != 0 || test_zero_row_writes(config) != 0) {
+    if (test_zero_row_writes(config) != 0) {
         config_free(config);
         return 1;
     }
