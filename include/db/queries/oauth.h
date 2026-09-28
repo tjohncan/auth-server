@@ -142,7 +142,9 @@ typedef struct {
  * get_authenticated_user_pin) applies the preference rule as well, and that is
  * policy: MFA guards admin work for an admin who has turned on require, and
  * having a factor does not by itself demand it. For such an admin, /login asks
- * for the factor before the console loads.
+ * for the factor before the console loads, and a session that skipped that step
+ * gets 403 "MFA verification required" from the admin API, as from /api/user,
+ * which the console turns into the MFA step.
  *
  * The management UI client's own require_mfa stays off, for a separate reason:
  * the console is where a first factor gets enrolled, and a client that requires

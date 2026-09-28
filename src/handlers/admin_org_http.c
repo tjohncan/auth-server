@@ -55,7 +55,8 @@ typedef struct {
  * Internal helper used by get_auth_context() for the session cookie
  * leg of dual authentication (session OR org key).
  *
- * Returns: 0 on success with user_pin populated, -1 on failure
+ * Returns: 0 on success with user_pin populated, -2 if the session is valid
+ *          but still owes MFA, -1 on any other failure
  */
 static int get_authenticated_user_pin(const HttpRequest *req, long long *out_user_pin) {
     db_handle_t *db = db_pool_get_connection();
@@ -85,7 +86,7 @@ static int get_authenticated_user_pin(const HttpRequest *req, long long *out_use
 
     /* The preference rule; see oauth_session_mfa_pending in db/queries/oauth.h */
     if (session.user_requires_mfa && !session.mfa_completed) {
-        return -1;
+        return -2;
     }
 
     *out_user_pin = session.user_account_pin;
@@ -103,14 +104,22 @@ static int get_authenticated_user_pin(const HttpRequest *req, long long *out_use
  * Query layer functions receive user_account_pin (session) or -1 (org key).
  * The -1 sentinel signals to query layer: "use org-based auth, not user-based".
  *
- * Returns: 0 on success with ctx populated, -1 if both methods fail
+ * A valid session that still owes MFA ends the attempt there: it is not retried
+ * as org-key auth, so the caller can say what is missing.
+ *
+ * Returns: 0 on success with ctx populated, -2 if the session owes MFA,
+ *          -1 if both methods fail
  */
 static int get_auth_context(const HttpRequest *req, const char *operation,
                             auth_context_t *ctx) {
     long long user_pin;
 
     /* Try session authentication first */
-    if (get_authenticated_user_pin(req, &user_pin) == 0) {
+    int session_rc = get_authenticated_user_pin(req, &user_pin);
+    if (session_rc == -2) {
+        return -2;
+    }
+    if (session_rc == 0) {
         /* Session auth succeeded */
         ctx->user_account_pin = user_pin;
         ctx->organization_pin = -1;  /* Sentinel: not org key auth */
@@ -132,6 +141,27 @@ static int get_auth_context(const HttpRequest *req, const char *operation,
 
     /* Both methods failed */
     return -1;
+}
+
+/*
+ * require_auth_context - get_auth_context, answered as a response on failure
+ *
+ * A session that owes MFA gets 403 "MFA verification required", the answer the
+ * /api/user endpoints give, which the console turns into the MFA step. Anything
+ * else gets 401.
+ *
+ * Returns: NULL on success with ctx populated, or the error response
+ */
+static HttpResponse *require_auth_context(const HttpRequest *req, const char *operation,
+                                          auth_context_t *ctx) {
+    int rc = get_auth_context(req, operation, ctx);
+    if (rc == 0) {
+        return NULL;
+    }
+    if (rc == -2) {
+        return response_json_error(403, "MFA verification required");
+    }
+    return response_json_error(401, "Authentication required");
 }
 
 /* ============================================================================
@@ -158,9 +188,8 @@ HttpResponse *admin_get_organizations_handler(const HttpRequest *req, const Rout
 
     /* Dual authentication: session OR org key */
     auth_context_t ctx;
-    if (get_auth_context(req, "get_organizations", &ctx) != 0) {
-        return response_json_error(401, "Authentication required");
-    }
+    HttpResponse *auth_err = require_auth_context(req, "get_organizations", &ctx);
+    if (auth_err) return auth_err;
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -268,9 +297,8 @@ HttpResponse *admin_update_organization_handler(const HttpRequest *req, const Ro
 
     /* Dual authentication: session OR org key */
     auth_context_t ctx;
-    if (get_auth_context(req, "update_organization", &ctx) != 0) {
-        return response_json_error(401, "Authentication required");
-    }
+    HttpResponse *auth_err = require_auth_context(req, "update_organization", &ctx);
+    if (auth_err) return auth_err;
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -368,9 +396,8 @@ HttpResponse *admin_get_resource_servers_handler(const HttpRequest *req, const R
 
     /* Dual authentication: session OR org key */
     auth_context_t ctx;
-    if (get_auth_context(req, "get_resource_servers", &ctx) != 0) {
-        return response_json_error(401, "Authentication required");
-    }
+    HttpResponse *auth_err = require_auth_context(req, "get_resource_servers", &ctx);
+    if (auth_err) return auth_err;
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -495,9 +522,8 @@ HttpResponse *admin_create_resource_server_handler(const HttpRequest *req, const
     if (ct_err) return ct_err;
 
     auth_context_t ctx;
-    if (get_auth_context(req, "create_resource_server", &ctx) != 0) {
-        return response_json_error(401, "Authentication required");
-    }
+    HttpResponse *auth_err = require_auth_context(req, "create_resource_server", &ctx);
+    if (auth_err) return auth_err;
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -593,9 +619,8 @@ HttpResponse *admin_update_resource_server_handler(const HttpRequest *req, const
     if (ct_err) return ct_err;
 
     auth_context_t ctx;
-    if (get_auth_context(req, "update_resource_server", &ctx) != 0) {
-        return response_json_error(401, "Authentication required");
-    }
+    HttpResponse *auth_err = require_auth_context(req, "update_resource_server", &ctx);
+    if (auth_err) return auth_err;
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -691,9 +716,8 @@ HttpResponse *admin_get_clients_handler(const HttpRequest *req, const RouteParam
     (void)params;
 
     auth_context_t ctx;
-    if (get_auth_context(req, "get_clients", &ctx) != 0) {
-        return response_json_error(401, "Authentication required");
-    }
+    HttpResponse *auth_err = require_auth_context(req, "get_clients", &ctx);
+    if (auth_err) return auth_err;
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -826,9 +850,8 @@ HttpResponse *admin_create_client_handler(const HttpRequest *req, const RoutePar
     if (ct_err) return ct_err;
 
     auth_context_t ctx;
-    if (get_auth_context(req, "create_client", &ctx) != 0) {
-        return response_json_error(401, "Authentication required");
-    }
+    HttpResponse *auth_err = require_auth_context(req, "create_client", &ctx);
+    if (auth_err) return auth_err;
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -933,9 +956,8 @@ HttpResponse *admin_update_client_handler(const HttpRequest *req, const RoutePar
     if (ct_err) return ct_err;
 
     auth_context_t ctx;
-    if (get_auth_context(req, "update_client", &ctx) != 0) {
-        return response_json_error(401, "Authentication required");
-    }
+    HttpResponse *auth_err = require_auth_context(req, "update_client", &ctx);
+    if (auth_err) return auth_err;
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -1033,9 +1055,8 @@ HttpResponse *admin_get_client_redirect_uris_handler(const HttpRequest *req, con
     (void)params;
 
     auth_context_t ctx;
-    if (get_auth_context(req, "get_redirect_uris", &ctx) != 0) {
-        return response_json_error(401, "Authentication required");
-    }
+    HttpResponse *auth_err = require_auth_context(req, "get_redirect_uris", &ctx);
+    if (auth_err) return auth_err;
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -1096,9 +1117,8 @@ HttpResponse *admin_create_client_redirect_uri_handler(const HttpRequest *req, c
     if (ct_err) return ct_err;
 
     auth_context_t ctx;
-    if (get_auth_context(req, "create_redirect_uri", &ctx) != 0) {
-        return response_json_error(401, "Authentication required");
-    }
+    HttpResponse *auth_err = require_auth_context(req, "create_redirect_uri", &ctx);
+    if (auth_err) return auth_err;
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -1160,9 +1180,8 @@ HttpResponse *admin_delete_client_redirect_uri_handler(const HttpRequest *req, c
     (void)params;
 
     auth_context_t ctx;
-    if (get_auth_context(req, "delete_redirect_uri", &ctx) != 0) {
-        return response_json_error(401, "Authentication required");
-    }
+    HttpResponse *auth_err = require_auth_context(req, "delete_redirect_uri", &ctx);
+    if (auth_err) return auth_err;
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -1226,9 +1245,8 @@ HttpResponse *admin_get_client_resource_servers_handler(const HttpRequest *req, 
     (void)params;
 
     auth_context_t ctx;
-    if (get_auth_context(req, "get_client_resource_servers", &ctx) != 0) {
-        return response_json_error(401, "Authentication required");
-    }
+    HttpResponse *auth_err = require_auth_context(req, "get_client_resource_servers", &ctx);
+    if (auth_err) return auth_err;
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -1293,9 +1311,8 @@ HttpResponse *admin_get_resource_server_clients_handler(const HttpRequest *req, 
     (void)params;
 
     auth_context_t ctx;
-    if (get_auth_context(req, "get_resource_server_clients", &ctx) != 0) {
-        return response_json_error(401, "Authentication required");
-    }
+    HttpResponse *auth_err = require_auth_context(req, "get_resource_server_clients", &ctx);
+    if (auth_err) return auth_err;
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -1360,9 +1377,8 @@ HttpResponse *admin_create_client_resource_server_link_handler(const HttpRequest
     if (ct_err) return ct_err;
 
     auth_context_t ctx;
-    if (get_auth_context(req, "link_client_resource_server", &ctx) != 0) {
-        return response_json_error(401, "Authentication required");
-    }
+    HttpResponse *auth_err = require_auth_context(req, "link_client_resource_server", &ctx);
+    if (auth_err) return auth_err;
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -1409,9 +1425,8 @@ HttpResponse *admin_delete_client_resource_server_link_handler(const HttpRequest
     (void)params;
 
     auth_context_t ctx;
-    if (get_auth_context(req, "unlink_client_resource_server", &ctx) != 0) {
-        return response_json_error(401, "Authentication required");
-    }
+    HttpResponse *auth_err = require_auth_context(req, "unlink_client_resource_server", &ctx);
+    if (auth_err) return auth_err;
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -1476,9 +1491,8 @@ HttpResponse *admin_create_resource_server_key_handler(const HttpRequest *req, c
     if (ct_err) return ct_err;
 
     auth_context_t ctx;
-    if (get_auth_context(req, "create_resource_server_key", &ctx) != 0) {
-        return response_json_error(401, "Authentication required");
-    }
+    HttpResponse *auth_err = require_auth_context(req, "create_resource_server_key", &ctx);
+    if (auth_err) return auth_err;
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -1595,9 +1609,8 @@ HttpResponse *admin_get_resource_server_keys_handler(const HttpRequest *req, con
     (void)params;
 
     auth_context_t ctx;
-    if (get_auth_context(req, "get_resource_server_keys", &ctx) != 0) {
-        return response_json_error(401, "Authentication required");
-    }
+    HttpResponse *auth_err = require_auth_context(req, "get_resource_server_keys", &ctx);
+    if (auth_err) return auth_err;
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -1677,9 +1690,8 @@ HttpResponse *admin_delete_resource_server_key_handler(const HttpRequest *req, c
     (void)params;
 
     auth_context_t ctx;
-    if (get_auth_context(req, "delete_resource_server_key", &ctx) != 0) {
-        return response_json_error(401, "Authentication required");
-    }
+    HttpResponse *auth_err = require_auth_context(req, "delete_resource_server_key", &ctx);
+    if (auth_err) return auth_err;
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -1740,9 +1752,8 @@ HttpResponse *admin_create_client_key_handler(const HttpRequest *req, const Rout
     if (ct_err) return ct_err;
 
     auth_context_t ctx;
-    if (get_auth_context(req, "create_client_key", &ctx) != 0) {
-        return response_json_error(401, "Authentication required");
-    }
+    HttpResponse *auth_err = require_auth_context(req, "create_client_key", &ctx);
+    if (auth_err) return auth_err;
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -1847,9 +1858,8 @@ HttpResponse *admin_get_client_keys_handler(const HttpRequest *req, const RouteP
     (void)params;
 
     auth_context_t ctx;
-    if (get_auth_context(req, "get_client_keys", &ctx) != 0) {
-        return response_json_error(401, "Authentication required");
-    }
+    HttpResponse *auth_err = require_auth_context(req, "get_client_keys", &ctx);
+    if (auth_err) return auth_err;
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -1929,9 +1939,8 @@ HttpResponse *admin_delete_client_key_handler(const HttpRequest *req, const Rout
     (void)params;
 
     auth_context_t ctx;
-    if (get_auth_context(req, "delete_client_key", &ctx) != 0) {
-        return response_json_error(401, "Authentication required");
-    }
+    HttpResponse *auth_err = require_auth_context(req, "delete_client_key", &ctx);
+    if (auth_err) return auth_err;
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {

@@ -426,6 +426,10 @@ Authenticated endpoints for organization administrators
 **Use Case**: Management UI operations
 **Access Control**: User must have org-admin role for the organization being managed
 
+A session that still owes MFA gets `403 {"error": "MFA verification required"}`, as on
+`/api/user`, even when the request also carries org-key headers; any other authentication
+failure gets `401`.
+
 ### Organizations
 
 **GET /api/admin/organizations**
