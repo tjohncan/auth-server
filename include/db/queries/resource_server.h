@@ -212,7 +212,8 @@ typedef struct {
  * - Session auth: Verifies user is org admin
  * - Org key auth: Verifies specific key is active
  *
- * Returns: 0 on success, -1 on error, -2 if secret below minimum length
+ * Returns: 0 on success, 1 if nothing was inserted (resource server not found or
+ *          caller not authorized), -1 on error, -2 if secret below minimum length
  */
 int resource_server_key_create(db_handle_t *db,
                                 long long user_account_pin,
@@ -270,7 +271,8 @@ int resource_server_key_list(db_handle_t *db,
  * - Session auth: Verifies user is org admin
  * - Org key auth: Verifies specific key is active
  *
- * Returns: 0 on success, -1 on error
+ * Returns: 0 on success, 1 if nothing was revoked (not found, not the caller's,
+ *          or already revoked), -1 on error
  */
 int resource_server_key_revoke(db_handle_t *db,
                                long long user_account_pin,

@@ -347,6 +347,13 @@ int admin_list_client_redirect_uris(db_handle_t *db, long long user_account_pin,
                                      int *out_count,
                                      int *out_total);
 
+/*
+ * The create/delete/revoke wrappers below (redirect URIs, client-resource-server
+ * links, resource server and client keys) return their query function's code
+ * unchanged, including 1 for "matched nothing" -- not found, not the caller's,
+ * or (keys) not confidential / already revoked. Handlers answer 1 with 404 or 409,
+ * never with success. See the query headers for each function's exact meaning.
+ */
 int admin_create_client_redirect_uri(db_handle_t *db, long long user_account_pin,
                                       long long organization_key_pin,
                                       const unsigned char *client_id,
@@ -527,7 +534,7 @@ int admin_list_organization_keys(db_handle_t *db,
  *   db     - Database handle
  *   key_id - Key UUID (16 bytes)
  *
- * Returns: 0 on success, -1 on error
+ * Returns: 0 on success, 1 if the key does not exist, -1 on error
  */
 int admin_revoke_organization_key(db_handle_t *db,
                                    const unsigned char *key_id);

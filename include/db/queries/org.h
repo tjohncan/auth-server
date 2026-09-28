@@ -251,7 +251,8 @@ int organization_key_list(db_handle_t *db,
  *   db                   - Database handle
  *   key_id               - Key UUID (16 bytes)
  *
- * Returns: 0 on success, -1 on error
+ * Returns: 0 on success (re-revoking is idempotent), 1 if the id does not exist,
+ *          -1 on error
  */
 int organization_key_revoke(db_handle_t *db,
                             const unsigned char *key_id);

@@ -175,7 +175,8 @@ int client_redirect_uri_list(db_handle_t *db, long long user_account_pin,
  * - Session auth: Verifies user is org admin
  * - Org key auth: Verifies specific key is active
  *
- * Returns: 0 on success, -1 on error
+ * Returns: 0 on success, 1 if nothing was inserted (client not found or caller
+ *          not authorized), -1 on error
  */
 int client_redirect_uri_create(db_handle_t *db, long long user_account_pin,
                                 long long organization_key_pin,
@@ -199,7 +200,8 @@ int client_redirect_uri_create(db_handle_t *db, long long user_account_pin,
  * - Session auth: Verifies user is org admin
  * - Org key auth: Verifies specific key is active
  *
- * Returns: 0 on success, -1 on error
+ * Returns: 0 on success, 1 if nothing was deleted (not found or caller not
+ *          authorized), -1 on error
  */
 int client_redirect_uri_delete(db_handle_t *db, long long user_account_pin,
                                 long long organization_key_pin,
@@ -320,7 +322,9 @@ int resource_server_client_list(db_handle_t *db, long long user_account_pin,
  * - Session auth: Verifies user is org admin
  * - Org key auth: Verifies specific key is active
  *
- * Returns: 0 on success, -1 on error
+ * Returns: 0 on success (including an already-existing link), 1 if either side
+ *          is missing, they are in different organizations, or the caller is not
+ *          authorized, -1 on error
  */
 int client_resource_server_create(db_handle_t *db, long long user_account_pin,
                                    long long organization_key_pin,
@@ -343,7 +347,8 @@ int client_resource_server_create(db_handle_t *db, long long user_account_pin,
  * - Session auth: Verifies user is org admin
  * - Org key auth: Verifies specific key is active
  *
- * Returns: 0 on success, -1 on error
+ * Returns: 0 on success, 1 if nothing was deleted (not found or caller not
+ *          authorized), -1 on error
  */
 int client_resource_server_delete(db_handle_t *db, long long user_account_pin,
                                    long long organization_key_pin,
@@ -499,7 +504,8 @@ typedef struct {
  * - Session auth: Verifies user is org admin
  * - Org key auth: Verifies specific key is active
  *
- * Returns: 0 on success, -1 on error (or if client is not confidential),
+ * Returns: 0 on success, 1 if nothing was inserted (client not found, not
+ *          confidential, or caller not authorized), -1 on error,
  *          -2 if secret below minimum length
  */
 int client_key_create(db_handle_t *db,
@@ -558,7 +564,8 @@ int client_key_list(db_handle_t *db,
  * - Session auth: Verifies user is org admin
  * - Org key auth: Verifies specific key is active
  *
- * Returns: 0 on success, -1 on error
+ * Returns: 0 on success, 1 if nothing was revoked (not found, not the caller's,
+ *          or already revoked), -1 on error
  */
 int client_key_revoke(db_handle_t *db,
                       long long user_account_pin,

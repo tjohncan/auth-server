@@ -1141,7 +1141,8 @@ int client_redirect_uri_create(db_handle_t *db, long long user_account_pin,
             "WHERE c.id = " P"1 "
             "AND ok.pin = " P"4 "
             "AND ok.is_active = " BOOL_TRUE " "
-            "LIMIT 1";
+            "LIMIT 1 "
+            "RETURNING pin";
     } else {
         /* Session authentication - verify user is org admin */
         sql =
@@ -1153,7 +1154,8 @@ int client_redirect_uri_create(db_handle_t *db, long long user_account_pin,
             "WHERE c.id = " P"1 "
             "AND oa.user_account_pin = " P"4 "
             "AND ua.is_active = " BOOL_TRUE " "
-            "LIMIT 1";
+            "LIMIT 1 "
+            "RETURNING pin";
     }
 
     db_stmt_t *stmt = NULL;
@@ -1180,7 +1182,14 @@ int client_redirect_uri_create(db_handle_t *db, long long user_account_pin,
     int rc = db_step(stmt);
     db_finalize(stmt);
 
-    if (rc != DB_DONE) {
+    /* Authorization lives in the WHERE clause, so "not yours / not there" is a
+       statement that inserts nothing and still completes. RETURNING is what
+       tells that apart from success. */
+    if (rc == DB_DONE) {
+        log_info("Redirect URI not created: client not found or caller not authorized");
+        return 1;
+    }
+    if (rc != DB_ROW) {
         log_error("Failed to create redirect URI");
         return -1;
     }
@@ -1213,7 +1222,8 @@ int client_redirect_uri_delete(db_handle_t *db, long long user_account_pin,
                 "AND ok.is_active = " BOOL_TRUE " "
                 "LIMIT 1"
             ") "
-            "AND redirect_uri = " P"2";
+            "AND redirect_uri = " P"2 "
+            "RETURNING pin";
     } else {
         /* Session authentication - verify user is org admin */
         sql =
@@ -1227,7 +1237,8 @@ int client_redirect_uri_delete(db_handle_t *db, long long user_account_pin,
                 "AND ua.is_active = " BOOL_TRUE " "
                 "LIMIT 1"
             ") "
-            "AND redirect_uri = " P"2";
+            "AND redirect_uri = " P"2 "
+            "RETURNING pin";
     }
 
     db_stmt_t *stmt = NULL;
@@ -1247,7 +1258,11 @@ int client_redirect_uri_delete(db_handle_t *db, long long user_account_pin,
     int rc = db_step(stmt);
     db_finalize(stmt);
 
-    if (rc != DB_DONE) {
+    if (rc == DB_DONE) {
+        log_info("Redirect URI not deleted: not found or caller not authorized");
+        return 1;
+    }
+    if (rc != DB_ROW) {
         log_error("Failed to delete redirect URI");
         return -1;
     }
@@ -1535,6 +1550,34 @@ int resource_server_client_list(db_handle_t *db, long long user_account_pin,
     return 0;
 }
 
+/*
+ * The authorized source rows for a link, shared by the INSERT and by the
+ * follow-up that tells "already linked" apart from "not found / not yours".
+ * One text per auth mode, so the two statements cannot drift apart.
+ */
+#define CRS_SOURCE_ORG_KEY \
+    "FROM " TBL_CLIENT " c " \
+    "JOIN " TBL_RESOURCE_SERVER " rs ON rs.organization_pin = c.organization_pin " \
+    "JOIN " TBL_ORGANIZATION_KEY " ok ON ok.organization_pin = c.organization_pin " \
+    "LEFT JOIN " TBL_CLIENT_RESOURCE_SERVER " existing " \
+    "  ON existing.client_pin = c.pin AND existing.resource_server_pin = rs.pin " \
+    "WHERE c.id = " P"1 " \
+    "AND rs.id = " P"2 " \
+    "AND ok.pin = " P"3 " \
+    "AND ok.is_active = " BOOL_TRUE " "
+
+#define CRS_SOURCE_SESSION \
+    "FROM " TBL_CLIENT " c " \
+    "JOIN " TBL_RESOURCE_SERVER " rs ON rs.organization_pin = c.organization_pin " \
+    "JOIN " TBL_ORGANIZATION_ADMIN " oa ON oa.organization_pin = c.organization_pin " \
+    "JOIN " TBL_USER_ACCOUNT " ua ON ua.pin = oa.user_account_pin " \
+    "LEFT JOIN " TBL_CLIENT_RESOURCE_SERVER " existing " \
+    "  ON existing.client_pin = c.pin AND existing.resource_server_pin = rs.pin " \
+    "WHERE c.id = " P"1 " \
+    "AND rs.id = " P"2 " \
+    "AND oa.user_account_pin = " P"3 " \
+    "AND ua.is_active = " BOOL_TRUE " "
+
 int client_resource_server_create(db_handle_t *db, long long user_account_pin,
                                    long long organization_key_pin,
                                    const unsigned char *client_id,
@@ -1544,69 +1587,76 @@ int client_resource_server_create(db_handle_t *db, long long user_account_pin,
         return -1;
     }
 
-    const char *sql;
     int is_org_key_auth = (user_account_pin == -1);
+    long long auth_pin = is_org_key_auth ? organization_key_pin : user_account_pin;
 
-    if (is_org_key_auth) {
-        /* Org key authentication - verify key is active */
-        sql =
-            "INSERT INTO " TBL_CLIENT_RESOURCE_SERVER " (organization_pin, client_pin, resource_server_pin) "
-            "SELECT c.organization_pin, c.pin, rs.pin "
-            "FROM " TBL_CLIENT " c "
-            "JOIN " TBL_RESOURCE_SERVER " rs ON rs.organization_pin = c.organization_pin "
-            "JOIN " TBL_ORGANIZATION_KEY " ok ON ok.organization_pin = c.organization_pin "
-            "LEFT JOIN " TBL_CLIENT_RESOURCE_SERVER " existing "
-            "  ON existing.client_pin = c.pin AND existing.resource_server_pin = rs.pin "
-            "WHERE c.id = " P"1 "
-            "AND rs.id = " P"2 "
-            "AND ok.pin = " P"3 "
-            "AND ok.is_active = " BOOL_TRUE " "
-            "AND existing.pin IS NULL "
-            "LIMIT 1";
-    } else {
-        /* Session authentication - verify user is org admin */
-        sql =
-            "INSERT INTO " TBL_CLIENT_RESOURCE_SERVER " (organization_pin, client_pin, resource_server_pin) "
-            "SELECT c.organization_pin, c.pin, rs.pin "
-            "FROM " TBL_CLIENT " c "
-            "JOIN " TBL_RESOURCE_SERVER " rs ON rs.organization_pin = c.organization_pin "
-            "JOIN " TBL_ORGANIZATION_ADMIN " oa ON oa.organization_pin = c.organization_pin "
-            "JOIN " TBL_USER_ACCOUNT " ua ON ua.pin = oa.user_account_pin "
-            "LEFT JOIN " TBL_CLIENT_RESOURCE_SERVER " existing "
-            "  ON existing.client_pin = c.pin AND existing.resource_server_pin = rs.pin "
-            "WHERE c.id = " P"1 "
-            "AND rs.id = " P"2 "
-            "AND oa.user_account_pin = " P"3 "
-            "AND ua.is_active = " BOOL_TRUE " "
-            "AND existing.pin IS NULL "
-            "LIMIT 1";
-    }
+    const char *insert_sql = is_org_key_auth
+        ? "INSERT INTO " TBL_CLIENT_RESOURCE_SERVER " (organization_pin, client_pin, resource_server_pin) "
+          "SELECT c.organization_pin, c.pin, rs.pin " CRS_SOURCE_ORG_KEY
+          "AND existing.pin IS NULL LIMIT 1 RETURNING pin"
+        : "INSERT INTO " TBL_CLIENT_RESOURCE_SERVER " (organization_pin, client_pin, resource_server_pin) "
+          "SELECT c.organization_pin, c.pin, rs.pin " CRS_SOURCE_SESSION
+          "AND existing.pin IS NULL LIMIT 1 RETURNING pin";
 
     db_stmt_t *stmt = NULL;
-    if (db_prepare(db, &stmt, sql) != 0) {
+    if (db_prepare(db, &stmt, insert_sql) != 0) {
         log_error("Failed to prepare client_resource_server_create statement");
         return -1;
     }
 
     db_bind_blob(stmt, 1, client_id, 16);
     db_bind_blob(stmt, 2, resource_server_id, 16);
-    if (is_org_key_auth) {
-        db_bind_int64(stmt, 3, organization_key_pin);
-    } else {
-        db_bind_int64(stmt, 3, user_account_pin);
-    }
+    db_bind_int64(stmt, 3, auth_pin);
 
     int rc = db_step(stmt);
     db_finalize(stmt);
 
+    if (rc == DB_ROW) {
+        log_info("Created client-resource-server link");
+        return 0;
+    }
     if (rc != DB_DONE) {
         log_error("Failed to create client-resource-server link");
         return -1;
     }
 
-    log_info("Created client-resource-server link");
-    return 0;
+    /* Nothing inserted. That is either an existing link, which stays an
+       idempotent success, or a client/resource server that is missing, in
+       different organizations, or not the caller's -- which must not report
+       success. Same source rows, without the "not already linked" filter. */
+    const char *check_sql = is_org_key_auth
+        ? "SELECT existing.pin " CRS_SOURCE_ORG_KEY "LIMIT 1"
+        : "SELECT existing.pin " CRS_SOURCE_SESSION "LIMIT 1";
+
+    if (db_prepare(db, &stmt, check_sql) != 0) {
+        log_error("Failed to prepare client_resource_server_create check");
+        return -1;
+    }
+
+    db_bind_blob(stmt, 1, client_id, 16);
+    db_bind_blob(stmt, 2, resource_server_id, 16);
+    db_bind_int64(stmt, 3, auth_pin);
+
+    rc = db_step(stmt);
+    int already_linked = (rc == DB_ROW && db_column_type(stmt, 0) != DB_NULL);
+    db_finalize(stmt);
+
+    if (rc != DB_ROW && rc != DB_DONE) {
+        log_error("Failed to check client-resource-server link");
+        return -1;
+    }
+    if (already_linked) {
+        log_info("Client-resource-server link already exists");
+        return 0;
+    }
+
+    log_info("Link not created: client or resource server not found, not in one "
+             "organization, or caller not authorized");
+    return 1;
 }
+
+#undef CRS_SOURCE_ORG_KEY
+#undef CRS_SOURCE_SESSION
 
 int client_resource_server_delete(db_handle_t *db, long long user_account_pin,
                                    long long organization_key_pin,
@@ -1636,7 +1686,8 @@ int client_resource_server_delete(db_handle_t *db, long long user_account_pin,
                 "SELECT rs.pin FROM " TBL_RESOURCE_SERVER " rs "
                 "WHERE rs.id = " P"2 "
                 "LIMIT 1"
-            ")";
+            ") "
+            "RETURNING pin";
     } else {
         /* Session authentication - verify user is org admin */
         sql =
@@ -1654,7 +1705,8 @@ int client_resource_server_delete(db_handle_t *db, long long user_account_pin,
                 "SELECT rs.pin FROM " TBL_RESOURCE_SERVER " rs "
                 "WHERE rs.id = " P"2 "
                 "LIMIT 1"
-            ")";
+            ") "
+            "RETURNING pin";
     }
 
     db_stmt_t *stmt = NULL;
@@ -1674,7 +1726,11 @@ int client_resource_server_delete(db_handle_t *db, long long user_account_pin,
     int rc = db_step(stmt);
     db_finalize(stmt);
 
-    if (rc != DB_DONE) {
+    if (rc == DB_DONE) {
+        log_info("Link not deleted: not found or caller not authorized");
+        return 1;
+    }
+    if (rc != DB_ROW) {
         log_error("Failed to delete client-resource-server link");
         return -1;
     }
@@ -1737,7 +1793,8 @@ int client_key_create(db_handle_t *db,
             "AND ok.pin = " P"7 "
             "AND ok.is_active = " BOOL_TRUE " "
             "AND c.client_type = 'confidential' "
-            "LIMIT 1";
+            "LIMIT 1 "
+            "RETURNING pin";
     } else {
         /* Session authentication - verify user is org admin */
         sql =
@@ -1751,7 +1808,8 @@ int client_key_create(db_handle_t *db,
             "AND oa.user_account_pin = " P"7 "
             "AND ua.is_active = " BOOL_TRUE " "
             "AND c.client_type = 'confidential' "
-            "LIMIT 1";
+            "LIMIT 1 "
+            "RETURNING pin";
     }
 
     db_stmt_t *stmt = NULL;
@@ -1788,8 +1846,17 @@ int client_key_create(db_handle_t *db,
     OPENSSL_cleanse(salt_hex, sizeof(salt_hex));
     OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
 
-    if (rc != DB_DONE) {
-        log_error("Failed to insert client key (unauthorized, not confidential, or constraint violation)");
+    /* A public client, another org's client or a missing one all insert nothing
+       and still complete. RETURNING is what tells that apart from success;
+       without it the caller would be handed a key_id -- and, in generate mode, a
+       secret -- for a key that does not exist. */
+    if (rc == DB_DONE) {
+        log_info("Client key not created: client not found, not confidential, "
+                 "or caller not authorized");
+        return 1;
+    }
+    if (rc != DB_ROW) {
+        log_error("Failed to insert client key");
         return -1;
     }
 
@@ -1987,7 +2054,8 @@ int client_key_revoke(db_handle_t *db,
                 "AND ok.pin = " P"2 "
                 "AND ok.is_active = " BOOL_TRUE
             ") "
-            "AND is_active = " BOOL_TRUE;  /* Only revoke if currently active */
+            "AND is_active = " BOOL_TRUE " "  /* Only revoke if currently active */
+            "RETURNING pin";
     } else {
         /* Session authentication - verify user is org admin */
         sql =
@@ -2002,7 +2070,8 @@ int client_key_revoke(db_handle_t *db,
                 "AND oa.user_account_pin = " P"2 "
                 "AND ua.is_active = " BOOL_TRUE
             ") "
-            "AND is_active = " BOOL_TRUE;  /* Only revoke if currently active */
+            "AND is_active = " BOOL_TRUE " "  /* Only revoke if currently active */
+            "RETURNING pin";
     }
 
     db_stmt_t *stmt = NULL;
@@ -2021,7 +2090,14 @@ int client_key_revoke(db_handle_t *db,
     int rc = db_step(stmt);
     db_finalize(stmt);
 
-    if (rc != DB_DONE) {
+    /* Zero rows: unknown id, another org's key, or already revoked. Reported,
+       not waved through -- a revoke answered with success while the key stays
+       live is the one outcome an operator responding to a leak cannot afford. */
+    if (rc == DB_DONE) {
+        log_info("Client key not revoked: not found, not the caller's, or already revoked");
+        return 1;
+    }
+    if (rc != DB_ROW) {
         log_error("Failed to revoke client key");
         return -1;
     }

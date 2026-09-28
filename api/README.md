@@ -493,10 +493,14 @@ Add redirect URI to client.
 
 Body: `client_id`, `redirect_uri`, `note` (required except note)
 
+Returns `404` if the client doesn't exist or isn't in an organization the caller administers.
+
 **DELETE /api/admin/client-redirect-uris**
 Remove redirect URI from client.
 
 Query: `client_id`, `redirect_uri` (both required)
+
+Returns `404` if the client has no such redirect URI, or isn't the caller's.
 
 ### Client-Resource-Server Links
 
@@ -520,10 +524,15 @@ Link client to resource server (grant access).
 
 Body: `client_id`, `resource_server_id` (both required)
 
+Linking a pair that is already linked succeeds. Returns `404` if either side doesn't exist,
+they are in different organizations, or the caller doesn't administer them.
+
 **DELETE /api/admin/client-resource-servers**
 Unlink client from resource server.
 
 Query: `client_id`, `resource_server_id` (both required)
+
+Returns `404` if there is no such link, or the client isn't the caller's.
 
 ### Resource Server Keys
 
@@ -556,6 +565,9 @@ Response (user-provided secret):
 }
 ```
 
+Returns `404` if the resource server doesn't exist or isn't in an organization the caller
+administers; no key is created and no secret is returned.
+
 **GET /api/admin/resource-server-keys**
 List resource server API keys.
 
@@ -568,6 +580,9 @@ Returns: `keys` array with `id`, `key_id`, `is_active`, `generated_at`, `note` (
 Revoke (soft delete) resource server API key.
 
 Query: `id` (required) - Key UUID
+
+Returns `404` if the key doesn't exist, isn't in an organization the caller administers,
+or is already revoked. Success means an active key was revoked by this call.
 
 ### Client Keys
 
@@ -584,6 +599,9 @@ Body:
 Response: Same format as resource server keys (with generated secret shown once, 
     or confirmation message for user-provided)
 
+Returns `409` if the client doesn't exist, isn't the caller's, or isn't confidential; no key
+is created and no secret is returned.
+
 **GET /api/admin/client-keys**
 List client API keys.
 
@@ -595,6 +613,8 @@ Returns: Same format as resource server keys list
 Revoke (soft delete) client API key.
 
 Query: `id` (required) - Key UUID
+
+Same `404` semantics as resource server key revocation.
 
 ---
 
@@ -655,7 +675,9 @@ Revoke (soft delete) organization API key.
 
 Query: `id` (required) - Key UUID
 
-Note: Self-revocation allowed (key can revoke itself).
+Note: Self-revocation allowed (key can revoke itself). Revoking an already-revoked key succeeds.
+An unknown `id` returns `404` to a localhost caller; an org-key caller gets `403`, as for
+another organization's key, so the endpoint doesn't reveal which keys exist.
 
 ---
 

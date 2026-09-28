@@ -787,7 +787,8 @@ int resource_server_key_create(db_handle_t *db,
             "WHERE rs.id = " P"2 "
             "AND ok.pin = " P"7 "
             "AND ok.is_active = " BOOL_TRUE " "
-            "LIMIT 1";
+            "LIMIT 1 "
+            "RETURNING pin";
     } else {
         /* Session authentication - verify user is org admin */
         sql =
@@ -800,7 +801,8 @@ int resource_server_key_create(db_handle_t *db,
             "WHERE rs.id = " P"2 "
             "AND oa.user_account_pin = " P"7 "
             "AND ua.is_active = " BOOL_TRUE " "
-            "LIMIT 1";
+            "LIMIT 1 "
+            "RETURNING pin";
     }
 
     db_stmt_t *stmt = NULL;
@@ -837,8 +839,14 @@ int resource_server_key_create(db_handle_t *db,
     OPENSSL_cleanse(salt_hex, sizeof(salt_hex));
     OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
 
-    if (rc != DB_DONE) {
-        log_error("Failed to insert resource server key (unauthorized or constraint violation)");
+    /* See client_key_create: zero rows inserted must not hand back a key_id. */
+    if (rc == DB_DONE) {
+        log_info("Resource server key not created: resource server not found "
+                 "or caller not authorized");
+        return 1;
+    }
+    if (rc != DB_ROW) {
+        log_error("Failed to insert resource server key");
         return -1;
     }
 
@@ -1036,7 +1044,8 @@ int resource_server_key_revoke(db_handle_t *db,
                 "AND ok.pin = " P"2 "
                 "AND ok.is_active = " BOOL_TRUE
             ") "
-            "AND is_active = " BOOL_TRUE;  /* Only revoke if currently active */
+            "AND is_active = " BOOL_TRUE " "  /* Only revoke if currently active */
+            "RETURNING pin";
     } else {
         /* Session authentication - verify user is org admin */
         sql =
@@ -1051,7 +1060,8 @@ int resource_server_key_revoke(db_handle_t *db,
                 "AND oa.user_account_pin = " P"2 "
                 "AND ua.is_active = " BOOL_TRUE
             ") "
-            "AND is_active = " BOOL_TRUE;  /* Only revoke if currently active */
+            "AND is_active = " BOOL_TRUE " "  /* Only revoke if currently active */
+            "RETURNING pin";
     }
 
     db_stmt_t *stmt = NULL;
@@ -1070,7 +1080,13 @@ int resource_server_key_revoke(db_handle_t *db,
     int rc = db_step(stmt);
     db_finalize(stmt);
 
-    if (rc != DB_DONE) {
+    /* See client_key_revoke: zero rows must not be reported as revoked. */
+    if (rc == DB_DONE) {
+        log_info("Resource server key not revoked: not found, not the caller's, "
+                 "or already revoked");
+        return 1;
+    }
+    if (rc != DB_ROW) {
         log_error("Failed to revoke resource server key");
         return -1;
     }

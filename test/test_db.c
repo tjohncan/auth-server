@@ -6,6 +6,10 @@
 #include "db/init/db_history.h"
 #include "crypto/signing_keys.h"
 #include "db/queries/oauth.h"
+#include "db/queries/client.h"
+#include "db/queries/resource_server.h"
+#include "db/queries/org.h"
+#include "crypto/password.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -313,6 +317,200 @@ done:
     return failed;
 }
 
+/*
+ * Authorization-scoped writes must report when they matched nothing.
+ *
+ * These statements carry their authorization in the WHERE clause, so "not
+ * found / not yours / not confidential" is a statement that changes zero rows
+ * and still completes. Reported as success, that becomes a 200 carrying a key_id
+ * and secret for a client key that does not exist, or "Key revoked successfully"
+ * for a key that stays live. Each zero-row case below must return 1.
+ *
+ * Runs under both auth modes (user 1 administers org 1; org key 1 belongs to
+ * org 1), since each write has a separate SQL text per mode, and checks that a
+ * revoked key and another org's key are refused. Returns 0 on success.
+ */
+static int test_zero_row_writes(const config_t *config) {
+    log_info("\nZero-row write reporting tests");
+
+    db_handle_t *sdb = open_test_db(config);
+    if (!sdb) {
+        log_error("Zero-row: could not open a test database");
+        return 1;
+    }
+
+    int failed = 1;
+
+    /* Org 1 (ours) and org 2 (not ours). In org 1: a confidential client (pin 1),
+       a public client (pin 2), a resource server (pin 1). In org 2: a
+       confidential client (pin 3) and a resource server (pin 2). Org keys: pin 1
+       active in org 1, pin 2 revoked in org 1, pin 3 active in org 2. The key
+       hashes are never verified at this layer -- the queries authorize by key
+       pin and is_active -- so placeholders do. */
+    if (db_execute_direct(sdb,
+            "INSERT INTO organization (id, code_name, display_name) VALUES "
+            "  (x'10000000000000000000000000000001', 'ours', 'Ours'),"
+            "  (x'10000000000000000000000000000002', 'theirs', 'Theirs');"
+            "INSERT INTO organization_key (id, organization_pin, salt, hash_iterations, "
+            "                              secret_hash, is_active) VALUES "
+            "  (x'70000000000000000000000000000001', 1, 's', 1, 'h', 1),"
+            "  (x'70000000000000000000000000000002', 1, 's', 1, 'h', 0),"
+            "  (x'70000000000000000000000000000003', 2, 's', 1, 'h', 1);") != 0) {
+        log_error("Zero-row: could not insert organizations");
+        goto done;
+    }
+    if (db_execute_direct(sdb,
+            "INSERT INTO user_account (id) VALUES (x'20000000000000000000000000000001');"
+            "INSERT INTO organization_admin (organization_pin, user_account_pin) VALUES (1, 1);"
+            "INSERT INTO client (id, organization_pin, code_name, client_type, grant_type, "
+            "                    display_name, access_token_ttl_seconds) VALUES "
+            "  (x'30000000000000000000000000000001', 1, 'conf', 'confidential', 'client_credentials', 'C', 60),"
+            "  (x'30000000000000000000000000000002', 1, 'pub', 'public', 'authorization_code', 'P', 60),"
+            "  (x'30000000000000000000000000000003', 2, 'other', 'confidential', 'client_credentials', 'O', 60);"
+            "INSERT INTO resource_server (id, organization_pin, code_name, display_name, address) VALUES "
+            "  (x'40000000000000000000000000000001', 1, 'rs', 'RS', 'https://rs.ours'),"
+            "  (x'40000000000000000000000000000002', 2, 'rs2', 'RS2', 'https://rs.theirs');") != 0) {
+        log_error("Zero-row: could not insert fixtures");
+        goto done;
+    }
+
+    const unsigned char conf_client[16]  = {0x30,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x01};
+    const unsigned char pub_client[16]   = {0x30,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x02};
+    const unsigned char other_client[16] = {0x30,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x03};
+    const unsigned char our_rs[16]       = {0x40,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x01};
+    const unsigned char their_rs[16]     = {0x40,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x02};
+    const unsigned char unknown[16]      = {0x99,0x99,0x99,0x99,0x99,0x99,0x99,0x99,
+                                            0x99,0x99,0x99,0x99,0x99,0x99,0x99,0x99};
+    const char *secret = "zero-row-test-secret-value";
+    unsigned char key_id[16];
+    int rc;
+
+#define EXPECT(call, want, what) \
+    do { rc = (call); if (rc != (want)) { \
+        log_error("Zero-row: %s returned %d, expected %d", (what), rc, (want)); \
+        goto done; } } while (0)
+
+    /* Every dual-auth write has one SQL text per auth mode, so the matrix runs
+       once under each: session (admin of org 1) and org 1's active key. */
+    const struct { long long user_pin, key_pin; const char *name; } auths[] = {
+        {  1, -1, "session" },
+        { -1,  1, "org key" },
+    };
+
+    for (size_t a = 0; a < sizeof(auths) / sizeof(auths[0]); a++) {
+        const long long U = auths[a].user_pin, K = auths[a].key_pin;
+
+        /* Client keys */
+        EXPECT(client_key_create(sdb, U, K, pub_client, secret, NULL, key_id), 1,
+               "client key for a public client");
+        EXPECT(client_key_create(sdb, U, K, other_client, secret, NULL, key_id), 1,
+               "client key for another org's client");
+        EXPECT(client_key_create(sdb, U, K, conf_client, secret, NULL, key_id), 0,
+               "client key for our confidential client");
+        EXPECT(client_key_revoke(sdb, U, K, key_id), 0, "revoke our client key");
+        EXPECT(client_key_revoke(sdb, U, K, key_id), 1, "revoke it again");
+        EXPECT(client_key_revoke(sdb, U, K, unknown), 1, "revoke an unknown client key");
+
+        /* Resource server keys */
+        EXPECT(resource_server_key_create(sdb, U, K, their_rs, secret, NULL, key_id), 1,
+               "RS key for another org's resource server");
+        EXPECT(resource_server_key_create(sdb, U, K, our_rs, secret, NULL, key_id), 0,
+               "RS key for our resource server");
+        EXPECT(resource_server_key_revoke(sdb, U, K, unknown), 1, "revoke an unknown RS key");
+        EXPECT(resource_server_key_revoke(sdb, U, K, key_id), 0, "revoke our RS key");
+
+        /* Client-resource-server links: "already linked" stays a success */
+        EXPECT(client_resource_server_create(sdb, U, K, conf_client, their_rs), 1,
+               "link across organizations");
+        EXPECT(client_resource_server_create(sdb, U, K, other_client, their_rs), 1,
+               "link in an org we don't administer");
+        EXPECT(client_resource_server_create(sdb, U, K, conf_client, our_rs), 0, "link ours");
+        EXPECT(client_resource_server_create(sdb, U, K, conf_client, our_rs), 0,
+               "link ours again (idempotent)");
+        EXPECT(client_resource_server_delete(sdb, U, K, conf_client, our_rs), 0, "unlink ours");
+        EXPECT(client_resource_server_delete(sdb, U, K, conf_client, our_rs), 1,
+               "unlink it again");
+
+        /* Redirect URIs */
+        EXPECT(client_redirect_uri_create(sdb, U, K, other_client, "https://x.example/cb", NULL), 1,
+               "redirect URI on another org's client");
+        EXPECT(client_redirect_uri_create(sdb, U, K, pub_client, "https://x.example/cb", NULL), 0,
+               "redirect URI on our client");
+        EXPECT(client_redirect_uri_delete(sdb, U, K, pub_client, "https://x.example/cb"), 0,
+               "delete our redirect URI");
+        EXPECT(client_redirect_uri_delete(sdb, U, K, pub_client, "https://x.example/cb"), 1,
+               "delete it again");
+
+        log_info("  %s: keys, links and redirect URIs report zero-row outcomes (OK)",
+                 auths[a].name);
+    }
+
+    /* A revoked org key and another org's key must be refused everywhere --
+       including against objects that exist and that org 1 could change. Set up
+       live ones with session auth, try each denied key, then check they are
+       all still there to be removed by the rightful caller. */
+    unsigned char live_client_key[16], live_rs_key[16];
+    EXPECT(client_key_create(sdb, 1, -1, conf_client, secret, NULL, live_client_key), 0,
+           "set up a live client key");
+    EXPECT(resource_server_key_create(sdb, 1, -1, our_rs, secret, NULL, live_rs_key), 0,
+           "set up a live RS key");
+    EXPECT(client_resource_server_create(sdb, 1, -1, conf_client, our_rs), 0,
+           "set up a live link");
+    EXPECT(client_redirect_uri_create(sdb, 1, -1, pub_client, "https://live.example/cb", NULL), 0,
+           "set up a live redirect URI");
+
+    const struct { long long key_pin; const char *name; } denied[] = {
+        { 2, "revoked org key" },
+        { 3, "other org's key" },
+    };
+
+    for (size_t d = 0; d < sizeof(denied) / sizeof(denied[0]); d++) {
+        const long long K = denied[d].key_pin;
+
+        EXPECT(client_key_create(sdb, -1, K, conf_client, secret, NULL, key_id), 1,
+               "denied: create client key");
+        EXPECT(client_key_revoke(sdb, -1, K, live_client_key), 1, "denied: revoke client key");
+        EXPECT(resource_server_key_create(sdb, -1, K, our_rs, secret, NULL, key_id), 1,
+               "denied: create RS key");
+        EXPECT(resource_server_key_revoke(sdb, -1, K, live_rs_key), 1, "denied: revoke RS key");
+        EXPECT(client_resource_server_create(sdb, -1, K, conf_client, our_rs), 1,
+               "denied: link (already linked, but not the caller's)");
+        EXPECT(client_resource_server_delete(sdb, -1, K, conf_client, our_rs), 1,
+               "denied: unlink");
+        EXPECT(client_redirect_uri_create(sdb, -1, K, pub_client, "https://y.example/cb", NULL), 1,
+               "denied: create redirect URI");
+        EXPECT(client_redirect_uri_delete(sdb, -1, K, pub_client, "https://live.example/cb"), 1,
+               "denied: delete redirect URI");
+
+        log_info("  %s: refused on every write, live objects included (OK)", denied[d].name);
+    }
+
+    EXPECT(client_key_revoke(sdb, 1, -1, live_client_key), 0, "live client key survived");
+    EXPECT(resource_server_key_revoke(sdb, 1, -1, live_rs_key), 0, "live RS key survived");
+    EXPECT(client_resource_server_delete(sdb, 1, -1, conf_client, our_rs), 0, "live link survived");
+    EXPECT(client_redirect_uri_delete(sdb, 1, -1, pub_client, "https://live.example/cb"), 0,
+           "live redirect URI survived");
+    log_info("  live objects untouched by denied callers (OK)");
+
+    /* Organization keys (unscoped at this layer; the handler authorizes) */
+    EXPECT(organization_key_create(sdb, "ours", secret, NULL, key_id), 0, "org key create");
+    EXPECT(organization_key_revoke(sdb, key_id), 0, "revoke org key");
+    EXPECT(organization_key_revoke(sdb, key_id), 0, "revoke org key again (idempotent)");
+    EXPECT(organization_key_revoke(sdb, unknown), 1, "revoke an unknown org key");
+    log_info("  organization key revoke reports an unknown id (OK)");
+
+#undef EXPECT
+
+    failed = 0;
+
+done:
+    db_disconnect(sdb);
+    if (!failed) {
+        log_info("Zero-row write reporting tests passed!");
+    }
+    return failed;
+}
+
 int main(void) {
     log_init(LOG_INFO);
     log_info("Database Integration Test");
@@ -590,6 +788,12 @@ int main(void) {
     }
 
     if (test_deactivated_user_tokens(config) != 0) {
+        config_free(config);
+        return 1;
+    }
+
+    /* Key creation hashes the secret, so the password module needs its config */
+    if (crypto_password_init(config) != 0 || test_zero_row_writes(config) != 0) {
         config_free(config);
         return 1;
     }

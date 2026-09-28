@@ -1127,6 +1127,9 @@ HttpResponse *admin_create_client_redirect_uri_handler(const HttpRequest *req, c
 
     free(redirect_uri); free(note);
 
+    if (result == 1) {
+        return response_json_error(404, "Client not found");
+    }
     if (result != 0) {
         return response_json_error(409, "Failed to create redirect URI");
     }
@@ -1186,8 +1189,11 @@ HttpResponse *admin_delete_client_redirect_uri_handler(const HttpRequest *req, c
 
     free(redirect_uri);
 
+    if (result == 1) {
+        return response_json_error(404, "Redirect URI not found");
+    }
     if (result != 0) {
-        return response_json_error(404, "Redirect URI not found or delete failed");
+        return response_json_error(500, "Failed to delete redirect URI");
     }
 
     return response_json_ok("{\"message\":\"Redirect URI deleted successfully\"}");
@@ -1370,8 +1376,11 @@ HttpResponse *admin_create_client_resource_server_link_handler(const HttpRequest
 
     int result = admin_create_client_resource_server_link(db, ctx.user_account_pin, ctx.organization_key_pin, client_id, server_id);
 
+    if (result == 1) {
+        return response_json_error(404, "Client or resource server not found in the same organization");
+    }
     if (result != 0) {
-        return response_json_error(409, "Failed to create link");
+        return response_json_error(500, "Failed to create link");
     }
 
     return response_json_ok("{\"message\":\"Link created successfully\"}");
@@ -1416,8 +1425,11 @@ HttpResponse *admin_delete_client_resource_server_link_handler(const HttpRequest
 
     int result = admin_delete_client_resource_server_link(db, ctx.user_account_pin, ctx.organization_key_pin, client_id, server_id);
 
+    if (result == 1) {
+        return response_json_error(404, "Link not found");
+    }
     if (result != 0) {
-        return response_json_error(404, "Link not found or delete failed");
+        return response_json_error(500, "Failed to delete link");
     }
 
     return response_json_ok("{\"message\":\"Link deleted successfully\"}");
@@ -1527,9 +1539,13 @@ HttpResponse *admin_create_resource_server_key_handler(const HttpRequest *req, c
                  "Secret must be at least %d characters", crypto_password_min_length());
         return response_json_error(400, msg);
     }
+    if (result == 1) {
+        OPENSSL_cleanse(generated_secret, sizeof(generated_secret));
+        return response_json_error(404, "Resource server not found");
+    }
     if (result != 0) {
         OPENSSL_cleanse(generated_secret, sizeof(generated_secret));
-        return response_json_error(409, "Key creation failed");
+        return response_json_error(500, "Key creation failed");
     }
 
     char key_id_hex[33];
@@ -1673,8 +1689,11 @@ HttpResponse *admin_delete_resource_server_key_handler(const HttpRequest *req, c
 
     int result = admin_revoke_resource_server_key(db, ctx.user_account_pin, ctx.organization_key_pin, key_id);
 
+    if (result == 1) {
+        return response_json_error(404, "Key not found or already revoked");
+    }
     if (result != 0) {
-        return response_json_error(404, "Key not found or revoke failed");
+        return response_json_error(500, "Failed to revoke key");
     }
 
     return response_json_ok("{\"message\":\"Key revoked successfully\"}");
@@ -1769,8 +1788,10 @@ HttpResponse *admin_create_client_key_handler(const HttpRequest *req, const Rout
         snprintf(msg, sizeof(msg),
                  "Secret must be at least %d characters", crypto_password_min_length());
         resp = response_json_error(400, msg);
+    } else if (result == 1) {
+        resp = response_json_error(409, "Key creation failed: client not found, or not a confidential client");
     } else if (result != 0) {
-        resp = response_json_error(409, "Key creation failed (client must be confidential)");
+        resp = response_json_error(500, "Key creation failed");
     } else {
         char key_id_hex[33];
         bytes_to_hex(key_id, 16, key_id_hex, sizeof(key_id_hex));
@@ -1920,8 +1941,11 @@ HttpResponse *admin_delete_client_key_handler(const HttpRequest *req, const Rout
 
     int result = admin_revoke_client_key(db, ctx.user_account_pin, ctx.organization_key_pin, key_id);
 
+    if (result == 1) {
+        return response_json_error(404, "Key not found or already revoked");
+    }
     if (result != 0) {
-        return response_json_error(404, "Key not found or revoke failed");
+        return response_json_error(500, "Failed to revoke key");
     }
 
     return response_json_ok("{\"message\":\"Key revoked successfully\"}");

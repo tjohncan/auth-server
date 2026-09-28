@@ -758,7 +758,11 @@ HttpResponse *admin_revoke_organization_key_handler(const HttpRequest *req, cons
     }
 
     /* Revoke key */
-    if (admin_revoke_organization_key(db, key_id) != 0) {
+    int revoke_rc = admin_revoke_organization_key(db, key_id);
+    if (revoke_rc == 1) {
+        return response_json_error(404, "Organization key not found");
+    }
+    if (revoke_rc != 0) {
         return response_json_error(500, "Failed to revoke organization key");
     }
 
