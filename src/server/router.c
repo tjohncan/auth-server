@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <strings.h>
 #include <stdio.h>
 #include <stdbool.h>
 #include <openssl/crypto.h>
@@ -680,7 +681,23 @@ HttpResponse *router_dispatch(Router *router, const HttpRequest *req) {
         return cors_preflight(req->path);
     }
 
-    HttpResponse *resp = dispatch_route(router, req);
+    /*
+     * One whole-body check for JSON string escapes, before any handler reads a
+     * field. json_get_string refuses a bad value per field, but a refused
+     * OPTIONAL field looks exactly like an omitted one, so without this the
+     * rest of the request would go through with that field silently skipped.
+     * Form-encoded bodies are exempt: they carry no JSON strings, and any quote
+     * or backslash in them is percent-encoded.
+     */
+    HttpResponse *resp;
+    const char *content_type = http_request_get_header(req, "Content-Type");
+    int is_form = content_type &&
+        strncasecmp(content_type, "application/x-www-form-urlencoded", 33) == 0;
+    if (req->body && !is_form && !json_escapes_valid(req->body)) {
+        resp = response_json_error(400, "Invalid JSON string escape");
+    } else {
+        resp = dispatch_route(router, req);
+    }
 
     /*
      * HEAD: nothing registers it, so fall back to the GET route for the same

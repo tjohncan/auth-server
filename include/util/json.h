@@ -13,13 +13,29 @@
 /*
  * json_unescape - Unescape JSON string escape sequences in-place
  *
- * Processes: \", \\, \t, \n, \r, \b, \f
- * Modifies string in-place (always shrinks or stays same size).
+ * Processes: \", \\, \/, \t, \n, \r, \b, \f, and \uXXXX (decoded to UTF-8, surrogate
+ * pairs joined). Modifies string in-place (always shrinks or stays same size).
  *
  * Parameters:
  *   str - String to unescape (modified in place)
+ *
+ * Returns: 0 on success; -1 on an escape that is invalid or refused (\u0000, a
+ *          lone surrogate, a truncated or non-hex \u, an unknown escape letter).
+ *          On -1 the string's contents are unspecified and must not be used.
  */
-void json_unescape(char *str);
+int json_unescape(char *str);
+
+/*
+ * json_escapes_valid - Does every string in this JSON text unescape cleanly?
+ *
+ * Applies json_unescape's rules to every string literal (keys included).
+ * Checked once per request, before any field is read: json_get_string refuses
+ * a bad value field by field, which for an OPTIONAL field is indistinguishable
+ * from "not sent" and would let the rest of the request proceed without it.
+ *
+ * Returns: 1 if valid (or no strings at all), 0 on any refused escape
+ */
+int json_escapes_valid(const char *json);
 
 /*
  * json_get_string - Extract string value from JSON body
@@ -31,7 +47,8 @@ void json_unescape(char *str);
  *   json - JSON string to parse
  *   key  - Key to search for
  *
- * Returns: Newly allocated string (caller must free), or NULL if not found
+ * Returns: Newly allocated string (caller must free), or NULL if not found or
+ *          if the value contains an escape json_unescape refuses
  */
 char *json_get_string(const char *json, const char *key);
 

@@ -328,6 +328,76 @@ void test_json_unescape(void) {
     assert(strcmp(buf, "<script>") == 0);
     printf("Unescaped \\u003C/\\u003E -> '%s'\n", buf);
 
+    /* \\uXXXX beyond ASCII decodes to UTF-8. These are what Python/PHP/.NET send
+       for non-ASCII by default; dropping them would rewrite usernames, emails
+       and passwords without a word. */
+    strcpy(buf, "Jos\\u00e9");
+    json_unescape(buf);
+    assert(strcmp(buf, "Jos\xc3\xa9") == 0);                         /* José, 2-byte */
+    strcpy(buf, "\\u0418\\u0432\\u0430\\u043d");
+    json_unescape(buf);
+    assert(strcmp(buf, "\xd0\x98\xd0\xb2\xd0\xb0\xd0\xbd") == 0);   /* Иван */
+    strcpy(buf, "\\u5c71\\u7530");
+    json_unescape(buf);
+    assert(strcmp(buf, "\xe5\xb1\xb1\xe7\x94\xb0") == 0);           /* 山田, 3-byte */
+    strcpy(buf, "a\\ud83d\\ude00b");
+    json_unescape(buf);
+    assert(strcmp(buf, "a\xf0\x9f\x98\x80" "b") == 0);              /* U+1F600 pair, 4-byte */
+    strcpy(buf, "\\u041f\\u0430\\u0440\\u043e\\u043b\\u044c1");
+    json_unescape(buf);
+    assert(strcmp(buf, "\xd0\x9f\xd0\xb0\xd1\x80\xd0\xbe\xd0\xbb\xd1\x8c" "1") == 0);  /* Пароль1, not "1" */
+    printf("Unescaped non-ASCII \\uXXXX (2/3/4-byte UTF-8, surrogate pair) OK\n");
+
+    /* Same through json_get_string, the path every request field takes */
+    char *email = json_get_string("{\"email\":\"jos\\u00e9@ex\\u00e4mple.com\"}", "email");
+    assert(email && strcmp(email, "jos\xc3\xa9@ex\xc3\xa4mple.com") == 0);
+    free(email);
+
+    /* Refused, never dropped: dropping hands the caller a value the client did
+       not send ("hunter\u00002" as the password "hunter2"). */
+    const char *refused[] = {
+        "hunter\\u00002",      /* NUL (would truncate) */
+        "a\\ud83db",           /* lone high surrogate */
+        "a\\ude00b",           /* lone low surrogate */
+        "a\\ud83d\\u0041b",    /* high surrogate followed by a non-low escape */
+        "x\\uzz12y",           /* non-hex digits */
+        "a\\ud83d\\u",         /* high, then a truncated escape */
+        "ab\\u12",             /* truncated escape */
+        "a\\qb",               /* not a JSON escape at all */
+    };
+    for (size_t i = 0; i < sizeof(refused) / sizeof(refused[0]); i++) {
+        strcpy(buf, refused[i]);
+        assert(json_unescape(buf) == -1);
+    }
+    strcpy(buf, "fine\\u00e9");
+    assert(json_unescape(buf) == 0);
+
+    /* And json_get_string, the path every request field takes, refuses the
+       whole value -- the caller sees the field as absent and answers 400 */
+    assert(json_get_string("{\"password\":\"hunter\\u00002\"}", "password") == NULL);
+    assert(json_get_string("{\"email\":\"a\\ud83d@b.example\"}", "email") == NULL);
+    printf("NUL, lone surrogates, malformed and unknown escapes refused OK\n");
+
+    /* Whole-body check: one bad string anywhere -- an optional field, a key --
+       fails the body, which is what stops a refused optional field from being
+       mistaken for an omitted one */
+    assert(json_escapes_valid("{\"display_name\":\"X\",\"note\":\"a\\ud800\"}") == 0);
+    assert(json_escapes_valid("{\"bad\\qkey\":1}") == 0);
+    assert(json_escapes_valid("{\"a\":\"Jos\\u00e9\",\"b\":\"https:\\/\\/x\"}") == 1);
+    assert(json_escapes_valid("{\"a\":1,\"b\":true}") == 1);
+    assert(json_escapes_valid("") == 1);
+    printf("Whole-body escape check OK\n");
+
+    /* \\/ is what PHP's json_encode sends for every '/' unless told otherwise:
+       URLs, redirect URIs, and any password containing a slash */
+    char *uri = json_get_string("{\"redirect_uri\":\"https:\\/\\/x.example\\/cb\"}", "redirect_uri");
+    assert(uri && strcmp(uri, "https://x.example/cb") == 0);
+    free(uri);
+    strcpy(buf, "pa\\/ss");
+    json_unescape(buf);
+    assert(strcmp(buf, "pa/ss") == 0);
+    printf("Unescaped \\/ (PHP default) OK\n");
+
     /* Round-trip: escape then unescape */
     char escaped[256];
     json_escape(escaped, sizeof(escaped), "He said \"hi\" & <bye>");

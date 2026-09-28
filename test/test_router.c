@@ -223,6 +223,36 @@ static HttpResponse *request(Router *router, const char *raw) {
 }
 
 /*
+ * A JSON body with a refused string escape is answered 400 before any handler
+ * runs, whichever field carries it. Per-field refusal alone would let a bad
+ * OPTIONAL field pass as omitted. Form-encoded bodies are not JSON-checked.
+ */
+void test_json_body_escape_check(Router *router) {
+    printf("\n=== Test: Whole-body JSON escape check ===\n");
+
+    HttpResponse *resp = request(router,
+        "POST /revoke HTTP/1.0\r\nContent-Type: application/json\r\n\r\n"
+        "{\"display_name\":\"X\",\"note\":\"a\\ud800\"}");
+    assert(resp && resp->status_code == 400);
+    printf("✓ bad escape in an optional field: %d\n", resp->status_code);
+    http_response_free(resp);
+
+    resp = request(router,
+        "POST /revoke HTTP/1.0\r\nContent-Type: application/json\r\n\r\n"
+        "{\"display_name\":\"Caf\\u00e9\"}");
+    assert(resp && resp->status_code == 200);
+    printf("✓ valid escapes reach the handler: %d\n", resp->status_code);
+    http_response_free(resp);
+
+    resp = request(router,
+        "POST /revoke HTTP/1.0\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\n"
+        "token=\"a\\qb\"");
+    assert(resp && resp->status_code == 200);
+    printf("✓ form-encoded body is not JSON-checked: %d\n", resp->status_code);
+    http_response_free(resp);
+}
+
+/*
  * Pin the set. Adding a fifth path has to fail here first, which forces somebody
  * to look at the endpoint rather than discover it in production.
  */
@@ -459,6 +489,7 @@ int main(void) {
     /* Run tests */
     test_exact_match(router);
     test_404(router);
+    test_json_body_escape_check(router);
     test_cors_set_is_pinned();
     test_cors_header_on_public_paths(router);
     test_cors_preflight(router);
