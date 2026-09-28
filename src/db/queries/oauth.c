@@ -291,7 +291,7 @@ int oauth_session_get_by_token(db_handle_t *db, const char *session_token,
     const char *sql =
         "SELECT B.id AS session_id, B.user_account_pin, U.id AS user_id, "
         "B.authentication_complete, B.mfa_completed, U.require_mfa, "
-        UNIX_TS("B.started_at") " "
+        UNIX_TS("B.started_at") ", U.has_mfa "
         "FROM " TBL_BROWSER " B "
         "JOIN " TBL_USER_ACCOUNT " U ON U.pin = B.user_account_pin "
         "WHERE B.session_token = " P"1 "
@@ -347,6 +347,7 @@ int oauth_session_get_by_token(db_handle_t *db, const char *session_token,
         out_session->mfa_completed = db_column_int(stmt, 4);
         out_session->user_requires_mfa = db_column_int(stmt, 5);
         out_session->started_at = (time_t)db_column_int64(stmt, 6);
+        out_session->user_has_mfa = db_column_int(stmt, 7);
 
         db_finalize(stmt);
         return 0;

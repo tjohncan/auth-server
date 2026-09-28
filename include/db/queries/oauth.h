@@ -111,8 +111,27 @@ typedef struct {
     int authentication_complete;    /* 1 if auth complete, 0 otherwise */
     int mfa_completed;              /* 1 if MFA done, 0 otherwise */
     int user_requires_mfa;          /* 1 if user opted in to enforce MFA (preference flag) */
+    int user_has_mfa;               /* 1 if user has at least one confirmed MFA method */
     time_t started_at;              /* Session creation time (Unix epoch) */
 } oauth_session_info_t;
+
+/*
+ * Must this session prove a factor before it may manage factors?
+ *
+ * Gates TOTP setup/confirm, method deletion, recovery-code regeneration and the
+ * require toggle. Keyed on ENROLLMENT, not on the require_mfa preference: several
+ * of those endpoints end in a factor the session can then present (fresh recovery
+ * codes, a newly enrolled authenticator), so gating them on the preference would
+ * let a password-only session satisfy a client's require_mfa for any user who has
+ * enrolled but not opted in. require_mfa implies has_mfa (schema CHECK), so this
+ * covers both.
+ *
+ * A user with no factor yet is not gated: first enrollment is open to whoever
+ * holds the password, by necessity — see "Deliberate Tradeoffs" in README.md.
+ */
+static inline int oauth_session_mfa_pending(const oauth_session_info_t *session) {
+    return session->user_has_mfa && !session->mfa_completed;
+}
 
 /*
  * Look up browser session by session token

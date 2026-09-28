@@ -83,12 +83,30 @@ function ensureQRCodeLoaded() {
 
 // ===== API Helpers =====
 
+/* Turn a non-OK response into a thrown Error.
+ *
+ * One case is not an error to show: a session that logged in with a password
+ * alone, for a user who has MFA enrolled, is refused MFA management with
+ * 403 "MFA verification required". The login page already runs the MFA step for
+ * an existing session (mfa_step=1) and returns here afterwards, so send the user
+ * there instead of alerting. The return keeps this page's query, so the client
+ * the console was opened for is still selected when the user comes back. */
+async function apiFail(response) {
+    const error = await response.json().catch(() => ({ error: 'Unknown error' }));
+    if (response.status === 403 && error.error === 'MFA verification required') {
+        /* replace, not href: Back must not land on the page that bounces again.
+           Never settle: a throw here would run the caller's catch and flash its
+           error alert while the page is already navigating away. */
+        window.location.replace('/login?mfa_step=1&return=' +
+            encodeURIComponent(window.location.pathname + window.location.search));
+        return new Promise(() => {});
+    }
+    throw new Error(error.error || `HTTP ${response.status}`);
+}
+
 async function apiGet(endpoint) {
     const response = await fetch(`${API_URL}${endpoint}`, { credentials: 'include' });
-    if (!response.ok) {
-        const error = await response.json().catch(() => ({ error: 'Unknown error' }));
-        throw new Error(error.error || `HTTP ${response.status}`);
-    }
+    if (!response.ok) await apiFail(response);
     return response.json();
 }
 
@@ -99,10 +117,7 @@ async function apiPost(endpoint, data) {
         credentials: 'include',
         body: JSON.stringify(data)
     });
-    if (!response.ok) {
-        const error = await response.json().catch(() => ({ error: 'Unknown error' }));
-        throw new Error(error.error || `HTTP ${response.status}`);
-    }
+    if (!response.ok) await apiFail(response);
     return response.json();
 }
 
@@ -113,10 +128,7 @@ async function apiPut(endpoint, data) {
         credentials: 'include',
         body: JSON.stringify(data)
     });
-    if (!response.ok) {
-        const error = await response.json().catch(() => ({ error: 'Unknown error' }));
-        throw new Error(error.error || `HTTP ${response.status}`);
-    }
+    if (!response.ok) await apiFail(response);
     return response.json();
 }
 
@@ -125,10 +137,7 @@ async function apiDelete(endpoint) {
         method: 'DELETE',
         credentials: 'include'
     });
-    if (!response.ok) {
-        const error = await response.json().catch(() => ({ error: 'Unknown error' }));
-        throw new Error(error.error || `HTTP ${response.status}`);
-    }
+    if (!response.ok) await apiFail(response);
     return response.json();
 }
 

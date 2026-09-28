@@ -2314,6 +2314,16 @@ All endpoints require a valid session cookie.
 **Authentication**: Session cookie required
 **Method IDs**: 32-character lowercase hex strings (16-byte UUID without hyphens)
 
+**Managing factors requires the factor you already have.** Once a user has a confirmed
+method, TOTP setup/confirm, method deletion, recovery-code regeneration and the
+`require` toggle all return `403 {"error": "MFA verification required"}` until the
+session has completed MFA (`/verify` or `/recover`), whether or not `require_mfa` is on.
+Several of these end in a factor the session could then present, so without this a
+password alone would satisfy a client's `require_mfa`. A user with no confirmed method
+is not gated, since there is nothing to prove yet. Confirming a method marks the current
+session MFA-completed. `/verify`, `/recover` and `GET /methods` are never gated; the MFA
+step itself runs on them.
+
 ---
 
 ### POST /api/user/mfa/totp/setup

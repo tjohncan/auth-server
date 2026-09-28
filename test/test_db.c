@@ -5,6 +5,7 @@
 #include "db/init/db_init.h"
 #include "db/init/db_history.h"
 #include "crypto/signing_keys.h"
+#include "db/queries/oauth.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -115,6 +116,106 @@ done:
 
     if (!failed) {
         log_info("Signing-key cache tests passed!");
+    }
+    return failed;
+}
+
+/*
+ * MFA-management gate — keyed on enrollment (has_mfa), not on the require_mfa
+ * preference.
+ *
+ * The case that matters: a user who has enrolled a factor but not opted in to
+ * "require". A gate reading the preference would pass their password-only
+ * session -- and several gated endpoints end in a factor that session could then
+ * present. The decision itself is oauth_session_mfa_pending(); what can silently
+ * break it is the session lookup not carrying has_mfa, which would make the gate
+ * read 0 and wave everyone through. So this drives the real lookup.
+ *
+ * Returns 0 on success.
+ */
+static int test_mfa_management_gate(const config_t *config) {
+    log_info("\nMFA-management gate tests");
+
+    db_handle_t *sdb = open_test_db(config);
+    if (!sdb) {
+        log_error("MFA gate: could not open a test database");
+        return 1;
+    }
+
+    int failed = 1;
+
+    const unsigned char user_id[16] = {0x6d, 0x66, 0x61, 0x67, 0x61, 0x74, 0x65, 0x01,
+                                       0x6d, 0x66, 0x61, 0x67, 0x61, 0x74, 0x65, 0x02};
+    if (db_execute_direct(sdb,
+            "INSERT INTO user_account (id) VALUES (x'6d666167617465016d66616761746502')") != 0) {
+        log_error("MFA gate: could not insert user");
+        goto done;
+    }
+
+    long long user_pin = 0;
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(sdb, &stmt, "SELECT pin FROM user_account") != 0 || db_step(stmt) != DB_ROW) {
+        log_error("MFA gate: could not read user pin");
+        if (stmt) db_finalize(stmt);
+        goto done;
+    }
+    user_pin = db_column_int64(stmt, 0);
+    db_finalize(stmt);
+
+    const char *token = "mfa-gate-test-session-token";
+    unsigned char session_id[16];
+    if (oauth_session_create(sdb, user_pin, user_id, token, "password",
+                             NULL, NULL, 3600, session_id) != 0) {
+        log_error("MFA gate: could not create session");
+        goto done;
+    }
+
+    oauth_session_info_t s;
+
+    /* 1. No factor enrolled: not gated. First enrollment has to be reachable. */
+    if (oauth_session_get_by_token(sdb, token, &s) != 0) {
+        log_error("MFA gate: session lookup failed");
+        goto done;
+    }
+    if (s.user_has_mfa != 0 || oauth_session_mfa_pending(&s)) {
+        log_error("MFA gate: unenrolled user gated (has_mfa=%d)", s.user_has_mfa);
+        goto done;
+    }
+    log_info("  no factor enrolled: not gated (OK)");
+
+    /* 2. Enrolled, require_mfa still 0, password-only session: gated. A gate
+       reading require_mfa instead of has_mfa fails here. */
+    if (db_execute_direct(sdb, "UPDATE user_account SET has_mfa = 1") != 0 ||
+        oauth_session_get_by_token(sdb, token, &s) != 0) {
+        log_error("MFA gate: could not mark user enrolled");
+        goto done;
+    }
+    if (s.user_has_mfa != 1 || s.user_requires_mfa != 0 || !oauth_session_mfa_pending(&s)) {
+        log_error("MFA gate: enrolled user with password-only session NOT gated "
+                  "(has_mfa=%d require_mfa=%d mfa_completed=%d)",
+                  s.user_has_mfa, s.user_requires_mfa, s.mfa_completed);
+        goto done;
+    }
+    log_info("  enrolled, require off, password-only session: gated (OK)");
+
+    /* 3. Once the session completes MFA, the gate opens. */
+    if (oauth_session_set_mfa_completed(sdb, token) != 0 ||
+        oauth_session_get_by_token(sdb, token, &s) != 0) {
+        log_error("MFA gate: could not complete MFA on session");
+        goto done;
+    }
+    if (oauth_session_mfa_pending(&s)) {
+        log_error("MFA gate: still gated after MFA completion");
+        goto done;
+    }
+    log_info("  after MFA completion: not gated (OK)");
+
+    failed = 0;
+
+done:
+    db_disconnect(sdb);
+    if (!failed) {
+        log_info("MFA-management gate tests passed!");
     }
     return failed;
 }
@@ -386,6 +487,11 @@ int main(void) {
     db_disconnect(db);
 
     if (test_signing_key_cache(config) != 0) {
+        config_free(config);
+        return 1;
+    }
+
+    if (test_mfa_management_gate(config) != 0) {
         config_free(config);
         return 1;
     }

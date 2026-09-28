@@ -600,6 +600,15 @@ proxying, so the attacker gets in regardless and the *victim* is the one who get
 What it reliably produces is a race between legitimate co-holders of the same seed. Guessing,
 as opposed to observing, is capped by per-method rate limiting.
 
+**A user's first MFA method can be enrolled with the password alone.**
+Once a user has a factor, managing factors (adding, deleting, regenerating recovery codes,
+toggling `require`) demands that factor first. Before that there is nothing to demand, so
+whoever holds the password can enroll the first method. The consequence is narrow and
+worth stating: a client's `require_mfa` protects users who have enrolled, and gives no
+protection to a user who never did. Their first "second factor" belongs to whoever
+registers it first. Closing that needs an out-of-band enrollment channel, which this
+server does not have.
+
 **Changing a password does not sign you out everywhere.**
 A password change rotates the credential and nothing else; live sessions and refresh chains
 survive it. Compromise recovery has stronger, explicit paths here — account deactivation
