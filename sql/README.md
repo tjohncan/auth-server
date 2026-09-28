@@ -43,6 +43,7 @@ This schema supports:
 - `user_account.username_hash` and `user_email.email_hash` are HMAC-SHA256 blind indexes (64-char hex) for deterministic lookups
 - Case-insensitive matching via application-level lowercasing before HMAC (replaces SQL `lower()` / `COLLATE NOCASE`)
 - MFA secrets (`user_mfa.secret`) also encrypted with the same derived key
+- JWT signing secrets and private keys (`auth_request_signing`, `access_token_signing`) too; see Keys Domain
 
 **Soft vs Hard Delete:**
 - `is_active` flag for soft-delete where foreign keys or audit require row retention
@@ -103,6 +104,8 @@ Cryptographic signing keys for JWTs with automatic rotation.
 **Design:**
 - Singleton tables (single row enforced via CHECK constraint)
 - Current + prior keys for graceful rotation
+- Secrets and private keys encrypted at rest (`e1:` + AES-256-GCM, same key as the PII fields);
+  public keys in plaintext
 - Auto-initialized on first use
 - Passive rotation mechanism (checked on every use, rotated when stale)
 

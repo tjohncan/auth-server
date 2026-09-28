@@ -47,8 +47,8 @@ This server focuses on authentication logic.
 - Format string vulnerability warnings
 - JSON injection protection in error responses
 - SHA-256 hashed token storage (sessions, auth codes, refresh/access tokens)
-- AES-256-GCM encryption of sensitive information at rest (usernames, emails, MFA secrets) 
-    with HMAC-SHA256 blind indexes for lookups
+- AES-256-GCM encryption of sensitive information at rest (usernames, emails, MFA secrets,
+    JWT signing secrets and private keys) with HMAC-SHA256 blind indexes for lookups
 
 **System Dependencies**
 - POSIX + pthreads
@@ -282,6 +282,23 @@ Manages cryptographic signing keys for JWTs with automatic rotation.
 - Database tables: `auth_request_signing`, `access_token_signing` (SQLite) or `keys.*` (PostgreSQL)
 - Single-row tables enforced via `singleton` column (CHECK + UNIQUE constraint)
 - Current + prior keys retained for graceful rotation
+- HMAC secrets and ES256 private keys are stored encrypted with the field-encryption key
+    (`encryption_key`), as `e1:`-prefixed values; public keys are stored in plaintext
+- A stored key that will not decrypt (an `encryption_key` that differs from the one that
+    stored it) stops token issuance, `/userinfo` and the JWKS endpoint, with an error naming
+    both tables; it is never silently regenerated. `/introspect` and `/revoke` don't use the
+    keys and keep working. Deleting the rows in both tables regenerates them on next use.
+    Refresh tokens and sessions are unaffected. Outstanding access tokens stop verifying
+    against the published keys and at `/userinfo`, but `/introspect` reports them active
+    until they expire, so deleting the rows is no way to retire leaked tokens: revoke them,
+    or deactivate the user.
+- **Upgrading from a build before signing-key encryption:** its keys are stored in
+    plaintext, which the server refuses the same way. Stop every instance of the older
+    build, delete the rows in both tables, then start the new one. Deleting first means the
+    new build never runs against plaintext rows; an older instance left running against the
+    database would write plaintext keys again. Rolling back takes the same steps, since the
+    older build can't use encrypted keys either: stop the new build, delete the rows again,
+    then start the old one.
 
 **Rotation:**
 - **Passive mechanism**: Keys checked on every use, rotated if stale

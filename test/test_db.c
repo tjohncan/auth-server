@@ -11,9 +11,11 @@
 #include "db/queries/org.h"
 #include "db/queries/mfa.h"
 #include "crypto/password.h"
+#include "crypto/encrypt.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <openssl/crypto.h>
 
 /*
  * A database of the test's own: SQLite in memory, schema applied, gone when the
@@ -121,6 +123,157 @@ done:
 
     if (!failed) {
         log_info("Signing-key cache tests passed!");
+    }
+    return failed;
+}
+
+/* Read one text column of the single signing-key row, raw, as stored. */
+static int read_stored_key(db_handle_t *db, const char *sql, char *out, size_t out_size) {
+    db_stmt_t *stmt = NULL;
+    out[0] = '\0';
+    if (db_prepare(db, &stmt, sql) != 0) return -1;
+    int rc = db_step(stmt);
+    const char *v = (rc == DB_ROW) ? db_column_text(stmt, 0) : NULL;
+    if (v) snprintf(out, out_size, "%s", v);
+    db_finalize(stmt);
+    return (rc == DB_ROW && v) ? 0 : -1;
+}
+
+/*
+ * Signing keys are encrypted at rest, and a key that will not open fails
+ * rather than being replaced.
+ *
+ * The ES256 private key mints access tokens; storing it in plaintext would make
+ * read access to the database enough to forge them. This pins: what is stored
+ * (sealed private material, plaintext public key); that rotation carries the
+ * sealed value into the prior columns intact; and the two ways a row can fail to
+ * open -- plaintext format, or a different encryption_key -- both fail every load
+ * and leave the row untouched instead of regenerating over it.
+ *
+ * Returns 0 on success.
+ */
+static int test_signing_key_encryption(const config_t *config) {
+    log_info("\nSigning-key encryption tests");
+
+    db_handle_t *sdb = open_test_db(config);
+    if (!sdb) {
+        log_error("Key encryption: could not open a test database");
+        return 1;
+    }
+
+    int failed = 1;
+    signing_key_t *es = NULL, *hmac = NULL, *rotated = NULL, *bad = NULL;
+    char stored[1024], stored_before[1024];
+
+    signing_key_thread_cleanup();
+
+    /* 1. What lands in the table */
+    if (signing_key_get_or_rotate(sdb, SIGNING_KEY_ACCESS_TOKEN, &es) != 0 || !es ||
+        signing_key_get_or_rotate(sdb, SIGNING_KEY_AUTH_REQUEST, &hmac) != 0 || !hmac) {
+        log_error("Key encryption: could not generate keys");
+        goto done;
+    }
+    if (strncmp(es->current_private_key, "-----BEGIN PRIVATE KEY-----", 27) != 0) {
+        log_error("Key encryption: loaded private key is not a PEM");
+        goto done;
+    }
+    if (read_stored_key(sdb, "SELECT current_private_key FROM access_token_signing",
+                        stored, sizeof(stored)) != 0 ||
+        strncmp(stored, "e1:", 3) != 0 || strstr(stored, "PRIVATE KEY")) {
+        log_error("Key encryption: private key stored unsealed: %.40s", stored);
+        goto done;
+    }
+    if (read_stored_key(sdb, "SELECT current_secret FROM auth_request_signing",
+                        stored, sizeof(stored)) != 0 ||
+        strncmp(stored, "e1:", 3) != 0 || strcmp(stored + 3, hmac->current_secret) == 0) {
+        log_error("Key encryption: HMAC secret stored unsealed");
+        goto done;
+    }
+    if (read_stored_key(sdb, "SELECT current_public_key FROM access_token_signing",
+                        stored, sizeof(stored)) != 0 ||
+        strncmp(stored, "-----BEGIN PUBLIC KEY-----", 26) != 0) {
+        log_error("Key encryption: public key should stay plaintext");
+        goto done;
+    }
+    log_info("  private material sealed at rest, public key plaintext (OK)");
+
+    /* 2. Rotation moves the sealed value into prior, and it still opens */
+    if (read_stored_key(sdb, "SELECT current_private_key FROM access_token_signing",
+                        stored_before, sizeof(stored_before)) != 0 ||
+        db_execute_direct(sdb,
+            "UPDATE access_token_signing SET current_generated_at = "
+            "datetime('now', '-61 days')") != 0 ||
+        signing_key_get_or_rotate(sdb, SIGNING_KEY_ACCESS_TOKEN, &rotated) != 0 || !rotated) {
+        log_error("Key encryption: rotation failed");
+        goto done;
+    }
+    if (read_stored_key(sdb, "SELECT prior_private_key FROM access_token_signing",
+                        stored, sizeof(stored)) != 0 ||
+        strcmp(stored, stored_before) != 0 ||
+        !rotated->prior_private_key ||
+        strcmp(rotated->prior_private_key, es->current_private_key) != 0 ||
+        strcmp(rotated->current_private_key, es->current_private_key) == 0) {
+        log_error("Key encryption: rotation did not carry the sealed key into prior");
+        goto done;
+    }
+    log_info("  rotation carries the sealed key into prior and it opens (OK)");
+
+    /* 3. Pre-encryption plaintext row: every load fails, nothing is regenerated */
+    if (db_execute_direct(sdb,
+            "UPDATE auth_request_signing SET current_secret = 'legacy-plaintext-secret'") != 0) {
+        log_error("Key encryption: could not plant a legacy row");
+        goto done;
+    }
+    signing_key_thread_cleanup();  /* the cache is keyed on timestamps; force a reload */
+    if (signing_key_get_or_rotate(sdb, SIGNING_KEY_AUTH_REQUEST, &bad) == 0) {
+        log_error("Key encryption: a plaintext row was accepted");
+        goto done;
+    }
+    if (read_stored_key(sdb, "SELECT current_secret FROM auth_request_signing",
+                        stored, sizeof(stored)) != 0 ||
+        strcmp(stored, "legacy-plaintext-secret") != 0) {
+        log_error("Key encryption: the legacy row was overwritten");
+        goto done;
+    }
+    log_info("  plaintext legacy row fails and is left alone (OK)");
+
+    /* 4. Different encryption_key: fails, row untouched; right key recovers */
+    if (encrypt_init("not-the-key-that-sealed-these") != 0) {
+        log_error("Key encryption: could not switch passphrase");
+        goto done;
+    }
+    signing_key_thread_cleanup();
+    int wrong_key_rc = signing_key_get_or_rotate(sdb, SIGNING_KEY_ACCESS_TOKEN, &bad);
+    if (encrypt_init(config->encryption_key) != 0) {
+        log_error("Key encryption: could not restore passphrase");
+        goto done;
+    }
+    if (wrong_key_rc == 0) {
+        log_error("Key encryption: key opened under the wrong encryption_key");
+        goto done;
+    }
+    signing_key_thread_cleanup();
+    signing_key_free(rotated);
+    rotated = NULL;
+    if (signing_key_get_or_rotate(sdb, SIGNING_KEY_ACCESS_TOKEN, &rotated) != 0 || !rotated) {
+        log_error("Key encryption: key did not open again under the right encryption_key");
+        goto done;
+    }
+    log_info("  wrong encryption_key fails, right one recovers (OK)");
+
+    failed = 0;
+
+done:
+    signing_key_free(es);
+    signing_key_free(hmac);
+    signing_key_free(rotated);
+    signing_key_free(bad);
+    signing_key_thread_cleanup();
+    OPENSSL_cleanse(stored, sizeof(stored));
+    OPENSSL_cleanse(stored_before, sizeof(stored_before));
+    db_disconnect(sdb);
+    if (!failed) {
+        log_info("Signing-key encryption tests passed!");
     }
     return failed;
 }
@@ -859,7 +1012,19 @@ int main(void) {
     log_info("\nDisconnecting...");
     db_disconnect(db);
 
+    /* Signing keys are sealed with the field-encryption key, as in main.c */
+    if (encrypt_init(config->encryption_key) != 0) {
+        log_error("Failed to initialize field encryption");
+        config_free(config);
+        return 1;
+    }
+
     if (test_signing_key_cache(config) != 0) {
+        config_free(config);
+        return 1;
+    }
+
+    if (test_signing_key_encryption(config) != 0) {
         config_free(config);
         return 1;
     }
