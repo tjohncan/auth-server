@@ -149,6 +149,17 @@ jobs:
           set -o pipefail
           DB_BACKEND=postgresql make 2>&1 | tee /tmp/pg.log
 
+      # EMAIL_SUPPORT is a compile-time choice too, and no other job sets it, so the
+      # email-only code (verification, password reset, passwordless login,
+      # invitations) would otherwise never be compiled in CI. From clean: make
+      # doesn't track a changed flag, and would relink the objects above as they are.
+      # Appends to the same log, so the warning gate below covers both builds.
+      - name: Build against PostgreSQL with email support
+        run: |
+          set -o pipefail
+          make clean
+          DB_BACKEND=postgresql EMAIL_SUPPORT=1 make 2>&1 | tee -a /tmp/pg.log
+
       # Same gate as above, without the vendor filter: no third-party source is
       # compiled here, and libpq's headers come in via -isystem so its diagnostics
       # (if any ever appear) are suppressed rather than filtered.
