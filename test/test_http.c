@@ -489,6 +489,62 @@ void test_header_end_scan(void) {
     printf("✓ the FIRST delimiter wins when the body contains another\n");
 }
 
+void test_cross_origin(void) {
+    printf("\n=== Test: Cross-origin detection ===\n");
+
+    static const struct {
+        const char *headers;
+        int cross;
+        const char *what;
+    } cases[] = {
+        { "Sec-Fetch-Site: same-origin\r\n", 0, "Sec-Fetch-Site: same-origin" },
+        { "Sec-Fetch-Site: none\r\n",        0, "Sec-Fetch-Site: none (the user's own navigation)" },
+        { "Sec-Fetch-Site: cross-site\r\n",  1, "Sec-Fetch-Site: cross-site" },
+        { "Sec-Fetch-Site: same-site\r\n",   1, "Sec-Fetch-Site: same-site (a sibling subdomain)" },
+        { "sec-fetch-site: cross-site\r\n",  1, "header name in lower case" },
+        { "Sec-Fetch-Site: same-origin\r\nOrigin: https://evil.example\r\n", 0,
+          "Sec-Fetch-Site decides over Origin" },
+        { "Sec-Fetch-Site: cross-site\r\nOrigin: https://auth.example.test\r\n", 1,
+          "Sec-Fetch-Site decides over a matching Origin" },
+        { "Origin: https://auth.example.test\r\n",                 0, "Origin matching Host" },
+        { "Origin: https://AUTH.Example.test\r\n",                 0, "Origin matching Host in another case" },
+        { "Origin: https://evil.example\r\n",                      1, "Origin of another site" },
+        { "Origin: https://auth.example.test.evil.example\r\n",    1, "Origin extending Host" },
+        { "Origin: https://auth.example.tes\r\n",                  1, "Origin a prefix of Host" },
+        { "Origin: https://auth.example.test:8443\r\n",            1, "Origin on another port" },
+        { "Origin: null\r\n",                                      1, "opaque Origin" },
+        { "",                                                      0, "neither header (not a browser)" },
+    };
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char raw[512];
+        snprintf(raw, sizeof(raw),
+                 "POST /passwordless-login HTTP/1.1\r\n"
+                 "Host: auth.example.test\r\n"
+                 "%s"
+                 "Content-Length: 0\r\n"
+                 "\r\n", cases[i].headers);
+
+        HttpRequest req = http_request_parse(raw, strlen(raw));
+        assert(req.method == HTTP_POST);
+        assert(http_request_is_cross_origin(&req) == cases[i].cross);
+        http_request_cleanup(&req);
+        printf("✓ %s: %s\n", cases[i].what, cases[i].cross ? "cross-origin" : "passes");
+    }
+
+    /* An Origin with no Host to hold it against */
+    char no_host[] =
+        "POST /passwordless-login HTTP/1.0\r\n"
+        "Origin: https://auth.example.test\r\n"
+        "Content-Length: 0\r\n"
+        "\r\n";
+    HttpRequest req = http_request_parse(no_host, strlen(no_host));
+    assert(req.method == HTTP_POST);
+    assert(http_request_is_cross_origin(&req) == 1);
+    http_request_cleanup(&req);
+    printf("✓ Origin with no Host: cross-origin\n");
+}
+
 int main(void) {
     log_init(LOG_INFO);
     log_info("HTTP Parser Test Suite");
@@ -498,6 +554,7 @@ int main(void) {
     test_real_world_request();
     test_malformed_requests();
     test_header_end_scan();
+    test_cross_origin();
 
     printf("\n=== All Tests Passed! ===\n\n");
 

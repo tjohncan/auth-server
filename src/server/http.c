@@ -296,6 +296,23 @@ const char *http_request_get_header(const HttpRequest *req, const char *name) {
     return NULL;
 }
 
+int http_request_is_cross_origin(const HttpRequest *req) {
+    const char *site = http_request_get_header(req, "Sec-Fetch-Site");
+    if (site) {
+        return strcmp(site, "same-origin") != 0 && strcmp(site, "none") != 0;
+    }
+
+    const char *origin = http_request_get_header(req, "Origin");
+    if (!origin) return 0;
+
+    /* "scheme://host[:port]" against Host. An opaque origin ("null") has no
+       host to match, and a request without Host has nothing to match it to. */
+    const char *host = http_request_get_header(req, "Host");
+    const char *sep = strstr(origin, "://");
+    if (!sep || !host) return 1;
+    return strcasecmp(sep + 3, host) != 0;
+}
+
 const char *http_request_get_client_ip(const HttpRequest *req, const char *socket_ip) {
     /* Check X-Real-IP first (single IP from trusted reverse proxy).
      * This server must sit behind a trusted reverse proxy in any real deployment, for TLS. */

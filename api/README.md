@@ -2346,6 +2346,13 @@ Consume a passwordless login token and create a session.
 
 Returns an HTML page stating the link is invalid, expired, or already used.
 
+**Error Response** (403 Forbidden):
+
+The browser reported the form as posted from another site: a `Sec-Fetch-Site` other than
+`same-origin`, or, from a browser too old to send that, an `Origin` that doesn't match `Host`.
+Another site could otherwise post its own token and sign the visitor into its account. The
+token is left unused.
+
 **Notes**:
 - This endpoint is submitted by the confirmation page's form — not called directly via API
 - Session is created via `oauth_session_create` (not `session_authenticate_and_create`)

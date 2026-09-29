@@ -1455,6 +1455,13 @@ HttpResponse *passwordless_login_handler(const HttpRequest *req,
                                            const RouteParams *params) {
     (void)params;
 
+    /* The confirmation page is the one legitimate sender, and it is same-origin.
+     * Another site posting here would be posting its own token, to sign this
+     * browser into its own account (login CSRF). */
+    if (http_request_is_cross_origin(req)) {
+        return response_html_error(403, "Cross-site request refused");
+    }
+
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
         log_error("Failed to get database connection");
