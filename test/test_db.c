@@ -916,6 +916,132 @@ done:
 }
 
 /*
+ * Deactivation revokes, so reactivation doesn't resurrect.
+ *
+ * The use-time checks read is_active, so an account that is only flagged
+ * inactive gets every session and token back when it is reactivated: an
+ * attacker's included, MFA-complete sessions and all. user_set_active must close
+ * the sessions and revoke the refresh and access tokens when it deactivates,
+ * leave another user's alone, and sweep an account an older build flagged
+ * inactive without revoking anything.
+ *
+ * Returns 0 on success.
+ */
+static int test_deactivation_revokes(const config_t *config) {
+    log_info("\nDeactivation revocation tests");
+
+    db_handle_t *sdb = open_test_db(config);
+    if (!sdb) {
+        log_error("Revocation: could not open a test database");
+        return 1;
+    }
+
+    int failed = 1;
+
+    /* Two users, pins 1 and 2 */
+    if (db_execute_direct(sdb, FIXTURE_ORG_RS_CLIENT
+            "INSERT INTO user_account (id) VALUES (x'00000000000000000000000000000004');"
+            "INSERT INTO user_account (id) VALUES (x'00000000000000000000000000000005');") != 0) {
+        log_error("Revocation: could not insert fixtures");
+        goto done;
+    }
+    const unsigned char user_ids[2][16] = {
+        {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x04},
+        {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x05},
+    };
+
+    /* Each user gets an MFA-complete session, a refresh token and an access token */
+    const char *sessions[] = { "revoke-session-1", "revoke-session-2" };
+    const char *codes[]    = { "revoke-code-1", "revoke-code-2" };
+    const char *refresh[]  = { "revoke-refresh-1", "revoke-refresh-2" };
+    const char *access[]   = { "revoke-access-1", "revoke-access-2" };
+    for (int u = 0; u < 2; u++) {
+        unsigned char id[16], code_id[16];
+        if (oauth_session_create(sdb, u + 1, user_ids[u], sessions[u], "password",
+                                 NULL, NULL, 3600, id) != 0 ||
+            oauth_session_set_mfa_completed(sdb, sessions[u]) != 0 ||
+            oauth_auth_code_create(sdb, 1, FIXTURE_CLIENT_ID, u + 1, user_ids[u], codes[u],
+                                   NULL, NULL, 600, code_id) != 0 ||
+            oauth_token_create_refresh(sdb, 1, u + 1, code_id, refresh[u], "read",
+                                       3600, id) != 0 ||
+            oauth_token_create_access(sdb, 1, 1, u + 1, NULL, NULL, access[u], "read",
+                                      3600, id) != 0) {
+            log_error("Revocation: could not create sessions and tokens");
+            goto done;
+        }
+    }
+
+    oauth_session_info_t session;
+    char revoked[8];
+
+    /* 1. Deactivate user 1, then reactivate: none of theirs comes back */
+    if (user_set_active(sdb, user_ids[0], 0) != 0 ||
+        user_set_active(sdb, user_ids[0], 1) != 0) {
+        log_error("Revocation: could not deactivate and reactivate");
+        goto done;
+    }
+    if (oauth_session_get_by_token(sdb, sessions[0], &session) == 0) {
+        log_error("Revocation: the session came back with the account");
+        goto done;
+    }
+    if (read_stored_value(sdb, "SELECT is_revoked FROM refresh_token WHERE user_account_pin = 1",
+                          revoked, sizeof(revoked)) != 0 || strcmp(revoked, "1") != 0) {
+        log_error("Revocation: the refresh token came back with the account");
+        goto done;
+    }
+    if (oauth_access_token_is_active(sdb, access[0]) != 0) {
+        log_error("Revocation: the access token came back with the account");
+        goto done;
+    }
+    log_info("  deactivated then reactivated: session, refresh and access token stay dead (OK)");
+
+    /* 2. User 2's are untouched */
+    if (oauth_session_get_by_token(sdb, sessions[1], &session) != 0 ||
+        read_stored_value(sdb, "SELECT is_revoked FROM refresh_token WHERE user_account_pin = 2",
+                          revoked, sizeof(revoked)) != 0 || strcmp(revoked, "0") != 0 ||
+        oauth_access_token_is_active(sdb, access[1]) != 1) {
+        log_error("Revocation: another user's session or tokens were touched");
+        goto done;
+    }
+    log_info("  another user's session and tokens untouched (OK)");
+
+    /* 3. User 2 flagged inactive the old way, everything still open: deactivating
+       again sweeps it, so reactivating brings nothing back */
+    if (db_execute_direct(sdb, "UPDATE user_account SET is_active = 0 WHERE pin = 2") != 0 ||
+        user_set_active(sdb, user_ids[1], 0) != 0 ||
+        user_set_active(sdb, user_ids[1], 1) != 0) {
+        log_error("Revocation: could not deactivate an already-inactive account");
+        goto done;
+    }
+    if (oauth_session_get_by_token(sdb, sessions[1], &session) == 0 ||
+        read_stored_value(sdb, "SELECT is_revoked FROM refresh_token WHERE user_account_pin = 2",
+                          revoked, sizeof(revoked)) != 0 || strcmp(revoked, "1") != 0 ||
+        oauth_access_token_is_active(sdb, access[1]) != 0) {
+        log_error("Revocation: deactivating an already-inactive account left something open");
+        goto done;
+    }
+    log_info("  already inactive: deactivating again sweeps what it still held (OK)");
+
+    /* 4. An unknown id is reported, not waved through */
+    const unsigned char unknown_id[16] = {0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+                                          0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff};
+    if (user_set_active(sdb, unknown_id, 0) != 1) {
+        log_error("Revocation: an unknown id was not reported");
+        goto done;
+    }
+    log_info("  unknown id reported (OK)");
+
+    failed = 0;
+
+done:
+    db_disconnect(sdb);
+    if (!failed) {
+        log_info("Deactivation revocation tests passed!");
+    }
+    return failed;
+}
+
+/*
  * Authorization-scoped writes must report when they matched nothing.
  *
  * These statements carry their authorization in the WHERE clause, so "not
@@ -1477,6 +1603,11 @@ int main(void) {
     }
 
     if (test_deactivated_user_tokens(config) != 0) {
+        config_free(config);
+        return 1;
+    }
+
+    if (test_deactivation_revokes(config) != 0) {
         config_free(config);
         return 1;
     }

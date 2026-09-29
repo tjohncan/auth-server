@@ -626,7 +626,8 @@ localhost-only), which returns them to this starting point: confirm who is askin
 **Changing a password does not sign you out everywhere.**
 A password change rotates the credential and nothing else; live sessions and refresh chains
 survive it. Compromise recovery has stronger, explicit paths here — account deactivation
-(localhost-only) and token revocation — and password change isn't asked to carry that weight.
+(localhost-only), which closes every session and revokes every token, and token revocation —
+and password change isn't asked to carry that weight.
 Mass invalidation is a cost paid by every user on every routine rotation, in order to evict an
 attacker who, in the case that actually matters, already knows the new password.
 

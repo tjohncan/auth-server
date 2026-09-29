@@ -3238,13 +3238,19 @@ int user_set_active(db_handle_t *db, const unsigned char *user_id, int active) {
 
     int val = active ? 1 : 0;
 
+    if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
+        log_error("Failed to begin transaction");
+        return -1;
+    }
+
     /* Check current state */
     const char *check_sql =
-        "SELECT is_active FROM " TBL_USER_ACCOUNT " WHERE id = " P"1";
+        "SELECT pin, is_active FROM " TBL_USER_ACCOUNT " WHERE id = " P"1";
 
     db_stmt_t *stmt = NULL;
     if (db_prepare(db, &stmt, check_sql) != 0) {
         log_error("Failed to prepare user_set_active check");
+        db_execute_trusted(db, "ROLLBACK");
         return -1;
     }
 
@@ -3253,42 +3259,93 @@ int user_set_active(db_handle_t *db, const unsigned char *user_id, int active) {
     int rc = db_step(stmt);
     if (rc != DB_ROW) {
         db_finalize(stmt);
+        db_execute_trusted(db, "ROLLBACK");
         if (rc == DB_DONE) return 1; /* not found */
         log_error("Error in user_set_active check");
         return -1;
     }
 
-    int current = db_column_int(stmt, 0);
+    long long user_account_pin = db_column_int64(stmt, 0);
+    int current = db_column_int(stmt, 1);
     db_finalize(stmt);
 
-    if (current == val) return 0; /* already in desired state */
+    if (current != val) {
+        const char *update_sql =
+            "UPDATE " TBL_USER_ACCOUNT " "
+            "SET is_active = " P"1, updated_at = " NOW " "
+            "WHERE pin = " P"2 "
+            "AND is_active IS DISTINCT FROM " P"1";
 
-    /* Apply change */
-    const char *update_sql =
-        "UPDATE " TBL_USER_ACCOUNT " "
-        "SET is_active = " P"1, updated_at = " NOW " "
-        "WHERE id = " P"2 "
-        "AND is_active IS DISTINCT FROM " P"1";
+        if (db_prepare(db, &stmt, update_sql) != 0) {
+            log_error("Failed to prepare user_set_active update");
+            db_execute_trusted(db, "ROLLBACK");
+            return -1;
+        }
 
-    stmt = NULL;
-    if (db_prepare(db, &stmt, update_sql) != 0) {
-        log_error("Failed to prepare user_set_active update");
+        db_bind_int(stmt, 1, val);
+        db_bind_int64(stmt, 2, user_account_pin);
+
+        rc = db_step(stmt);
+        db_finalize(stmt);
+
+        if (rc != DB_DONE) {
+            log_error("Error in user_set_active update");
+            db_execute_trusted(db, "ROLLBACK");
+            return -1;
+        }
+    }
+
+    /* Deactivation is the compromise lever, and the flag alone doesn't pull it:
+     * every use-time check reads is_active, so reactivating would bring back
+     * every session and token the account still held, an attacker's included,
+     * MFA-complete sessions and all. So deactivating also closes the sessions
+     * and revokes the refresh and access tokens. It does so on every call, which
+     * sweeps up whatever an account deactivated by an older build still holds. */
+    if (!val) {
+        const char *revoke_steps[] = {
+            "UPDATE " TBL_BROWSER " "
+            "SET is_closed = " BOOL_TRUE ", closed_at = " NOW ", updated_at = " NOW " "
+            "WHERE user_account_pin = " P"1 AND is_closed = " BOOL_FALSE,
+
+            "UPDATE " TBL_REFRESH_TOKEN " "
+            "SET is_revoked = " BOOL_TRUE ", revoked_at = " NOW ", updated_at = " NOW " "
+            "WHERE user_account_pin = " P"1 AND is_revoked = " BOOL_FALSE,
+
+            "UPDATE " TBL_ACCESS_TOKEN " "
+            "SET is_revoked = " BOOL_TRUE ", revoked_at = " NOW ", updated_at = " NOW " "
+            "WHERE user_account_pin = " P"1 AND is_revoked = " BOOL_FALSE,
+        };
+
+        for (size_t i = 0; i < sizeof(revoke_steps) / sizeof(revoke_steps[0]); i++) {
+            if (db_prepare(db, &stmt, revoke_steps[i]) != 0) {
+                log_error("Failed to prepare deactivation revoke statement");
+                db_execute_trusted(db, "ROLLBACK");
+                return -1;
+            }
+
+            db_bind_int64(stmt, 1, user_account_pin);
+
+            rc = db_step(stmt);
+            db_finalize(stmt);
+
+            if (rc != DB_DONE) {
+                log_error("Failed to revoke sessions and tokens on deactivation");
+                db_execute_trusted(db, "ROLLBACK");
+                return -1;
+            }
+        }
+    }
+
+    if (db_execute_trusted(db, "COMMIT") != 0) {
+        log_error("Failed to commit user_set_active");
+        db_execute_trusted(db, "ROLLBACK");
         return -1;
     }
 
-    db_bind_int(stmt, 1, val);
-    db_bind_blob(stmt, 2, user_id, 16);
-
-    rc = db_step(stmt);
-    db_finalize(stmt);
-
-    if (rc != DB_DONE) {
-        log_error("Error in user_set_active update");
-        return -1;
+    if (current != val) {
+        char user_id_hex[33];
+        bytes_to_hex(user_id, 16, user_id_hex, sizeof(user_id_hex));
+        log_info("%s account for user_id=%s", val ? "Activated" : "Deactivated", user_id_hex);
     }
-
-    char user_id_hex[33];
-    bytes_to_hex(user_id, 16, user_id_hex, sizeof(user_id_hex));
-    log_info("%s account for user_id=%s", val ? "Activated" : "Deactivated", user_id_hex);
     return 0;
 }
