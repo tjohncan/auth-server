@@ -48,6 +48,10 @@ All endpoints reject connections from non-localhost IPs with `403 Forbidden`.
 ### Security Model
 
 - **Access Control**: IP-based (localhost only)
+- **Behind a proxy on the same host**: a request counts as local when it comes from 127.0.0.1
+  or ::1 and carries neither `X-Real-IP` nor `X-Forwarded-For`. A proxy on the same machine
+  must add one of those to everything it forwards (the shipped nginx config sets `X-Real-IP`),
+  or every request it passes on looks local.
 - **Use Case**: Shell access to server host = trusted admin
 - **Transport**: HTTP acceptable (localhost loopback)
 - **Audience**: Server administrators via curl/scripts
