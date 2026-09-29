@@ -774,7 +774,8 @@ done:
  * deactivation revokes nothing, so the check has to happen at use time, in every
  * liveness query. Pins both of them, and that a client_credentials token (no
  * user row) is not collateral damage of the user predicate. Deactivating the
- * client's organization is read the same way, for both kinds of token.
+ * client's organization, or the token's resource server, is read the same way,
+ * for both kinds of token.
  *
  * Returns 0 on success.
  */
@@ -852,31 +853,41 @@ static int test_deactivated_user_tokens(const config_t *config) {
     log_info("  client_credentials token unaffected (OK)");
 
     /* 4. With the account active again, deactivating the client's organization
-       kills both tokens, and reactivating it brings them back. */
-    if (db_execute_direct(sdb,
-            "UPDATE user_account SET is_active = 1;"
-            "UPDATE organization SET is_active = 0") != 0) {
-        log_error("Deactivation: could not deactivate the organization");
+       kills both tokens, and reactivating it brings them back. The same for the
+       tokens' resource server. */
+    if (db_execute_direct(sdb, "UPDATE user_account SET is_active = 1") != 0) {
+        log_error("Deactivation: could not reactivate the user");
         goto done;
     }
-    const char *org_tokens[] = { "deact-user-token", "deact-machine-token" };
-    for (size_t i = 0; i < sizeof(org_tokens) / sizeof(org_tokens[0]); i++) {
-        active = -1;
-        if (oauth_introspect_token(sdb, org_tokens[i], NULL, 1, &active,
-                                   NULL, NULL, NULL, NULL, NULL, NULL) != 0 || active != 0 ||
-            oauth_access_token_is_active(sdb, org_tokens[i]) != 0) {
-            log_error("Deactivation: %s still active after its organization was deactivated",
-                      org_tokens[i]);
+    const char *owners[] = { "organization", "resource_server" };
+    const char *owned_tokens[] = { "deact-user-token", "deact-machine-token" };
+    for (size_t o = 0; o < sizeof(owners) / sizeof(owners[0]); o++) {
+        char sql[64];
+        snprintf(sql, sizeof(sql), "UPDATE %s SET is_active = 0", owners[o]);
+        if (db_execute_direct(sdb, sql) != 0) {
+            log_error("Deactivation: could not deactivate the %s", owners[o]);
             goto done;
         }
+        for (size_t i = 0; i < sizeof(owned_tokens) / sizeof(owned_tokens[0]); i++) {
+            active = -1;
+            if (oauth_introspect_token(sdb, owned_tokens[i], NULL, 1, &active,
+                                       NULL, NULL, NULL, NULL, NULL, NULL) != 0 || active != 0 ||
+                oauth_access_token_is_active(sdb, owned_tokens[i]) != 0) {
+                log_error("Deactivation: %s still active after its %s was deactivated",
+                          owned_tokens[i], owners[o]);
+                goto done;
+            }
+        }
+        snprintf(sql, sizeof(sql), "UPDATE %s SET is_active = 1", owners[o]);
+        if (db_execute_direct(sdb, sql) != 0 ||
+            oauth_access_token_is_active(sdb, "deact-user-token") != 1 ||
+            oauth_access_token_is_active(sdb, "deact-machine-token") != 1) {
+            log_error("Deactivation: tokens not active again after the %s was reactivated",
+                      owners[o]);
+            goto done;
+        }
+        log_info("  deactivated %s: both tokens inactive, active again after (OK)", owners[o]);
     }
-    if (db_execute_direct(sdb, "UPDATE organization SET is_active = 1") != 0 ||
-        oauth_access_token_is_active(sdb, "deact-user-token") != 1 ||
-        oauth_access_token_is_active(sdb, "deact-machine-token") != 1) {
-        log_error("Deactivation: tokens not active again after the organization was reactivated");
-        goto done;
-    }
-    log_info("  deactivated organization: both tokens inactive, active again after (OK)");
 
     /* 5. A malformed user id must not degrade into "no user". A zero user id is
        how a client_credentials token looks, so a user token would introspect
