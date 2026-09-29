@@ -2613,7 +2613,8 @@ curl -X DELETE "http://localhost:8080/api/user/mfa/methods?id=a1b2c3d4e5f6a1b2c3
 Regenerate recovery codes. Atomically revokes the existing set and creates a new one. 
 Requires at least one confirmed MFA method.
 
-**Request Body**: None required.
+**Request Body**: None required, but send `Content-Type: application/json`: any other type
+gets `415`, which keeps a plain HTML form from triggering this.
 
 **Success Response** (200 OK):
 ```json
@@ -2632,6 +2633,7 @@ Requires at least one confirmed MFA method.
 **Example**:
 ```bash
 curl -X POST http://localhost:8080/api/user/mfa/recovery-codes/regenerate \
+  -H "Content-Type: application/json" \
   -H "Cookie: session=<token>"
 ```
 

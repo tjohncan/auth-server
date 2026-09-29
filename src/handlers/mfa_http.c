@@ -571,6 +571,11 @@ HttpResponse *mfa_delete_method_handler(const HttpRequest *req, const RouteParam
 HttpResponse *mfa_regenerate_recovery_codes_handler(const HttpRequest *req,
                                                     const RouteParams *params) {
     (void)params;
+    /* Nothing is read from the body. JSON is still required: it's what keeps a
+     * plain HTML form out, and SameSite=Lax lets a form on a sibling subdomain
+     * post here with the session cookie. */
+    HttpResponse *ct_err = require_content_type(req, "application/json");
+    if (ct_err) return ct_err;
 
     /* Get database connection */
     db_handle_t *db = db_pool_get_connection();
