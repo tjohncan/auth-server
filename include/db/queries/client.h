@@ -572,23 +572,4 @@ int client_key_revoke(db_handle_t *db,
                       long long organization_key_pin,
                       const unsigned char *key_id);
 
-/*
- * Verify Client API key authentication
- *
- * Verifies key_id + secret combination for client_credentials flow.
- * Uses timing-safe comparison to prevent timing attacks.
- *
- * Parameters:
- *   db             - Database handle
- *   key_id         - Key UUID (16 bytes)
- *   secret         - Plaintext secret to verify
- *   out_client_pin - Output: Client PIN (for token generation)
- *
- * Returns: 1 if valid, 0 if invalid, -1 on error
- */
-int client_key_verify(db_handle_t *db,
-                      const unsigned char *key_id,
-                      const char *secret,
-                      long long *out_client_pin);
-
 #endif /* DB_QUERIES_CLIENT_H */

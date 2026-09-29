@@ -280,25 +280,6 @@ int resource_server_key_revoke(db_handle_t *db,
                                const unsigned char *key_id);
 
 /*
- * Verify Resource Server API key authentication
- *
- * Verifies key_id + secret combination.
- * Uses timing-safe comparison to prevent timing attacks.
- *
- * Parameters:
- *   db                      - Database handle
- *   key_id                  - Key UUID (16 bytes)
- *   secret                  - Plaintext secret to verify
- *   out_resource_server_pin - Output: Resource server PIN (for introspection)
- *
- * Returns: 1 if valid, 0 if invalid, -1 on error
- */
-int resource_server_key_verify(db_handle_t *db,
-                               const unsigned char *key_id,
-                               const char *secret,
-                               long long *out_resource_server_pin);
-
-/*
  * Check if resource server has user provisioning enabled
  *
  * Parameters:
