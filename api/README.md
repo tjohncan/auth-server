@@ -480,6 +480,10 @@ Update organization properties.
 Query: `id` (required) - Organization UUID
 Body: `display_name`, `note`, `is_active` (all optional)
 
+Deactivating an organization stops its clients getting tokens, and from then on their
+outstanding access tokens fail introspection and `/userinfo`. A resource server that only
+checks tokens against JWKS keeps accepting them until `exp`.
+
 ### Resource Servers
 
 **GET /api/admin/resource-servers**
@@ -1296,6 +1300,7 @@ resource_server_secret=<resource_server_secret>
   - Invalid tokens
   - Expired tokens
   - Revoked tokens
+  - Tokens whose user, client or client's organization has been deactivated
   - Tokens not belonging to the authenticated resource server
   - Authentication failures
 - This prevents information disclosure per RFC 7662
@@ -1317,7 +1322,7 @@ OpenID Connect UserInfo endpoint (OIDC Core Section 5.3). Returns claims about t
 
 **Security**: Bearer token authentication. The access token (ES256 JWT) must be provided in the Authorization header. The token is verified against the server's current (and prior) signing keys.
 
-Signature and expiry are verified from the JWT itself, but a self-contained token cannot carry revocation state — so the token record is also consulted. A token revoked via `POST /revoke`, auto-revoked by replay-chain revocation, or belonging to a client that has since been deactivated, is rejected here immediately rather than remaining usable until `exp`. This applies the same liveness predicate as `POST /introspect`.
+Signature and expiry are verified from the JWT itself, but a self-contained token cannot carry revocation state — so the token record is also consulted. A token revoked via `POST /revoke`, auto-revoked by replay-chain revocation, or whose user, client or client's organization has since been deactivated, is rejected here immediately rather than remaining usable until `exp`. This applies the same liveness predicate as `POST /introspect`.
 
 **Request**:
 ```http

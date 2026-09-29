@@ -1367,12 +1367,17 @@ int oauth_introspect_token(db_handle_t *db,
         UNIX_TS("at.expected_expiry") ", " UNIX_TS("at.issued_at") " "
         "FROM " TBL_ACCESS_TOKEN " at "
         "INNER JOIN " TBL_CLIENT " c ON c.pin = at.client_pin "
+        "INNER JOIN " TBL_ORGANIZATION " o ON o.pin = c.organization_pin "
         "INNER JOIN " TBL_RESOURCE_SERVER " rs ON rs.pin = at.resource_server_pin "
         "LEFT JOIN " TBL_USER_ACCOUNT " ua ON ua.pin = at.user_account_pin "
         "WHERE at.token = " P"1 "
         "AND at.resource_server_pin = " P"2 "
         "AND at.is_revoked = " BOOL_FALSE " "
         "AND c.is_active = " BOOL_TRUE " "
+        /* Deactivating the client's organization revokes nothing either. A
+           deactivated organization's resource servers can't authenticate to ask,
+           but this query doesn't lean on that. */
+        "AND o.is_active = " BOOL_TRUE " "
         /* Deactivation is the documented compromise-recovery path, and it revokes
            nothing, so the account's state has to be read here. NULL user = a
            client_credentials token, which has no account to be deactivated. */
@@ -1482,14 +1487,17 @@ int oauth_access_token_is_active(db_handle_t *db, const char *token) {
     }
 
     /* Same predicate oauth_introspect_token() applies: revoked tokens are dead,
-     * and so are the tokens of a deactivated client or a deactivated user. */
+     * and so are the tokens of a deactivated client, of a deactivated user, and
+     * of a client whose organization has been deactivated. */
     const char *sql =
         "SELECT 1 FROM " TBL_ACCESS_TOKEN " at "
         "INNER JOIN " TBL_CLIENT " c ON c.pin = at.client_pin "
+        "INNER JOIN " TBL_ORGANIZATION " o ON o.pin = c.organization_pin "
         "LEFT JOIN " TBL_USER_ACCOUNT " ua ON ua.pin = at.user_account_pin "
         "WHERE at.token = " P"1 "
         "AND at.is_revoked = " BOOL_FALSE " "
         "AND c.is_active = " BOOL_TRUE " "
+        "AND o.is_active = " BOOL_TRUE " "
         "AND (at.user_account_pin IS NULL OR ua.is_active = " BOOL_TRUE ") "
         "AND (at.expected_expiry IS NULL OR at.expected_expiry > " NOW ") "
         "LIMIT 1";
