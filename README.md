@@ -292,13 +292,6 @@ Manages cryptographic signing keys for JWTs with automatic rotation.
     against the published keys and at `/userinfo`, but `/introspect` reports them active
     until they expire, so deleting the rows is no way to retire leaked tokens: revoke them,
     or deactivate the user.
-- **Upgrading from a build before signing-key encryption:** its keys are stored in
-    plaintext, which the server refuses the same way. Stop every instance of the older
-    build, delete the rows in both tables, then start the new one. Deleting first means the
-    new build never runs against plaintext rows; an older instance left running against the
-    database would write plaintext keys again. Rolling back takes the same steps, since the
-    older build can't use encrypted keys either: stop the new build, delete the rows again,
-    then start the old one.
 
 **Rotation:**
 - **Passive mechanism**: Keys checked on every use, rotated if stale

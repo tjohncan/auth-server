@@ -7,16 +7,6 @@ endpoint runs. A body containing an escape that cannot be decoded (an escaped NU
 UTF-16 surrogate, a malformed or unknown escape) is refused with
 `400 {"error": "Invalid JSON string escape"}`, whichever field carries it.
 
-**Upgrading from a build that didn't decode these escapes:** earlier builds removed any
-`\uXXXX` escape outside printable ASCII instead of decoding it, and kept `\/` with its
-backslash. Clients that escape that way (Python's `json.dumps` and `requests`' `json=`, PHP's
-`json_encode`, .NET's `System.Text.Json`; PHP also escapes every `/`) had usernames, emails and
-passwords stored altered: the password `Пароль1` was stored as `1`, and `a/b` from PHP as
-`a\/b`. Those values now arrive decoded and no longer match. Affected users need a password
-reset, and an affected username or email has to be entered again; the stored values can't be
-repaired. Browsers send raw UTF-8, so accounts created through the bundled pages are not
-affected.
-
 ## Table of Contents
 
 1. [Admin API (Localhost-Only)](#admin-api-localhost-only)
