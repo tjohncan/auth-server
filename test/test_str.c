@@ -408,6 +408,54 @@ void test_json_unescape(void) {
            "He said \"hi\" & <bye>", buf);
 }
 
+void test_json_utf8_valid(void) {
+    printf("\n=== Testing json_utf8_valid ===\n\n");
+
+    /* Well-formed: ASCII, each sequence length, and the edges of the ranges
+       the lead bytes allow */
+    const char *good[] = {
+        "",
+        "plain ASCII",
+        "Jos\xc3\xa9",              /* U+00E9, two bytes */
+        "\xe2\x82\xac",             /* U+20AC, three bytes */
+        "\xed\x9f\xbf",             /* U+D7FF, the last before the surrogates */
+        "\xee\x80\x80",             /* U+E000, the first after them */
+        "\xf0\x9f\x98\x80",         /* U+1F600, four bytes */
+        "\xf4\x8f\xbf\xbf",         /* U+10FFFF, the last code point */
+    };
+    for (size_t i = 0; i < sizeof(good) / sizeof(good[0]); i++) {
+        assert(json_utf8_valid(good[i], strlen(good[i])) == 1);
+    }
+
+    const char *bad[] = {
+        "\x80",                     /* a continuation byte with no lead */
+        "a\xbfz",                   /* the same, mid-string */
+        "\xc0\x80",                 /* overlong NUL */
+        "\xc1\xbf",                 /* overlong U+007F */
+        "\xe0\x80\x80",             /* overlong three-byte form */
+        "\xf0\x80\x80\x80",         /* overlong four-byte form */
+        "\xed\xa0\x80",             /* U+D800, a surrogate */
+        "\xed\xbf\xbf",             /* U+DFFF, a surrogate */
+        "\xf4\x90\x80\x80",         /* U+110000, past the last code point */
+        "\xf5\x80\x80\x80",         /* a lead byte that never occurs */
+        "\xff",
+        "\xc3",                     /* truncated two-byte */
+        "\xe2\x82",                 /* truncated three-byte */
+        "\xf0\x9f\x98",             /* truncated four-byte */
+        "\xc3(",                    /* a lead byte, then no continuation */
+        "\xe2\x28\xa1",             /* the same in the second position */
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        assert(json_utf8_valid(bad[i], strlen(bad[i])) == 0);
+    }
+
+    /* The length decides, not a NUL: U+0000 is well-formed, and a character
+       cut short by the length is not */
+    assert(json_utf8_valid("a\0b", 3) == 1);
+    assert(json_utf8_valid("\xc3\xa9", 1) == 0);
+    printf("Well-formed UTF-8 accepted; overlong, surrogate, out-of-range and truncated refused OK\n");
+}
+
 int main(void) {
     log_init(LOG_INFO);
     log_info("TESTING - String Utilities");
@@ -422,6 +470,7 @@ int main(void) {
     test_json_escape();
     test_json_escaped_len();
     test_json_unescape();
+    test_json_utf8_valid();
 
     printf("\n=== All tests complete ===\n");
 

@@ -285,6 +285,42 @@ int json_escapes_valid(const char *json) {
     return 1;
 }
 
+int json_utf8_valid(const char *text, size_t len) {
+    const unsigned char *s = (const unsigned char *)text;
+    size_t i = 0;
+
+    while (i < len) {
+        unsigned char c = s[i];
+        if (c < 0x80) {
+            i++;
+            continue;
+        }
+
+        /* The lead byte fixes how many continuation bytes follow, and the range
+           the first of them may take: that range is what rules out overlong
+           forms (E0, F0), surrogates (ED) and anything past U+10FFFF (F4). */
+        size_t n;
+        unsigned char lo = 0x80, hi = 0xBF;
+        if (c >= 0xC2 && c <= 0xDF)      { n = 1; }
+        else if (c == 0xE0)              { n = 2; lo = 0xA0; }
+        else if (c >= 0xE1 && c <= 0xEC) { n = 2; }
+        else if (c == 0xED)              { n = 2; hi = 0x9F; }
+        else if (c >= 0xEE && c <= 0xEF) { n = 2; }
+        else if (c == 0xF0)              { n = 3; lo = 0x90; }
+        else if (c >= 0xF1 && c <= 0xF3) { n = 3; }
+        else if (c == 0xF4)              { n = 3; hi = 0x8F; }
+        else return 0;  /* 80..C1 and F5..FF never start a character */
+
+        if (len - i <= n) return 0;  /* truncated */
+        if (s[i + 1] < lo || s[i + 1] > hi) return 0;
+        for (size_t k = 2; k <= n; k++) {
+            if (s[i + k] < 0x80 || s[i + k] > 0xBF) return 0;
+        }
+        i += n + 1;
+    }
+    return 1;
+}
+
 int json_get_int(const char *json, const char *key, int *out_value) {
     if (!json || !key || !out_value) return -1;
 

@@ -688,12 +688,20 @@ HttpResponse *router_dispatch(Router *router, const HttpRequest *req) {
      * rest of the request would go through with that field silently skipped.
      * Form-encoded bodies are exempt: they carry no JSON strings, and any quote
      * or backslash in them is percent-encoded.
+     *
+     * And before that, that the body is UTF-8 at all, which RFC 8259 requires
+     * of JSON. Raw bytes reach a handler as sent, and then the backends part
+     * ways: SQLite stores an invalid sequence and echoes it into later JSON
+     * responses, while PostgreSQL refuses it at INSERT and the handler answers
+     * 500. Refused here, both answer 400.
      */
     HttpResponse *resp;
     const char *content_type = http_request_get_header(req, "Content-Type");
     int is_form = content_type &&
         strncasecmp(content_type, "application/x-www-form-urlencoded", 33) == 0;
-    if (req->body && !is_form && !json_escapes_valid(req->body)) {
+    if (req->body && !is_form && !json_utf8_valid(req->body, req->body_length)) {
+        resp = response_json_error(400, "Request body is not valid UTF-8");
+    } else if (req->body && !is_form && !json_escapes_valid(req->body)) {
         resp = response_json_error(400, "Invalid JSON string escape");
     } else {
         resp = dispatch_route(router, req);

@@ -253,6 +253,43 @@ void test_json_body_escape_check(Router *router) {
 }
 
 /*
+ * A body that isn't UTF-8 is answered 400 before any handler runs, so SQLite and
+ * PostgreSQL treat it alike. Raw UTF-8 passes, and form-encoded bodies are exempt.
+ */
+void test_json_body_utf8_check(Router *router) {
+    printf("\n=== Test: Whole-body UTF-8 check ===\n");
+
+    HttpResponse *resp = request(router,
+        "POST /revoke HTTP/1.0\r\nContent-Type: application/json\r\n\r\n"
+        "{\"display_name\":\"X\",\"note\":\"a\xff\"}");
+    assert(resp && resp->status_code == 400);
+    assert(resp->body && strstr(resp->body, "not valid UTF-8"));
+    printf("✓ invalid byte in an optional field: %d\n", resp->status_code);
+    http_response_free(resp);
+
+    resp = request(router,
+        "POST /revoke HTTP/1.0\r\nContent-Type: application/json\r\n\r\n"
+        "{\"note\":\"\xed\xa0\x80\"}");
+    assert(resp && resp->status_code == 400);
+    printf("✓ an encoded surrogate: %d\n", resp->status_code);
+    http_response_free(resp);
+
+    resp = request(router,
+        "POST /revoke HTTP/1.0\r\nContent-Type: application/json\r\n\r\n"
+        "{\"display_name\":\"Caf\xc3\xa9\"}");
+    assert(resp && resp->status_code == 200);
+    printf("✓ raw UTF-8 reaches the handler: %d\n", resp->status_code);
+    http_response_free(resp);
+
+    resp = request(router,
+        "POST /revoke HTTP/1.0\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\n"
+        "token=a\xff");
+    assert(resp && resp->status_code == 200);
+    printf("✓ form-encoded body is not UTF-8-checked: %d\n", resp->status_code);
+    http_response_free(resp);
+}
+
+/*
  * Pin the set. Adding a fifth path has to fail here first, which forces somebody
  * to look at the endpoint rather than discover it in production.
  */
@@ -523,6 +560,7 @@ int main(void) {
     test_exact_match(router);
     test_404(router);
     test_json_body_escape_check(router);
+    test_json_body_utf8_check(router);
     test_cors_set_is_pinned();
     test_cors_header_on_public_paths(router);
     test_cors_preflight(router);

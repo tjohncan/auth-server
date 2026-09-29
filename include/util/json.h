@@ -38,6 +38,18 @@ int json_unescape(char *str);
 int json_escapes_valid(const char *json);
 
 /*
+ * json_utf8_valid - Is this text well-formed UTF-8, as RFC 8259 requires of JSON?
+ *
+ * Well-formed per RFC 3629: no overlong forms, no UTF-16 surrogates (U+D800 to
+ * U+DFFF), nothing above U+10FFFF, no stray or missing continuation bytes.
+ * Checked once per request, next to json_escapes_valid: raw bytes pass through
+ * json_unescape as sent, so this is the one place a bad byte is stopped.
+ *
+ * Returns: 1 if well-formed (an empty text is), 0 otherwise
+ */
+int json_utf8_valid(const char *text, size_t len);
+
+/*
  * json_get_string - Extract string value from JSON body
  *
  * Very simple parser - only handles basic {"key":"value"} format.

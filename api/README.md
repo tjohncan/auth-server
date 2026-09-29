@@ -5,7 +5,9 @@ HTTP endpoints for the OAuth2 authentication server.
 Any request body that is not form-encoded is checked for JSON string escapes before the
 endpoint runs. A body containing an escape that cannot be decoded (an escaped NUL, a lone
 UTF-16 surrogate, a malformed or unknown escape) is refused with
-`400 {"error": "Invalid JSON string escape"}`, whichever field carries it.
+`400 {"error": "Invalid JSON string escape"}`, whichever field carries it. A body that isn't
+well-formed UTF-8, as JSON has to be, is refused the same way, with
+`400 {"error": "Request body is not valid UTF-8"}`.
 
 ## Table of Contents
 
