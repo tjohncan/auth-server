@@ -476,8 +476,10 @@ test/
 └── fuzz/               # Coverage-guided fuzzing (see fuzz/README.md)
     ├── fuzz_http.c     # Harness: HTTP request parser
     ├── fuzz_jwt.c      # Harness: authorization-code JWT decoder
+    ├── fuzz_json.c     # Harness: request-body checks and JSON field readers
     ├── http.dict       # Token dictionaries for the mutator
     ├── jwt.dict
+    ├── json.dict
     ├── run.sh          # Build + run a target to a time budget + print a report card
     ├── corpus/<target>/    # Seed corpus, per target (committed)
     └── crashes/<target>/   # Regression seeds, per target — replayed by `make test`
@@ -532,14 +534,15 @@ vendor/
 
 **Memory Safety:**
 
-Two components take untrusted bytes and pick them apart with pointer arithmetic and
-hand-rolled parsing: the HTTP request parser (socket-facing) and the authorization-code
-JWT decoder (base64url + JSON). Both are fuzzed under ASan+UBSan. See
-[`test/fuzz/README.md`](test/fuzz/README.md).
+Three components take untrusted bytes and pick them apart with pointer arithmetic and
+hand-rolled parsing: the HTTP request parser (socket-facing), the authorization-code
+JWT decoder (base64url + JSON), and the JSON helpers every request body goes through
+(UTF-8 and escape checks, field readers, the in-place `\u` decoder). All three are fuzzed
+under ASan+UBSan. See [`test/fuzz/README.md`](test/fuzz/README.md).
 
 - `make fuzz-regress` - Replay every saved crash + seed under ASan+UBSan. Needs only gcc,
   runs in seconds, and is part of `make test`.
-- `make fuzz` - Coverage-guided search for new bugs (needs clang; `FUZZ_TARGET=http|jwt`,
+- `make fuzz` - Coverage-guided search for new bugs (needs clang; `FUZZ_TARGET=http|jwt|json`,
   `FUZZ_TIME=3600` to soak).
 - `make sanitize` - Build the whole server with ASan+UBSan and drive it by hand.
 

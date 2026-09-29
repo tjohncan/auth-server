@@ -34,8 +34,10 @@ auth-server-asan
 fuzz-replay
 fuzz-replay-http
 fuzz-replay-jwt
+fuzz-replay-json
 fuzz_http
 fuzz_jwt
+fuzz_json
 fuzz_http_replay
 .fuzz-work/
 fuzz-*.log

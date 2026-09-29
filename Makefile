@@ -138,7 +138,7 @@ release: clean $(TARGET)
 # Clean build artifacts
 clean:
 	rm -f src/*.o src/**/*.o src/**/**/*.o vendor/**/*.o $(TARGET) test-str test-http test-router test-db test-crypto test-email
-	rm -rf fuzz-replay fuzz-replay-http fuzz-replay-jwt fuzz_http fuzz_jwt fuzz_http_replay auth-server-asan .fuzz-work
+	rm -rf fuzz-replay fuzz-replay-http fuzz-replay-jwt fuzz-replay-json fuzz_http fuzz_jwt fuzz_json fuzz_http_replay auth-server-asan .fuzz-work
 	@echo "Cleaned build artifacts (crash seeds in test/fuzz/crashes/ are kept — they are tests)"
 
 # Test programs
@@ -216,12 +216,14 @@ test-sanitized: test-str test-http test-router
 # is quietly undefined. This makes UB abort like ASan does.
 #
 # Per fuzz target: the harness, and the extra TUs it links (the http parser needs no
-# database or crypto; the jwt decoder needs the hmac/base64/json stack). Each target
-# owns its own corpus/ and crashes/ subdirectory.
+# database or crypto; the jwt decoder needs the hmac/base64/json stack; the json
+# request-body helpers need only json.c). Each target owns its own corpus/ and
+# crashes/ subdirectory.
 FUZZ_SAN         = -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer
 FUZZ_HTTP_SRCS   = test/fuzz/fuzz_http.c src/server/http.c src/util/str.c src/util/json.c src/util/log.c
 FUZZ_JWT_SRCS    = test/fuzz/fuzz_jwt.c src/crypto/jwt.c src/crypto/hmac.c src/crypto/random.c \
                    src/crypto/sha256.c src/util/data.c src/util/str.c src/util/json.c src/util/log.c
+FUZZ_JSON_SRCS   = test/fuzz/fuzz_json.c src/util/json.c src/util/log.c
 FUZZ_TIME       ?= 60
 FUZZ_TARGET     ?= http
 
@@ -233,8 +235,10 @@ fuzz-regress:
 	    $(FUZZ_HTTP_SRCS) -lcrypto -o fuzz-replay-http
 	@$(CC) -std=c11 -g -O1 -Iinclude $(FUZZ_SAN) -DFUZZ_STANDALONE \
 	    $(FUZZ_JWT_SRCS) -lcrypto -o fuzz-replay-jwt
+	@$(CC) -std=c11 -g -O1 -Iinclude $(FUZZ_SAN) -DFUZZ_STANDALONE \
+	    $(FUZZ_JSON_SRCS) -o fuzz-replay-json
 	@echo "=== Fuzz regression seeds (ASan+UBSan) ==="
-	@fail=0; for target in http jwt; do \
+	@fail=0; for target in http jwt json; do \
 	    for f in test/fuzz/crashes/$$target/* test/fuzz/corpus/$$target/*; do \
 	        [ -f "$$f" ] || continue; \
 	        if ./fuzz-replay-$$target "$$f" >/dev/null 2>&1; then \
@@ -252,6 +256,7 @@ fuzz-regress:
 # Coverage-guided fuzz run. Needs clang (libFuzzer). Pick target and budget:
 #   make fuzz                              # http, 60s
 #   make fuzz FUZZ_TARGET=jwt FUZZ_TIME=3600
+#   make fuzz FUZZ_TARGET=json
 fuzz:
 	@./test/fuzz/run.sh $(FUZZ_TARGET) $(FUZZ_TIME)
 
@@ -277,7 +282,7 @@ help:
 	@echo ""
 	@echo "Memory safety (see test/fuzz/README.md):"
 	@echo "  make fuzz-regress   - Replay saved crash seeds under ASan+UBSan (gcc, seconds)"
-	@echo "  make fuzz           - Coverage-guided fuzz (clang; FUZZ_TARGET=http|jwt, FUZZ_TIME=60)"
+	@echo "  make fuzz           - Coverage-guided fuzz (clang; FUZZ_TARGET=http|jwt|json, FUZZ_TIME=60)"
 	@echo "  make sanitize       - Build the whole server with ASan+UBSan to drive by hand"
 
 .PHONY: all debug release clean help test test-str test-http test-router test-db test-crypto test-email \
