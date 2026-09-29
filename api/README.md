@@ -368,7 +368,7 @@ curl -X POST http://localhost:8080/api/admin/users/deactivate \
 Reset a user's MFA, for someone who has lost every factor and every recovery code. All of the
 user's MFA methods are removed, confirmed or not; their recovery codes are revoked; and `require`
 is turned off. They then sign in with their password and enroll a new factor, as the first time.
-Resetting a user who has no MFA succeeds without changing anything.
+Resetting a user who has no MFA succeeds; a setup they started and never confirmed is removed too.
 
 This is the one way past a user's second factor, and the next factor is enrolled with the
 password alone, so confirm who is asking before running it. The password and existing sessions
