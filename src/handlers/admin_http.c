@@ -7,6 +7,7 @@
 #include "db/db_pool.h"
 #include "db/queries/user.h"
 #include "db/queries/org.h"
+#include "db/queries/mfa.h"
 #include "crypto/password.h"
 #include "crypto/random.h"
 #include "util/config.h"
@@ -772,9 +773,17 @@ HttpResponse *admin_revoke_organization_key_handler(const HttpRequest *req, cons
 /* ============================================================================
  * POST /api/admin/users/activate
  * POST /api/admin/users/deactivate
+ * POST /api/admin/users/reset-mfa
  * ========================================================================== */
 
-static HttpResponse *set_user_active(const HttpRequest *req, int active) {
+/*
+ * The part the server's user endpoints share: localhost only, and a JSON body
+ * naming the user by user_id.
+ *
+ * Returns: NULL with *out_db and out_user_id filled, or the error response
+ */
+static HttpResponse *server_user_request(const HttpRequest *req, db_handle_t **out_db,
+                                         unsigned char *out_user_id) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -791,12 +800,21 @@ static HttpResponse *set_user_active(const HttpRequest *req, int active) {
     if (!user_id_str)
         return response_json_error(400, "user_id required");
 
-    unsigned char user_id[16];
-    if (hex_to_bytes(user_id_str, user_id, 16) != 0) {
+    if (hex_to_bytes(user_id_str, out_user_id, 16) != 0) {
         free(user_id_str);
         return response_json_error(400, "Invalid user_id format");
     }
     free(user_id_str);
+
+    *out_db = db;
+    return NULL;
+}
+
+static HttpResponse *set_user_active(const HttpRequest *req, int active) {
+    db_handle_t *db = NULL;
+    unsigned char user_id[16];
+    HttpResponse *req_err = server_user_request(req, &db, user_id);
+    if (req_err) return req_err;
 
     int rc = user_set_active(db, user_id, active);
     if (rc == 1) return response_json_error(404, "User not found");
@@ -817,4 +835,25 @@ HttpResponse *server_deactivate_user_handler(const HttpRequest *req,
                                               const RouteParams *params) {
     (void)params;
     return set_user_active(req, 0);
+}
+
+/*
+ * Removes every MFA method and recovery code a user has and turns require off,
+ * for someone who has lost them all. The next factor is enrolled with the
+ * password alone, so whoever runs this confirms who is asking first.
+ */
+HttpResponse *server_reset_user_mfa_handler(const HttpRequest *req,
+                                             const RouteParams *params) {
+    (void)params;
+
+    db_handle_t *db = NULL;
+    unsigned char user_id[16];
+    HttpResponse *req_err = server_user_request(req, &db, user_id);
+    if (req_err) return req_err;
+
+    int rc = mfa_reset_user(db, user_id);
+    if (rc == 1) return response_json_error(404, "User not found");
+    if (rc != 0) return response_json_error(500, "Internal error");
+
+    return response_json_ok("{\"message\":\"MFA reset\"}");
 }

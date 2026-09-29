@@ -373,6 +373,49 @@ curl -X POST http://localhost:8080/api/admin/users/deactivate \
 
 ---
 
+### POST /api/admin/users/reset-mfa
+
+Reset a user's MFA, for someone who has lost every factor and every recovery code. All of the
+user's MFA methods are removed, confirmed or not; their recovery codes are revoked; and `require`
+is turned off. They then sign in with their password and enroll a new factor, as the first time.
+Resetting a user who has no MFA succeeds without changing anything.
+
+This is the one way past a user's second factor, and the next factor is enrolled with the
+password alone, so confirm who is asking before running it. The password and existing sessions
+are left alone: if the factor was stolen rather than lost, deactivate the user instead.
+
+**Request Body**:
+```json
+{
+  "user_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"
+}
+```
+
+| Field   | Type   | Required | Description           |
+|---------|--------|----------|-----------------------|
+| user_id | string | Yes      | 32-character hex UUID |
+
+**Success Response** (200 OK):
+```json
+{
+  "message": "MFA reset"
+}
+```
+
+**Error Responses**:
+- **400** — missing or invalid user_id
+- **403** — not from localhost
+- **404** — user not found
+
+**Example**:
+```bash
+curl -X POST http://localhost:8080/api/admin/users/reset-mfa \
+  -H "Content-Type: application/json" \
+  -d '{"user_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"}'
+```
+
+---
+
 ### Complete Bootstrap Workflow
 
 ```bash

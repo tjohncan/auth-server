@@ -625,6 +625,9 @@ worth stating: a client's `require_mfa` protects users who have enrolled, and gi
 protection to a user who never did. Their first "second factor" belongs to whoever
 registers it first. Closing that needs an out-of-band enrollment channel, which this
 server does not have.
+The same holds after a reset. A user who loses every factor and every recovery code can't
+manage factors any more, so an operator resets them (`POST /api/admin/users/reset-mfa`,
+localhost-only), which returns them to this starting point: confirm who is asking first.
 
 **Changing a password does not sign you out everywhere.**
 A password change rotates the credential and nothing else; live sessions and refresh chains

@@ -182,6 +182,9 @@ HttpResponse *server_activate_user_handler(const HttpRequest *req, const RoutePa
 /* POST /api/admin/users/deactivate - Deactivate user account (localhost-only) */
 HttpResponse *server_deactivate_user_handler(const HttpRequest *req, const RouteParams *params);
 
+/* POST /api/admin/users/reset-mfa - Remove a user's MFA methods and recovery codes (localhost-only) */
+HttpResponse *server_reset_user_mfa_handler(const HttpRequest *req, const RouteParams *params);
+
 /* ============================================================================
  * Authentication Endpoints
  * ============================================================================ */

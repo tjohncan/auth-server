@@ -662,6 +662,112 @@ done:
 }
 
 /*
+ * The operator's MFA reset. User 1 has a confirmed method, an unconfirmed one, a
+ * recovery-code set and require on, and a password-only session held at the
+ * factor-management gate. After the reset no method remains, the recovery-code
+ * set is revoked, both flags are clear, and that session is free of the gate:
+ * first enrollment is open again. User 2's confirmed method is untouched, a
+ * repeat succeeds, and an unknown id is reported.
+ *
+ * Returns 0 on success.
+ */
+static int test_mfa_reset(const config_t *config) {
+    log_info("\nMFA reset tests");
+
+    db_handle_t *sdb = open_test_db(config);
+    if (!sdb) {
+        log_error("MFA reset: could not open a test database");
+        return 1;
+    }
+
+    int failed = 1;
+    char value[64];
+
+    if (db_execute_direct(sdb,
+            "INSERT INTO user_account (id) VALUES "
+            "  (x'00000000000000000000000000000011'),"
+            "  (x'00000000000000000000000000000012');") != 0) {
+        log_error("MFA reset: could not insert users");
+        goto done;
+    }
+    const unsigned char user1[16]   = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x11};
+    const unsigned char unknown[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x99};
+
+    unsigned char method_id[16], set_id[16];
+    const char *codes[] = { "reset-code-one", "reset-code-two" };
+    if (mfa_method_create(sdb, 1, "TOTP", "phone", "secret-1", method_id) != 0 ||
+        mfa_method_confirm(sdb, method_id) != 0 ||
+        mfa_method_create(sdb, 1, "TOTP", "spare", "secret-2", method_id) != 0 ||
+        recovery_code_set_create(sdb, 1, codes, 2, set_id) != 0 ||
+        mfa_update_require_mfa_flag(sdb, 1, 1) != 0 ||
+        mfa_method_create(sdb, 2, "TOTP", "theirs", "secret-3", method_id) != 0 ||
+        mfa_method_confirm(sdb, method_id) != 0) {
+        log_error("MFA reset: could not set up MFA");
+        goto done;
+    }
+
+    const char *token = "mfa-reset-test-session";
+    unsigned char session_id[16];
+    oauth_session_info_t s;
+    if (oauth_session_create(sdb, 1, user1, token, "password", NULL, NULL, 3600, session_id) != 0 ||
+        oauth_session_get_by_token(sdb, token, &s) != 0 || !oauth_session_mfa_pending(&s)) {
+        log_error("MFA reset: the password-only session should start out gated");
+        goto done;
+    }
+
+    /* 1. Reset user 1: everything of theirs goes, nothing of user 2's does */
+    if (mfa_reset_user(sdb, user1) != 0) {
+        log_error("MFA reset: the reset failed");
+        goto done;
+    }
+    const struct { const char *sql, *want, *what; } after[] = {
+        { "SELECT COUNT(*) FROM user_mfa WHERE user_account_pin = 1", "0",
+          "user 1's methods" },
+        { "SELECT COUNT(*) FROM recovery_code_set WHERE user_account_pin = 1 AND is_active = 1", "0",
+          "user 1's active recovery-code sets" },
+        { "SELECT COUNT(*) FROM recovery_code_set WHERE user_account_pin = 1 AND revoked_at IS NOT NULL", "1",
+          "user 1's revoked recovery-code sets" },
+        { "SELECT has_mfa || '/' || require_mfa FROM user_account WHERE pin = 1", "0/0",
+          "user 1's has_mfa/require_mfa" },
+        { "SELECT COUNT(*) FROM user_mfa WHERE user_account_pin = 2 AND is_confirmed = 1", "1",
+          "user 2's confirmed methods" },
+        { "SELECT has_mfa FROM user_account WHERE pin = 2", "1",
+          "user 2's has_mfa" },
+    };
+    for (size_t i = 0; i < sizeof(after) / sizeof(after[0]); i++) {
+        if (read_stored_value(sdb, after[i].sql, value, sizeof(value)) != 0 ||
+            strcmp(value, after[i].want) != 0) {
+            log_error("MFA reset: %s is '%s', expected '%s'", after[i].what, value, after[i].want);
+            goto done;
+        }
+    }
+    log_info("  methods deleted, recovery codes revoked, both flags clear (OK)");
+    log_info("  another user's MFA untouched (OK)");
+
+    if (oauth_session_get_by_token(sdb, token, &s) != 0 || oauth_session_mfa_pending(&s)) {
+        log_error("MFA reset: the session is still held at the gate");
+        goto done;
+    }
+    log_info("  the user's session is free of the gate, so enrollment is open again (OK)");
+
+    /* 2. A repeat changes nothing and succeeds; an unknown id is reported */
+    if (mfa_reset_user(sdb, user1) != 0 || mfa_reset_user(sdb, unknown) != 1) {
+        log_error("MFA reset: a repeat, or an unknown id, was answered wrongly");
+        goto done;
+    }
+    log_info("  repeat succeeds, unknown id reported (OK)");
+
+    failed = 0;
+
+done:
+    db_disconnect(sdb);
+    if (!failed) {
+        log_info("MFA reset tests passed!");
+    }
+    return failed;
+}
+
+/*
  * Token liveness after account deactivation.
  *
  * api/README says a deactivated user's tokens "will fail introspection" —
@@ -1322,6 +1428,11 @@ int main(void) {
     }
 
     if (test_mfa_management_gate(config) != 0) {
+        config_free(config);
+        return 1;
+    }
+
+    if (test_mfa_reset(config) != 0) {
         config_free(config);
         return 1;
     }

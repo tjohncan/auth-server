@@ -383,6 +383,7 @@ int main(void) {
     /* User activate/deactivate (localhost-only) */
     router_add(router, HTTP_POST, "/api/admin/users/activate", server_activate_user_handler);
     router_add(router, HTTP_POST, "/api/admin/users/deactivate", server_deactivate_user_handler);
+    router_add(router, HTTP_POST, "/api/admin/users/reset-mfa", server_reset_user_mfa_handler);
 
     router_add(router, HTTP_POST, "/login", login_handler);
     router_add(router, HTTP_GET, "/api/user/management-setups", management_setups_handler);
