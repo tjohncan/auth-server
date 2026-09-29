@@ -8,12 +8,14 @@ function escapeHtml(text) {
 function getReturnUrl() {
     const params = new URLSearchParams(window.location.search);
     const raw = params.get('return') || '/admin';
-    // Resolve it as navigation will, and keep it only if it stays on this origin.
-    // A prefix check can't tell: the URL parser drops tabs and newlines and reads a
-    // backslash as a slash, so "/", a tab, then "/evil.example" passes one and leaves.
+    // Resolve it as navigation will, keep it only if it stays on this origin, and
+    // return that resolved URL whole. Navigation would read any piece of it again,
+    // and differently: the parser drops tabs and newlines, reads a backslash as a
+    // slash, and resolves "/.//evil.example" to the path "//evil.example", which
+    // on its own names another host.
     try {
         const url = new URL(raw, window.location.origin);
-        if (url.origin === window.location.origin) return url.pathname + url.search + url.hash;
+        if (url.origin === window.location.origin) return url.href;
     } catch (e) {
         /* Not a URL at all */
     }
@@ -24,9 +26,9 @@ function getReturnUrl() {
 (function updatePasswordlessLink() {
     const link = document.getElementById('passwordlessLink');
     if (!link) return;
-    const returnUrl = getReturnUrl();
-    if (returnUrl && returnUrl.startsWith('/authorize?')) {
-        const qs = returnUrl.substring('/authorize?'.length);
+    const returnUrl = new URL(getReturnUrl(), window.location.origin);
+    if (returnUrl.pathname === '/authorize' && returnUrl.search) {
+        const qs = returnUrl.search.substring(1);
         link.href = '/request-passwordless-login?return_to=' + encodeURIComponent(qs);
     }
 })();
