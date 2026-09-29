@@ -3287,5 +3287,8 @@ int user_set_active(db_handle_t *db, const unsigned char *user_id, int active) {
         return -1;
     }
 
+    char user_id_hex[33];
+    bytes_to_hex(user_id, 16, user_id_hex, sizeof(user_id_hex));
+    log_info("%s account for user_id=%s", val ? "Activated" : "Deactivated", user_id_hex);
     return 0;
 }

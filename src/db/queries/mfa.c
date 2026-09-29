@@ -1084,7 +1084,9 @@ int mfa_reset_user(db_handle_t *db, const unsigned char *user_id) {
         return -1;
     }
 
-    log_info("Reset a user's MFA");
+    char user_id_hex[33];
+    bytes_to_hex(user_id, 16, user_id_hex, sizeof(user_id_hex));
+    log_info("Reset MFA for user_id=%s", user_id_hex);
     return 0;
 }
 
