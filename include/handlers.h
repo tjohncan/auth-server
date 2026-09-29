@@ -10,8 +10,14 @@
 extern const config_t *g_config;
 
 /* Name of the browser-session cookie, set at login and read by every
- * session-authenticated handler. */
-#define SESSION_COOKIE_NAME "session"
+ * session-authenticated handler.
+ *
+ * The __Host- prefix makes browsers refuse the cookie unless it is Secure, has
+ * Path=/ and no Domain, and comes from this host. Without it, a page on a sibling
+ * subdomain could set its own "session" cookie for the parent domain, with a
+ * longer path so it is sent first, and /authorize would sign the visitor in as
+ * the attacker. Every Set-Cookie below already meets the prefix's rules. */
+#define SESSION_COOKIE_NAME "__Host-session"
 
 /*
  * Handler function declarations

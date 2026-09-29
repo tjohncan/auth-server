@@ -104,7 +104,7 @@ static HttpResponse *require_authenticated_session(const HttpRequest *req,
  *
  * Response (success):
  *   200 OK
- *   Set-Cookie: session=<token>; HttpOnly; Secure; SameSite=Lax; Max-Age=604800
+ *   Set-Cookie: __Host-session=<token>; HttpOnly; Secure; SameSite=Lax; Max-Age=604800
  *   {"message":"Login successful"}
  *
  * Response (failure):

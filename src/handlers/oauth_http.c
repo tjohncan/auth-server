@@ -597,7 +597,7 @@ static int build_error_redirect(const char *redirect_uri,
  *
  * Request:
  *   GET /authorize?response_type=code&client_id=<uuid>&redirect_uri=<uri>&scope=<scope>&state=<state>&code_challenge=<challenge>&code_challenge_method=S256
- *   Cookie: session=<token>
+ *   Cookie: __Host-session=<token>
  *
  * Response (success):
  *   302 Found

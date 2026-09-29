@@ -818,7 +818,7 @@ Or with email (requires `EMAIL_SUPPORT`):
 **Success Response — no MFA** (200 OK):
 ```http
 HTTP/1.1 200 OK
-Set-Cookie: session=<token>; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=604800
+Set-Cookie: __Host-session=<token>; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=604800
 Content-Type: application/json
 
 {"message": "Login successful"}
@@ -827,7 +827,7 @@ Content-Type: application/json
 **Success Response — user requires MFA** (200 OK):
 ```http
 HTTP/1.1 200 OK
-Set-Cookie: session=<token>; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=604800
+Set-Cookie: __Host-session=<token>; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=604800
 Content-Type: application/json
 
 {
@@ -1420,7 +1420,7 @@ Get current user's profile information.
 **Example**:
 ```bash
 curl http://localhost:8080/api/user/profile \
-  -H "Cookie: session=<session_token>"
+  -H "Cookie: __Host-session=<session_token>"
 ```
 
 ---
@@ -1494,15 +1494,15 @@ Get current user's email addresses with pagination support.
 ```bash
 # Get first 50 emails (default)
 curl http://localhost:8080/api/user/emails \
-  -H "Cookie: session=<session_token>"
+  -H "Cookie: __Host-session=<session_token>"
 
 # Get first 10 emails
 curl "http://localhost:8080/api/user/emails?limit=10" \
-  -H "Cookie: session=<session_token>"
+  -H "Cookie: __Host-session=<session_token>"
 
 # Get next page (emails 10-19)
 curl "http://localhost:8080/api/user/emails?limit=10&offset=10" \
-  -H "Cookie: session=<session_token>"
+  -H "Cookie: __Host-session=<session_token>"
 ```
 
 ---
@@ -1568,7 +1568,7 @@ Add an email address to the current user's account.
 **Example**:
 ```bash
 curl -X POST http://localhost:8080/api/user/emails \
-  -H "Cookie: session=<session_token>" \
+  -H "Cookie: __Host-session=<session_token>" \
   -H "Content-Type: application/json" \
   -d '{"email": "alice.work@company.com"}'
 ```
@@ -1622,7 +1622,7 @@ Remove an email address from the current user's account.
 **Example**:
 ```bash
 curl -X DELETE http://localhost:8080/api/user/emails \
-  -H "Cookie: session=<session_token>" \
+  -H "Cookie: __Host-session=<session_token>" \
   -H "Content-Type: application/json" \
   -d '{"email": "alice.work@company.com"}'
 ```
@@ -1677,7 +1677,7 @@ Set or clear the primary email for the current user.
 **Example**:
 ```bash
 curl -X POST http://localhost:8080/api/user/emails/set-primary \
-  -H "Cookie: session=<session_token>" \
+  -H "Cookie: __Host-session=<session_token>" \
   -H "Content-Type: application/json" \
   -d '{"email": "alice.work@company.com"}'
 ```
@@ -1736,7 +1736,7 @@ Change current user's password.
 **Example**:
 ```bash
 curl -X POST http://localhost:8080/api/user/password \
-  -H "Cookie: session=<session_token>" \
+  -H "Cookie: __Host-session=<session_token>" \
   -H "Content-Type: application/json" \
   -d '{
     "current_password": "OldPassword123!",
@@ -1798,7 +1798,7 @@ Change current user's username.
 **Example**:
 ```bash
 curl -X POST http://localhost:8080/api/user/username \
-  -H "Cookie: session=<session_token>" \
+  -H "Cookie: __Host-session=<session_token>" \
   -H "Content-Type: application/json" \
   -d '{"new_username": "alice_new"}'
 ```
@@ -1850,7 +1850,7 @@ Toggle passwordless login (login via emailed link) for current user. Requires `E
 **Example**:
 ```bash
 curl -X POST http://localhost:8080/api/user/passwordless-login \
-  -H "Cookie: session=<session_token>" \
+  -H "Cookie: __Host-session=<session_token>" \
   -H "Content-Type: application/json" \
   -d '{"enabled": true}'
 ```
@@ -1874,7 +1874,7 @@ Log out current user (close browser session).
 
 **Response Headers**:
 ```
-Set-Cookie: session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0
+Set-Cookie: __Host-session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0
 ```
 
 **Error Response** (401 Unauthorized):
@@ -1893,7 +1893,7 @@ Set-Cookie: session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0
 **Example**:
 ```bash
 curl -X POST http://localhost:8080/logout \
-  -H "Cookie: session=<session_token>"
+  -H "Cookie: __Host-session=<session_token>"
 ```
 
 ---
@@ -1936,7 +1936,7 @@ Get management UI client setups available to current user.
 **Example**:
 ```bash
 curl "http://localhost:8080/api/user/management-setups?callback_url=http%3A%2F%2Flocalhost%3A8080%2Fcallback&api_url=http%3A%2F%2Flocalhost%3A8080%2Fapi" \
-  -H "Cookie: session=<session_token>"
+  -H "Cookie: __Host-session=<session_token>"
 ```
 
 ---
@@ -2011,7 +2011,7 @@ Request a verification email for one of the current user's email addresses.
 **Example**:
 ```bash
 curl -X POST http://localhost:8080/email-verification-token \
-  -H "Cookie: session=<session_token>" \
+  -H "Cookie: __Host-session=<session_token>" \
   -H "Content-Type: application/json" \
   -d '{"email": "alice@example.com"}'
 ```
@@ -2342,7 +2342,7 @@ Consume a passwordless login token and create a session.
 | token | string | Yes      | Passwordless login token |
 
 **Success Response** (303 See Other):
-- Sets `session` cookie (HttpOnly, Secure, SameSite=Lax)
+- Sets `__Host-session` cookie (HttpOnly, Secure, SameSite=Lax)
 - Redirects to `/authorize?{return_to}` if return_to was stored, otherwise `/`
 
 **Behavior**:
@@ -2471,7 +2471,7 @@ The method is unconfirmed until `POST /api/user/mfa/totp/confirm` succeeds.
 **Example**:
 ```bash
 curl -X POST http://localhost:8080/api/user/mfa/totp/setup \
-  -H "Cookie: session=<token>" \
+  -H "Cookie: __Host-session=<token>" \
   -H "Content-Type: application/json" \
   -d '{"display_name": "My Phone"}'
 ```
@@ -2605,7 +2605,7 @@ List all MFA methods (confirmed and pending) for the authenticated user.
 **Example**:
 ```bash
 curl http://localhost:8080/api/user/mfa/methods \
-  -H "Cookie: session=<token>"
+  -H "Cookie: __Host-session=<token>"
 ```
 
 ---
@@ -2624,7 +2624,7 @@ Delete an MFA method. The `id` query parameter is the 32-char hex method UUID.
 **Example**:
 ```bash
 curl -X DELETE "http://localhost:8080/api/user/mfa/methods?id=a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4" \
-  -H "Cookie: session=<token>"
+  -H "Cookie: __Host-session=<token>"
 ```
 
 ---
@@ -2655,7 +2655,7 @@ gets `415`, which keeps a plain HTML form from triggering this.
 ```bash
 curl -X POST http://localhost:8080/api/user/mfa/recovery-codes/regenerate \
   -H "Content-Type: application/json" \
-  -H "Cookie: session=<token>"
+  -H "Cookie: __Host-session=<token>"
 ```
 
 ---
@@ -2689,13 +2689,13 @@ or
 ```bash
 # Enable MFA requirement
 curl -X POST http://localhost:8080/api/user/mfa/require \
-  -H "Cookie: session=<token>" \
+  -H "Cookie: __Host-session=<token>" \
   -H "Content-Type: application/json" \
   -d '{"enabled": true}'
 
 # Disable MFA requirement
 curl -X POST http://localhost:8080/api/user/mfa/require \
-  -H "Cookie: session=<token>" \
+  -H "Cookie: __Host-session=<token>" \
   -H "Content-Type: application/json" \
   -d '{"enabled": false}'
 ```
