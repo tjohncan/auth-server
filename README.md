@@ -287,11 +287,12 @@ Manages cryptographic signing keys for JWTs with automatic rotation.
 - A stored key that will not decrypt (an `encryption_key` that differs from the one that
     stored it) stops token issuance, `/userinfo` and the JWKS endpoint, with an error naming
     both tables; it is never silently regenerated. `/introspect` and `/revoke` don't use the
-    keys and keep working. Deleting the rows in both tables regenerates them on next use.
-    Refresh tokens and sessions are unaffected. Outstanding access tokens stop verifying
-    against the published keys and at `/userinfo`, but `/introspect` reports them active
-    until they expire, so deleting the rows is no way to retire leaked tokens: revoke them,
-    or deactivate the user.
+    keys and keep working. The fix is to restore that `encryption_key`, which sign-in needs
+    too. Only if it is lost for good, delete the rows in both tables, which regenerates the
+    keys on next use. Refresh tokens and sessions survive that. Outstanding access tokens
+    stop verifying against the published keys and at `/userinfo`, but `/introspect` reports
+    them active until they expire, so deleting the rows is no way to retire leaked tokens:
+    revoke them, or deactivate the user.
 
 **Rotation:**
 - **Passive mechanism**: Keys checked on every use, rotated if stale

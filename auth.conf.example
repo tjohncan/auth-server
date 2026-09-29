@@ -39,8 +39,10 @@ enable_history_tables = true
 
 # Encryption
 # Passphrase used to derive keys for encrypting sensitive data at rest
-# Protects usernames, emails, MFA secrets, and other PII against database compromise
+# Protects usernames, emails, MFA secrets and signing keys against database compromise
 # IMPORTANT: Customize this in production! Use encryption_key_env to load from environment
+# Set it before the first start and then leave it: re-keying isn't supported yet, so after
+# a change nothing sealed under the old value can be read, and nobody can sign in.
 encryption_key = customize_me
 # encryption_key_env = MY_ENCRYPTION_KEY
 

@@ -203,9 +203,10 @@ cleanup:
  * later format can take "e2:" without guessing.
  *
  * A value that will not open fails every operation that needs the key; nothing is
- * regenerated. The two ways to get there are a row in the older plaintext format
- * and an encryption_key that differs from the one that stored the row. Both are
- * fixed the same way, by an operator deleting the rows, which the log message says.
+ * regenerated. The two ways to get there are a row in the older plaintext format,
+ * fixed by deleting the rows, and an encryption_key that differs from the one that
+ * stored the row, fixed by restoring that key, which sign-in needs too. The log
+ * messages say which.
  *
  * Plaintext is refused rather than read, or sealed in place, so that there is one
  * stored format and no upgrade path to maintain. The refusal is hygiene, not a
@@ -244,9 +245,9 @@ static char *open_key_material(const char *stored, const char *table, const char
     char plaintext[ENCRYPT_FIELD_MAX_LENGTH + 1];
     if (decrypt_field(stored + SIGNING_KEY_SEALED_PREFIX_LEN, plaintext, sizeof(plaintext)) != 0) {
         log_error("Signing key %s.%s cannot be decrypted: encryption_key is not the one that "
-                  "stored it. Token issuance, /userinfo and JWKS will fail until the key is "
-                  "restored or the rows in %s and %s are deleted (new keys are generated on "
-                  "next use; outstanding access tokens then stop verifying against JWKS).",
+                  "stored it. Restore that key: until then token issuance, /userinfo and JWKS "
+                  "fail, and so does sign-in, which needs it too. Only if it is lost for good, "
+                  "delete the rows in %s and %s; new signing keys are generated on next use.",
                   table, column, TBL_ACCESS_TOKEN_SIGNING, TBL_AUTH_REQUEST_SIGNING);
         OPENSSL_cleanse(plaintext, sizeof(plaintext));
         return NULL;
