@@ -7,9 +7,16 @@ function escapeHtml(text) {
 // Parse ?return= parameter from URL (validated to prevent open redirect)
 function getReturnUrl() {
     const params = new URLSearchParams(window.location.search);
-    const url = params.get('return') || '/admin';
-    // Only allow relative paths — block protocol-relative and backslash-relative URLs
-    if (url.startsWith('/') && !url.startsWith('//') && !url.startsWith('/\\')) return url;
+    const raw = params.get('return') || '/admin';
+    // Resolve it as navigation will, and keep it only if it stays on this origin.
+    // A prefix check can't tell: the URL parser drops tabs and newlines and reads a
+    // backslash as a slash, so "/", a tab, then "/evil.example" passes one and leaves.
+    try {
+        const url = new URL(raw, window.location.origin);
+        if (url.origin === window.location.origin) return url.pathname + url.search + url.hash;
+    } catch (e) {
+        /* Not a URL at all */
+    }
     return '/admin';
 }
 
