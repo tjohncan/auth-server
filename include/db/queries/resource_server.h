@@ -212,7 +212,8 @@ typedef struct {
  * - Session auth: Verifies user is org admin
  * - Org key auth: Verifies specific key is active
  *
- * Returns: 0 on success, -1 on error, -2 if secret below minimum length
+ * Returns: 0 on success, 1 if nothing was inserted (resource server not found or
+ *          caller not authorized), -1 on error, -2 if secret below minimum length
  */
 int resource_server_key_create(db_handle_t *db,
                                 long long user_account_pin,
@@ -270,31 +271,13 @@ int resource_server_key_list(db_handle_t *db,
  * - Session auth: Verifies user is org admin
  * - Org key auth: Verifies specific key is active
  *
- * Returns: 0 on success, -1 on error
+ * Returns: 0 on success, 1 if nothing was revoked (not found, not the caller's,
+ *          or already revoked), -1 on error
  */
 int resource_server_key_revoke(db_handle_t *db,
                                long long user_account_pin,
                                long long organization_key_pin,
                                const unsigned char *key_id);
-
-/*
- * Verify Resource Server API key authentication
- *
- * Verifies key_id + secret combination.
- * Uses timing-safe comparison to prevent timing attacks.
- *
- * Parameters:
- *   db                      - Database handle
- *   key_id                  - Key UUID (16 bytes)
- *   secret                  - Plaintext secret to verify
- *   out_resource_server_pin - Output: Resource server PIN (for introspection)
- *
- * Returns: 1 if valid, 0 if invalid, -1 on error
- */
-int resource_server_key_verify(db_handle_t *db,
-                               const unsigned char *key_id,
-                               const char *secret,
-                               long long *out_resource_server_pin);
 
 /*
  * Check if resource server has user provisioning enabled

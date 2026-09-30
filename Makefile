@@ -112,6 +112,20 @@ $(TARGET): $(OBJS)
 HEADERS := $(shell find include -name '*.h')
 $(filter-out vendor/%,$(OBJS)): $(HEADERS)
 
+# Nothing compiles the SQLite amalgamation until vendor/verify-sqlite.sh has checked
+# it against its pinned hashes, however it arrived. It runs on every build that could
+# compile it rather than once per stamp: hashing both files takes a fraction of a
+# second, and a stamp judged by file times would trust a replacement whose times were
+# restored, as unzip, cp -p and tar all do. Order-only, so a passing check never
+# forces a recompile. test/sanitize.sh, which compiles outside make, runs it too.
+ifeq ($(DB_BACKEND),sqlite)
+.PHONY: verify-sqlite
+verify-sqlite:
+	@sh vendor/verify-sqlite.sh
+
+vendor/sqlite/sqlite3.o test-http test-router test-db test-crypto: | verify-sqlite
+endif
+
 # Debug build (security flags applied except _FORTIFY_SOURCE which requires -O1+)
 debug: CFLAGS += $(DEBUG_FLAGS)
 debug: SECURITY_FLAGS = -fstack-protector-strong -fPIE -Wformat -Wformat-security
@@ -124,7 +138,7 @@ release: clean $(TARGET)
 # Clean build artifacts
 clean:
 	rm -f src/*.o src/**/*.o src/**/**/*.o vendor/**/*.o $(TARGET) test-str test-http test-router test-db test-crypto test-email
-	rm -rf fuzz-replay fuzz-replay-http fuzz-replay-jwt fuzz_http fuzz_jwt fuzz_http_replay auth-server-asan .fuzz-work
+	rm -rf fuzz-replay fuzz-replay-http fuzz-replay-jwt fuzz-replay-json fuzz_http fuzz_jwt fuzz_json fuzz_http_replay auth-server-asan .fuzz-work
 	@echo "Cleaned build artifacts (crash seeds in test/fuzz/crashes/ are kept — they are tests)"
 
 # Test programs
@@ -171,7 +185,7 @@ test: test-str test-http test-router test-db test-crypto
 # off-by-one is likeliest and review is weakest.
 #
 # str, http and router, deliberately not all five. None of the three opens a
-# database. test-db is left out because it writes to a scratch file and its value
+# database. test-db is left out because it opens the configured one and its value
 # is integration coverage rather than memory safety, and test-crypto because
 # Argon2 at 64 MiB under ASan costs real time for no arithmetic payoff.
 #
@@ -202,12 +216,14 @@ test-sanitized: test-str test-http test-router
 # is quietly undefined. This makes UB abort like ASan does.
 #
 # Per fuzz target: the harness, and the extra TUs it links (the http parser needs no
-# database or crypto; the jwt decoder needs the hmac/base64/json stack). Each target
-# owns its own corpus/ and crashes/ subdirectory.
+# database or crypto; the jwt decoder needs the hmac/base64/json stack; the json
+# request-body helpers need only json.c). Each target owns its own corpus/ and
+# crashes/ subdirectory.
 FUZZ_SAN         = -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer
 FUZZ_HTTP_SRCS   = test/fuzz/fuzz_http.c src/server/http.c src/util/str.c src/util/json.c src/util/log.c
 FUZZ_JWT_SRCS    = test/fuzz/fuzz_jwt.c src/crypto/jwt.c src/crypto/hmac.c src/crypto/random.c \
                    src/crypto/sha256.c src/util/data.c src/util/str.c src/util/json.c src/util/log.c
+FUZZ_JSON_SRCS   = test/fuzz/fuzz_json.c src/util/json.c src/util/log.c
 FUZZ_TIME       ?= 60
 FUZZ_TARGET     ?= http
 
@@ -219,8 +235,10 @@ fuzz-regress:
 	    $(FUZZ_HTTP_SRCS) -lcrypto -o fuzz-replay-http
 	@$(CC) -std=c11 -g -O1 -Iinclude $(FUZZ_SAN) -DFUZZ_STANDALONE \
 	    $(FUZZ_JWT_SRCS) -lcrypto -o fuzz-replay-jwt
+	@$(CC) -std=c11 -g -O1 -Iinclude $(FUZZ_SAN) -DFUZZ_STANDALONE \
+	    $(FUZZ_JSON_SRCS) -o fuzz-replay-json
 	@echo "=== Fuzz regression seeds (ASan+UBSan) ==="
-	@fail=0; for target in http jwt; do \
+	@fail=0; for target in http jwt json; do \
 	    for f in test/fuzz/crashes/$$target/* test/fuzz/corpus/$$target/*; do \
 	        [ -f "$$f" ] || continue; \
 	        if ./fuzz-replay-$$target "$$f" >/dev/null 2>&1; then \
@@ -238,6 +256,7 @@ fuzz-regress:
 # Coverage-guided fuzz run. Needs clang (libFuzzer). Pick target and budget:
 #   make fuzz                              # http, 60s
 #   make fuzz FUZZ_TARGET=jwt FUZZ_TIME=3600
+#   make fuzz FUZZ_TARGET=json
 fuzz:
 	@./test/fuzz/run.sh $(FUZZ_TARGET) $(FUZZ_TIME)
 
@@ -263,7 +282,7 @@ help:
 	@echo ""
 	@echo "Memory safety (see test/fuzz/README.md):"
 	@echo "  make fuzz-regress   - Replay saved crash seeds under ASan+UBSan (gcc, seconds)"
-	@echo "  make fuzz           - Coverage-guided fuzz (clang; FUZZ_TARGET=http|jwt, FUZZ_TIME=60)"
+	@echo "  make fuzz           - Coverage-guided fuzz (clang; FUZZ_TARGET=http|jwt|json, FUZZ_TIME=60)"
 	@echo "  make sanitize       - Build the whole server with ASan+UBSan to drive by hand"
 
 .PHONY: all debug release clean help test test-str test-http test-router test-db test-crypto test-email \

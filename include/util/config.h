@@ -56,7 +56,7 @@ typedef struct {
     int password_min_length;  /* Minimum password length (default 1, minimum 1) */
 
     /* OAuth2 token limits */
-    int max_access_token_ttl_seconds;  /* Maximum TTL for client access tokens (default 60 days) */
+    int max_access_token_ttl_seconds;  /* Maximum TTL for client access tokens (default 59 days) */
 
     /* JWT settings */
     int jwt_clock_skew_seconds;  /* Clock skew tolerance for JWT validation (default 0) */

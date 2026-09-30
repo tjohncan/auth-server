@@ -124,6 +124,15 @@ int mfa_update_require_mfa_flag(db_handle_t *db,
                                  long long user_account_pin,
                                  int require_mfa);
 
+/* Reset a user's MFA, for an operator helping someone who has lost every factor
+ * and every recovery code. In one transaction: deletes all of the user's methods,
+ * confirmed or not; revokes the active recovery-code set; clears has_mfa and
+ * require_mfa. The user is back where first enrollment starts. The password and
+ * sessions are untouched.
+ * Returns: 0 on success, including for a user with no MFA; 1 if no user has
+ *          that id; -1 on error */
+int mfa_reset_user(db_handle_t *db, const unsigned char *user_id);
+
 /* ============================================================================
  * Logging
  * ========================================================================== */

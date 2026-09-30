@@ -51,9 +51,6 @@ static HttpResponse *response_html_error(int status_code, const char *message) {
     return resp;
 }
 
-/* Cookie name for session token */
-#define SESSION_COOKIE_NAME "session"
-
 /* Session token size: 32 bytes (256 bits) — matches session.c */
 #define SESSION_TOKEN_BYTES 32
 
@@ -86,6 +83,8 @@ static HttpResponse *require_authenticated_session(const HttpRequest *req,
 
     cleanse_free(session_token);
 
+    /* The preference rule, not the enrollment rule used for factor management;
+       see oauth_session_mfa_pending in db/queries/oauth.h for why there are two. */
     if (out_session->user_requires_mfa && !out_session->mfa_completed) {
         return response_json_error(403, "MFA verification required");
     }
@@ -105,7 +104,7 @@ static HttpResponse *require_authenticated_session(const HttpRequest *req,
  *
  * Response (success):
  *   200 OK
- *   Set-Cookie: session=<token>; HttpOnly; Secure; SameSite=Lax; Max-Age=604800
+ *   Set-Cookie: __Host-session=<token>; HttpOnly; Secure; SameSite=Lax; Max-Age=604800
  *   {"message":"Login successful"}
  *
  * Response (failure):
@@ -287,24 +286,12 @@ HttpResponse *management_setups_handler(const HttpRequest *req, const RouteParam
     free(callback_url_encoded);
     free(api_url_encoded);
 
-    /* Parse session cookie */
-    const char *cookie_header = http_request_get_header(req, "Cookie");
-    char *session_token = NULL;
-    if (cookie_header) {
-        session_token = http_cookie_get_value(cookie_header, "session");
-    }
-
-    if (!session_token) {
-        return response_json_error(401, "Authentication required");
-    }
-
-    /* Get session info */
+    /* Same gate as every other /api/user endpoint: a user who requires MFA and
+     * has only passed the password gets 403 here, not their org/client topology.
+     * The console's picker sends that 403 to the MFA step. */
     oauth_session_info_t session;
-    if (oauth_session_get_by_token(db, session_token, &session) != 0) {
-        cleanse_free(session_token);
-        return response_json_error(401, "Invalid or expired session");
-    }
-    cleanse_free(session_token);
+    HttpResponse *auth_err = require_authenticated_session(req, db, &session);
+    if (auth_err) return auth_err;
 
     /* Get management UI setups */
     management_ui_setup_t *setups = NULL;
@@ -1467,6 +1454,13 @@ HttpResponse *passwordless_login_page_handler(const HttpRequest *req,
 HttpResponse *passwordless_login_handler(const HttpRequest *req,
                                            const RouteParams *params) {
     (void)params;
+
+    /* The confirmation page is the one legitimate sender, and it is same-origin.
+     * Another site posting here would be posting its own token, to sign this
+     * browser into its own account (login CSRF). */
+    if (http_request_is_cross_origin(req)) {
+        return response_html_error(403, "Cross-site request refused");
+    }
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {

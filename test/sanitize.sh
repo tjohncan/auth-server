@@ -46,6 +46,9 @@ LDLIBS="-lpthread -lm -ldl -largon2 -lssl -lcrypto"
 mapfile -t SRCS < <(find src -name '*.c' ! -name 'email.c' | sort)
 SRCS+=(vendor/sqlite/sqlite3.c)
 
+# This compiles the amalgamation outside make, so it runs make's check itself.
+sh vendor/verify-sqlite.sh
+
 echo "Compiling ${#SRCS[@]} translation units with ASan+UBSan (this is slower than a normal build)..."
 # shellcheck disable=SC2086
 gcc ${CFLAGS} "${SRCS[@]}" ${LDLIBS} ${SAN_FLAGS} -pie -o "${OUT}"

@@ -8,10 +8,12 @@
 #   ./test/fuzz/run.sh              # http target, 60-second smoke run
 #   ./test/fuzz/run.sh http 3600    # http target, one-hour soak
 #   ./test/fuzz/run.sh jwt 3600     # jwt target, one-hour soak
+#   ./test/fuzz/run.sh json         # json target, 60-second smoke run
 #
 # Targets:
 #   http  - http_request_parse + accessors (the socket-facing request parser)
 #   jwt   - jwt_decode_auth_request (the authorization-code JWT decoder)
+#   json  - the request-body checks and field readers in util/json.c
 #
 # Single process on purpose. These targets saturate their reachable edges within
 # seconds, so extra cores buy no coverage — they only scatter per-worker logs and
@@ -34,7 +36,7 @@ else
 fi
 
 # Per-target config: the TUs to link, and whether it uses a dictionary. Keeping the
-# source lists here (not in the harness) is what lets one runner serve both targets.
+# source lists here (not in the harness) is what lets one runner serve every target.
 case "${TARGET}" in
     http)
         SRCS="test/fuzz/fuzz_http.c src/server/http.c src/util/str.c src/util/json.c src/util/log.c"
@@ -50,8 +52,14 @@ case "${TARGET}" in
         # The harness caps the payload at 1200B to keep the signed token under 2048.
         MAXLEN=1200
         ;;
+    json)
+        SRCS="test/fuzz/fuzz_json.c src/util/json.c src/util/log.c"
+        DICT="test/fuzz/json.dict"
+        DESC="json_utf8_valid, json_escapes_valid, json_get_* and json_unescape"
+        MAXLEN=4096
+        ;;
     *)
-        echo "error: unknown target '${TARGET}'. Use 'http' or 'jwt'." >&2
+        echo "error: unknown target '${TARGET}'. Use 'http', 'jwt' or 'json'." >&2
         exit 2
         ;;
 esac
@@ -80,8 +88,8 @@ echo "Building ${BIN} (clang + libFuzzer + ASan + UBSan)..."
 # diagnostic and keeps running, so libFuzzer never sees a crash and a run with real
 # undefined behavior in it still reports "no findings". This makes UB abort.
 #
-# No -Ivendor/sqlite / -DDB_BACKEND_SQLITE: neither harness compiles a database TU, so
-# both fuzz targets build on a fresh clone before the SQLite amalgamation is vendored
+# No -Ivendor/sqlite / -DDB_BACKEND_SQLITE: no harness compiles a database TU, so
+# every fuzz target builds on a fresh clone before the SQLite amalgamation is vendored
 # (the Makefile exempts them from that requirement too). Keep this in step with the
 # fuzz-regress rule, which likewise omits them.
 # shellcheck disable=SC2086

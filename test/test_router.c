@@ -223,6 +223,73 @@ static HttpResponse *request(Router *router, const char *raw) {
 }
 
 /*
+ * A JSON body with a refused string escape is answered 400 before any handler
+ * runs, whichever field carries it. Per-field refusal alone would let a bad
+ * OPTIONAL field pass as omitted. Form-encoded bodies are not JSON-checked.
+ */
+void test_json_body_escape_check(Router *router) {
+    printf("\n=== Test: Whole-body JSON escape check ===\n");
+
+    HttpResponse *resp = request(router,
+        "POST /revoke HTTP/1.0\r\nContent-Type: application/json\r\n\r\n"
+        "{\"display_name\":\"X\",\"note\":\"a\\ud800\"}");
+    assert(resp && resp->status_code == 400);
+    printf("✓ bad escape in an optional field: %d\n", resp->status_code);
+    http_response_free(resp);
+
+    resp = request(router,
+        "POST /revoke HTTP/1.0\r\nContent-Type: application/json\r\n\r\n"
+        "{\"display_name\":\"Caf\\u00e9\"}");
+    assert(resp && resp->status_code == 200);
+    printf("✓ valid escapes reach the handler: %d\n", resp->status_code);
+    http_response_free(resp);
+
+    resp = request(router,
+        "POST /revoke HTTP/1.0\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\n"
+        "token=\"a\\qb\"");
+    assert(resp && resp->status_code == 200);
+    printf("✓ form-encoded body is not JSON-checked: %d\n", resp->status_code);
+    http_response_free(resp);
+}
+
+/*
+ * A body that isn't UTF-8 is answered 400 before any handler runs, so SQLite and
+ * PostgreSQL treat it alike. Raw UTF-8 passes, and form-encoded bodies are exempt.
+ */
+void test_json_body_utf8_check(Router *router) {
+    printf("\n=== Test: Whole-body UTF-8 check ===\n");
+
+    HttpResponse *resp = request(router,
+        "POST /revoke HTTP/1.0\r\nContent-Type: application/json\r\n\r\n"
+        "{\"display_name\":\"X\",\"note\":\"a\xff\"}");
+    assert(resp && resp->status_code == 400);
+    assert(resp->body && strstr(resp->body, "not valid UTF-8"));
+    printf("✓ invalid byte in an optional field: %d\n", resp->status_code);
+    http_response_free(resp);
+
+    resp = request(router,
+        "POST /revoke HTTP/1.0\r\nContent-Type: application/json\r\n\r\n"
+        "{\"note\":\"\xed\xa0\x80\"}");
+    assert(resp && resp->status_code == 400);
+    printf("✓ an encoded surrogate: %d\n", resp->status_code);
+    http_response_free(resp);
+
+    resp = request(router,
+        "POST /revoke HTTP/1.0\r\nContent-Type: application/json\r\n\r\n"
+        "{\"display_name\":\"Caf\xc3\xa9\"}");
+    assert(resp && resp->status_code == 200);
+    printf("✓ raw UTF-8 reaches the handler: %d\n", resp->status_code);
+    http_response_free(resp);
+
+    resp = request(router,
+        "POST /revoke HTTP/1.0\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\n"
+        "token=a\xff");
+    assert(resp && resp->status_code == 200);
+    printf("✓ form-encoded body is not UTF-8-checked: %d\n", resp->status_code);
+    http_response_free(resp);
+}
+
+/*
  * Pin the set. Adding a fifth path has to fail here first, which forces somebody
  * to look at the endpoint rather than discover it in production.
  */
@@ -436,6 +503,39 @@ void test_head_requests(Router *router) {
     printf("✓ HEAD keeps CORS on /userinfo and still has none on /health\n");
 }
 
+/*
+ * Every response carries the server's own security headers, including the
+ * anti-framing pair. They are set in http_response_new so no handler can
+ * forget them; this pins that for a routed response and for the router's 404,
+ * which never touches a handler. Without them, a deployment with no nginx in
+ * front (the documented load-balancer topology) serves framable pages.
+ */
+void test_default_security_headers(Router *router) {
+    printf("\n=== Test: Default security headers on every response ===\n");
+
+    const char *raws[] = {
+        "GET /health HTTP/1.0\r\n\r\n",
+        "GET /no-such-path HTTP/1.0\r\n\r\n",
+    };
+
+    for (size_t i = 0; i < sizeof(raws) / sizeof(raws[0]); i++) {
+        HttpResponse *resp = request(router, raws[i]);
+        assert(resp);
+
+        const char *nosniff = header_value(resp, "X-Content-Type-Options");
+        const char *xfo = header_value(resp, "X-Frame-Options");
+        const char *csp = header_value(resp, "Content-Security-Policy");
+
+        assert(nosniff && strcmp(nosniff, "nosniff") == 0);
+        assert(xfo && strcmp(xfo, "SAMEORIGIN") == 0);
+        assert(csp && strcmp(csp, "frame-ancestors 'self'") == 0);
+
+        printf("✓ %d response: nosniff, X-Frame-Options, frame-ancestors present\n",
+               resp->status_code);
+        http_response_free(resp);
+    }
+}
+
 int main(void) {
     log_init(LOG_INFO);
     log_info("Router Test Suite");
@@ -459,11 +559,14 @@ int main(void) {
     /* Run tests */
     test_exact_match(router);
     test_404(router);
+    test_json_body_escape_check(router);
+    test_json_body_utf8_check(router);
     test_cors_set_is_pinned();
     test_cors_header_on_public_paths(router);
     test_cors_preflight(router);
     test_cors_boot_validation();
     test_head_requests(router);
+    test_default_security_headers(router);
 #if ROUTER_USE_PATH_PARAMS
     test_path_params(router);
     test_multiple_params(router);

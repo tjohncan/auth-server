@@ -291,7 +291,7 @@ int oauth_session_get_by_token(db_handle_t *db, const char *session_token,
     const char *sql =
         "SELECT B.id AS session_id, B.user_account_pin, U.id AS user_id, "
         "B.authentication_complete, B.mfa_completed, U.require_mfa, "
-        UNIX_TS("B.started_at") " "
+        UNIX_TS("B.started_at") ", U.has_mfa "
         "FROM " TBL_BROWSER " B "
         "JOIN " TBL_USER_ACCOUNT " U ON U.pin = B.user_account_pin "
         "WHERE B.session_token = " P"1 "
@@ -347,6 +347,7 @@ int oauth_session_get_by_token(db_handle_t *db, const char *session_token,
         out_session->mfa_completed = db_column_int(stmt, 4);
         out_session->user_requires_mfa = db_column_int(stmt, 5);
         out_session->started_at = (time_t)db_column_int64(stmt, 6);
+        out_session->user_has_mfa = db_column_int(stmt, 7);
 
         db_finalize(stmt);
         return 0;
@@ -1366,12 +1367,26 @@ int oauth_introspect_token(db_handle_t *db,
         UNIX_TS("at.expected_expiry") ", " UNIX_TS("at.issued_at") " "
         "FROM " TBL_ACCESS_TOKEN " at "
         "INNER JOIN " TBL_CLIENT " c ON c.pin = at.client_pin "
+        "INNER JOIN " TBL_ORGANIZATION " o ON o.pin = c.organization_pin "
         "INNER JOIN " TBL_RESOURCE_SERVER " rs ON rs.pin = at.resource_server_pin "
         "LEFT JOIN " TBL_USER_ACCOUNT " ua ON ua.pin = at.user_account_pin "
         "WHERE at.token = " P"1 "
         "AND at.resource_server_pin = " P"2 "
         "AND at.is_revoked = " BOOL_FALSE " "
         "AND c.is_active = " BOOL_TRUE " "
+        /* Deactivating a client, its organization or a resource server revokes
+           nothing, so each is read here. A deactivated organization's or resource
+           server's credentials can't authenticate to ask, but this query doesn't
+           lean on that: oauth_access_token_is_active applies the same predicate
+           with no caller to authenticate. */
+        "AND o.is_active = " BOOL_TRUE " "
+        "AND rs.is_active = " BOOL_TRUE " "
+        /* Deactivating a user does revoke their tokens (user_set_active), but the
+           account is read here too: a token issued while that deactivation was
+           running escapes the sweep, and so does anything an account deactivated
+           before the sweep existed still holds. NULL user = a client_credentials
+           token, which has no account to be deactivated. */
+        "AND (at.user_account_pin IS NULL OR ua.is_active = " BOOL_TRUE ") "
         "AND (at.expected_expiry IS NULL OR at.expected_expiry > " NOW ") "
         "LIMIT 1";
 
@@ -1393,6 +1408,23 @@ int oauth_introspect_token(db_handle_t *db,
         return 0;  /* Not an error, just inactive token */
     }
 
+    /* Every id that is present must be exactly 16 bytes before the token is
+     * called active. Skipping a malformed one would leave the caller's zeroed
+     * buffer, and a zero user id is how a client_credentials token looks -- so
+     * a user token would introspect as active with no sub. Refuse instead.
+     * (The user id may be SQL NULL for client_credentials; that is not malformed.) */
+    for (int col = 1; col <= 3; col++) {
+        if (db_column_type(stmt, col) == DB_NULL) {
+            continue;
+        }
+        const void *blob = db_column_blob(stmt, col);
+        if (!blob || db_column_bytes(stmt, col) != 16) {
+            log_error("Token introspection: malformed id in column %d; reporting inactive", col);
+            db_finalize(stmt);
+            return 0;
+        }
+    }
+
     /* Token is active - extract details */
     *out_active = 1;
 
@@ -1404,23 +1436,25 @@ int oauth_introspect_token(db_handle_t *db,
         }
     }
 
-    /* Extract UUIDs (16-byte blobs) */
+    /* Extract UUIDs (16-byte blobs; lengths validated above). The checks stay at
+     * each copy so none of them depends on code above it. Blob then bytes, on the
+     * same column: on PostgreSQL, db_column_bytes reports the last decoded blob. */
     if (out_client_id) {
         const void *blob = db_column_blob(stmt, 1);
-        if (blob) memcpy(out_client_id, blob, 16);
+        if (blob && db_column_bytes(stmt, 1) == 16) memcpy(out_client_id, blob, 16);
     }
 
     if (out_user_id) {
         /* May be NULL for client_credentials tokens (LEFT JOIN) */
         if (db_column_type(stmt, 2) != DB_NULL) {
             const void *blob = db_column_blob(stmt, 2);
-            if (blob) memcpy(out_user_id, blob, 16);
+            if (blob && db_column_bytes(stmt, 2) == 16) memcpy(out_user_id, blob, 16);
         }
     }
 
     if (out_resource_server_id) {
         const void *blob = db_column_blob(stmt, 3);
-        if (blob) memcpy(out_resource_server_id, blob, 16);
+        if (blob && db_column_bytes(stmt, 3) == 16) memcpy(out_resource_server_id, blob, 16);
     }
 
     if (out_expires_at) {
@@ -1458,13 +1492,21 @@ int oauth_access_token_is_active(db_handle_t *db, const char *token) {
     }
 
     /* Same predicate oauth_introspect_token() applies: revoked tokens are dead,
-     * and so are the tokens of a client that has been deactivated. */
+     * and so are the tokens of a deactivated client, of a deactivated user, of a
+     * client whose organization has been deactivated, and for a deactivated
+     * resource server. */
     const char *sql =
         "SELECT 1 FROM " TBL_ACCESS_TOKEN " at "
         "INNER JOIN " TBL_CLIENT " c ON c.pin = at.client_pin "
+        "INNER JOIN " TBL_ORGANIZATION " o ON o.pin = c.organization_pin "
+        "INNER JOIN " TBL_RESOURCE_SERVER " rs ON rs.pin = at.resource_server_pin "
+        "LEFT JOIN " TBL_USER_ACCOUNT " ua ON ua.pin = at.user_account_pin "
         "WHERE at.token = " P"1 "
         "AND at.is_revoked = " BOOL_FALSE " "
         "AND c.is_active = " BOOL_TRUE " "
+        "AND o.is_active = " BOOL_TRUE " "
+        "AND rs.is_active = " BOOL_TRUE " "
+        "AND (at.user_account_pin IS NULL OR ua.is_active = " BOOL_TRUE ") "
         "AND (at.expected_expiry IS NULL OR at.expected_expiry > " NOW ") "
         "LIMIT 1";
 

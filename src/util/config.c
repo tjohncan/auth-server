@@ -29,7 +29,10 @@
 #define DEFAULT_DB_PORT 5432
 #define DEFAULT_SCHEMA_DIR "./sql"
 #define DEFAULT_ENABLE_HISTORY_TABLES 0  /* Disabled by default */
-#define DEFAULT_MAX_ACCESS_TOKEN_TTL_SECONDS (60 * 24 * 3600)  /* 60 days */
+/* 59 days: under the 60-day ES256 rotation interval minus its 45-minute activation
+ * delay, so a token issued at the maximum still verifies until exp. main.c clamps
+ * any configured value above that bound. */
+#define DEFAULT_MAX_ACCESS_TOKEN_TTL_SECONDS (59 * 24 * 3600)
 #define DEFAULT_JWT_CLOCK_SKEW_SECONDS 0  /* Strict validation by default */
 #define DEFAULT_LOG_LEVEL "info"  /* Log level: debug, info, warn, error */
 

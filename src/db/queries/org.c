@@ -768,7 +768,11 @@ int organization_key_create(db_handle_t *db,
     db_bind_text(stmt, 3, hash_hex, -1);
     db_bind_text(stmt, 4, salt_hex, -1);
     db_bind_int(stmt, 5, iterations);
-    db_bind_text(stmt, 6, note, -1);
+    if (note != NULL) {
+        db_bind_text(stmt, 6, note, -1);
+    } else {
+        db_bind_null(stmt, 6);
+    }
 
     int rc = db_step(stmt);
     db_finalize(stmt);
@@ -864,9 +868,8 @@ int organization_key_list(db_handle_t *db,
         }
 
         const unsigned char *id_blob = db_column_blob(stmt, 0);
-        if (id_blob) {
-            memcpy(key.id, id_blob, 16);
-        }
+        if (!id_blob || db_column_bytes(stmt, 0) != 16) continue;
+        memcpy(key.id, id_blob, 16);
         key.is_active = db_column_int(stmt, 1);
 
         const char *generated_at = db_column_text(stmt, 2);
@@ -923,7 +926,8 @@ int organization_key_revoke(db_handle_t *db,
     const char *sql =
         "UPDATE " TBL_ORGANIZATION_KEY " "
         "SET is_active = " BOOL_FALSE ", updated_at = " NOW " "
-        "WHERE id = " P"1";
+        "WHERE id = " P"1 "
+        "RETURNING pin";
 
     db_stmt_t *stmt = NULL;
     if (db_prepare(db, &stmt, sql) != 0) {
@@ -936,7 +940,13 @@ int organization_key_revoke(db_handle_t *db,
     int rc = db_step(stmt);
     db_finalize(stmt);
 
-    if (rc != DB_DONE) {
+    /* No is_active filter here, so re-revoking stays idempotent; zero rows can
+       only mean the id does not exist. */
+    if (rc == DB_DONE) {
+        log_info("Organization key not revoked: not found");
+        return 1;
+    }
+    if (rc != DB_ROW) {
         log_error("Failed to revoke organization key");
         return -1;
     }

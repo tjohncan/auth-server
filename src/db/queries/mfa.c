@@ -180,8 +180,8 @@ int mfa_method_get_by_id(db_handle_t *db,
     if (rc == DB_ROW) {
         /* Extract MFA method data */
         const unsigned char *id_blob = db_column_blob(stmt, 0);
-        if (!id_blob) {
-            log_error("NULL method ID in MFA lookup");
+        if (!id_blob || db_column_bytes(stmt, 0) != 16) {
+            log_error("NULL or malformed method ID in MFA lookup");
             db_finalize(stmt);
             return -1;
         }
@@ -287,7 +287,7 @@ int mfa_method_list(db_handle_t *db,
         memset(method, 0, sizeof(*method));
 
         const unsigned char *id_blob = db_column_blob(stmt, 0);
-        if (!id_blob) continue;
+        if (!id_blob || db_column_bytes(stmt, 0) != 16) continue;
         memcpy(method->id, id_blob, 16);
 
         method->pin = db_column_int64(stmt, 1);
@@ -689,8 +689,8 @@ int recovery_code_set_get_active(db_handle_t *db,
 
     if (rc == DB_ROW) {
         const unsigned char *id_blob = db_column_blob(stmt, 0);
-        if (!id_blob) {
-            log_error("NULL recovery code set ID");
+        if (!id_blob || db_column_bytes(stmt, 0) != 16) {
+            log_error("NULL or malformed recovery code set ID");
             db_finalize(stmt);
             return -1;
         }
@@ -1004,6 +1004,89 @@ int mfa_update_require_mfa_flag(db_handle_t *db,
     }
 
     log_info("Updated require_mfa flag to %d", require_mfa);
+    return 0;
+}
+
+int mfa_reset_user(db_handle_t *db, const unsigned char *user_id) {
+    if (!db || !user_id) {
+        log_error("Invalid arguments to mfa_reset_user");
+        return -1;
+    }
+
+    if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
+        log_error("Failed to begin transaction");
+        return -1;
+    }
+
+    const char *select_sql =
+        "SELECT pin FROM " TBL_USER_ACCOUNT " WHERE id = " P"1";
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, select_sql) != 0) {
+        log_error("Failed to prepare mfa_reset_user lookup");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    db_bind_blob(stmt, 1, user_id, 16);
+
+    int rc = db_step(stmt);
+    if (rc != DB_ROW) {
+        db_finalize(stmt);
+        db_execute_trusted(db, "ROLLBACK");
+        if (rc == DB_DONE) return 1;  /* not found */
+        log_error("Failed to look up user for MFA reset");
+        return -1;
+    }
+
+    long long user_account_pin = db_column_int64(stmt, 0);
+    db_finalize(stmt);
+
+    /* The state mfa_method_delete leaves when the last confirmed method goes,
+     * for every method at once: the methods themselves, confirmed or not; the
+     * active recovery-code set, revoked as recovery_code_set_revoke does; and
+     * both flags, cleared together as the schema's CHECK requires. */
+    const char *steps[] = {
+        "DELETE FROM " TBL_USER_MFA " "
+        "WHERE user_account_pin = " P"1",
+
+        "UPDATE " TBL_RECOVERY_CODE_SET " "
+        "SET is_active = " BOOL_FALSE ", revoked_at = " NOW ", updated_at = " NOW " "
+        "WHERE user_account_pin = " P"1 AND is_active = " BOOL_TRUE,
+
+        "UPDATE " TBL_USER_ACCOUNT " "
+        "SET has_mfa = " BOOL_FALSE ", require_mfa = " BOOL_FALSE ", updated_at = " NOW " "
+        "WHERE pin = " P"1 AND has_mfa = " BOOL_TRUE,
+    };
+
+    for (size_t i = 0; i < sizeof(steps) / sizeof(steps[0]); i++) {
+        if (db_prepare(db, &stmt, steps[i]) != 0) {
+            log_error("Failed to prepare MFA reset statement");
+            db_execute_trusted(db, "ROLLBACK");
+            return -1;
+        }
+
+        db_bind_int64(stmt, 1, user_account_pin);
+
+        rc = db_step(stmt);
+        db_finalize(stmt);
+
+        if (rc != DB_DONE) {
+            log_error("Failed to reset MFA");
+            db_execute_trusted(db, "ROLLBACK");
+            return -1;
+        }
+    }
+
+    if (db_execute_trusted(db, "COMMIT") != 0) {
+        log_error("Failed to commit MFA reset");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    char user_id_hex[33];
+    bytes_to_hex(user_id, 16, user_id_hex, sizeof(user_id_hex));
+    log_info("Reset MFA for user_id=%s", user_id_hex);
     return 0;
 }
 

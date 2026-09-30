@@ -474,11 +474,7 @@ int admin_create_client_redirect_uri(db_handle_t *db, long long user_account_pin
         return -1;
     }
 
-    if (client_redirect_uri_create(db, user_account_pin, organization_key_pin, client_id, redirect_uri, note) != 0) {
-        return -1;
-    }
-
-    return 0;
+    return client_redirect_uri_create(db, user_account_pin, organization_key_pin, client_id, redirect_uri, note);
 }
 
 int admin_delete_client_redirect_uri(db_handle_t *db, long long user_account_pin,
@@ -490,11 +486,7 @@ int admin_delete_client_redirect_uri(db_handle_t *db, long long user_account_pin
         return -1;
     }
 
-    if (client_redirect_uri_delete(db, user_account_pin, organization_key_pin, client_id, redirect_uri) != 0) {
-        return -1;
-    }
-
-    return 0;
+    return client_redirect_uri_delete(db, user_account_pin, organization_key_pin, client_id, redirect_uri);
 }
 
 int admin_list_client_resource_servers(db_handle_t *db, long long user_account_pin,
@@ -556,11 +548,7 @@ int admin_create_client_resource_server_link(db_handle_t *db, long long user_acc
         return -1;
     }
 
-    if (client_resource_server_create(db, user_account_pin, organization_key_pin, client_id, resource_server_id) != 0) {
-        return -1;
-    }
-
-    return 0;
+    return client_resource_server_create(db, user_account_pin, organization_key_pin, client_id, resource_server_id);
 }
 
 int admin_delete_client_resource_server_link(db_handle_t *db, long long user_account_pin,
@@ -572,12 +560,8 @@ int admin_delete_client_resource_server_link(db_handle_t *db, long long user_acc
         return -1;
     }
 
-    if (client_resource_server_delete(db, user_account_pin, organization_key_pin,
-                                       client_id, resource_server_id) != 0) {
-        return -1;
-    }
-
-    return 0;
+    return client_resource_server_delete(db, user_account_pin, organization_key_pin,
+                                         client_id, resource_server_id);
 }
 
 /* ============================================================================
@@ -640,11 +624,7 @@ int admin_revoke_resource_server_key(db_handle_t *db,
         return -1;
     }
 
-    if (resource_server_key_revoke(db, user_account_pin, organization_key_pin, key_id) != 0) {
-        return -1;
-    }
-
-    return 0;
+    return resource_server_key_revoke(db, user_account_pin, organization_key_pin, key_id);
 }
 
 /* ============================================================================
@@ -707,11 +687,7 @@ int admin_revoke_client_key(db_handle_t *db,
         return -1;
     }
 
-    if (client_key_revoke(db, user_account_pin, organization_key_pin, key_id) != 0) {
-        return -1;
-    }
-
-    return 0;
+    return client_key_revoke(db, user_account_pin, organization_key_pin, key_id);
 }
 
 /* ============================================================================
@@ -982,9 +958,5 @@ int admin_revoke_organization_key(db_handle_t *db,
         return -1;
     }
 
-    if (organization_key_revoke(db, key_id) != 0) {
-        return -1;
-    }
-
-    return 0;
+    return organization_key_revoke(db, key_id);
 }

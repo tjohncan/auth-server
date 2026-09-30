@@ -33,7 +33,7 @@ static HttpResponse *require_session(const HttpRequest *req, db_handle_t *db,
     const char *cookie_header = http_request_get_header(req, "Cookie");
     char *session_token = NULL;
     if (cookie_header) {
-        session_token = http_cookie_get_value(cookie_header, "session");
+        session_token = http_cookie_get_value(cookie_header, SESSION_COOKIE_NAME);
     }
 
     if (!session_token) {
@@ -86,7 +86,7 @@ HttpResponse *mfa_totp_setup_handler(const HttpRequest *req, const RouteParams *
     if (auth_err) return auth_err;
 
     /* If user already has MFA, require completion before enrolling new methods */
-    if (session.user_requires_mfa && !session.mfa_completed) {
+    if (oauth_session_mfa_pending(&session)) {
         return response_json_error(403, "MFA verification required");
     }
 
@@ -194,7 +194,7 @@ HttpResponse *mfa_totp_confirm_handler(const HttpRequest *req, const RouteParams
     if (auth_err) return auth_err;
 
     /* If user already has MFA, require completion before confirming new methods */
-    if (session.user_requires_mfa && !session.mfa_completed) {
+    if (oauth_session_mfa_pending(&session)) {
         return response_json_error(403, "MFA verification required");
     }
 
@@ -237,6 +237,20 @@ HttpResponse *mfa_totp_confirm_handler(const HttpRequest *req, const RouteParams
     }
     if (rc != 0) {
         return response_json_error(500, "Failed to confirm MFA method");
+    }
+
+    /* A valid code from the authenticator just registered proves possession of
+     * it, so this session has completed MFA. Without this, a first enrollment
+     * would be followed by a bounce to the MFA step on the very next MFA-management
+     * call. For an additional method the gate above already required completion. */
+    const char *confirm_cookie = http_request_get_header(req, "Cookie");
+    if (confirm_cookie) {
+        char *session_token = http_cookie_get_value(confirm_cookie, SESSION_COOKIE_NAME);
+        if (session_token) {
+            oauth_session_set_mfa_completed(db, session_token);
+            OPENSSL_cleanse(session_token, strlen(session_token));
+            free(session_token);
+        }
     }
 
     /* Build response */
@@ -327,7 +341,7 @@ HttpResponse *mfa_verify_handler(const HttpRequest *req, const RouteParams *para
         /* Mark session MFA as completed */
         const char *cookie_header = http_request_get_header(req, "Cookie");
         if (cookie_header) {
-            char *session_token = http_cookie_get_value(cookie_header, "session");
+            char *session_token = http_cookie_get_value(cookie_header, SESSION_COOKIE_NAME);
             if (session_token) {
                 oauth_session_set_mfa_completed(db, session_token);
                 OPENSSL_cleanse(session_token, strlen(session_token));
@@ -396,7 +410,7 @@ HttpResponse *mfa_recover_handler(const HttpRequest *req, const RouteParams *par
         /* Mark session MFA as completed */
         const char *cookie_header = http_request_get_header(req, "Cookie");
         if (cookie_header) {
-            char *session_token = http_cookie_get_value(cookie_header, "session");
+            char *session_token = http_cookie_get_value(cookie_header, SESSION_COOKIE_NAME);
             if (session_token) {
                 oauth_session_set_mfa_completed(db, session_token);
                 OPENSSL_cleanse(session_token, strlen(session_token));
@@ -511,7 +525,7 @@ HttpResponse *mfa_delete_method_handler(const HttpRequest *req, const RouteParam
     if (auth_err) return auth_err;
 
     /* Destructive MFA operation — require MFA completion first */
-    if (session.user_requires_mfa && !session.mfa_completed) {
+    if (oauth_session_mfa_pending(&session)) {
         return response_json_error(403, "MFA verification required");
     }
 
@@ -557,6 +571,11 @@ HttpResponse *mfa_delete_method_handler(const HttpRequest *req, const RouteParam
 HttpResponse *mfa_regenerate_recovery_codes_handler(const HttpRequest *req,
                                                     const RouteParams *params) {
     (void)params;
+    /* Nothing is read from the body. JSON is still required: it's what keeps a
+     * plain HTML form out, and SameSite=Lax lets a form on a sibling subdomain
+     * post here with the session cookie. */
+    HttpResponse *ct_err = require_content_type(req, "application/json");
+    if (ct_err) return ct_err;
 
     /* Get database connection */
     db_handle_t *db = db_pool_get_connection();
@@ -571,7 +590,7 @@ HttpResponse *mfa_regenerate_recovery_codes_handler(const HttpRequest *req,
     if (auth_err) return auth_err;
 
     /* Destructive MFA operation — require MFA completion first */
-    if (session.user_requires_mfa && !session.mfa_completed) {
+    if (oauth_session_mfa_pending(&session)) {
         return response_json_error(403, "MFA verification required");
     }
 
@@ -633,7 +652,7 @@ HttpResponse *mfa_set_require_handler(const HttpRequest *req, const RouteParams 
     if (auth_err) return auth_err;
 
     /* Destructive MFA operation — require MFA completion first */
-    if (session.user_requires_mfa && !session.mfa_completed) {
+    if (oauth_session_mfa_pending(&session)) {
         return response_json_error(403, "MFA verification required");
     }
 
@@ -659,22 +678,14 @@ HttpResponse *mfa_set_require_handler(const HttpRequest *req, const RouteParams 
         }
     }
 
-    /* Update require_mfa flag */
+    /* Update require_mfa flag.
+     *
+     * Deliberately does NOT mark the session MFA-completed. Enabling requires a
+     * confirmed method, and the gate above demands MFA completion from anyone who
+     * has one, so a legitimate caller is complete already; marking it here could
+     * only ever hand completion to a session that had not earned it. */
     if (mfa_update_require_mfa_flag(db, session.user_account_pin, enabled) != 0) {
         return response_json_error(500, "Failed to update MFA requirement");
-    }
-
-    /* Mark current session as MFA-completed so user isn't locked out */
-    if (enabled) {
-        const char *cookie_header = http_request_get_header(req, "Cookie");
-        if (cookie_header) {
-            char *session_token = http_cookie_get_value(cookie_header, "session");
-            if (session_token) {
-                oauth_session_set_mfa_completed(db, session_token);
-                OPENSSL_cleanse(session_token, strlen(session_token));
-                free(session_token);
-            }
-        }
     }
 
     return response_json_ok("{\"message\":\"MFA requirement updated\"}");

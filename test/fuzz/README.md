@@ -10,12 +10,16 @@ hands one blob of bytes to one function; the fuzzer generates the blobs.
 |---|---|---|
 | `http` | `http_request_parse` + accessors | Socket-facing request parser: in-place pointer arithmetic over attacker bytes. |
 | `jwt`  | `jwt_decode_auth_request` | Authorization-code decoder: HMAC verify, base64url, hand-rolled JSON, hex decode. |
+| `json` | `json_utf8_valid`, `json_escapes_valid`, `json_get_*`, `json_unescape` | Every request body: the whole-body checks, then the field readers and the in-place `\u` decoder. |
 
 Each harness mirrors the real call path. `fuzz_http.c` follows
 `main.c:router_request_handler()`: the same private NUL-terminated copy of the socket
 bytes, the same parse call, the same accessors afterward. `fuzz_jwt.c` follows the
-OAuth token-exchange path into `jwt_decode_auth_request()`. A harness that drifts from
-the real call path fuzzes fiction, so keep them aligned when the callers change.
+OAuth token-exchange path into `jwt_decode_auth_request()`. `fuzz_json.c` follows
+`router_dispatch()`'s body checks into the field reads handlers make, and also aborts if
+unescaping ever lengthens a string, or if a body that passed both checks yields a value
+that isn't well-formed UTF-8. A harness that drifts from the real call path fuzzes
+fiction, so keep them aligned when the callers change.
 
 ### A note on the JWT harness
 
@@ -38,7 +42,8 @@ bytes past that gate.
 ```sh
 make fuzz                              # http target, 60s
 make fuzz FUZZ_TARGET=jwt FUZZ_TIME=3600
-make fuzz-regress                      # both targets, gcc, seconds
+make fuzz FUZZ_TARGET=json
+make fuzz-regress                      # every target, gcc, seconds
 ```
 
 libFuzzer ships with clang and has no gcc equivalent, so the coverage-guided run needs
@@ -49,8 +54,9 @@ wired into `make test`.
 
 ```
 test/fuzz/
-  fuzz_http.c   fuzz_jwt.c   harnesses (each also builds -DFUZZ_STANDALONE to replay one input)
-  http.dict     jwt.dict     libFuzzer token dictionaries
+  fuzz_http.c   fuzz_jwt.c   fuzz_json.c   harnesses (each also builds -DFUZZ_STANDALONE
+                                           to replay one input)
+  http.dict     jwt.dict     json.dict     libFuzzer token dictionaries
   run.sh        build + run a target to a time budget + print a report card
   corpus/<target>/   committed seed corpus, one file per input shape
   crashes/<target>/  committed regression seeds: inputs that once crashed the target

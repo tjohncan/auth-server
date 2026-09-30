@@ -7,9 +7,18 @@ function escapeHtml(text) {
 // Parse ?return= parameter from URL (validated to prevent open redirect)
 function getReturnUrl() {
     const params = new URLSearchParams(window.location.search);
-    const url = params.get('return') || '/admin';
-    // Only allow relative paths — block protocol-relative and backslash-relative URLs
-    if (url.startsWith('/') && !url.startsWith('//') && !url.startsWith('/\\')) return url;
+    const raw = params.get('return') || '/admin';
+    // Resolve it as navigation will, keep it only if it stays on this origin, and
+    // return that resolved URL whole. Navigation would read any piece of it again,
+    // and differently: the parser drops tabs and newlines, reads a backslash as a
+    // slash, and resolves "/.//evil.example" to the path "//evil.example", which
+    // on its own names another host.
+    try {
+        const url = new URL(raw, window.location.origin);
+        if (url.origin === window.location.origin) return url.href;
+    } catch (e) {
+        /* Not a URL at all */
+    }
     return '/admin';
 }
 
@@ -17,9 +26,9 @@ function getReturnUrl() {
 (function updatePasswordlessLink() {
     const link = document.getElementById('passwordlessLink');
     if (!link) return;
-    const returnUrl = getReturnUrl();
-    if (returnUrl && returnUrl.startsWith('/authorize?')) {
-        const qs = returnUrl.substring('/authorize?'.length);
+    const returnUrl = new URL(getReturnUrl(), window.location.origin);
+    if (returnUrl.pathname === '/authorize' && returnUrl.search) {
+        const qs = returnUrl.search.substring(1);
         link.href = '/request-passwordless-login?return_to=' + encodeURIComponent(qs);
     }
 })();

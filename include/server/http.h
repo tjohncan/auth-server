@@ -111,6 +111,20 @@ void http_request_cleanup(HttpRequest *req);
 const char *http_request_get_header(const HttpRequest *req, const char *name);
 
 /*
+ * http_request_is_cross_origin - Did a browser send this from another origin?
+ *
+ * Sec-Fetch-Site decides when present, and every current browser sends it:
+ * only "same-origin" and "none" (the user's own navigation) pass. A browser
+ * too old to send it still sends Origin on a cross-origin POST, and that has
+ * to match the Host the request was sent to. A request with neither header
+ * isn't a browser's, or is from one too old to tell, and passes: this keeps
+ * other sites from driving a user's browser, not clients from calling.
+ *
+ * Returns: 1 if another (or an opaque) origin sent it, 0 otherwise
+ */
+int http_request_is_cross_origin(const HttpRequest *req);
+
+/*
  * http_request_get_client_ip - Get real client IP from headers
  *
  * When behind a reverse proxy, the socket IP will be the proxy.

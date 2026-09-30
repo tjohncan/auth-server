@@ -47,8 +47,8 @@ This server focuses on authentication logic.
 - Format string vulnerability warnings
 - JSON injection protection in error responses
 - SHA-256 hashed token storage (sessions, auth codes, refresh/access tokens)
-- AES-256-GCM encryption of sensitive information at rest (usernames, emails, MFA secrets) 
-    with HMAC-SHA256 blind indexes for lookups
+- AES-256-GCM encryption of sensitive information at rest (usernames, emails, MFA secrets,
+    JWT signing secrets and private keys) with HMAC-SHA256 blind indexes for lookups
 
 **System Dependencies**
 - POSIX + pthreads
@@ -282,6 +282,17 @@ Manages cryptographic signing keys for JWTs with automatic rotation.
 - Database tables: `auth_request_signing`, `access_token_signing` (SQLite) or `keys.*` (PostgreSQL)
 - Single-row tables enforced via `singleton` column (CHECK + UNIQUE constraint)
 - Current + prior keys retained for graceful rotation
+- HMAC secrets and ES256 private keys are stored encrypted with the field-encryption key
+    (`encryption_key`), as `e1:`-prefixed values; public keys are stored in plaintext
+- A stored key that will not decrypt (an `encryption_key` that differs from the one that
+    stored it) stops token issuance, `/userinfo` and the JWKS endpoint, with an error naming
+    both tables; it is never silently regenerated. `/introspect` and `/revoke` don't use the
+    keys and keep working. The fix is to restore that `encryption_key`, which sign-in needs
+    too. Only if it is lost for good, delete the rows in both tables, which regenerates the
+    keys on next use. Refresh tokens and sessions survive that. Outstanding access tokens
+    stop verifying against the published keys and at `/userinfo`, but `/introspect` reports
+    them active until they expire, so deleting the rows is no way to retire leaked tokens:
+    revoke them, or deactivate the user.
 
 **Rotation:**
 - **Passive mechanism**: Keys checked on every use, rotated if stale
@@ -465,8 +476,10 @@ test/
 └── fuzz/               # Coverage-guided fuzzing (see fuzz/README.md)
     ├── fuzz_http.c     # Harness: HTTP request parser
     ├── fuzz_jwt.c      # Harness: authorization-code JWT decoder
+    ├── fuzz_json.c     # Harness: request-body checks and JSON field readers
     ├── http.dict       # Token dictionaries for the mutator
     ├── jwt.dict
+    ├── json.dict
     ├── run.sh          # Build + run a target to a time budget + print a report card
     ├── corpus/<target>/    # Seed corpus, per target (committed)
     └── crashes/<target>/   # Regression seeds, per target — replayed by `make test`
@@ -489,7 +502,7 @@ vendor/
 - Designed to handle high-concurrency load
 - Linear scaling with CPU cores for parsing, routing and serialization
 - No context switching within event loop
-- Password verification and contended database writes are the exceptions — see
+- Password verification and contended database writes stall the worker running them — see
   [Deliberate Tradeoffs](#deliberate-tradeoffs)
 
 **Memory:**
@@ -521,14 +534,15 @@ vendor/
 
 **Memory Safety:**
 
-Two components take untrusted bytes and pick them apart with pointer arithmetic and
-hand-rolled parsing: the HTTP request parser (socket-facing) and the authorization-code
-JWT decoder (base64url + JSON). Both are fuzzed under ASan+UBSan. See
-[`test/fuzz/README.md`](test/fuzz/README.md).
+Three components take untrusted bytes and pick them apart with pointer arithmetic and
+hand-rolled parsing: the HTTP request parser (socket-facing), the authorization-code
+JWT decoder (base64url + JSON), and the JSON helpers every request body goes through
+(UTF-8 and escape checks, field readers, the in-place `\u` decoder). All three are fuzzed
+under ASan+UBSan. See [`test/fuzz/README.md`](test/fuzz/README.md).
 
 - `make fuzz-regress` - Replay every saved crash + seed under ASan+UBSan. Needs only gcc,
   runs in seconds, and is part of `make test`.
-- `make fuzz` - Coverage-guided search for new bugs (needs clang; `FUZZ_TARGET=http|jwt`,
+- `make fuzz` - Coverage-guided search for new bugs (needs clang; `FUZZ_TARGET=http|jwt|json`,
   `FUZZ_TIME=3600` to soak).
 - `make sanitize` - Build the whole server with ASan+UBSan and drive it by hand.
 
@@ -600,12 +614,27 @@ proxying, so the attacker gets in regardless and the *victim* is the one who get
 What it reliably produces is a race between legitimate co-holders of the same seed. Guessing,
 as opposed to observing, is capped by per-method rate limiting.
 
+**A user's first MFA method can be enrolled with the password alone.**
+Once a user has a factor, managing factors (adding, deleting, regenerating recovery codes,
+toggling `require`) demands that factor first. Before that there is nothing to demand, so
+whoever holds the password can enroll the first method. The consequence is narrow and
+worth stating: a client's `require_mfa` protects users who have enrolled, and gives no
+protection to a user who never did. Their first "second factor" belongs to whoever
+registers it first. Closing that needs an out-of-band enrollment channel, which this
+server does not have.
+The same holds after a reset. A user who loses every factor and every recovery code can't
+manage factors any more, so an operator resets them (`POST /api/admin/users/reset-mfa`,
+localhost-only), which returns them to this starting point: confirm who is asking first.
+
 **Changing a password does not sign you out everywhere.**
 A password change rotates the credential and nothing else; live sessions and refresh chains
 survive it. Compromise recovery has stronger, explicit paths here — account deactivation
-(localhost-only) and token revocation — and password change isn't asked to carry that weight.
+(localhost-only), which closes every session and revokes every token and emailed link, and
+token revocation — and password change isn't asked to carry that weight.
 Mass invalidation is a cost paid by every user on every routine rotation, in order to evict an
-attacker who, in the case that actually matters, already knows the new password.
+attacker who, in the case that actually matters, already knows the new password. Deactivation
+evicts but leaves the password as it was; the API reference gives the order for handing the
+account back.
 
 **Defaults are permissive; policy is the deployer's.**
 The shipped `encryption_key` is a public placeholder and `password_min_length` is 1. The server
@@ -637,36 +666,17 @@ This rejection is narrower and is header-interpretation hygiene: it removes the 
 between a front-end proxy that might fold or tolerate a malformed line and an origin that would
 otherwise ignore it. No legitimate client sends such a line, so failing closed costs nothing.
 
-**Handlers run inside the event loop, so the expensive requests do not scale with cores.**
-Parsing, routing and serialization scale the way Performance Characteristics describes.
-Password verification does not. Argon2id runs at 64 MiB (`ARGON2_MEMORY_COST`) with the
-iteration count drawn from `secret_hash_min_iterations`..`max_iterations`, shipped as 4 —
-call it 80–200 ms of CPU per verification, depending on the machine. Handlers execute
-synchronously on the worker that accepted the connection, so for that interval the worker's
-entire `epoll` loop is stopped and every other connection it holds waits, including static
-files and `/health`. The practical ceiling is single-digit logins per second per core, and it
-does not move by adding connections.
-
-The parameters are not the thing to weaken.
-64 MiB and four passes are chosen to make offline cracking expensive;
-halving them to buy login throughput trades a real defence.
-Transient memory follows from the same figure — 64 MiB per password hash in flight,
-so **64 MiB × worker count** is the worst case to size a host against,
-and worker count is auto-detected from cores unless `server_workers` says otherwise.
-
-The same property arrives from a second direction at the database.
-A transaction that wants SQLite's write lock while another holds it
-retries internally for `sqlite3_busy_timeout` (2200 ms) before giving up,
-and because the handler is synchronous that is 2.2 seconds in which
-its worker serves nothing — then the request fails anyway. WAL mode keeps ordinary
-readers out of this entirely, but the write paths do not:
-account changes, MFA enrolment and token creation can all reach it under contention.
-
-Both are the same deliberate choice seen twice: no thread pool, no work queue,
-no handoff between accepting a connection and answering it.
-That shape is fixed; the knobs sit outside it — `server_workers`,
-`secret_hashing_algorithm`, and the iteration counts — so a deployer who wants
-different numbers turns those rather than the request path.
+**Handlers run inside the event loop, so a password check stalls its whole worker.**
+A request is handled start to finish on the worker that accepted it: no thread pool, no work
+queue. Argon2id at the shipped 64 MiB and 4 passes takes roughly 200 ms of CPU on a current
+laptop core, and for that long the worker's `epoll` loop is stopped: other logins, static
+files and `/health` on that worker wait behind it. Login throughput is therefore a few per
+second per core, growing with cores rather than connections, and transient memory peaks at
+**64 MiB × worker count**. That cost is what makes a stolen database expensive to crack, so
+the answer to login load is more cores, not cheaper hashing. Anything else that waits
+behaves the same way, in smaller measure: a write that meets another's SQLite write lock
+waits for it (up to the 2.2 s busy timeout, then fails), and on PostgreSQL every query is a
+round trip the worker spends waiting.
 
 ## Design Philosophy
 

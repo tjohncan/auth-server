@@ -787,7 +787,8 @@ int resource_server_key_create(db_handle_t *db,
             "WHERE rs.id = " P"2 "
             "AND ok.pin = " P"7 "
             "AND ok.is_active = " BOOL_TRUE " "
-            "LIMIT 1";
+            "LIMIT 1 "
+            "RETURNING pin";
     } else {
         /* Session authentication - verify user is org admin */
         sql =
@@ -800,7 +801,8 @@ int resource_server_key_create(db_handle_t *db,
             "WHERE rs.id = " P"2 "
             "AND oa.user_account_pin = " P"7 "
             "AND ua.is_active = " BOOL_TRUE " "
-            "LIMIT 1";
+            "LIMIT 1 "
+            "RETURNING pin";
     }
 
     db_stmt_t *stmt = NULL;
@@ -837,8 +839,14 @@ int resource_server_key_create(db_handle_t *db,
     OPENSSL_cleanse(salt_hex, sizeof(salt_hex));
     OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
 
-    if (rc != DB_DONE) {
-        log_error("Failed to insert resource server key (unauthorized or constraint violation)");
+    /* See client_key_create: zero rows inserted must not hand back a key_id. */
+    if (rc == DB_DONE) {
+        log_info("Resource server key not created: resource server not found "
+                 "or caller not authorized");
+        return 1;
+    }
+    if (rc != DB_ROW) {
+        log_error("Failed to insert resource server key");
         return -1;
     }
 
@@ -1036,7 +1044,8 @@ int resource_server_key_revoke(db_handle_t *db,
                 "AND ok.pin = " P"2 "
                 "AND ok.is_active = " BOOL_TRUE
             ") "
-            "AND is_active = " BOOL_TRUE;  /* Only revoke if currently active */
+            "AND is_active = " BOOL_TRUE " "  /* Only revoke if currently active */
+            "RETURNING pin";
     } else {
         /* Session authentication - verify user is org admin */
         sql =
@@ -1051,7 +1060,8 @@ int resource_server_key_revoke(db_handle_t *db,
                 "AND oa.user_account_pin = " P"2 "
                 "AND ua.is_active = " BOOL_TRUE
             ") "
-            "AND is_active = " BOOL_TRUE;  /* Only revoke if currently active */
+            "AND is_active = " BOOL_TRUE " "  /* Only revoke if currently active */
+            "RETURNING pin";
     }
 
     db_stmt_t *stmt = NULL;
@@ -1070,87 +1080,19 @@ int resource_server_key_revoke(db_handle_t *db,
     int rc = db_step(stmt);
     db_finalize(stmt);
 
-    if (rc != DB_DONE) {
+    /* See client_key_revoke: zero rows must not be reported as revoked. */
+    if (rc == DB_DONE) {
+        log_info("Resource server key not revoked: not found, not the caller's, "
+                 "or already revoked");
+        return 1;
+    }
+    if (rc != DB_ROW) {
         log_error("Failed to revoke resource server key");
         return -1;
     }
 
     log_info("Revoked resource server key");
     return 0;
-}
-
-int resource_server_key_verify(db_handle_t *db,
-                               const unsigned char *key_id,
-                               const char *secret,
-                               long long *out_resource_server_pin) {
-    if (!db || !key_id || !secret) {
-        log_error("Invalid arguments to resource_server_key_verify");
-        return -1;
-    }
-
-    const char *sql =
-        "SELECT rsk.salt, rsk.hash_iterations, rsk.secret_hash, rsk.resource_server_pin "
-        "FROM " TBL_RESOURCE_SERVER_KEY " rsk "
-        "JOIN " TBL_RESOURCE_SERVER " rs ON rs.pin = rsk.resource_server_pin "
-        "WHERE rsk.id = " P"1 "
-        "AND rsk.is_active = " BOOL_TRUE " "
-        "AND rs.is_active = " BOOL_TRUE " "
-        "LIMIT 1";
-
-    db_stmt_t *stmt = NULL;
-    if (db_prepare(db, &stmt, sql) != 0) {
-        log_error("Failed to prepare resource_server_key_verify statement");
-        return -1;
-    }
-
-    db_bind_blob(stmt, 1, key_id, 16);
-
-    int rc = db_step(stmt);
-
-    if (rc != DB_ROW) {
-        db_finalize(stmt);
-        log_debug("Resource server key not found or inactive");
-        return 0;  /* Invalid key */
-    }
-
-    /* Extract stored hash parameters */
-    const char *salt_ptr = (const char *)db_column_text(stmt, 0);
-    int iterations = db_column_int(stmt, 1);
-    const char *hash_ptr = (const char *)db_column_text(stmt, 2);
-    long long resource_server_pin = db_column_int64(stmt, 3);
-
-    if (!salt_ptr || !hash_ptr) {
-        log_error("NULL hash fields in resource_server_key");
-        db_finalize(stmt);
-        return -1;
-    }
-
-    /* Copy column data before finalize — pointers are invalid after */
-    char salt[256], hash[256];
-    snprintf(salt, sizeof(salt), "%s", salt_ptr);
-    snprintf(hash, sizeof(hash), "%s", hash_ptr);
-
-    db_finalize(stmt);
-
-    /* Verify secret using timing-safe comparison */
-    int valid = crypto_password_verify(secret, strlen(secret), salt, iterations, hash);
-    OPENSSL_cleanse(salt, sizeof(salt));
-    OPENSSL_cleanse(hash, sizeof(hash));
-
-    /* If valid, return resource server pin if requested */
-    if (valid == 1) {
-        if (out_resource_server_pin != NULL) {
-            *out_resource_server_pin = resource_server_pin;
-        }
-        log_info("Resource server key verified successfully");
-        return 1;  /* Valid */
-    } else if (valid == 0) {
-        log_info("Resource server key verification failed (invalid secret)");
-        return 0;  /* Invalid */
-    } else {
-        log_error("Error during resource server key verification");
-        return -1;  /* Error */
-    }
 }
 
 int resource_server_provisioning_allowed(db_handle_t *db, long long rs_pin) {

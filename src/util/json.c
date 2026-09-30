@@ -6,8 +6,46 @@
 #include <stdbool.h>
 #include <limits.h>
 
-void json_unescape(char *str) {
-    if (!str) return;
+/* Parse exactly four hex digits. The caller guarantees p[0..3] are not NUL. */
+static int json_hex4(const char *p, unsigned int *out) {
+    unsigned int v = 0;
+    for (int i = 0; i < 4; i++) {
+        char c = p[i];
+        if (c >= '0' && c <= '9')      v = (v << 4) | (unsigned int)(c - '0');
+        else if (c >= 'a' && c <= 'f') v = (v << 4) | (unsigned int)(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') v = (v << 4) | (unsigned int)(c - 'A' + 10);
+        else return 0;
+    }
+    *out = v;
+    return 1;
+}
+
+/* Encode a Unicode scalar value (never a surrogate, never 0) as UTF-8. */
+static int json_utf8_encode(unsigned int cp, char *out) {
+    if (cp < 0x80) {
+        out[0] = (char)cp;
+        return 1;
+    }
+    if (cp < 0x800) {
+        out[0] = (char)(0xC0 | (cp >> 6));
+        out[1] = (char)(0x80 | (cp & 0x3F));
+        return 2;
+    }
+    if (cp < 0x10000) {
+        out[0] = (char)(0xE0 | (cp >> 12));
+        out[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        out[2] = (char)(0x80 | (cp & 0x3F));
+        return 3;
+    }
+    out[0] = (char)(0xF0 | (cp >> 18));
+    out[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+    out[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+    out[3] = (char)(0x80 | (cp & 0x3F));
+    return 4;
+}
+
+int json_unescape(char *str) {
+    if (!str) return 0;
 
     const char *read = str;
     char *write = str;
@@ -19,41 +57,71 @@ void json_unescape(char *str) {
             switch (*read) {
                 case '"':  *write++ = '"';  break;
                 case '\\': *write++ = '\\'; break;
+                case '/':  *write++ = '/';  break;  /* PHP's json_encode escapes '/' by default */
                 case 't':  *write++ = '\t'; break;
                 case 'n':  *write++ = '\n'; break;
                 case 'r':  *write++ = '\r'; break;
                 case 'b':  *write++ = '\b'; break;
                 case 'f':  *write++ = '\f'; break;
                 case 'u': {
-                    /* Decode \uXXXX: accept printable ASCII, skip everything else */
+                    /* Decode \uXXXX to UTF-8, joining surrogate pairs.
+                     *
+                     * This is not a corner case: Python's json.dumps (and so
+                     * requests' json=), PHP's json_encode and .NET's
+                     * System.Text.Json all escape non-ASCII this way by default,
+                     * and the fields that arrive like this include passwords.
+                     *
+                     * Refused, not decoded: \u0000 (it would truncate every
+                     * C-string consumer), a lone or mismatched surrogate (no UTF-8
+                     * form), and a truncated or non-hex escape. RFC 8259 makes the
+                     * malformed ones invalid JSON. Dropping any of them and carrying
+                     * on would hand the caller a value the client never sent --
+                     * "hunter\u00002" becoming the password "hunter2".
+                     *
+                     * In place is safe: a 6-byte escape yields at most 3 bytes
+                     * and a 12-byte pair yields 4, so write never passes read. */
                     if (!read[1] || !read[2] || !read[3] || !read[4]) {
-                        /* Truncated \uXXXX — advance to end of string */
-                        while (read[1]) read++;
-                        break;
+                        *write = '\0';
+                        return -1;  /* Truncated \uXXXX */
                     }
                     unsigned int cp = 0;
-                    int i;
-                    for (i = 0; i < 4; i++) {
-                        char c = read[1 + i];
-                        if (c >= '0' && c <= '9')      cp = (cp << 4) | (c - '0');
-                        else if (c >= 'a' && c <= 'f') cp = (cp << 4) | (c - 'a' + 10);
-                        else if (c >= 'A' && c <= 'F') cp = (cp << 4) | (c - 'A' + 10);
-                        else { cp = 0; break; }  /* Malformed — drop it */
+                    if (!json_hex4(read + 1, &cp)) {
+                        *write = '\0';
+                        return -1;  /* Non-hex digits */
                     }
                     read += 4;  /* Skip the 4 hex digits */
-                    if (cp >= 0x20 && cp <= 0x7E) {
-                        *write++ = (char)cp;  /* Printable ASCII */
+
+                    if (cp >= 0xD800 && cp <= 0xDBFF) {
+                        /* High surrogate: needs a \uDC00-\uDFFF right behind it.
+                           Checked left to right so a NUL stops the scan. */
+                        unsigned int lo = 0;
+                        if (read[1] == '\\' && read[2] == 'u' &&
+                            read[3] && read[4] && read[5] && read[6] &&
+                            json_hex4(read + 3, &lo) && lo >= 0xDC00 && lo <= 0xDFFF) {
+                            cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                            read += 6;  /* Consume the low half */
+                        } else {
+                            *write = '\0';
+                            return -1;  /* Lone high surrogate */
+                        }
+                    } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+                        *write = '\0';
+                        return -1;  /* Lone low surrogate */
                     }
-                    /* Non-ASCII \uXXXX silently dropped (accented chars, etc.).
-                     * Literal UTF-8 bytes in the JSON are preserved as-is.
-                     * Only affects clients that encode non-ASCII as \uXXXX escapes. */
+
+                    if (cp == 0) {
+                        *write = '\0';
+                        return -1;  /* \u0000 */
+                    }
+
+                    write += json_utf8_encode(cp, write);
                     break;
                 }
                 default:
-                    /* Unknown escape - keep backslash and char */
-                    *write++ = '\\';
-                    *write++ = *read;
-                    break;
+                    /* Not a JSON escape. No conforming encoder emits one, and
+                       keeping or dropping the backslash would both be a guess. */
+                    *write = '\0';
+                    return -1;
             }
             read++;
         } else {
@@ -62,6 +130,7 @@ void json_unescape(char *str) {
         }
     }
     *write = '\0';
+    return 0;
 }
 
 /*
@@ -171,10 +240,85 @@ char *json_get_string(const char *json, const char *key) {
     memcpy(value, value_start, len);
     value[len] = '\0';
 
-    /* Unescape JSON escape sequences */
-    json_unescape(value);
+    /* Unescape JSON escape sequences. An invalid escape rejects the whole value:
+       callers see the field as absent and answer 400, rather than acting on a
+       string the client did not send. */
+    if (json_unescape(value) != 0) {
+        /* The value may be a password: wipe before freeing */
+        volatile char *wipe = value;
+        for (size_t i = 0; i <= len; i++) wipe[i] = 0;
+        free(value);
+        return NULL;
+    }
 
     return value;
+}
+
+int json_escapes_valid(const char *json) {
+    if (!json) return 1;
+
+    const char *p = json;
+    while (*p) {
+        if (*p != '"') {
+            p++;
+            continue;
+        }
+
+        const char *start = p + 1;
+        const char *end = find_string_end(start);
+        if (!end) return 1;  /* Unterminated: not an escape problem; field reads fail on their own */
+
+        size_t len = (size_t)(end - start);
+        if (memchr(start, '\\', len)) {
+            char *copy = malloc(len + 1);
+            if (!copy) return 0;
+            memcpy(copy, start, len);
+            copy[len] = '\0';
+            int rc = json_unescape(copy);
+            volatile char *wipe = copy;  /* may be a password */
+            for (size_t i = 0; i <= len; i++) wipe[i] = 0;
+            free(copy);
+            if (rc != 0) return 0;
+        }
+        p = end + 1;
+    }
+    return 1;
+}
+
+int json_utf8_valid(const char *text, size_t len) {
+    const unsigned char *s = (const unsigned char *)text;
+    size_t i = 0;
+
+    while (i < len) {
+        unsigned char c = s[i];
+        if (c < 0x80) {
+            i++;
+            continue;
+        }
+
+        /* The lead byte fixes how many continuation bytes follow, and the range
+           the first of them may take: that range is what rules out overlong
+           forms (E0, F0), surrogates (ED) and anything past U+10FFFF (F4). */
+        size_t n;
+        unsigned char lo = 0x80, hi = 0xBF;
+        if (c >= 0xC2 && c <= 0xDF)      { n = 1; }
+        else if (c == 0xE0)              { n = 2; lo = 0xA0; }
+        else if (c >= 0xE1 && c <= 0xEC) { n = 2; }
+        else if (c == 0xED)              { n = 2; hi = 0x9F; }
+        else if (c >= 0xEE && c <= 0xEF) { n = 2; }
+        else if (c == 0xF0)              { n = 3; lo = 0x90; }
+        else if (c >= 0xF1 && c <= 0xF3) { n = 3; }
+        else if (c == 0xF4)              { n = 3; hi = 0x8F; }
+        else return 0;  /* 80..C1 and F5..FF never start a character */
+
+        if (len - i <= n) return 0;  /* truncated */
+        if (s[i + 1] < lo || s[i + 1] > hi) return 0;
+        for (size_t k = 2; k <= n; k++) {
+            if (s[i + k] < 0x80 || s[i + k] > 0xBF) return 0;
+        }
+        i += n + 1;
+    }
+    return 1;
 }
 
 int json_get_int(const char *json, const char *key, int *out_value) {

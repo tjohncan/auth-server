@@ -2,6 +2,13 @@
 
 HTTP endpoints for the OAuth2 authentication server.
 
+Any request body that is not form-encoded is checked for JSON string escapes before the
+endpoint runs. A body containing an escape that cannot be decoded (an escaped NUL, a lone
+UTF-16 surrogate, a malformed or unknown escape) is refused with
+`400 {"error": "Invalid JSON string escape"}`, whichever field carries it. A body that isn't
+well-formed UTF-8, as JSON has to be, is refused the same way, with
+`400 {"error": "Request body is not valid UTF-8"}`.
+
 ## Table of Contents
 
 1. [Admin API (Localhost-Only)](#admin-api-localhost-only)
@@ -41,6 +48,10 @@ All endpoints reject connections from non-localhost IPs with `403 Forbidden`.
 ### Security Model
 
 - **Access Control**: IP-based (localhost only)
+- **Behind a proxy on the same host**: a request counts as local when it comes from 127.0.0.1
+  or ::1 and carries neither `X-Real-IP` nor `X-Forwarded-For`. A proxy on the same machine
+  must add one of those to everything it forwards (the shipped nginx config sets `X-Real-IP`),
+  or every request it passes on looks local.
 - **Use Case**: Shell access to server host = trusted admin
 - **Transport**: HTTP acceptable (localhost loopback)
 - **Audience**: Server administrators via curl/scripts
@@ -106,6 +117,14 @@ Bootstrap the authentication system with initial organization and management UI.
 5. Client-Resource-Server link (management_ui can access management_api)
 6. User account with hashed password
 7. Organization admin privilege for user
+
+The management UI client is created with `require_mfa` off, and should stay that way: the
+console is where users enroll their first MFA method, and `/authorize` turns away a user
+with no enrolled method when the client requires MFA. For admin work, MFA follows each
+admin's own `require` setting: with it on, `/login` asks for the factor before the console
+loads; having a factor does not by itself demand it. A `require_mfa` set on the management
+client anyway applies when the console signs in through `/authorize`, not to admin API
+calls, which authenticate by session cookie.
 
 **Example**:
 ```bash
@@ -280,6 +299,9 @@ curl -X POST http://localhost:8080/api/admin/org-admins \
 
 Activate a user account. Idempotent — activating an already-active user succeeds silently without touching the row.
 
+Reactivation restores the account, not what deactivation closed: the user signs in again, and
+no earlier session, token or emailed link comes back.
+
 **Request Body**:
 ```json
 {
@@ -314,9 +336,18 @@ curl -X POST http://localhost:8080/api/admin/users/activate \
 
 ### POST /api/admin/users/deactivate
 
-Deactivate a user account. Idempotent — deactivating an already-inactive user succeeds silently without touching the row.
+Deactivate a user account. Idempotent — deactivating an already-inactive user succeeds, and closes anything the account still has open.
 
-Deactivated users cannot log in or create new sessions. Existing tokens are not revoked but will fail introspection and session checks (is_active is evaluated at use time).
+Deactivated users cannot log in or create new sessions. Deactivation also closes the user's sessions, revokes their refresh and access tokens, and voids any password-reset, passwordless-login or invitation link still outstanding, so reactivating the account later brings none of them back: whoever held them has to sign in again. A resource server that validates access tokens locally against `/.well-known/jwks.json` cannot see deactivation or revocation, because a self-contained token carries no liveness state, and will keep accepting one until its `exp`. Resource servers that need deactivation to take effect immediately should use `POST /introspect`.
+
+Deactivation doesn't change the password, and a deactivated account can't have it changed: no
+reset link can be requested or used, and nobody can sign in to change it. So whoever knows the
+password can sign in again once the account is reactivated. After a compromise, the order today
+is: deactivate; reset MFA if a factor was stolen; reactivate when the user is ready; the user
+signs in at once, changes the password and enrolls a factor. Someone holding the old password
+can still get in between reactivation and that change. What would close that window is a way to
+set a new password while the account is still deactivated, through an emailed link or one the
+operator hands over; that doesn't exist yet.
 
 **Request Body**:
 ```json
@@ -344,6 +375,50 @@ Deactivated users cannot log in or create new sessions. Existing tokens are not 
 **Example**:
 ```bash
 curl -X POST http://localhost:8080/api/admin/users/deactivate \
+  -H "Content-Type: application/json" \
+  -d '{"user_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"}'
+```
+
+---
+
+### POST /api/admin/users/reset-mfa
+
+Reset a user's MFA, for someone who has lost every factor and every recovery code. All of the
+user's MFA methods are removed, confirmed or not; their recovery codes are revoked; and `require`
+is turned off. They then sign in with their password and enroll a new factor, as the first time.
+Resetting a user who has no MFA succeeds; a setup they started and never confirmed is removed too.
+
+This is the one way past a user's second factor, and the next factor is enrolled with the
+password alone, so confirm who is asking before running it. The password and existing sessions
+are left alone. A factor stolen rather than lost usually means the password went with it: deactivate
+the user too, and follow the recovery order under `POST /api/admin/users/deactivate`.
+
+**Request Body**:
+```json
+{
+  "user_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"
+}
+```
+
+| Field   | Type   | Required | Description           |
+|---------|--------|----------|-----------------------|
+| user_id | string | Yes      | 32-character hex UUID |
+
+**Success Response** (200 OK):
+```json
+{
+  "message": "MFA reset"
+}
+```
+
+**Error Responses**:
+- **400** — missing or invalid user_id
+- **403** — not from localhost
+- **404** — user not found
+
+**Example**:
+```bash
+curl -X POST http://localhost:8080/api/admin/users/reset-mfa \
   -H "Content-Type: application/json" \
   -d '{"user_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"}'
 ```
@@ -399,9 +474,13 @@ Authenticated endpoints for organization administrators
     to manage resources, clients, and configurations. 
     Requires valid session cookie from `/login`.
 
-**Authentication**: Session cookie (user must be org admin)
+**Authentication**: Session cookie (user must be org admin; MFA must be completed if the user requires it)
 **Use Case**: Management UI operations
 **Access Control**: User must have org-admin role for the organization being managed
+
+A session that still owes MFA gets `403 {"error": "MFA verification required"}`, as on
+`/api/user`, even when the request also carries org-key headers; any other authentication
+failure gets `401`.
 
 ### Organizations
 
@@ -419,6 +498,10 @@ Update organization properties.
 
 Query: `id` (required) - Organization UUID
 Body: `display_name`, `note`, `is_active` (all optional)
+
+Deactivating an organization stops its clients getting tokens, and from then on their
+outstanding access tokens fail introspection and `/userinfo`. A resource server that only
+checks tokens against JWKS keeps accepting them until `exp`.
 
 ### Resource Servers
 
@@ -441,6 +524,10 @@ Update resource server.
 Query: `id` (required)
 Body: `display_name`, `address`, `note`, `is_active`, `allow_user_provisioning` (all optional)
 
+Deactivating a resource server stops tokens being issued for it, and from then on its
+outstanding access tokens fail introspection and `/userinfo`. If the server itself only
+checks tokens against JWKS, it keeps accepting them until `exp`.
+
 ### Clients
 
 **GET /api/admin/clients**
@@ -460,11 +547,19 @@ Body: `organization_id`, `code_name`, `display_name`, `client_type`, `grant_type
     `maximum_session_seconds` (enforced at `/authorize` — sessions older than this are rejected),
     `secret_rotation_seconds` (enforced at authentication — client keys older than this are rejected)
 
+`access_token_ttl_seconds` may not exceed the server's `max_access_token_ttl_seconds`
+(default 59 days); a larger value is refused with `400`. A client stored with a larger value
+before the limit existed gets tokens issued at the limit, and `expires_in` reports it.
+
 **PUT /api/admin/clients**
 Update client configuration.
 
 Query: `id` (required)
 Body: `display_name`, `note`, TTL/MFA settings, `is_active` (all optional)
+
+`access_token_ttl_seconds` has the same limit as on create. The console's edit form sends the
+stored TTL back with every change, so a client stored over the limit can't be edited there
+until its TTL is lowered.
 
 ### Client Redirect URIs
 
@@ -478,10 +573,14 @@ Add redirect URI to client.
 
 Body: `client_id`, `redirect_uri`, `note` (required except note)
 
+Returns `404` if the client doesn't exist or isn't in an organization the caller administers.
+
 **DELETE /api/admin/client-redirect-uris**
 Remove redirect URI from client.
 
 Query: `client_id`, `redirect_uri` (both required)
+
+Returns `404` if the client has no such redirect URI, or isn't the caller's.
 
 ### Client-Resource-Server Links
 
@@ -505,10 +604,15 @@ Link client to resource server (grant access).
 
 Body: `client_id`, `resource_server_id` (both required)
 
+Linking a pair that is already linked succeeds. Returns `404` if either side doesn't exist,
+they are in different organizations, or the caller doesn't administer them.
+
 **DELETE /api/admin/client-resource-servers**
 Unlink client from resource server.
 
 Query: `client_id`, `resource_server_id` (both required)
+
+Returns `404` if there is no such link, or the client isn't the caller's.
 
 ### Resource Server Keys
 
@@ -541,10 +645,13 @@ Response (user-provided secret):
 }
 ```
 
+Returns `404` if the resource server doesn't exist or isn't in an organization the caller
+administers; no key is created and no secret is returned.
+
 **GET /api/admin/resource-server-keys**
 List resource server API keys.
 
-Query: `resource_server_id` (required), `limit` (default 100, max 1000), `offset` (default 0), 
+Query: `resource_server_id` (required), `limit` (default 20, max 100), `offset` (default 0), 
     `is_active` (optional boolean filter)
 
 Returns: `keys` array with `id`, `key_id`, `is_active`, `generated_at`, `note` (never returns secret/salt/hash)
@@ -553,6 +660,9 @@ Returns: `keys` array with `id`, `key_id`, `is_active`, `generated_at`, `note` (
 Revoke (soft delete) resource server API key.
 
 Query: `id` (required) - Key UUID
+
+Returns `404` if the key doesn't exist, isn't in an organization the caller administers,
+or is already revoked. Success means an active key was revoked by this call.
 
 ### Client Keys
 
@@ -569,10 +679,13 @@ Body:
 Response: Same format as resource server keys (with generated secret shown once, 
     or confirmation message for user-provided)
 
+Returns `409` if the client doesn't exist, isn't the caller's, or isn't confidential; no key
+is created and no secret is returned.
+
 **GET /api/admin/client-keys**
 List client API keys.
 
-Query: `client_id` (required), `limit`, `offset`, `is_active`
+Query: `client_id` (required), `limit` (default 20, max 100), `offset` (default 0), `is_active`
 
 Returns: Same format as resource server keys list
 
@@ -580,6 +693,8 @@ Returns: Same format as resource server keys list
 Revoke (soft delete) client API key.
 
 Query: `id` (required) - Key UUID
+
+Same `404` semantics as resource server key revocation.
 
 ---
 
@@ -640,7 +755,9 @@ Revoke (soft delete) organization API key.
 
 Query: `id` (required) - Key UUID
 
-Note: Self-revocation allowed (key can revoke itself).
+Note: Self-revocation allowed (key can revoke itself). Revoking an already-revoked key succeeds.
+An unknown `id` returns `404` to a localhost caller; an org-key caller gets `403`, as for
+another organization's key, so the endpoint doesn't reveal which keys exist.
 
 ---
 
@@ -715,7 +832,7 @@ Or with email (requires `EMAIL_SUPPORT`):
 **Success Response — no MFA** (200 OK):
 ```http
 HTTP/1.1 200 OK
-Set-Cookie: session=<token>; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=604800
+Set-Cookie: __Host-session=<token>; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=604800
 Content-Type: application/json
 
 {"message": "Login successful"}
@@ -724,7 +841,7 @@ Content-Type: application/json
 **Success Response — user requires MFA** (200 OK):
 ```http
 HTTP/1.1 200 OK
-Set-Cookie: session=<token>; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=604800
+Set-Cookie: __Host-session=<token>; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=604800
 Content-Type: application/json
 
 {
@@ -1206,6 +1323,7 @@ resource_server_secret=<resource_server_secret>
   - Invalid tokens
   - Expired tokens
   - Revoked tokens
+  - Tokens whose user, client, resource server or client's organization has been deactivated
   - Tokens not belonging to the authenticated resource server
   - Authentication failures
 - This prevents information disclosure per RFC 7662
@@ -1227,7 +1345,7 @@ OpenID Connect UserInfo endpoint (OIDC Core Section 5.3). Returns claims about t
 
 **Security**: Bearer token authentication. The access token (ES256 JWT) must be provided in the Authorization header. The token is verified against the server's current (and prior) signing keys.
 
-Signature and expiry are verified from the JWT itself, but a self-contained token cannot carry revocation state — so the token record is also consulted. A token revoked via `POST /revoke`, auto-revoked by replay-chain revocation, or belonging to a client that has since been deactivated, is rejected here immediately rather than remaining usable until `exp`. This applies the same liveness predicate as `POST /introspect`.
+Signature and expiry are verified from the JWT itself, but a self-contained token cannot carry revocation state — so the token record is also consulted. A token revoked via `POST /revoke`, auto-revoked by replay-chain revocation, or whose user, client, resource server or client's organization has since been deactivated, is rejected here immediately rather than remaining usable until `exp`. This applies the same liveness predicate as `POST /introspect`.
 
 **Request**:
 ```http
@@ -1316,7 +1434,7 @@ Get current user's profile information.
 **Example**:
 ```bash
 curl http://localhost:8080/api/user/profile \
-  -H "Cookie: session=<session_token>"
+  -H "Cookie: __Host-session=<session_token>"
 ```
 
 ---
@@ -1390,15 +1508,15 @@ Get current user's email addresses with pagination support.
 ```bash
 # Get first 50 emails (default)
 curl http://localhost:8080/api/user/emails \
-  -H "Cookie: session=<session_token>"
+  -H "Cookie: __Host-session=<session_token>"
 
 # Get first 10 emails
 curl "http://localhost:8080/api/user/emails?limit=10" \
-  -H "Cookie: session=<session_token>"
+  -H "Cookie: __Host-session=<session_token>"
 
 # Get next page (emails 10-19)
 curl "http://localhost:8080/api/user/emails?limit=10&offset=10" \
-  -H "Cookie: session=<session_token>"
+  -H "Cookie: __Host-session=<session_token>"
 ```
 
 ---
@@ -1407,7 +1525,7 @@ curl "http://localhost:8080/api/user/emails?limit=10&offset=10" \
 
 Add an email address to the current user's account.
 
-**Authentication**: Session cookie required (MFA must be completed if enrolled)
+**Authentication**: Session cookie required (MFA must be completed if the user requires it)
 
 **Request Body**:
 ```json
@@ -1464,7 +1582,7 @@ Add an email address to the current user's account.
 **Example**:
 ```bash
 curl -X POST http://localhost:8080/api/user/emails \
-  -H "Cookie: session=<session_token>" \
+  -H "Cookie: __Host-session=<session_token>" \
   -H "Content-Type: application/json" \
   -d '{"email": "alice.work@company.com"}'
 ```
@@ -1475,7 +1593,7 @@ curl -X POST http://localhost:8080/api/user/emails \
 
 Remove an email address from the current user's account.
 
-**Authentication**: Session cookie required (MFA must be completed if enrolled)
+**Authentication**: Session cookie required (MFA must be completed if the user requires it)
 
 **Request Body**:
 ```json
@@ -1518,7 +1636,7 @@ Remove an email address from the current user's account.
 **Example**:
 ```bash
 curl -X DELETE http://localhost:8080/api/user/emails \
-  -H "Cookie: session=<session_token>" \
+  -H "Cookie: __Host-session=<session_token>" \
   -H "Content-Type: application/json" \
   -d '{"email": "alice.work@company.com"}'
 ```
@@ -1529,7 +1647,7 @@ curl -X DELETE http://localhost:8080/api/user/emails \
 
 Set or clear the primary email for the current user.
 
-**Authentication**: Session cookie required (MFA must be completed if enrolled)
+**Authentication**: Session cookie required (MFA must be completed if the user requires it)
 
 **Request Body**:
 ```json
@@ -1573,7 +1691,7 @@ Set or clear the primary email for the current user.
 **Example**:
 ```bash
 curl -X POST http://localhost:8080/api/user/emails/set-primary \
-  -H "Cookie: session=<session_token>" \
+  -H "Cookie: __Host-session=<session_token>" \
   -H "Content-Type: application/json" \
   -d '{"email": "alice.work@company.com"}'
 ```
@@ -1632,7 +1750,7 @@ Change current user's password.
 **Example**:
 ```bash
 curl -X POST http://localhost:8080/api/user/password \
-  -H "Cookie: session=<session_token>" \
+  -H "Cookie: __Host-session=<session_token>" \
   -H "Content-Type: application/json" \
   -d '{
     "current_password": "OldPassword123!",
@@ -1694,7 +1812,7 @@ Change current user's username.
 **Example**:
 ```bash
 curl -X POST http://localhost:8080/api/user/username \
-  -H "Cookie: session=<session_token>" \
+  -H "Cookie: __Host-session=<session_token>" \
   -H "Content-Type: application/json" \
   -d '{"new_username": "alice_new"}'
 ```
@@ -1746,7 +1864,7 @@ Toggle passwordless login (login via emailed link) for current user. Requires `E
 **Example**:
 ```bash
 curl -X POST http://localhost:8080/api/user/passwordless-login \
-  -H "Cookie: session=<session_token>" \
+  -H "Cookie: __Host-session=<session_token>" \
   -H "Content-Type: application/json" \
   -d '{"enabled": true}'
 ```
@@ -1770,7 +1888,7 @@ Log out current user (close browser session).
 
 **Response Headers**:
 ```
-Set-Cookie: session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0
+Set-Cookie: __Host-session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0
 ```
 
 **Error Response** (401 Unauthorized):
@@ -1789,7 +1907,7 @@ Set-Cookie: session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0
 **Example**:
 ```bash
 curl -X POST http://localhost:8080/logout \
-  -H "Cookie: session=<session_token>"
+  -H "Cookie: __Host-session=<session_token>"
 ```
 
 ---
@@ -1832,7 +1950,7 @@ Get management UI client setups available to current user.
 **Example**:
 ```bash
 curl "http://localhost:8080/api/user/management-setups?callback_url=http%3A%2F%2Flocalhost%3A8080%2Fcallback&api_url=http%3A%2F%2Flocalhost%3A8080%2Fapi" \
-  -H "Cookie: session=<session_token>"
+  -H "Cookie: __Host-session=<session_token>"
 ```
 
 ---
@@ -1856,7 +1974,7 @@ are automatically cleaned up (squatter cleanup).
 
 Request a verification email for one of the current user's email addresses.
 
-**Authentication**: Session cookie required (MFA must be completed if enrolled)
+**Authentication**: Session cookie required (MFA must be completed if the user requires it)
 
 **Request Body**:
 ```json
@@ -1907,7 +2025,7 @@ Request a verification email for one of the current user's email addresses.
 **Example**:
 ```bash
 curl -X POST http://localhost:8080/email-verification-token \
-  -H "Cookie: session=<session_token>" \
+  -H "Cookie: __Host-session=<session_token>" \
   -H "Content-Type: application/json" \
   -d '{"email": "alice@example.com"}'
 ```
@@ -2238,7 +2356,7 @@ Consume a passwordless login token and create a session.
 | token | string | Yes      | Passwordless login token |
 
 **Success Response** (303 See Other):
-- Sets `session` cookie (HttpOnly, Secure, SameSite=Lax)
+- Sets `__Host-session` cookie (HttpOnly, Secure, SameSite=Lax)
 - Redirects to `/authorize?{return_to}` if return_to was stored, otherwise `/`
 
 **Behavior**:
@@ -2250,6 +2368,13 @@ Consume a passwordless login token and create a session.
 **Error Response** (400 Bad Request):
 
 Returns an HTML page stating the link is invalid, expired, or already used.
+
+**Error Response** (403 Forbidden):
+
+The browser reported the form as posted from another site: a `Sec-Fetch-Site` other than
+`same-origin`, or, from a browser too old to send that, an `Origin` that doesn't match `Host`.
+Another site could otherwise post its own token and sign the visitor into its account. The
+token is left unused.
 
 **Notes**:
 - This endpoint is submitted by the confirmation page's form — not called directly via API
@@ -2314,6 +2439,16 @@ All endpoints require a valid session cookie.
 **Authentication**: Session cookie required
 **Method IDs**: 32-character lowercase hex strings (16-byte UUID without hyphens)
 
+**Managing factors requires the factor you already have.** Once a user has a confirmed
+method, TOTP setup/confirm, method deletion, recovery-code regeneration and the
+`require` toggle all return `403 {"error": "MFA verification required"}` until the
+session has completed MFA (`/verify` or `/recover`), whether or not `require_mfa` is on.
+Several of these end in a factor the session could then present, so without this a
+password alone would satisfy a client's `require_mfa`. A user with no confirmed method
+is not gated, since there is nothing to prove yet. Confirming a method marks the current
+session MFA-completed. `/verify`, `/recover` and `GET /methods` are never gated; the MFA
+step itself runs on them.
+
 ---
 
 ### POST /api/user/mfa/totp/setup
@@ -2350,7 +2485,7 @@ The method is unconfirmed until `POST /api/user/mfa/totp/confirm` succeeds.
 **Example**:
 ```bash
 curl -X POST http://localhost:8080/api/user/mfa/totp/setup \
-  -H "Cookie: session=<token>" \
+  -H "Cookie: __Host-session=<token>" \
   -H "Content-Type: application/json" \
   -d '{"display_name": "My Phone"}'
 ```
@@ -2484,7 +2619,7 @@ List all MFA methods (confirmed and pending) for the authenticated user.
 **Example**:
 ```bash
 curl http://localhost:8080/api/user/mfa/methods \
-  -H "Cookie: session=<token>"
+  -H "Cookie: __Host-session=<token>"
 ```
 
 ---
@@ -2503,7 +2638,7 @@ Delete an MFA method. The `id` query parameter is the 32-char hex method UUID.
 **Example**:
 ```bash
 curl -X DELETE "http://localhost:8080/api/user/mfa/methods?id=a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4" \
-  -H "Cookie: session=<token>"
+  -H "Cookie: __Host-session=<token>"
 ```
 
 ---
@@ -2513,7 +2648,8 @@ curl -X DELETE "http://localhost:8080/api/user/mfa/methods?id=a1b2c3d4e5f6a1b2c3
 Regenerate recovery codes. Atomically revokes the existing set and creates a new one. 
 Requires at least one confirmed MFA method.
 
-**Request Body**: None required.
+**Request Body**: None required, but send `Content-Type: application/json`: any other type
+gets `415`, which keeps a plain HTML form from triggering this.
 
 **Success Response** (200 OK):
 ```json
@@ -2532,7 +2668,8 @@ Requires at least one confirmed MFA method.
 **Example**:
 ```bash
 curl -X POST http://localhost:8080/api/user/mfa/recovery-codes/regenerate \
-  -H "Cookie: session=<token>"
+  -H "Content-Type: application/json" \
+  -H "Cookie: __Host-session=<token>"
 ```
 
 ---
@@ -2566,13 +2703,13 @@ or
 ```bash
 # Enable MFA requirement
 curl -X POST http://localhost:8080/api/user/mfa/require \
-  -H "Cookie: session=<token>" \
+  -H "Cookie: __Host-session=<token>" \
   -H "Content-Type: application/json" \
   -d '{"enabled": true}'
 
 # Disable MFA requirement
 curl -X POST http://localhost:8080/api/user/mfa/require \
-  -H "Cookie: session=<token>" \
+  -H "Cookie: __Host-session=<token>" \
   -H "Content-Type: application/json" \
   -d '{"enabled": false}'
 ```

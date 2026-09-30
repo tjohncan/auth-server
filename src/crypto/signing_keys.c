@@ -4,6 +4,7 @@
 
 #include "crypto/signing_keys.h"
 #include "crypto/random.h"
+#include "crypto/encrypt.h"
 #include "db/db.h"
 #include "db/db_sql.h"
 #include "util/log.h"
@@ -189,21 +190,100 @@ cleanup:
 }
 
 /* ============================================================================
+ * Encryption at rest
+ * ============================================================================
+ *
+ * The HMAC secrets and ES256 private keys are stored encrypted with the same
+ * AES-256-GCM field encryption as usernames, emails and MFA secrets. Public keys
+ * stay plaintext: they are published at /.well-known/jwks.json anyway.
+ *
+ * Stored form: "e1:" + encrypt_field() output. The prefix cannot occur in either
+ * plaintext form (base64url for HMAC secrets, "-----BEGIN" for PEM) or in
+ * encrypt_field's own base64url output, so a stored value is unambiguous, and a
+ * later format can take "e2:" without guessing.
+ *
+ * A value that will not open fails every operation that needs the key; nothing is
+ * regenerated. The two ways to get there are a row in the older plaintext format,
+ * fixed by deleting the rows, and an encryption_key that differs from the one that
+ * stored the row, fixed by restoring that key, which sign-in needs too. The log
+ * messages say which.
+ *
+ * Plaintext is refused rather than read, or sealed in place, so that there is one
+ * stored format and no upgrade path to maintain. The refusal is hygiene, not a
+ * defence against someone who can write the database: a sealed value is not bound
+ * to its column, so any value sealed under the same key opens here.
+ */
+
+#define SIGNING_KEY_SEALED_PREFIX     "e1:"
+#define SIGNING_KEY_SEALED_PREFIX_LEN 3
+#define SIGNING_KEY_SEALED_MAX        512  /* prefix + base64url(12 + 256 + 16) + NUL */
+
+static int seal_key_material(const char *plaintext, char *out, size_t out_size) {
+    if (out_size <= SIGNING_KEY_SEALED_PREFIX_LEN) {
+        return -1;
+    }
+    memcpy(out, SIGNING_KEY_SEALED_PREFIX, SIGNING_KEY_SEALED_PREFIX_LEN);
+    if (encrypt_field(plaintext, out + SIGNING_KEY_SEALED_PREFIX_LEN,
+                      out_size - SIGNING_KEY_SEALED_PREFIX_LEN) != 0) {
+        log_error("Failed to encrypt signing key material");
+        OPENSSL_cleanse(out, out_size);
+        return -1;
+    }
+    return 0;
+}
+
+/* Returns a heap copy of the plaintext (caller cleanses and frees), or NULL. */
+static char *open_key_material(const char *stored, const char *table, const char *column) {
+    if (strncmp(stored, SIGNING_KEY_SEALED_PREFIX, SIGNING_KEY_SEALED_PREFIX_LEN) != 0) {
+        log_error("Signing key %s.%s is stored unencrypted (written by a build before signing "
+                  "keys were encrypted). Token issuance, /userinfo and JWKS will fail until it "
+                  "is removed: delete the rows in %s and %s; new keys are generated on next use.",
+                  table, column, TBL_ACCESS_TOKEN_SIGNING, TBL_AUTH_REQUEST_SIGNING);
+        return NULL;
+    }
+
+    char plaintext[ENCRYPT_FIELD_MAX_LENGTH + 1];
+    if (decrypt_field(stored + SIGNING_KEY_SEALED_PREFIX_LEN, plaintext, sizeof(plaintext)) != 0) {
+        log_error("Signing key %s.%s cannot be decrypted: encryption_key is not the one that "
+                  "stored it. Restore that key: until then token issuance, /userinfo and JWKS "
+                  "fail, and so does sign-in, which needs it too. Only if it is lost for good, "
+                  "delete the rows in %s and %s; new signing keys are generated on next use.",
+                  table, column, TBL_ACCESS_TOKEN_SIGNING, TBL_AUTH_REQUEST_SIGNING);
+        OPENSSL_cleanse(plaintext, sizeof(plaintext));
+        return NULL;
+    }
+
+    char *copy = str_dup(plaintext);
+    OPENSSL_cleanse(plaintext, sizeof(plaintext));
+    if (!copy) {
+        log_error("Failed to allocate memory for signing key material");
+    }
+    return copy;
+}
+
+/* ============================================================================
  * Database Operations
  * ============================================================================ */
 
 /*
- * Load key from database (returns NULL if not found, caller frees result)
+ * Load key from database
+ *
+ * Returns 0 with *out_key set, 1 if there is no row, -1 on error -- including a
+ * row whose key material will not open. That distinction is load-bearing: the
+ * caller treats "no row" as first run and generates a key, and an unreadable
+ * row must never be mistaken for that.
  *
  * out_current_ts / out_prior_ts receive the generated_at columns as raw text,
  * caller frees. They come from this statement rather than a separate read so
  * the timestamps and the key material can never describe different generations
  * of the row; see the per-worker cache below for why that matters. Either may
- * be NULL on return: prior_generated_at when the column is NULL, and both when
- * the row was not found or a copy could not be allocated.
+ * be NULL on success: prior_generated_at when the column is NULL, or when a
+ * copy could not be allocated.
  */
-static signing_key_t *load_key_from_db(db_handle_t *db, signing_key_type_t type,
-                                       char **out_current_ts, char **out_prior_ts) {
+static int load_key_from_db(db_handle_t *db, signing_key_type_t type,
+                            signing_key_t **out_key,
+                            char **out_current_ts, char **out_prior_ts) {
+    *out_key = NULL;
     *out_current_ts = NULL;
     *out_prior_ts = NULL;
 
@@ -226,13 +306,18 @@ static signing_key_t *load_key_from_db(db_handle_t *db, signing_key_type_t type,
     db_stmt_t *stmt = NULL;
     if (db_prepare(db, &stmt, sql) != 0) {
         log_error("Failed to prepare load key statement");
-        return NULL;
+        return -1;
     }
 
     int rc = db_step(stmt);
+    if (rc == DB_DONE) {
+        db_finalize(stmt);
+        return 1;  /* No row: first run */
+    }
     if (rc != DB_ROW) {
         db_finalize(stmt);
-        return NULL;  /* Not found (not an error) */
+        log_error("Failed to load signing key");
+        return -1;
     }
 
     /* Allocate key structure */
@@ -240,7 +325,7 @@ static signing_key_t *load_key_from_db(db_handle_t *db, signing_key_type_t type,
     if (!key) {
         log_error("Failed to allocate memory for signing key");
         db_finalize(stmt);
-        return NULL;
+        return -1;
     }
 
     key->type = type;
@@ -249,15 +334,17 @@ static signing_key_t *load_key_from_db(db_handle_t *db, signing_key_type_t type,
         /* HMAC keys */
         const char *current = (const char *)db_column_text(stmt, 0);
         const char *prior = (const char *)db_column_text(stmt, 1);
+        int has_prior = (prior && db_column_type(stmt, 1) != DB_NULL);
 
-        key->current_secret = current ? str_dup(current) : NULL;
-        key->prior_secret = (prior && db_column_type(stmt, 1) != DB_NULL) ? str_dup(prior) : NULL;
+        key->current_secret = current
+            ? open_key_material(current, table, "current_secret") : NULL;
+        key->prior_secret = has_prior
+            ? open_key_material(prior, table, "prior_secret") : NULL;
 
-        if (current && !key->current_secret) {
-            log_error("Failed to allocate memory for signing key secret");
+        if (!key->current_secret || (has_prior && !key->prior_secret)) {
             db_finalize(stmt);
             signing_key_free(key);
-            return NULL;
+            return -1;
         }
 
         const char *current_ts = (const char *)db_column_text(stmt, 2);
@@ -276,17 +363,25 @@ static signing_key_t *load_key_from_db(db_handle_t *db, signing_key_type_t type,
         const char *prior_priv = (const char *)db_column_text(stmt, 2);
         const char *prior_pub = (const char *)db_column_text(stmt, 3);
 
-        key->current_private_key = current_priv ? str_dup(current_priv) : NULL;
+        int has_prior_priv = (prior_priv && db_column_type(stmt, 2) != DB_NULL);
+
+        key->current_private_key = current_priv
+            ? open_key_material(current_priv, table, "current_private_key") : NULL;
+        key->prior_private_key = has_prior_priv
+            ? open_key_material(prior_priv, table, "prior_private_key") : NULL;
         key->current_public_key = current_pub ? str_dup(current_pub) : NULL;
-        key->prior_private_key = (prior_priv && db_column_type(stmt, 2) != DB_NULL) ? str_dup(prior_priv) : NULL;
         key->prior_public_key = (prior_pub && db_column_type(stmt, 3) != DB_NULL) ? str_dup(prior_pub) : NULL;
 
-        if ((current_priv && !key->current_private_key) ||
-            (current_pub && !key->current_public_key)) {
-            log_error("Failed to allocate memory for signing key pair");
+        if (!key->current_private_key || (has_prior_priv && !key->prior_private_key)) {
             db_finalize(stmt);
             signing_key_free(key);
-            return NULL;
+            return -1;
+        }
+        if (!key->current_public_key) {
+            log_error("Failed to load signing key pair (missing or unallocatable public key)");
+            db_finalize(stmt);
+            signing_key_free(key);
+            return -1;
         }
 
         const char *current_ts = (const char *)db_column_text(stmt, 4);
@@ -301,7 +396,8 @@ static signing_key_t *load_key_from_db(db_handle_t *db, signing_key_type_t type,
     }
 
     db_finalize(stmt);
-    return key;
+    *out_key = key;
+    return 0;
 }
 
 /*
@@ -316,6 +412,11 @@ static int insert_new_key(db_handle_t *db, signing_key_type_t type,
     char sql[1024];
     db_stmt_t *stmt = NULL;
 
+    char sealed[SIGNING_KEY_SEALED_MAX];
+    if (seal_key_material(secret_or_priv, sealed, sizeof(sealed)) != 0) {
+        return -1;
+    }
+
     if (type == SIGNING_KEY_AUTH_REQUEST) {
         snprintf(sql, sizeof(sql),
                  "INSERT INTO %s (singleton, current_secret, current_generated_at) "
@@ -323,10 +424,11 @@ static int insert_new_key(db_handle_t *db, signing_key_type_t type,
 
         if (db_prepare(db, &stmt, sql) != 0) {
             log_error("Failed to prepare insert HMAC key statement");
+            OPENSSL_cleanse(sealed, sizeof(sealed));
             return -1;
         }
 
-        db_bind_text(stmt, 1, secret_or_priv, -1);
+        db_bind_text(stmt, 1, sealed, -1);
     } else {
         snprintf(sql, sizeof(sql),
                  "INSERT INTO %s (singleton, current_private_key, current_public_key, "
@@ -334,15 +436,17 @@ static int insert_new_key(db_handle_t *db, signing_key_type_t type,
 
         if (db_prepare(db, &stmt, sql) != 0) {
             log_error("Failed to prepare insert ES256 key statement");
+            OPENSSL_cleanse(sealed, sizeof(sealed));
             return -1;
         }
 
-        db_bind_text(stmt, 1, secret_or_priv, -1);
+        db_bind_text(stmt, 1, sealed, -1);
         db_bind_text(stmt, 2, public_key, -1);
     }
 
     int rc = db_step(stmt);
     db_finalize(stmt);
+    OPENSSL_cleanse(sealed, sizeof(sealed));
 
     if (rc != DB_DONE) {
         log_error("Failed to insert new signing key");
@@ -357,15 +461,33 @@ static int insert_new_key(db_handle_t *db, signing_key_type_t type,
 /*
  * Rotate key (move current -> prior, insert new -> current)
  *
- * WHERE clause includes the old key value for optimistic concurrency:
- * if another worker already rotated, zero rows match and we harmlessly no-op.
+ * The prior columns are copied from the current ones inside the UPDATE, so the
+ * stored (encrypted) value moves as-is and is never re-bound from memory.
+ *
+ * Optimistic concurrency is keyed on current_generated_at, compared as the raw
+ * text load_key_from_db read: if another worker already rotated, that column has
+ * moved on, zero rows match, and this harmlessly no-ops. The key value itself
+ * cannot serve as the check for an encrypted column -- AES-GCM with a random IV
+ * never reproduces the stored ciphertext. The timestamp is the same invariant the
+ * per-worker cache relies on (it strictly increases across every write this file
+ * performs).
  */
 static int rotate_key(db_handle_t *db, signing_key_type_t type,
                       const char *new_secret_or_priv, const char *new_public_key,
-                      const char *old_secret_or_priv, const char *old_public_key) {
+                      const char *old_generated_at) {
     const char *table = (type == SIGNING_KEY_AUTH_REQUEST)
                         ? TBL_AUTH_REQUEST_SIGNING
                         : TBL_ACCESS_TOKEN_SIGNING;
+
+    if (!old_generated_at) {
+        log_error("Cannot rotate signing key without its current generated_at");
+        return -1;
+    }
+
+    char sealed[SIGNING_KEY_SEALED_MAX];
+    if (seal_key_material(new_secret_or_priv, sealed, sizeof(sealed)) != 0) {
+        return -1;
+    }
 
     char sql[1024];
     db_stmt_t *stmt = NULL;
@@ -373,47 +495,49 @@ static int rotate_key(db_handle_t *db, signing_key_type_t type,
     if (type == SIGNING_KEY_AUTH_REQUEST) {
         snprintf(sql, sizeof(sql),
                  "UPDATE %s SET "
-                 "prior_secret = " P"1, "
+                 "prior_secret = current_secret, "
                  "prior_generated_at = current_generated_at, "
-                 "current_secret = " P"2, "
+                 "current_secret = " P"1, "
                  "current_generated_at = " NOW " "
                  "WHERE singleton = " BOOL_TRUE " "
-                 "AND current_secret = " P"1 "
+                 "AND current_generated_at = " P"2 "
                  "RETURNING singleton", table);
 
         if (db_prepare(db, &stmt, sql) != 0) {
             log_error("Failed to prepare rotate HMAC key statement");
+            OPENSSL_cleanse(sealed, sizeof(sealed));
             return -1;
         }
 
-        db_bind_text(stmt, 1, old_secret_or_priv, -1);
-        db_bind_text(stmt, 2, new_secret_or_priv, -1);
+        db_bind_text(stmt, 1, sealed, -1);
+        db_bind_text(stmt, 2, old_generated_at, -1);
     } else {
         snprintf(sql, sizeof(sql),
                  "UPDATE %s SET "
-                 "prior_private_key = " P"1, "
-                 "prior_public_key = " P"2, "
+                 "prior_private_key = current_private_key, "
+                 "prior_public_key = current_public_key, "
                  "prior_generated_at = current_generated_at, "
-                 "current_private_key = " P"3, "
-                 "current_public_key = " P"4, "
+                 "current_private_key = " P"1, "
+                 "current_public_key = " P"2, "
                  "current_generated_at = " NOW " "
                  "WHERE singleton = " BOOL_TRUE " "
-                 "AND current_private_key = " P"1 "
+                 "AND current_generated_at = " P"3 "
                  "RETURNING singleton", table);
 
         if (db_prepare(db, &stmt, sql) != 0) {
             log_error("Failed to prepare rotate ES256 key statement");
+            OPENSSL_cleanse(sealed, sizeof(sealed));
             return -1;
         }
 
-        db_bind_text(stmt, 1, old_secret_or_priv, -1);
-        db_bind_text(stmt, 2, old_public_key, -1);
-        db_bind_text(stmt, 3, new_secret_or_priv, -1);
-        db_bind_text(stmt, 4, new_public_key, -1);
+        db_bind_text(stmt, 1, sealed, -1);
+        db_bind_text(stmt, 2, new_public_key, -1);
+        db_bind_text(stmt, 3, old_generated_at, -1);
     }
 
     int rc = db_step(stmt);
     db_finalize(stmt);
+    OPENSSL_cleanse(sealed, sizeof(sealed));
 
     if (rc == DB_ROW) {
         log_info("Rotated %s signing key",
@@ -430,11 +554,12 @@ static int rotate_key(db_handle_t *db, signing_key_type_t type,
  * Per-worker key cache
  * ============================================================================
  *
- * signing_key_get_or_rotate() used to open BEGIN IMMEDIATE — the database-wide
- * write lock on SQLite — on every call, because it might rotate. It almost
- * never does: once per 24 hours for auth-request keys, once per 60 days for
- * access-token keys. Every other call declared write intent in order to run a
- * SELECT, which is the one thing WAL mode exists to make unnecessary.
+ * signing_key_get_or_rotate() might rotate, and rotation needs BEGIN IMMEDIATE,
+ * the database-wide write lock on SQLite. It almost never does rotate: once per
+ * 24 hours for auth-request keys, once per 60 days for access-token keys. Taking
+ * that lock on every call would declare write intent in order to run a SELECT,
+ * which is the one thing WAL mode exists to make unnecessary. So the lock is
+ * taken only on a cache miss.
  *
  * The cache below is validated against the database on every single use rather
  * than trusted for an interval. It holds the generated_at columns as raw text;
@@ -644,12 +769,19 @@ int signing_key_get_or_rotate(db_handle_t *db, signing_key_type_t type,
         return -1;
     }
 
-    /* Load existing key */
+    /* Load existing key. An unreadable row is an error, never "first run":
+       generating over it would silently replace the deployment's key. */
     char *current_ts = NULL;
     char *prior_ts = NULL;
-    signing_key_t *key = load_key_from_db(db, type, &current_ts, &prior_ts);
+    signing_key_t *key = NULL;
+    int load_rc = load_key_from_db(db, type, &key, &current_ts, &prior_ts);
 
-    if (!key) {
+    if (load_rc < 0) {
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    if (load_rc == 1) {
         /* First run: no key exists, generate and insert */
         log_info("No %s key found, generating initial key",
                  type == SIGNING_KEY_AUTH_REQUEST ? "auth_request_signing" : "access_token_signing");
@@ -692,8 +824,7 @@ int signing_key_get_or_rotate(db_handle_t *db, signing_key_type_t type,
         free(public_key);
 
         /* Reload from DB to get timestamp */
-        key = load_key_from_db(db, type, &current_ts, &prior_ts);
-        if (!key) {
+        if (load_key_from_db(db, type, &key, &current_ts, &prior_ts) != 0) {
             log_error("Failed to reload newly inserted key");
             return -1;
         }
@@ -707,11 +838,9 @@ int signing_key_get_or_rotate(db_handle_t *db, signing_key_type_t type,
     time_t age = now - key->current_generated_at;
 
     if (age >= rotation_interval) {
-        /* The row is about to be replaced, so its timestamps are dead from here.
-           Releasing them now leaves every error path below unchanged. */
-        free(current_ts);
+        /* The row is about to be replaced. current_ts is kept only as rotate_key's
+           concurrency check and released below; prior_ts is dead already. */
         free(prior_ts);
-        current_ts = NULL;
         prior_ts = NULL;
 
         /* Rotation needed */
@@ -724,37 +853,25 @@ int signing_key_get_or_rotate(db_handle_t *db, signing_key_type_t type,
 
         if (type == SIGNING_KEY_AUTH_REQUEST) {
             new_secret_or_priv = generate_hmac_secret();
-            if (!new_secret_or_priv) {
-                signing_key_free(key);
-                db_execute_trusted(db, "ROLLBACK");
-                return -1;
-            }
-
-            if (rotate_key(db, type, new_secret_or_priv, NULL,
-                          key->current_secret, NULL) != 0) {
-                OPENSSL_cleanse(new_secret_or_priv, strlen(new_secret_or_priv));
-                free(new_secret_or_priv);
-                signing_key_free(key);
-                db_execute_trusted(db, "ROLLBACK");
-                return -1;
-            }
-        } else {
-            if (generate_es256_keypair(&new_secret_or_priv, &new_public_key) != 0) {
-                signing_key_free(key);
-                db_execute_trusted(db, "ROLLBACK");
-                return -1;
-            }
-
-            if (rotate_key(db, type, new_secret_or_priv, new_public_key,
-                          key->current_private_key, key->current_public_key) != 0) {
-                OPENSSL_cleanse(new_secret_or_priv, strlen(new_secret_or_priv));
-                free(new_secret_or_priv);
-                free(new_public_key);
-                signing_key_free(key);
-                db_execute_trusted(db, "ROLLBACK");
-                return -1;
-            }
+        } else if (generate_es256_keypair(&new_secret_or_priv, &new_public_key) != 0) {
+            new_secret_or_priv = NULL;
         }
+
+        if (!new_secret_or_priv ||
+            rotate_key(db, type, new_secret_or_priv, new_public_key, current_ts) != 0) {
+            if (new_secret_or_priv) {
+                OPENSSL_cleanse(new_secret_or_priv, strlen(new_secret_or_priv));
+            }
+            free(new_secret_or_priv);
+            free(new_public_key);
+            free(current_ts);
+            signing_key_free(key);
+            db_execute_trusted(db, "ROLLBACK");
+            return -1;
+        }
+
+        free(current_ts);
+        current_ts = NULL;
 
         /* Commit and reload */
         if (db_execute_trusted(db, "COMMIT") != 0) {
@@ -771,8 +888,8 @@ int signing_key_get_or_rotate(db_handle_t *db, signing_key_type_t type,
         free(new_public_key);
 
         signing_key_free(key);
-        key = load_key_from_db(db, type, &current_ts, &prior_ts);
-        if (!key) {
+        key = NULL;
+        if (load_key_from_db(db, type, &key, &current_ts, &prior_ts) != 0) {
             log_error("Failed to reload rotated key");
             return -1;
         }

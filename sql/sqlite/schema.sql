@@ -782,4 +782,30 @@ create index idx_recovery_code_cleanup
 create index idx_recovery_code_set_cleanup
   on recovery_code_set(is_active, revoked_at);
 
+-- ============================================================================
+-- INDEXES - Finding a user's or a client's rows
+-- ============================================================================
+-- Deactivating a user closes their sessions and revokes their tokens and
+-- emailed links, finding the rows by user, and none of these tables was indexed
+-- that way, so each of those updates read the whole table. (user, client) also
+-- serves a user's rows for one client, and (client, resource server) a client's
+-- access tokens for one resource server: the lookups revoking on unlink needs.
+-- password_reset_token and passwordless_login_token are already covered by
+-- their rate-limit indexes, which lead with the user.
+
+create index idx_browser_user
+  on browser(user_account_pin);
+
+create index idx_refresh_token_user_client
+  on refresh_token(user_account_pin, client_pin);
+
+create index idx_access_token_user_client
+  on access_token(user_account_pin, client_pin);
+
+create index idx_access_token_client_resource_server
+  on access_token(client_pin, resource_server_pin);
+
+create index idx_invitation_token_user
+  on invitation_token(user_account_pin);
+
 commit;

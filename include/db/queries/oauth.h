@@ -111,8 +111,50 @@ typedef struct {
     int authentication_complete;    /* 1 if auth complete, 0 otherwise */
     int mfa_completed;              /* 1 if MFA done, 0 otherwise */
     int user_requires_mfa;          /* 1 if user opted in to enforce MFA (preference flag) */
+    int user_has_mfa;               /* 1 if user has at least one confirmed MFA method */
     time_t started_at;              /* Session creation time (Unix epoch) */
 } oauth_session_info_t;
+
+/*
+ * Must this session prove a factor before it may manage factors?
+ *
+ * Gates TOTP setup/confirm, method deletion, recovery-code regeneration and the
+ * require toggle. Keyed on ENROLLMENT, not on the require_mfa preference: several
+ * of those endpoints end in a factor the session can then present (fresh recovery
+ * codes, a newly enrolled authenticator), so gating them on the preference would
+ * let a password-only session satisfy a client's require_mfa for any user who has
+ * enrolled but not opted in. require_mfa implies has_mfa (schema CHECK), so this
+ * covers both.
+ *
+ * A user with no factor yet is not gated: first enrollment is open to whoever
+ * holds the password, by necessity — see "Deliberate Tradeoffs" in README.md.
+ *
+ * This is one of TWO MFA rules in the handlers:
+ *   - Managing factors (this function, used in mfa_http.c): gated on
+ *     ENROLLMENT. Anyone who has a factor proves it before touching factors.
+ *   - The user's own /api/user endpoints (session_http.c
+ *     require_authenticated_session): gated on the require_mfa PREFERENCE.
+ *     MFA is optional until the user, or a client at /authorize, requires it,
+ *     and enrolling must not lock a user out of their own profile.
+ * Those two differ deliberately; unifying them either way changes behavior.
+ *
+ * The cookie leg of the /api/admin endpoints (admin_org_http.c
+ * get_authenticated_user_pin) applies the preference rule as well, and that is
+ * policy: MFA guards admin work for an admin who has turned on require, and
+ * having a factor does not by itself demand it. For such an admin, /login asks
+ * for the factor before the console loads, and a session that skipped that step
+ * gets 403 "MFA verification required" from the admin API, as from /api/user,
+ * which the console turns into the MFA step.
+ *
+ * The management UI client's own require_mfa stays off, for a separate reason:
+ * the console is where a first factor gets enrolled, and a client that requires
+ * MFA turns away users who have none. A require_mfa set on that client anyway is
+ * enforced by /authorize when the console signs in, not by the admin API, which
+ * authenticates by cookie and never learns which client the console came through.
+ */
+static inline int oauth_session_mfa_pending(const oauth_session_info_t *session) {
+    return session->user_has_mfa && !session->mfa_completed;
+}
 
 /*
  * Look up browser session by session token
@@ -438,11 +480,13 @@ int oauth_introspect_token(db_handle_t *db,
  * Check whether an access token is still active
  *
  * Access tokens are self-contained ES256 JWTs, so signature and expiry can be
- * verified offline. Two things cannot be: revocation, and the liveness of the
- * issuing client — both live in the database. Endpoints that accept a Bearer
- * token (e.g. GET /userinfo) must consult this to honor POST /revoke,
- * replay-chain revocation, and client deactivation; otherwise a revoked token,
- * or a token belonging to a deactivated client, keeps working until exp.
+ * verified offline. Two things cannot be: revocation, and whether the token's
+ * client, its user, its resource server and the client's organization are still
+ * active — both live in the database. Endpoints that accept a Bearer token
+ * (e.g. GET /userinfo) must consult this to honor POST /revoke, replay-chain
+ * revocation and deactivation; otherwise a revoked token, or one whose client,
+ * user, resource server or organization has been deactivated, keeps working
+ * until exp.
  *
  * Applies the same liveness predicate as oauth_introspect_token(), but takes no
  * resource_server_pin — it answers only "is this token still valid at all", not
@@ -452,8 +496,7 @@ int oauth_introspect_token(db_handle_t *db,
  *   db    - Database handle
  *   token - Access token string (hashed internally for lookup)
  *
- * Returns: 1 if active, 0 if revoked/expired/unknown/client-deactivated,
- *          -1 on error
+ * Returns: 1 if active, 0 if revoked/expired/unknown/deactivated, -1 on error
  */
 int oauth_access_token_is_active(db_handle_t *db, const char *token);
 

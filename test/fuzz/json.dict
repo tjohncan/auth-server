@@ -1,0 +1,51 @@
+# libFuzzer dictionary for the JSON request-body helpers (src/util/json.c).
+#
+# The harness hands the fuzzer's bytes in as a request body, so these are the
+# tokens the escape decoder, the UTF-8 check and the field readers pivot on.
+# Pass with: -dict=test/fuzz/json.dict
+#
+# Format: "literal", with \xNN escapes. A backslash is written \x5c throughout,
+# so no editor or tool along the way turns an escape into the character it names.
+
+# --- Structure --------------------------------------------------------------
+obj_open="{"
+obj_close="}"
+quote="\""
+colon=":"
+comma=","
+
+# --- Keys handlers read -----------------------------------------------------
+k_username="\"username\":\""
+k_password="\"password\":\""
+k_email="\"email\":\""
+k_note="\"note\":\""
+k_enabled="\"enabled\":"
+k_limit="\"limit\":"
+v_true="true"
+v_false="false"
+v_null="null"
+num_edge="-2147483649"
+
+# --- Escapes: the ones decoded, and the ones refused ------------------------
+esc_quote="\x5c\""
+esc_backslash="\x5c\x5c"
+esc_slash="\x5c/"
+esc_n="\x5cn"
+esc_u="\x5cu"
+esc_u_e9="\x5cu00e9"
+esc_u_nul="\x5cu0000"
+esc_high="\x5cud83d"
+esc_low="\x5cude00"
+esc_lone_low="\x5cudc00"
+esc_unknown="\x5cq"
+
+# --- Raw bytes: well-formed, and each kind of ill-formed --------------------
+utf8_2="\xc3\xa9"
+utf8_3="\xe2\x82\xac"
+utf8_4="\xf0\x9f\x98\x80"
+utf8_max="\xf4\x8f\xbf\xbf"
+bad_continuation="\x80"
+bad_overlong="\xc0\x80"
+bad_surrogate="\xed\xa0\x80"
+bad_past_max="\xf4\x90\x80\x80"
+bad_lead="\xff"

@@ -14,6 +14,7 @@ RUN apk add --no-cache \
     gcc \
     musl-dev \
     make \
+    openssl \
     openssl-dev \
     argon2-dev \
     linux-headers \
@@ -27,6 +28,10 @@ COPY Makefile ./
 COPY src/ ./src/
 COPY include/ ./include/
 COPY vendor/ ./vendor/
+
+# vendor/ comes from the build context, fetched however the builder chose; check
+# the amalgamation against SQLite's published hash before compiling it.
+RUN if [ "$DB_BACKEND" = "sqlite" ]; then sh vendor/verify-sqlite.sh; fi
 
 RUN make clean && make DB_BACKEND=${DB_BACKEND} EMAIL_SUPPORT=${EMAIL_SUPPORT}
 
