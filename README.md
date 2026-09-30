@@ -630,10 +630,11 @@ localhost-only), which returns them to this starting point: confirm who is askin
 A password change rotates the credential and nothing else; live sessions and refresh chains
 survive it. Compromise recovery has stronger, explicit paths here — account deactivation
 (localhost-only), which closes every session and revokes every token and emailed link, and
-token revocation —
-and password change isn't asked to carry that weight.
+token revocation — and password change isn't asked to carry that weight.
 Mass invalidation is a cost paid by every user on every routine rotation, in order to evict an
-attacker who, in the case that actually matters, already knows the new password.
+attacker who, in the case that actually matters, already knows the new password. Deactivation
+evicts but leaves the password as it was; the API reference gives the order for handing the
+account back.
 
 **Defaults are permissive; policy is the deployer's.**
 The shipped `encryption_key` is a public placeholder and `password_min_length` is 1. The server

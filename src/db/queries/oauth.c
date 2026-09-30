@@ -1374,16 +1374,18 @@ int oauth_introspect_token(db_handle_t *db,
         "AND at.resource_server_pin = " P"2 "
         "AND at.is_revoked = " BOOL_FALSE " "
         "AND c.is_active = " BOOL_TRUE " "
-        /* Deactivating the client's organization revokes nothing either, and nor
-           does deactivating the resource server. A deactivated organization's or
-           resource server's credentials can't authenticate to ask, but this query
-           doesn't lean on that: oauth_access_token_is_active applies the same
-           predicate with no caller to authenticate. */
+        /* Deactivating a client, its organization or a resource server revokes
+           nothing, so each is read here. A deactivated organization's or resource
+           server's credentials can't authenticate to ask, but this query doesn't
+           lean on that: oauth_access_token_is_active applies the same predicate
+           with no caller to authenticate. */
         "AND o.is_active = " BOOL_TRUE " "
         "AND rs.is_active = " BOOL_TRUE " "
-        /* Deactivation is the documented compromise-recovery path, and it revokes
-           nothing, so the account's state has to be read here. NULL user = a
-           client_credentials token, which has no account to be deactivated. */
+        /* Deactivating a user does revoke their tokens (user_set_active), but the
+           account is read here too: a token issued while that deactivation was
+           running escapes the sweep, and so does anything an account deactivated
+           before the sweep existed still holds. NULL user = a client_credentials
+           token, which has no account to be deactivated. */
         "AND (at.user_account_pin IS NULL OR ua.is_active = " BOOL_TRUE ") "
         "AND (at.expected_expiry IS NULL OR at.expected_expiry > " NOW ") "
         "LIMIT 1";

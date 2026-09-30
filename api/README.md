@@ -340,6 +340,13 @@ Deactivate a user account. Idempotent — deactivating an already-inactive user 
 
 Deactivated users cannot log in or create new sessions. Deactivation also closes the user's sessions, revokes their refresh and access tokens, and voids any password-reset, passwordless-login or invitation link still outstanding, so reactivating the account later brings none of them back: whoever held them has to sign in again. A resource server that validates access tokens locally against `/.well-known/jwks.json` cannot see deactivation or revocation, because a self-contained token carries no liveness state, and will keep accepting one until its `exp`. Resource servers that need deactivation to take effect immediately should use `POST /introspect`.
 
+Deactivation doesn't change the password, and a deactivated account can't have it changed: no
+reset link can be requested or used, and nobody can sign in to change it. So whoever knows the
+password can sign in again once the account is reactivated. After a compromise, the order today
+is: deactivate; reset MFA if a factor was stolen; reactivate when the user is ready; the user
+signs in at once, changes the password and enrolls a factor. Someone holding the old password
+can still get in between reactivation and that change.
+
 **Request Body**:
 ```json
 {
@@ -381,7 +388,8 @@ Resetting a user who has no MFA succeeds; a setup they started and never confirm
 
 This is the one way past a user's second factor, and the next factor is enrolled with the
 password alone, so confirm who is asking before running it. The password and existing sessions
-are left alone: if the factor was stolen rather than lost, deactivate the user instead.
+are left alone. A factor stolen rather than lost usually means the password went with it: deactivate
+the user too, and follow the recovery order under `POST /api/admin/users/deactivate`.
 
 **Request Body**:
 ```json

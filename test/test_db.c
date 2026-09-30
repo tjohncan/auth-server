@@ -770,12 +770,14 @@ done:
 /*
  * Token liveness after account deactivation.
  *
- * api/README says a deactivated user's tokens "will fail introspection" —
- * deactivation revokes nothing, so the check has to happen at use time, in every
- * liveness query. Pins both of them, and that a client_credentials token (no
- * user row) is not collateral damage of the user predicate. Deactivating the
- * client's organization, or the token's resource server, is read the same way,
- * for both kinds of token.
+ * user_set_active revokes a user's tokens (test_deactivation_revokes), but every
+ * liveness query also reads is_active at use time, for the tokens that sweep
+ * misses: one issued while the deactivation was running, or anything an account
+ * deactivated before the sweep existed still holds. So this flips is_active
+ * directly, as such an account was left, and pins the use-time check in both
+ * queries, and that a client_credentials token (no user row) is not collateral
+ * damage of it. Deactivating the client's organization, or the token's resource
+ * server, revokes nothing and is read the same way, for both kinds of token.
  *
  * Returns 0 on success.
  */
