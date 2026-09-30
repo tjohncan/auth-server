@@ -345,7 +345,9 @@ reset link can be requested or used, and nobody can sign in to change it. So who
 password can sign in again once the account is reactivated. After a compromise, the order today
 is: deactivate; reset MFA if a factor was stolen; reactivate when the user is ready; the user
 signs in at once, changes the password and enrolls a factor. Someone holding the old password
-can still get in between reactivation and that change.
+can still get in between reactivation and that change. What would close that window is a way to
+set a new password while the account is still deactivated, through an emailed link or one the
+operator hands over; that doesn't exist yet.
 
 **Request Body**:
 ```json
