@@ -920,10 +920,11 @@ done:
  *
  * The use-time checks read is_active, so an account that is only flagged
  * inactive gets every session and token back when it is reactivated: an
- * attacker's included, MFA-complete sessions and all. user_set_active must close
- * the sessions and revoke the refresh and access tokens when it deactivates,
- * leave another user's alone, and sweep an account an older build flagged
- * inactive without revoking anything.
+ * attacker's included, MFA-complete sessions and all, and every emailed link
+ * still in date. user_set_active must close the sessions, revoke the refresh and
+ * access tokens and void the password-reset, passwordless-login and invitation
+ * links when it deactivates, leave another user's alone, and sweep an account an
+ * older build flagged inactive without revoking anything.
  *
  * Returns 0 on success.
  */
@@ -950,11 +951,17 @@ static int test_deactivation_revokes(const config_t *config) {
         {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x05},
     };
 
-    /* Each user gets an MFA-complete session, a refresh token and an access token */
+    /* Each user gets an MFA-complete session, a refresh token and an access token,
+       and a password-reset, a passwordless-login and an invitation link. The
+       emailed links are rows with a known token hash, which is all their
+       redeem functions look at besides the account. */
     const char *sessions[] = { "revoke-session-1", "revoke-session-2" };
     const char *codes[]    = { "revoke-code-1", "revoke-code-2" };
     const char *refresh[]  = { "revoke-refresh-1", "revoke-refresh-2" };
     const char *access[]   = { "revoke-access-1", "revoke-access-2" };
+    const char *resets[]   = { "revoke-reset-1", "revoke-reset-2" };
+    const char *pwless[]   = { "revoke-pwless-1", "revoke-pwless-2" };
+    char invites[2][64];
     for (int u = 0; u < 2; u++) {
         unsigned char id[16], code_id[16];
         if (oauth_session_create(sdb, u + 1, user_ids[u], sessions[u], "password",
@@ -969,10 +976,34 @@ static int test_deactivation_revokes(const config_t *config) {
             log_error("Revocation: could not create sessions and tokens");
             goto done;
         }
+
+        char reset_hash[SHA256_HEX_LENGTH], pwless_hash[SHA256_HEX_LENGTH], sql[1024];
+        if (crypto_sha256_hex(resets[u], strlen(resets[u]), reset_hash, sizeof(reset_hash)) != 0 ||
+            crypto_sha256_hex(pwless[u], strlen(pwless[u]), pwless_hash, sizeof(pwless_hash)) != 0) {
+            log_error("Revocation: could not hash the emailed-link tokens");
+            goto done;
+        }
+        snprintf(sql, sizeof(sql),
+            "UPDATE user_account SET allow_passwordless_login = 1 WHERE pin = %d;"
+            "INSERT INTO password_reset_token (id, user_account_pin, token, issued_at, expected_expiry) "
+            "  VALUES (randomblob(16), %d, '%s', datetime('now'), datetime('now', '+1 hour'));"
+            "INSERT INTO passwordless_login_token "
+            "  (id, user_account_pin, email_address, token, issued_at, expected_expiry) "
+            "  VALUES (randomblob(16), %d, 'not-read', '%s', datetime('now'), "
+            "          datetime('now', '+10 minutes'));",
+            u + 1, u + 1, reset_hash, u + 1, pwless_hash);
+        if (db_execute_direct(sdb, sql) != 0 ||
+            user_create_invitation_token(sdb, u + 1, 0, 3600, NULL, invites[u]) != 0) {
+            log_error("Revocation: could not create the emailed links");
+            goto done;
+        }
     }
 
     oauth_session_info_t session;
     char revoked[8];
+    long long link_pin;
+    unsigned char link_id[16];
+    char return_to[64];
 
     /* 1. Deactivate user 1, then reactivate: none of theirs comes back */
     if (user_set_active(sdb, user_ids[0], 0) != 0 ||
@@ -993,7 +1024,20 @@ static int test_deactivation_revokes(const config_t *config) {
         log_error("Revocation: the access token came back with the account");
         goto done;
     }
-    log_info("  deactivated then reactivated: session, refresh and access token stay dead (OK)");
+    if (user_consume_password_reset_token(sdb, resets[0], "a-new-password") != 1) {
+        log_error("Revocation: the password-reset link came back with the account");
+        goto done;
+    }
+    if (user_consume_passwordless_login_token(sdb, pwless[0], &link_pin, link_id,
+                                               return_to, sizeof(return_to)) != 1) {
+        log_error("Revocation: the passwordless-login link came back with the account");
+        goto done;
+    }
+    if (user_consume_invitation_token(sdb, invites[0], "a-new-password") != 1) {
+        log_error("Revocation: the invitation link came back with the account");
+        goto done;
+    }
+    log_info("  deactivated then reactivated: session, tokens and emailed links stay dead (OK)");
 
     /* 2. User 2's are untouched */
     if (oauth_session_get_by_token(sdb, sessions[1], &session) != 0 ||
@@ -1003,7 +1047,18 @@ static int test_deactivation_revokes(const config_t *config) {
         log_error("Revocation: another user's session or tokens were touched");
         goto done;
     }
-    log_info("  another user's session and tokens untouched (OK)");
+    if (read_stored_value(sdb,
+            "SELECT (SELECT COUNT(*) FROM password_reset_token "
+            "        WHERE user_account_pin = 2 AND is_revoked = 0 AND is_used = 0)"
+            "     + (SELECT COUNT(*) FROM passwordless_login_token "
+            "        WHERE user_account_pin = 2 AND is_used = 0)"
+            "     + (SELECT COUNT(*) FROM invitation_token "
+            "        WHERE user_account_pin = 2 AND is_used = 0)",
+            revoked, sizeof(revoked)) != 0 || strcmp(revoked, "3") != 0) {
+        log_error("Revocation: another user's emailed links were touched");
+        goto done;
+    }
+    log_info("  another user's session, tokens and emailed links untouched (OK)");
 
     /* 3. User 2 flagged inactive the old way, everything still open: deactivating
        again sweeps it, so reactivating brings nothing back */
@@ -1016,7 +1071,11 @@ static int test_deactivation_revokes(const config_t *config) {
     if (oauth_session_get_by_token(sdb, sessions[1], &session) == 0 ||
         read_stored_value(sdb, "SELECT is_revoked FROM refresh_token WHERE user_account_pin = 2",
                           revoked, sizeof(revoked)) != 0 || strcmp(revoked, "1") != 0 ||
-        oauth_access_token_is_active(sdb, access[1]) != 0) {
+        oauth_access_token_is_active(sdb, access[1]) != 0 ||
+        user_consume_password_reset_token(sdb, resets[1], "a-new-password") != 1 ||
+        user_consume_passwordless_login_token(sdb, pwless[1], &link_pin, link_id,
+                                              return_to, sizeof(return_to)) != 1 ||
+        user_consume_invitation_token(sdb, invites[1], "a-new-password") != 1) {
         log_error("Revocation: deactivating an already-inactive account left something open");
         goto done;
     }

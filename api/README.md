@@ -300,7 +300,7 @@ curl -X POST http://localhost:8080/api/admin/org-admins \
 Activate a user account. Idempotent — activating an already-active user succeeds silently without touching the row.
 
 Reactivation restores the account, not what deactivation closed: the user signs in again, and
-no earlier session or token comes back.
+no earlier session, token or emailed link comes back.
 
 **Request Body**:
 ```json
@@ -338,7 +338,7 @@ curl -X POST http://localhost:8080/api/admin/users/activate \
 
 Deactivate a user account. Idempotent — deactivating an already-inactive user succeeds, and closes anything the account still has open.
 
-Deactivated users cannot log in or create new sessions. Deactivation also closes the user's sessions and revokes their refresh and access tokens, so reactivating the account later brings none of them back: whoever held them has to sign in again. A resource server that validates access tokens locally against `/.well-known/jwks.json` cannot see deactivation or revocation, because a self-contained token carries no liveness state, and will keep accepting one until its `exp`. Resource servers that need deactivation to take effect immediately should use `POST /introspect`.
+Deactivated users cannot log in or create new sessions. Deactivation also closes the user's sessions, revokes their refresh and access tokens, and voids any password-reset, passwordless-login or invitation link still outstanding, so reactivating the account later brings none of them back: whoever held them has to sign in again. A resource server that validates access tokens locally against `/.well-known/jwks.json` cannot see deactivation or revocation, because a self-contained token carries no liveness state, and will keep accepting one until its `exp`. Resource servers that need deactivation to take effect immediately should use `POST /introspect`.
 
 **Request Body**:
 ```json

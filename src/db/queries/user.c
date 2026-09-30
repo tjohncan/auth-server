@@ -3298,9 +3298,11 @@ int user_set_active(db_handle_t *db, const unsigned char *user_id, int active) {
     /* Deactivation is the compromise lever, and the flag alone doesn't pull it:
      * every use-time check reads is_active, so reactivating would bring back
      * every session and token the account still held, an attacker's included,
-     * MFA-complete sessions and all. So deactivating also closes the sessions
-     * and revokes the refresh and access tokens. It does so on every call, which
-     * sweeps up whatever an account deactivated by an older build still holds. */
+     * MFA-complete sessions and all, and every emailed link still in date. So
+     * deactivating also closes the sessions, revokes the refresh and access
+     * tokens, and voids outstanding password-reset, passwordless-login and
+     * invitation links. It does so on every call, which sweeps up whatever an
+     * account deactivated by an older build still holds. */
     if (!val) {
         const char *revoke_steps[] = {
             "UPDATE " TBL_BROWSER " "
@@ -3314,6 +3316,20 @@ int user_set_active(db_handle_t *db, const unsigned char *user_id, int active) {
             "UPDATE " TBL_ACCESS_TOKEN " "
             "SET is_revoked = " BOOL_TRUE ", revoked_at = " NOW ", updated_at = " NOW " "
             "WHERE user_account_pin = " P"1 AND is_revoked = " BOOL_FALSE,
+
+            "UPDATE " TBL_PASSWORD_RESET_TOKEN " "
+            "SET is_revoked = " BOOL_TRUE ", revoked_at = " NOW ", updated_at = " NOW " "
+            "WHERE user_account_pin = " P"1 AND is_used = " BOOL_FALSE
+            " AND is_revoked = " BOOL_FALSE,
+
+            /* These two have no revoked flag; marking them used is what refuses them */
+            "UPDATE " TBL_PASSWORDLESS_LOGIN_TOKEN " "
+            "SET is_used = " BOOL_TRUE ", used_at = " NOW ", updated_at = " NOW " "
+            "WHERE user_account_pin = " P"1 AND is_used = " BOOL_FALSE,
+
+            "UPDATE " TBL_INVITATION_TOKEN " "
+            "SET is_used = " BOOL_TRUE ", used_at = " NOW ", updated_at = " NOW " "
+            "WHERE user_account_pin = " P"1 AND is_used = " BOOL_FALSE,
         };
 
         for (size_t i = 0; i < sizeof(revoke_steps) / sizeof(revoke_steps[0]); i++) {

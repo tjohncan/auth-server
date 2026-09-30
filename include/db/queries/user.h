@@ -632,10 +632,11 @@ int user_get_by_id(db_handle_t *db, const unsigned char *user_id,
 /*
  * Set user active/inactive
  *
- * Deactivating also closes the user's browser sessions and revokes their
- * refresh and access tokens, in the same transaction, so reactivating later
- * brings none of them back. It does that on every call, already inactive or
- * not. Activating an active user is a no-op.
+ * Deactivating also closes the user's browser sessions, revokes their refresh
+ * and access tokens, and voids their outstanding password-reset,
+ * passwordless-login and invitation links, in the same transaction, so
+ * reactivating later brings none of them back. It does that on every call,
+ * already inactive or not. Activating an active user is a no-op.
  * active: 1 = active, 0 = inactive
  *
  * Returns: 0 success, 1 not found, -1 on error
