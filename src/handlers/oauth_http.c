@@ -217,8 +217,7 @@ static HttpResponse *authenticate_token_client(db_handle_t *db,
  *   400 Bad Request / 401 Unauthorized
  *   {"error":"invalid_grant","error_description":"..."}
  */
-HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *token_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/x-www-form-urlencoded");
     if (ct_err) return ct_err;
 
@@ -611,8 +610,7 @@ static int build_error_redirect(const char *redirect_uri,
  *   400 Bad Request
  *   {"error":"invalid_request","error_description":"..."}
  */
-HttpResponse *authorize_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *authorize_handler(const HttpRequest *req) {
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -1064,9 +1062,8 @@ static int ec_public_key_to_jwk(const char *pem_public_key,
  *     ]
  *   }
  */
-HttpResponse *jwks_handler(const HttpRequest *req, const RouteParams *params) {
+HttpResponse *jwks_handler(const HttpRequest *req) {
     (void)req;
-    (void)params;
 
     /* Serve from thread-local cache if fresh */
     time_t now = time(NULL);
@@ -1202,8 +1199,7 @@ HttpResponse *jwks_handler(const HttpRequest *req, const RouteParams *params) {
  *   200 OK (always, even if token is invalid or already revoked)
  *   Per RFC 7009: prevents information disclosure to unauthorized parties
  */
-HttpResponse *revoke_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *revoke_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/x-www-form-urlencoded");
     if (ct_err) return ct_err;
 
@@ -1330,8 +1326,7 @@ HttpResponse *revoke_handler(const HttpRequest *req, const RouteParams *params) 
  * Response (inactive token):
  *   {"active": false}
  */
-HttpResponse *introspect_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *introspect_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/x-www-form-urlencoded");
     if (ct_err) return ct_err;
 
@@ -1513,8 +1508,7 @@ HttpResponse *introspect_handler(const HttpRequest *req, const RouteParams *para
  * Response (error):
  *   401 Unauthorized (missing/invalid/expired token)
  */
-HttpResponse *userinfo_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *userinfo_handler(const HttpRequest *req) {
 
     /* Extract Bearer token from Authorization header */
     const char *auth_header = http_request_get_header(req, "Authorization");

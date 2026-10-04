@@ -74,8 +74,8 @@ Core HTTP server infrastructure.
 - **Event Loop** (`event_loop.c`, `include/server/event_loop.h`) - Multi-threaded epoll network layer. 
     Each worker runs independent epoll instance with kernel-level load balancing via SO_REUSEPORT.
 - **HTTP** (`http.c`, `include/server/http.h`) - Zero-copy parser and response builder. HTTP/1.0 implementation.
-- **Router** (`router.c`, `include/server/router.h`) - Hash table-based routing (FNV-1a, O(1) lookup). 
-    Path parameters disabled by default.
+- **Router** (`router.c`, `include/server/router.h`) - Hash table-based routing (FNV-1a, O(1) lookup)
+    on exact paths; identifiers travel in the query string or the body.
 
 ### Database Layer (`src/db/`)
 Database abstraction supporting SQLite and PostgreSQL.

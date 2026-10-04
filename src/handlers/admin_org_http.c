@@ -222,8 +222,7 @@ static HttpResponse *require_auth_context(const HttpRequest *req, const char *op
  * Query params (single mode):
  *   id - Organization UUID (hex)
  */
-HttpResponse *admin_get_organizations_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_get_organizations_handler(const HttpRequest *req) {
 
     /* Dual authentication: session OR org key */
     auth_context_t ctx;
@@ -329,8 +328,7 @@ HttpResponse *admin_get_organizations_handler(const HttpRequest *req, const Rout
  *   note         - New note
  *   is_active    - New active status (boolean)
  */
-HttpResponse *admin_update_organization_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_update_organization_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -430,8 +428,7 @@ cleanup:
  * Query params (single mode):
  *   id - Resource server UUID (hex)
  */
-HttpResponse *admin_get_resource_servers_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_get_resource_servers_handler(const HttpRequest *req) {
 
     /* Dual authentication: session OR org key */
     auth_context_t ctx;
@@ -555,8 +552,7 @@ HttpResponse *admin_get_resource_servers_handler(const HttpRequest *req, const R
  *   address        - API base URL (required)
  *   note           - Description (optional)
  */
-HttpResponse *admin_create_resource_server_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_create_resource_server_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -652,8 +648,7 @@ cleanup:
  *   note         - New note
  *   is_active    - New active status
  */
-HttpResponse *admin_update_resource_server_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_update_resource_server_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -751,8 +746,7 @@ cleanup:
  * Query params (list): organization_id, limit, offset, is_active
  * Query params (single): id
  */
-HttpResponse *admin_get_clients_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_get_clients_handler(const HttpRequest *req) {
 
     auth_context_t ctx;
     HttpResponse *auth_err = require_auth_context(req, "get_clients", &ctx);
@@ -883,8 +877,7 @@ HttpResponse *admin_get_clients_handler(const HttpRequest *req, const RouteParam
  *       note, require_mfa, access_token_ttl_seconds, issue_refresh_tokens,
  *       refresh_token_ttl_seconds, maximum_session_seconds, secret_rotation_seconds
  */
-HttpResponse *admin_create_client_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_create_client_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -989,8 +982,7 @@ cleanup:
  *       issue_refresh_tokens, refresh_token_ttl_seconds, maximum_session_seconds,
  *       secret_rotation_seconds, is_active
  */
-HttpResponse *admin_update_client_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_update_client_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -1090,8 +1082,7 @@ cleanup:
  * GET /api/admin/client-redirect-uris
  * Query: client_id, limit, offset
  */
-HttpResponse *admin_get_client_redirect_uris_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_get_client_redirect_uris_handler(const HttpRequest *req) {
 
     auth_context_t ctx;
     HttpResponse *auth_err = require_auth_context(req, "get_redirect_uris", &ctx);
@@ -1150,8 +1141,7 @@ HttpResponse *admin_get_client_redirect_uris_handler(const HttpRequest *req, con
  * POST /api/admin/client-redirect-uris
  * Body: client_id, redirect_uri, note
  */
-HttpResponse *admin_create_client_redirect_uri_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_create_client_redirect_uri_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -1215,8 +1205,7 @@ HttpResponse *admin_create_client_redirect_uri_handler(const HttpRequest *req, c
  * DELETE /api/admin/client-redirect-uris
  * Query: client_id, redirect_uri
  */
-HttpResponse *admin_delete_client_redirect_uri_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_delete_client_redirect_uri_handler(const HttpRequest *req) {
 
     auth_context_t ctx;
     HttpResponse *auth_err = require_auth_context(req, "delete_redirect_uri", &ctx);
@@ -1280,8 +1269,7 @@ HttpResponse *admin_delete_client_redirect_uri_handler(const HttpRequest *req, c
  * GET /api/admin/client-resource-servers
  * Query: client_id, limit, offset
  */
-HttpResponse *admin_get_client_resource_servers_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_get_client_resource_servers_handler(const HttpRequest *req) {
 
     auth_context_t ctx;
     HttpResponse *auth_err = require_auth_context(req, "get_client_resource_servers", &ctx);
@@ -1346,8 +1334,7 @@ HttpResponse *admin_get_client_resource_servers_handler(const HttpRequest *req, 
  * GET /api/admin/resource-server-clients
  * Query: resource_server_id, limit, offset
  */
-HttpResponse *admin_get_resource_server_clients_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_get_resource_server_clients_handler(const HttpRequest *req) {
 
     auth_context_t ctx;
     HttpResponse *auth_err = require_auth_context(req, "get_resource_server_clients", &ctx);
@@ -1410,8 +1397,7 @@ HttpResponse *admin_get_resource_server_clients_handler(const HttpRequest *req, 
  * POST /api/admin/client-resource-servers
  * Body: client_id, resource_server_id
  */
-HttpResponse *admin_create_client_resource_server_link_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_create_client_resource_server_link_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -1460,8 +1446,7 @@ HttpResponse *admin_create_client_resource_server_link_handler(const HttpRequest
  * DELETE /api/admin/client-resource-servers
  * Query: client_id, resource_server_id
  */
-HttpResponse *admin_delete_client_resource_server_link_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_delete_client_resource_server_link_handler(const HttpRequest *req) {
 
     auth_context_t ctx;
     HttpResponse *auth_err = require_auth_context(req, "unlink_client_resource_server", &ctx);
@@ -1524,8 +1509,7 @@ HttpResponse *admin_delete_client_resource_server_link_handler(const HttpRequest
  * Response (user-provided secret):
  *   { "id": "uuid", "key_id": "uuid", "message": "Key created successfully" }
  */
-HttpResponse *admin_create_resource_server_key_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_create_resource_server_key_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -1644,8 +1628,7 @@ HttpResponse *admin_create_resource_server_key_handler(const HttpRequest *req, c
  *   offset            - Skip N results (default 0)
  *   is_active         - Filter by active status (optional)
  */
-HttpResponse *admin_get_resource_server_keys_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_get_resource_server_keys_handler(const HttpRequest *req) {
 
     auth_context_t ctx;
     HttpResponse *auth_err = require_auth_context(req, "get_resource_server_keys", &ctx);
@@ -1725,8 +1708,7 @@ HttpResponse *admin_get_resource_server_keys_handler(const HttpRequest *req, con
  * Query params:
  *   id - Key UUID (hex, required)
  */
-HttpResponse *admin_delete_resource_server_key_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_delete_resource_server_key_handler(const HttpRequest *req) {
 
     auth_context_t ctx;
     HttpResponse *auth_err = require_auth_context(req, "delete_resource_server_key", &ctx);
@@ -1785,8 +1767,7 @@ HttpResponse *admin_delete_resource_server_key_handler(const HttpRequest *req, c
  * Response (user-provided secret):
  *   { "id": "uuid", "key_id": "uuid", "message": "Key created successfully" }
  */
-HttpResponse *admin_create_client_key_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_create_client_key_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -1893,8 +1874,7 @@ cleanup:
  *   offset    - Skip N results (default 0)
  *   is_active - Filter by active status (optional)
  */
-HttpResponse *admin_get_client_keys_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_get_client_keys_handler(const HttpRequest *req) {
 
     auth_context_t ctx;
     HttpResponse *auth_err = require_auth_context(req, "get_client_keys", &ctx);
@@ -1974,8 +1954,7 @@ HttpResponse *admin_get_client_keys_handler(const HttpRequest *req, const RouteP
  * Query params:
  *   id - Key UUID (hex, required)
  */
-HttpResponse *admin_delete_client_key_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_delete_client_key_handler(const HttpRequest *req) {
 
     auth_context_t ctx;
     HttpResponse *auth_err = require_auth_context(req, "delete_client_key", &ctx);

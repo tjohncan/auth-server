@@ -55,8 +55,7 @@ static int is_localhost(const HttpRequest *req) {
  * POST /api/admin/bootstrap
  * ========================================================================== */
 
-HttpResponse *admin_bootstrap_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_bootstrap_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -171,8 +170,7 @@ cleanup:
  * POST /api/admin/organizations
  * ========================================================================== */
 
-HttpResponse *admin_create_organization_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_create_organization_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -252,8 +250,7 @@ cleanup:
  * POST /api/admin/users
  * ========================================================================== */
 
-HttpResponse *admin_create_user_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_create_user_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -343,8 +340,7 @@ cleanup:
  * POST /api/admin/org-admins
  * ========================================================================== */
 
-HttpResponse *admin_make_org_admin_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_make_org_admin_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -423,8 +419,7 @@ cleanup:
  * GET /api/admin/list-all-organizations
  * ========================================================================== */
 
-HttpResponse *admin_list_all_organizations_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_list_all_organizations_handler(const HttpRequest *req) {
 
     /* Localhost validation */
     if (!is_localhost(req)) {
@@ -488,8 +483,7 @@ HttpResponse *admin_list_all_organizations_handler(const HttpRequest *req, const
  * POST /api/admin/organization-keys
  * ========================================================================== */
 
-HttpResponse *admin_create_organization_key_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_create_organization_key_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -596,8 +590,7 @@ cleanup:
  * GET /api/admin/organization-keys
  * ========================================================================== */
 
-HttpResponse *admin_list_organization_keys_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_list_organization_keys_handler(const HttpRequest *req) {
 
     /* Get database connection first (needed for both auth methods) */
     db_handle_t *db = db_pool_get_connection();
@@ -708,8 +701,7 @@ HttpResponse *admin_list_organization_keys_handler(const HttpRequest *req, const
  * DELETE /api/admin/organization-keys
  * ========================================================================== */
 
-HttpResponse *admin_revoke_organization_key_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_revoke_organization_key_handler(const HttpRequest *req) {
 
     /* Get database connection first (needed for both auth methods) */
     db_handle_t *db = db_pool_get_connection();
@@ -825,15 +817,11 @@ static HttpResponse *set_user_active(const HttpRequest *req, int active) {
         : "{\"message\":\"User deactivated\"}");
 }
 
-HttpResponse *server_activate_user_handler(const HttpRequest *req,
-                                            const RouteParams *params) {
-    (void)params;
+HttpResponse *server_activate_user_handler(const HttpRequest *req) {
     return set_user_active(req, 1);
 }
 
-HttpResponse *server_deactivate_user_handler(const HttpRequest *req,
-                                              const RouteParams *params) {
-    (void)params;
+HttpResponse *server_deactivate_user_handler(const HttpRequest *req) {
     return set_user_active(req, 0);
 }
 
@@ -842,9 +830,7 @@ HttpResponse *server_deactivate_user_handler(const HttpRequest *req,
  * for someone who has lost them all. The next factor is enrolled with the
  * password alone, so whoever runs this confirms who is asking first.
  */
-HttpResponse *server_reset_user_mfa_handler(const HttpRequest *req,
-                                             const RouteParams *params) {
-    (void)params;
+HttpResponse *server_reset_user_mfa_handler(const HttpRequest *req) {
 
     db_handle_t *db = NULL;
     unsigned char user_id[16];

@@ -23,7 +23,7 @@ extern const config_t *g_config;
  * Handler function declarations
  *
  * All handlers follow the RouteHandler signature:
- *   HttpResponse *handler(const HttpRequest *req, const RouteParams *params)
+ *   HttpResponse *handler(const HttpRequest *req)
  */
 
 /* ============================================================================
@@ -154,106 +154,106 @@ int try_org_key_auth(const HttpRequest *req, const char *operation,
  * ============================================================================ */
 
 /* GET /health - Health check endpoint */
-HttpResponse *health_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *health_handler(const HttpRequest *req);
 
 /* ============================================================================
  * Admin API Endpoints (Localhost-Only)
  * ============================================================================ */
 
 /* POST /api/admin/bootstrap - Bootstrap system with initial org and admin user */
-HttpResponse *admin_bootstrap_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *admin_bootstrap_handler(const HttpRequest *req);
 
 /* POST /api/admin/organizations - Create organization */
-HttpResponse *admin_create_organization_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *admin_create_organization_handler(const HttpRequest *req);
 
 /* POST /api/admin/users - Create user */
-HttpResponse *admin_create_user_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *admin_create_user_handler(const HttpRequest *req);
 
 /* POST /api/admin/org-admins - Grant org admin privileges */
-HttpResponse *admin_make_org_admin_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *admin_make_org_admin_handler(const HttpRequest *req);
 
 /* GET /api/admin/list-all-organizations - List all organizations (localhost-only) */
-HttpResponse *admin_list_all_organizations_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *admin_list_all_organizations_handler(const HttpRequest *req);
 
 /* POST /api/admin/organization-keys - Create organization key (localhost-only) */
-HttpResponse *admin_create_organization_key_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *admin_create_organization_key_handler(const HttpRequest *req);
 
 /* GET /api/admin/organization-keys - List organization keys (dual-auth) */
-HttpResponse *admin_list_organization_keys_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *admin_list_organization_keys_handler(const HttpRequest *req);
 
 /* DELETE /api/admin/organization-keys - Revoke organization key (dual-auth) */
-HttpResponse *admin_revoke_organization_key_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *admin_revoke_organization_key_handler(const HttpRequest *req);
 
 /* POST /api/admin/users/activate - Activate user account (localhost-only) */
-HttpResponse *server_activate_user_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *server_activate_user_handler(const HttpRequest *req);
 
 /* POST /api/admin/users/deactivate - Deactivate user account (localhost-only) */
-HttpResponse *server_deactivate_user_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *server_deactivate_user_handler(const HttpRequest *req);
 
 /* POST /api/admin/users/reset-mfa - Remove a user's MFA methods and recovery codes (localhost-only) */
-HttpResponse *server_reset_user_mfa_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *server_reset_user_mfa_handler(const HttpRequest *req);
 
 /* ============================================================================
  * Authentication Endpoints
  * ============================================================================ */
 
 /* POST /login - User login (creates session) */
-HttpResponse *login_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *login_handler(const HttpRequest *req);
 
 /* GET /api/user/management-setups - Get management UI setups for current user */
-HttpResponse *management_setups_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *management_setups_handler(const HttpRequest *req);
 
 /* GET /api/user/profile - Get current user's profile */
-HttpResponse *profile_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *profile_handler(const HttpRequest *req);
 
 /* GET /api/user/emails - Get current user's email addresses */
-HttpResponse *emails_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *emails_handler(const HttpRequest *req);
 
 /* POST /api/user/emails - Add email to current user */
-HttpResponse *add_email_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *add_email_handler(const HttpRequest *req);
 
 /* DELETE /api/user/emails - Remove email from current user */
-HttpResponse *delete_email_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *delete_email_handler(const HttpRequest *req);
 
 /* POST /api/user/emails/set-primary - Set primary email */
-HttpResponse *set_primary_email_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *set_primary_email_handler(const HttpRequest *req);
 
 #ifdef EMAIL_SUPPORT
 /* POST /email-verification-token - Create verification token and send email */
-HttpResponse *create_email_verification_token_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *create_email_verification_token_handler(const HttpRequest *req);
 
 /* GET /verify-email - Render verification confirmation page (public, no auth) */
-HttpResponse *verify_email_page_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *verify_email_page_handler(const HttpRequest *req);
 
 /* POST /verify-email - Consume token and verify email (public, no auth) */
-HttpResponse *verify_email_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *verify_email_handler(const HttpRequest *req);
 
 /* GET /request-password-reset - Render password reset request page */
-HttpResponse *request_password_reset_page_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *request_password_reset_page_handler(const HttpRequest *req);
 
 /* POST /request-password-reset - Create reset token and send email */
-HttpResponse *request_password_reset_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *request_password_reset_handler(const HttpRequest *req);
 
 /* GET /reset-password - Render set-new-password page (public, no auth) */
-HttpResponse *reset_password_page_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *reset_password_page_handler(const HttpRequest *req);
 
 /* POST /reset-password - Consume token and set new password (public, no auth) */
-HttpResponse *reset_password_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *reset_password_handler(const HttpRequest *req);
 
 /* GET /request-passwordless-login - Render passwordless login request page */
-HttpResponse *request_passwordless_login_page_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *request_passwordless_login_page_handler(const HttpRequest *req);
 
 /* POST /request-passwordless-login - Create token and send email */
-HttpResponse *request_passwordless_login_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *request_passwordless_login_handler(const HttpRequest *req);
 
 /* GET /passwordless-login - Render login confirmation page (public, no auth) */
-HttpResponse *passwordless_login_page_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *passwordless_login_page_handler(const HttpRequest *req);
 
 /* POST /passwordless-login - Consume token, create session, redirect (public, no auth) */
-HttpResponse *passwordless_login_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *passwordless_login_handler(const HttpRequest *req);
 
 /* POST /api/user/passwordless-login - Toggle allow_passwordless_login */
-HttpResponse *passwordless_login_toggle_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *passwordless_login_toggle_handler(const HttpRequest *req);
 #endif
 
 /* ============================================================================
@@ -261,137 +261,137 @@ HttpResponse *passwordless_login_toggle_handler(const HttpRequest *req, const Ro
  * ============================================================================ */
 
 /* GET /accept-invitation - Render password-set form (public, no auth) */
-HttpResponse *accept_invitation_page_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *accept_invitation_page_handler(const HttpRequest *req);
 
 /* POST /accept-invitation - Consume token and set password */
-HttpResponse *accept_invitation_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *accept_invitation_handler(const HttpRequest *req);
 
 /* POST /api/user/password - Change current user's password */
-HttpResponse *change_password_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *change_password_handler(const HttpRequest *req);
 
 /* POST /api/user/username - Change current user's username */
-HttpResponse *change_username_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *change_username_handler(const HttpRequest *req);
 
 /* POST /logout - User logout (closes session) */
-HttpResponse *logout_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *logout_handler(const HttpRequest *req);
 
 /* ============================================================================
  * MFA Endpoints (Session Auth)
  * ============================================================================ */
 
 /* POST /api/user/mfa/totp/setup - Begin TOTP enrollment */
-HttpResponse *mfa_totp_setup_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *mfa_totp_setup_handler(const HttpRequest *req);
 
 /* POST /api/user/mfa/totp/confirm - Confirm TOTP enrollment */
-HttpResponse *mfa_totp_confirm_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *mfa_totp_confirm_handler(const HttpRequest *req);
 
 /* POST /api/user/mfa/verify - Verify TOTP code during authentication */
-HttpResponse *mfa_verify_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *mfa_verify_handler(const HttpRequest *req);
 
 /* POST /api/user/mfa/recover - Verify recovery code */
-HttpResponse *mfa_recover_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *mfa_recover_handler(const HttpRequest *req);
 
 /* GET /api/user/mfa/methods - List MFA methods */
-HttpResponse *mfa_list_methods_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *mfa_list_methods_handler(const HttpRequest *req);
 
 /* DELETE /api/user/mfa/methods - Delete MFA method (method specified via query/body) */
-HttpResponse *mfa_delete_method_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *mfa_delete_method_handler(const HttpRequest *req);
 
 /* POST /api/user/mfa/recovery-codes/regenerate - Regenerate recovery codes */
-HttpResponse *mfa_regenerate_recovery_codes_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *mfa_regenerate_recovery_codes_handler(const HttpRequest *req);
 
 /* POST /api/user/mfa/require - Set user MFA preference (enforce or not) */
-HttpResponse *mfa_set_require_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *mfa_set_require_handler(const HttpRequest *req);
 
 /* ============================================================================
  * OAuth2 Endpoints
  * ============================================================================ */
 
 /* GET /authorize - OAuth2 authorization endpoint (authorization code flow) */
-HttpResponse *authorize_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *authorize_handler(const HttpRequest *req);
 
 /* POST /token - OAuth2 token endpoint (authorization_code, refresh_token, client_credentials) */
-HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *token_handler(const HttpRequest *req);
 
 /* GET /.well-known/jwks.json - JWKS endpoint (public keys for token verification) */
-HttpResponse *jwks_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *jwks_handler(const HttpRequest *req);
 
 /* POST /revoke - OAuth2 token revocation endpoint (RFC 7009) */
-HttpResponse *revoke_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *revoke_handler(const HttpRequest *req);
 
 /* POST /introspect - OAuth2 token introspection endpoint (RFC 7662) */
-HttpResponse *introspect_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *introspect_handler(const HttpRequest *req);
 
 /* GET /userinfo - OIDC UserInfo endpoint (Bearer token auth) */
-HttpResponse *userinfo_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *userinfo_handler(const HttpRequest *req);
 
 /* ============================================================================
  * Admin Organization Management API (Authenticated Org-Admin)
  * ============================================================================ */
 
 /* Organizations */
-HttpResponse *admin_get_organizations_handler(const HttpRequest *req, const RouteParams *params);
-HttpResponse *admin_update_organization_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *admin_get_organizations_handler(const HttpRequest *req);
+HttpResponse *admin_update_organization_handler(const HttpRequest *req);
 
 /* Resource Servers */
-HttpResponse *admin_get_resource_servers_handler(const HttpRequest *req, const RouteParams *params);
-HttpResponse *admin_create_resource_server_handler(const HttpRequest *req, const RouteParams *params);
-HttpResponse *admin_update_resource_server_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *admin_get_resource_servers_handler(const HttpRequest *req);
+HttpResponse *admin_create_resource_server_handler(const HttpRequest *req);
+HttpResponse *admin_update_resource_server_handler(const HttpRequest *req);
 
 /* Clients */
-HttpResponse *admin_get_clients_handler(const HttpRequest *req, const RouteParams *params);
-HttpResponse *admin_create_client_handler(const HttpRequest *req, const RouteParams *params);
-HttpResponse *admin_update_client_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *admin_get_clients_handler(const HttpRequest *req);
+HttpResponse *admin_create_client_handler(const HttpRequest *req);
+HttpResponse *admin_update_client_handler(const HttpRequest *req);
 
 /* Client Redirect URIs */
-HttpResponse *admin_get_client_redirect_uris_handler(const HttpRequest *req, const RouteParams *params);
-HttpResponse *admin_create_client_redirect_uri_handler(const HttpRequest *req, const RouteParams *params);
-HttpResponse *admin_delete_client_redirect_uri_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *admin_get_client_redirect_uris_handler(const HttpRequest *req);
+HttpResponse *admin_create_client_redirect_uri_handler(const HttpRequest *req);
+HttpResponse *admin_delete_client_redirect_uri_handler(const HttpRequest *req);
 
 /* Client-Resource-Server Links */
-HttpResponse *admin_get_client_resource_servers_handler(const HttpRequest *req, const RouteParams *params);
-HttpResponse *admin_get_resource_server_clients_handler(const HttpRequest *req, const RouteParams *params);
-HttpResponse *admin_create_client_resource_server_link_handler(const HttpRequest *req, const RouteParams *params);
-HttpResponse *admin_delete_client_resource_server_link_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *admin_get_client_resource_servers_handler(const HttpRequest *req);
+HttpResponse *admin_get_resource_server_clients_handler(const HttpRequest *req);
+HttpResponse *admin_create_client_resource_server_link_handler(const HttpRequest *req);
+HttpResponse *admin_delete_client_resource_server_link_handler(const HttpRequest *req);
 
 /* Resource Server Key Management */
-HttpResponse *admin_create_resource_server_key_handler(const HttpRequest *req, const RouteParams *params);
-HttpResponse *admin_get_resource_server_keys_handler(const HttpRequest *req, const RouteParams *params);
-HttpResponse *admin_delete_resource_server_key_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *admin_create_resource_server_key_handler(const HttpRequest *req);
+HttpResponse *admin_get_resource_server_keys_handler(const HttpRequest *req);
+HttpResponse *admin_delete_resource_server_key_handler(const HttpRequest *req);
 
 /* Client Key Management */
-HttpResponse *admin_create_client_key_handler(const HttpRequest *req, const RouteParams *params);
-HttpResponse *admin_get_client_keys_handler(const HttpRequest *req, const RouteParams *params);
-HttpResponse *admin_delete_client_key_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *admin_create_client_key_handler(const HttpRequest *req);
+HttpResponse *admin_get_client_keys_handler(const HttpRequest *req);
+HttpResponse *admin_delete_client_key_handler(const HttpRequest *req);
 
 /* ============================================================================
  * RS User Provisioning API (RS Key Auth)
  * ============================================================================ */
 
 /* POST /api/rs/users - Find-or-create user + generate invitation */
-HttpResponse *rs_provision_user_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *rs_provision_user_handler(const HttpRequest *req);
 
 /* GET /api/rs/users - Look up user */
-HttpResponse *rs_lookup_user_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *rs_lookup_user_handler(const HttpRequest *req);
 
 /* POST /api/rs/client-users - Link user to client */
-HttpResponse *rs_link_client_user_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *rs_link_client_user_handler(const HttpRequest *req);
 
 /* DELETE /api/rs/client-users - Unlink user from client */
-HttpResponse *rs_unlink_client_user_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *rs_unlink_client_user_handler(const HttpRequest *req);
 
 /* GET /api/rs/client-users - List users linked to client */
-HttpResponse *rs_list_client_users_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *rs_list_client_users_handler(const HttpRequest *req);
 
 /* ============================================================================
  * Static File Serving
  * ============================================================================ */
 
 /* GET / - Serves index.html */
-HttpResponse *index_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *index_handler(const HttpRequest *req);
 
 /* GET /static/... - Serves static files from ./static/ directory */
-HttpResponse *static_file_handler(const HttpRequest *req, const RouteParams *params);
+HttpResponse *static_file_handler(const HttpRequest *req);
 
 /* Register all static files from ./static/ directory as routes */
 void register_static_files(Router *router, const config_t *config);

@@ -137,9 +137,7 @@ static HttpResponse *rs_error_response(int rc, const char *context) {
  * Endpoint Handlers
  * ========================================================================== */
 
-HttpResponse *rs_provision_user_handler(const HttpRequest *req,
-                                         const RouteParams *params) {
-    (void)params;
+HttpResponse *rs_provision_user_handler(const HttpRequest *req) {
 
     if (req->method != HTTP_POST)
         return response_method_not_allowed("POST");
@@ -231,9 +229,7 @@ HttpResponse *rs_provision_user_handler(const HttpRequest *req,
     return jsonbuf_to_response(jb, 200);
 }
 
-HttpResponse *rs_lookup_user_handler(const HttpRequest *req,
-                                      const RouteParams *params) {
-    (void)params;
+HttpResponse *rs_lookup_user_handler(const HttpRequest *req) {
 
     rs_auth_t auth;
     HttpResponse *err = rs_authenticate(req, "rs_lookup_user", &auth);
@@ -286,9 +282,7 @@ HttpResponse *rs_lookup_user_handler(const HttpRequest *req,
     return jsonbuf_to_response(jb, 200);
 }
 
-HttpResponse *rs_link_client_user_handler(const HttpRequest *req,
-                                            const RouteParams *params) {
-    (void)params;
+HttpResponse *rs_link_client_user_handler(const HttpRequest *req) {
 
     if (req->method != HTTP_POST)
         return response_method_not_allowed("POST");
@@ -330,9 +324,7 @@ HttpResponse *rs_link_client_user_handler(const HttpRequest *req,
     return response_json_ok("{\"message\":\"User linked to client\"}");
 }
 
-HttpResponse *rs_unlink_client_user_handler(const HttpRequest *req,
-                                              const RouteParams *params) {
-    (void)params;
+HttpResponse *rs_unlink_client_user_handler(const HttpRequest *req) {
 
     if (req->method != HTTP_DELETE)
         return response_method_not_allowed("DELETE");
@@ -373,9 +365,7 @@ HttpResponse *rs_unlink_client_user_handler(const HttpRequest *req,
     return response_json_ok("{\"message\":\"User unlinked from client\"}");
 }
 
-HttpResponse *rs_list_client_users_handler(const HttpRequest *req,
-                                             const RouteParams *params) {
-    (void)params;
+HttpResponse *rs_list_client_users_handler(const HttpRequest *req) {
 
     rs_auth_t auth;
     HttpResponse *err = rs_authenticate(req, "rs_list_client_users", &auth);

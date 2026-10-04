@@ -68,8 +68,7 @@ static HttpResponse *require_session(const HttpRequest *req, db_handle_t *db,
  *   200 OK
  *   {"method_id":"<32hex>","secret":"<base32>","qr_url":"otpauth://..."}
  */
-HttpResponse *mfa_totp_setup_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *mfa_totp_setup_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -176,8 +175,7 @@ HttpResponse *mfa_totp_setup_handler(const HttpRequest *req, const RouteParams *
  *   400 Bad Request
  *   {"error":"Invalid TOTP code"}
  */
-HttpResponse *mfa_totp_confirm_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *mfa_totp_confirm_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -289,8 +287,7 @@ HttpResponse *mfa_totp_confirm_handler(const HttpRequest *req, const RouteParams
  *   200 OK
  *   {"valid":true} or {"valid":false}
  */
-HttpResponse *mfa_verify_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *mfa_verify_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -374,8 +371,7 @@ HttpResponse *mfa_verify_handler(const HttpRequest *req, const RouteParams *para
  *   200 OK
  *   {"valid":true} or {"valid":false}
  */
-HttpResponse *mfa_recover_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *mfa_recover_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -439,8 +435,7 @@ HttpResponse *mfa_recover_handler(const HttpRequest *req, const RouteParams *par
  *   {"methods":[{"id":"<32hex>","type":"TOTP","display_name":"My Phone",
  *                "is_confirmed":true,"confirmed_at":"2024-01-01T00:00:00Z"},...]}
  */
-HttpResponse *mfa_list_methods_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *mfa_list_methods_handler(const HttpRequest *req) {
 
     /* Get database connection */
     db_handle_t *db = db_pool_get_connection();
@@ -509,8 +504,7 @@ HttpResponse *mfa_list_methods_handler(const HttpRequest *req, const RouteParams
  *   200 OK
  *   {"message":"MFA method deleted"}
  */
-HttpResponse *mfa_delete_method_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *mfa_delete_method_handler(const HttpRequest *req) {
 
     /* Get database connection */
     db_handle_t *db = db_pool_get_connection();
@@ -568,9 +562,7 @@ HttpResponse *mfa_delete_method_handler(const HttpRequest *req, const RouteParam
  *   200 OK
  *   {"recovery_codes":["...","...",...]}
  */
-HttpResponse *mfa_regenerate_recovery_codes_handler(const HttpRequest *req,
-                                                    const RouteParams *params) {
-    (void)params;
+HttpResponse *mfa_regenerate_recovery_codes_handler(const HttpRequest *req) {
     /* Nothing is read from the body. JSON is still required: it's what keeps a
      * plain HTML form out, and SameSite=Lax lets a form on a sibling subdomain
      * post here with the session cookie. */
@@ -634,8 +626,7 @@ HttpResponse *mfa_regenerate_recovery_codes_handler(const HttpRequest *req,
  *   200 OK
  *   {"message":"MFA requirement updated"}
  */
-HttpResponse *mfa_set_require_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *mfa_set_require_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 

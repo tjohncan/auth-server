@@ -111,8 +111,7 @@ static HttpResponse *require_authenticated_session(const HttpRequest *req,
  *   401 Unauthorized
  *   {"error":"invalid_credentials","message":"Invalid username or password"}
  */
-HttpResponse *login_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;  /* Unused */
+HttpResponse *login_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -247,8 +246,7 @@ HttpResponse *login_handler(const HttpRequest *req, const RouteParams *params) {
  *     ]
  *   }
  */
-HttpResponse *management_setups_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *management_setups_handler(const HttpRequest *req) {
 
     /* Get database connection */
     db_handle_t *db = db_pool_get_connection();
@@ -334,8 +332,7 @@ HttpResponse *management_setups_handler(const HttpRequest *req, const RouteParam
  * Returns profile information for the authenticated user.
  * Requires valid session cookie.
  */
-HttpResponse *profile_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *profile_handler(const HttpRequest *req) {
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -376,8 +373,7 @@ HttpResponse *profile_handler(const HttpRequest *req, const RouteParams *params)
  * Returns email addresses for the authenticated user.
  * Requires valid session cookie.
  */
-HttpResponse *emails_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *emails_handler(const HttpRequest *req) {
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -426,8 +422,7 @@ HttpResponse *emails_handler(const HttpRequest *req, const RouteParams *params) 
  * Changes the authenticated user's password.
  * Requires valid session cookie and correct current password.
  */
-HttpResponse *change_password_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *change_password_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -489,8 +484,7 @@ HttpResponse *change_password_handler(const HttpRequest *req, const RouteParams 
  * Changes the authenticated user's username.
  * Requires valid session cookie.
  */
-HttpResponse *change_username_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *change_username_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -541,8 +535,7 @@ HttpResponse *change_username_handler(const HttpRequest *req, const RouteParams 
  * Adds a new email address to the authenticated user's account.
  * The email is added as unverified and non-primary.
  */
-HttpResponse *add_email_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *add_email_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -598,8 +591,7 @@ cleanup:
  * Removes an email address from the authenticated user's account.
  * Idempotent: returns success even if the email was already gone.
  */
-HttpResponse *delete_email_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *delete_email_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -637,8 +629,7 @@ HttpResponse *delete_email_handler(const HttpRequest *req, const RouteParams *pa
  *
  * Sets an email address as the primary email for the authenticated user.
  */
-HttpResponse *set_primary_email_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *set_primary_email_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -727,9 +718,7 @@ static HttpResponse *response_template(int status, const char *name, ...) {
  * Request body:
  *   {"email":"user@example.com"}
  */
-HttpResponse *create_email_verification_token_handler(const HttpRequest *req,
-                                                       const RouteParams *params) {
-    (void)params;
+HttpResponse *create_email_verification_token_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -808,9 +797,7 @@ HttpResponse *create_email_verification_token_handler(const HttpRequest *req,
  * Public endpoint (no auth). Renders confirmation page showing the email
  * address and username so the user can confirm before verifying.
  */
-HttpResponse *verify_email_page_handler(const HttpRequest *req,
-                                         const RouteParams *params) {
-    (void)params;
+HttpResponse *verify_email_page_handler(const HttpRequest *req) {
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -880,9 +867,7 @@ HttpResponse *verify_email_page_handler(const HttpRequest *req,
  * Public endpoint (no auth). Consumes the token and marks the email verified.
  * Expects form-encoded body: token=...
  */
-HttpResponse *verify_email_handler(const HttpRequest *req,
-                                    const RouteParams *params) {
-    (void)params;
+HttpResponse *verify_email_handler(const HttpRequest *req) {
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -922,10 +907,8 @@ HttpResponse *verify_email_handler(const HttpRequest *req,
  *
  * Renders a page with an email input form for requesting a password reset.
  */
-HttpResponse *request_password_reset_page_handler(const HttpRequest *req,
-                                                    const RouteParams *params) {
+HttpResponse *request_password_reset_page_handler(const HttpRequest *req) {
     (void)req;
-    (void)params;
 
     HttpResponse *resp = response_template(200, "pages/request-password-reset.html", NULL);
     return resp ? resp : response_json_error(500, "Template error");
@@ -939,9 +922,7 @@ HttpResponse *request_password_reset_page_handler(const HttpRequest *req,
  *
  * Request body: {"email":"user@example.com"}
  */
-HttpResponse *request_password_reset_handler(const HttpRequest *req,
-                                               const RouteParams *params) {
-    (void)params;
+HttpResponse *request_password_reset_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -1014,9 +995,7 @@ HttpResponse *request_password_reset_handler(const HttpRequest *req,
  * Public endpoint (no auth). Validates the token and renders
  * a "Set New Password" page with password input.
  */
-HttpResponse *reset_password_page_handler(const HttpRequest *req,
-                                            const RouteParams *params) {
-    (void)params;
+HttpResponse *reset_password_page_handler(const HttpRequest *req) {
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -1058,9 +1037,7 @@ HttpResponse *reset_password_page_handler(const HttpRequest *req,
  * Public endpoint (no auth). Consumes the token and sets the new password.
  * Expects form-encoded body: token=...&password=...
  */
-HttpResponse *reset_password_handler(const HttpRequest *req,
-                                       const RouteParams *params) {
-    (void)params;
+HttpResponse *reset_password_handler(const HttpRequest *req) {
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -1125,9 +1102,7 @@ HttpResponse *reset_password_handler(const HttpRequest *req,
  * Public endpoint (no auth). Validates invitation token and renders
  * password-set form showing username and/or email.
  */
-HttpResponse *accept_invitation_page_handler(const HttpRequest *req,
-                                               const RouteParams *params) {
-    (void)params;
+HttpResponse *accept_invitation_page_handler(const HttpRequest *req) {
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -1204,9 +1179,7 @@ HttpResponse *accept_invitation_page_handler(const HttpRequest *req,
  * Public endpoint (no auth). Consumes the invitation token and sets password.
  * Expects form-encoded body: token=...&password=...
  */
-HttpResponse *accept_invitation_handler(const HttpRequest *req,
-                                          const RouteParams *params) {
-    (void)params;
+HttpResponse *accept_invitation_handler(const HttpRequest *req) {
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -1278,9 +1251,7 @@ HttpResponse *accept_invitation_handler(const HttpRequest *req,
  * Renders a page with an email input form for requesting a passwordless login link.
  * Carries return_to from query param into a hidden form field.
  */
-HttpResponse *request_passwordless_login_page_handler(const HttpRequest *req,
-                                                        const RouteParams *params) {
-    (void)params;
+HttpResponse *request_passwordless_login_page_handler(const HttpRequest *req) {
 
     /* Extract return_to from query string (authorize query params, or empty) */
     char *return_to = NULL;
@@ -1307,9 +1278,7 @@ HttpResponse *request_passwordless_login_page_handler(const HttpRequest *req,
  *
  * Request body: {"email":"user@example.com","return_to":"client_id=...&..."}
  */
-HttpResponse *request_passwordless_login_handler(const HttpRequest *req,
-                                                   const RouteParams *params) {
-    (void)params;
+HttpResponse *request_passwordless_login_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -1392,9 +1361,7 @@ HttpResponse *request_passwordless_login_handler(const HttpRequest *req,
  * Public endpoint (no auth). Validates the token and renders
  * a confirmation page: "Log in as user@example.com?"
  */
-HttpResponse *passwordless_login_page_handler(const HttpRequest *req,
-                                                const RouteParams *params) {
-    (void)params;
+HttpResponse *passwordless_login_page_handler(const HttpRequest *req) {
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -1451,9 +1418,7 @@ HttpResponse *passwordless_login_page_handler(const HttpRequest *req,
  * sets the session cookie, and redirects to return_to or /.
  * Expects form-encoded body: token=...
  */
-HttpResponse *passwordless_login_handler(const HttpRequest *req,
-                                           const RouteParams *params) {
-    (void)params;
+HttpResponse *passwordless_login_handler(const HttpRequest *req) {
 
     /* The confirmation page is the one legitimate sender, and it is same-origin.
      * Another site posting here would be posting its own token, to sign this
@@ -1564,9 +1529,7 @@ HttpResponse *passwordless_login_handler(const HttpRequest *req,
  * Toggles allow_passwordless_login for the authenticated user.
  * Requires at least one verified email to enable.
  */
-HttpResponse *passwordless_login_toggle_handler(const HttpRequest *req,
-                                                 const RouteParams *params) {
-    (void)params;
+HttpResponse *passwordless_login_toggle_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -1612,8 +1575,7 @@ HttpResponse *passwordless_login_toggle_handler(const HttpRequest *req,
 
 #endif /* EMAIL_SUPPORT */
 
-HttpResponse *logout_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *logout_handler(const HttpRequest *req) {
 
     /* Get database connection */
     db_handle_t *db = db_pool_get_connection();
