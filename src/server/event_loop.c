@@ -51,13 +51,18 @@
  * Internal Structures
  * ============================================================================ */
 
+/* Connection IDs come from one counter for the whole process, not one per worker:
+ * the ID is how log lines from the same request are tied together, and with a
+ * counter per worker every worker hands out the same numbers at once. One
+ * uncontended atomic increment per accepted connection. */
+static atomic_uint_fast64_t g_next_connection_id = 1;
+
 /*
  * EventLoop - One epoll instance, runs on one thread
  */
 struct EventLoop {
     int epoll_fd;                 /* epoll file descriptor */
     atomic_bool running;          /* Set to false to stop the loop */
-    uint64_t next_connection_id;  /* Monotonic counter for connection IDs */
     EventLoopConfig config;       /* Configuration (copied) */
     int worker_index;             /* Index of this worker (for DB connection binding) */
 
@@ -277,7 +282,6 @@ EventLoop *event_loop_create(void) {
     }
 
     loop->running = false;
-    loop->next_connection_id = 1;
     loop->connections_head = NULL;
     loop->connections_tail = NULL;
 
@@ -358,7 +362,8 @@ static void handle_accept(EventLoop *loop, int listen_fd) {
         }
 
         /* Create connection object */
-        Connection *conn = connection_create(client_fd, remote_ip, loop->next_connection_id++);
+        Connection *conn = connection_create(client_fd, remote_ip,
+                                             atomic_fetch_add(&g_next_connection_id, 1));
         if (!conn) {
             close(client_fd);
             continue;  /* Try next connection */

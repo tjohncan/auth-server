@@ -65,7 +65,7 @@ typedef struct Connection {
     size_t bytes_written;         /* How much we've written so far */
 
     char remote_ip[INET6_ADDRSTRLEN];  /* Client IP address (IPv4 or IPv6, for logging) */
-    uint64_t connection_id;       /* Unique ID for logging/debugging */
+    uint64_t connection_id;       /* Unique across workers, for logging/debugging */
     struct timespec last_activity; /* Last read/write time (for timeout detection) */
 
     void *userdata;               /* Shared context from handler_context (not owned by connection) */
