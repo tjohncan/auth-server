@@ -1,4 +1,4 @@
-/* Define _GNU_SOURCE for SO_REUSEPORT */
+/* Define _GNU_SOURCE for SO_REUSEPORT and accept4 */
 #define _GNU_SOURCE
 
 #include "server/event_loop.h"
@@ -13,7 +13,6 @@
 #include <stdbool.h>
 #include <stdatomic.h>
 #include <unistd.h>
-#include <fcntl.h>
 #include <errno.h>
 #include <pthread.h>
 #include <sys/epoll.h>
@@ -84,35 +83,22 @@ struct EventLoopPool {
  * ============================================================================ */
 
 /*
- * set_nonblocking - Make a socket non-blocking
- *
- * This is CRITICAL for event loops. Blocking I/O would hang the entire loop.
- */
-static int set_nonblocking(int fd) {
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags == -1) {
-        log_error("fcntl(F_GETFL) failed: %s", strerror(errno));
-        return -1;
-    }
-
-    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1) {
-        log_error("fcntl(F_SETFL) failed: %s", strerror(errno));
-        return -1;
-    }
-
-    return 0;
-}
-
-/*
  * create_listen_socket - Create dual-stack TCP socket (IPv4 + IPv6)
  *
  * Uses SO_REUSEPORT so multiple threads can accept on the same port.
  * Creates IPv6 socket with IPV6_V6ONLY=0 to accept both IPv4 and IPv6.
  * IPv4 connections appear as IPv4-mapped IPv6 addresses (::ffff:192.0.2.1).
+ *
+ * Every descriptor the event loop opens -- this one, each accepted connection,
+ * each epoll instance -- is non-blocking (blocking I/O would hang the loop) and
+ * close-on-exec, both set atomically at creation. Close-on-exec keeps them out of
+ * the email command (util/email.c), which would otherwise hold a client's
+ * connection open after the worker closed it, and could keep a listening socket
+ * in SO_REUSEPORT's group past a restart, where connections queue unaccepted.
  */
 static int create_listen_socket(int port, int backlog) {
     /* Create IPv6 socket (supports both IPv4 and IPv6 when IPV6_V6ONLY=0) */
-    int fd = socket(AF_INET6, SOCK_STREAM, 0);
+    int fd = socket(AF_INET6, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     if (fd < 0) {
         log_error("socket(AF_INET6) failed: %s", strerror(errno));
         return -1;
@@ -156,12 +142,6 @@ static int create_listen_socket(int port, int backlog) {
     /* Listen */
     if (listen(fd, backlog) < 0) {
         log_error("listen() failed: %s", strerror(errno));
-        close(fd);
-        return -1;
-    }
-
-    /* Make non-blocking */
-    if (set_nonblocking(fd) < 0) {
         close(fd);
         return -1;
     }
@@ -288,8 +268,8 @@ EventLoop *event_loop_create(void) {
 
     memset(loop, 0, sizeof(EventLoop));
 
-    /* Create epoll instance */
-    loop->epoll_fd = epoll_create1(0);
+    /* Create epoll instance (close-on-exec: see create_listen_socket) */
+    loop->epoll_fd = epoll_create1(EPOLL_CLOEXEC);
     if (loop->epoll_fd < 0) {
         log_error("epoll_create1() failed: %s", strerror(errno));
         free(loop);
@@ -340,14 +320,16 @@ static void handle_accept(EventLoop *loop, int listen_fd) {
         struct sockaddr_storage client_addr;  /* Large enough for both IPv4 and IPv6 */
         socklen_t client_len = sizeof(client_addr);
 
-        /* Accept new connection (non-blocking, may return EAGAIN) */
-        int client_fd = accept(listen_fd, (struct sockaddr *)&client_addr, &client_len);
+        /* Accept new connection (non-blocking, may return EAGAIN). The connection
+         * itself comes back non-blocking and close-on-exec: see create_listen_socket. */
+        int client_fd = accept4(listen_fd, (struct sockaddr *)&client_addr, &client_len,
+                                SOCK_NONBLOCK | SOCK_CLOEXEC);
         if (client_fd < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 /* No more connections to accept right now - this is normal */
                 return;
             }
-            log_error("accept() failed: %s", strerror(errno));
+            log_error("accept4() failed: %s", strerror(errno));
             return;
         }
 
@@ -358,12 +340,6 @@ static void handle_accept(EventLoop *loop, int listen_fd) {
             log_warn("Connection limit reached (%d), rejecting new connection",
                     loop->active_connections);
             continue;
-        }
-
-        /* Make client socket non-blocking */
-        if (set_nonblocking(client_fd) < 0) {
-            close(client_fd);
-            continue;  /* Try next connection */
         }
 
         /* Get client IP (handle both IPv4 and IPv6) */

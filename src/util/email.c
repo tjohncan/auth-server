@@ -1,4 +1,4 @@
-#define _POSIX_C_SOURCE 200809L
+#define _GNU_SOURCE  /* syscall() */
 #include "util/email.h"
 #include "util/json.h"
 #include "util/log.h"
@@ -10,9 +10,31 @@
 #include <time.h>
 #include <openssl/crypto.h>
 #include <sys/wait.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
 #include <errno.h>
 
 #define EMAIL_TIMEOUT_SECONDS 30
+
+/* Close every descriptor above stderr, in the forked child before it makes its
+ * pipe. A plain fork() copies every descriptor the server has, close-on-exec or
+ * not: listening sockets, epoll instances, other clients' connections, the very
+ * connection that asked for this email. Whatever this child or the command keeps
+ * holds those open, so a client connection doesn't close when its worker closes
+ * it. close_range where the kernel has it (5.9+), otherwise one close() per
+ * possible descriptor. Only async-signal-safe calls: this runs after fork() in a
+ * multi-threaded process. */
+static void close_inherited_fds(void) {
+#ifdef SYS_close_range
+    if (syscall(SYS_close_range, 3, ~0U, 0) == 0) return;
+#endif
+    struct rlimit rl;
+    long max = (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY)
+        ? (long)rl.rlim_cur : 65536;
+    for (long fd = 3; fd < max; fd++) {
+        close((int)fd);
+    }
+}
 
 /* Write a message to stderr without locks (safe after fork in multi-threaded process).
  * log_* functions use flockfile(stderr) which can deadlock if another thread held
@@ -90,6 +112,9 @@ int email_send(const config_t *config,
     /* Reset SIGCHLD so our waitpid works on the grandchild */
     signal(SIGCHLD, SIG_DFL);
 
+    /* Hold nothing of the server's: only stdin, stdout and stderr stay */
+    close_inherited_fds();
+
     /* Create pipe for email command's stdin */
     int pipefd[2];
     if (pipe(pipefd) != 0) {
@@ -104,7 +129,9 @@ int email_send(const config_t *config,
     }
 
     if (email_pid == 0) {
-        /* Grandchild: exec email command */
+        /* Grandchild: exec email command, as the leader of its own process group
+         * so a timeout can kill whatever the command starts, not just the shell */
+        setpgid(0, 0);
         close(pipefd[1]);
         if (dup2(pipefd[0], STDIN_FILENO) < 0) {
             _exit(127);
@@ -113,6 +140,9 @@ int email_send(const config_t *config,
         execl("/bin/sh", "sh", "-c", config->email_command, (char *)NULL);
         _exit(127);
     }
+
+    /* Child: set the group here too, so it exists whichever process runs first */
+    setpgid(email_pid, email_pid);
 
     /* Child: write payload to grandchild's stdin */
     close(pipefd[0]);
@@ -146,8 +176,10 @@ int email_send(const config_t *config,
     }
 
     if (result == 0) {
-        /* Timed out — kill the email command */
-        kill(email_pid, SIGKILL);
+        /* Timed out — kill the email command and everything it started */
+        if (kill(-email_pid, SIGKILL) != 0) {
+            kill(email_pid, SIGKILL);
+        }
         waitpid(email_pid, &status, 0);
         sub_log("[WARN] Email command timed out");
     } else if (result > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0) {
