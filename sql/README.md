@@ -435,7 +435,10 @@ CREATE INDEX idx_recovery_code_set_cleanup ON recovery_code_set(is_active, revok
 PRAGMA auto_vacuum = INCREMENTAL;
 ```
 
-Must be set on an empty database before tables are created. Enables gradual space reclamation:
+Must be set on an empty database before tables are created, and before `journal_mode = WAL`,
+which writes the database header and fixes the setting. The server reads it back at startup
+and warns if it is off; with the server stopped, one `PRAGMA auto_vacuum = INCREMENTAL; VACUUM;`
+turns it on for an existing database. Enables gradual space reclamation:
 
 ```sql
 PRAGMA incremental_vacuum(100);  -- Frees 100 pages
