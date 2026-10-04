@@ -138,6 +138,7 @@ HTTP endpoint implementations.
 - `rs.c` - Resource servers invite users and manage their access to clients
 - `rs_http.c` - HTTP endpoints for the user provisioning API
 - `static.c` - Static file serving for management console
+- `routes.c` - The route table: every API endpoint, by method and exact path
 
 ## Handler Architecture
 
@@ -414,6 +415,7 @@ src/
 │   ├── mfa_http.c
 │   ├── rs.c
 │   ├── rs_http.c
+│   ├── routes.c
 │   └── static.c
 └── main.c              # Server entry point
 

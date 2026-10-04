@@ -396,6 +396,10 @@ HttpResponse *static_file_handler(const HttpRequest *req);
 /* Register all static files from ./static/ directory as routes */
 void register_static_files(Router *router, const config_t *config);
 
+/* Register every API endpoint (routes.c). main.c and test-handlers both use it,
+ * so the tests dispatch through the server's own route table. */
+void register_routes(Router *router);
+
 /* Free all cached static file buffers */
 void static_files_cleanup(void);
 
