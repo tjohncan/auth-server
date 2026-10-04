@@ -765,15 +765,8 @@ HttpResponse *create_email_verification_token_handler(const HttpRequest *req) {
 
     /* Build verification URL */
     char verify_url[512];
-    if (strcmp(g_config->host, "localhost") == 0) {
-        snprintf(verify_url, sizeof(verify_url),
-                 "http://localhost:%d/verify-email?token=%s",
-                 g_config->port, token);
-    } else {
-        snprintf(verify_url, sizeof(verify_url),
-                 "https://%s/verify-email?token=%s",
-                 g_config->host, token);
-    }
+    snprintf(verify_url, sizeof(verify_url), "%s/verify-email?token=%s",
+             g_config->public_base_url, token);
     OPENSSL_cleanse(token, sizeof(token));
 
     /* Send verification email */
@@ -957,15 +950,8 @@ HttpResponse *request_password_reset_handler(const HttpRequest *req) {
     if (result == 0) {
         /* Token created — send email */
         char reset_url[512];
-        if (strcmp(g_config->host, "localhost") == 0) {
-            snprintf(reset_url, sizeof(reset_url),
-                     "http://localhost:%d/reset-password?token=%s",
-                     g_config->port, token);
-        } else {
-            snprintf(reset_url, sizeof(reset_url),
-                     "https://%s/reset-password?token=%s",
-                     g_config->host, token);
-        }
+        snprintf(reset_url, sizeof(reset_url), "%s/reset-password?token=%s",
+                 g_config->public_base_url, token);
         OPENSSL_cleanse(token, sizeof(token));
 
         char *body_text = template_render("emails/reset.txt", "URL", reset_url, NULL);
@@ -1322,15 +1308,8 @@ HttpResponse *request_passwordless_login_handler(const HttpRequest *req) {
 
     if (result == 0) {
         char login_url[512];
-        if (strcmp(g_config->host, "localhost") == 0) {
-            snprintf(login_url, sizeof(login_url),
-                     "http://localhost:%d/passwordless-login?token=%s",
-                     g_config->port, token);
-        } else {
-            snprintf(login_url, sizeof(login_url),
-                     "https://%s/passwordless-login?token=%s",
-                     g_config->host, token);
-        }
+        snprintf(login_url, sizeof(login_url), "%s/passwordless-login?token=%s",
+                 g_config->public_base_url, token);
         OPENSSL_cleanse(token, sizeof(token));
 
         char *body_text = template_render("emails/passwordless.txt", "URL", login_url, NULL);

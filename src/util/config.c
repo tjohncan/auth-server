@@ -992,6 +992,24 @@ static void apply_env_overrides(config_t *config) {
     }
 }
 
+/*
+ * Derive public_base_url (see config.h) once host and port are final. localhost
+ * is a development setup reached directly, so http and the listen port; any other
+ * host is reached through the TLS-terminating proxy, on the default port.
+ */
+static int set_public_base_url(config_t *config) {
+    size_t size = sizeof(config->public_base_url);
+    int n = strcmp(config->host, "localhost") == 0
+        ? snprintf(config->public_base_url, size, "http://localhost:%d", config->port)
+        : snprintf(config->public_base_url, size, "https://%s", config->host);
+    if (n < 0 || (size_t)n >= size) {
+        log_error("server_host is too long: the server's public address, https:// and "
+                  "the host, may be at most %d characters", PUBLIC_BASE_URL_MAX);
+        return -1;
+    }
+    return 0;
+}
+
 config_t *config_load(const char *config_file) {
     /* Allocate config with defaults */
     config_t *config = calloc(1, sizeof(config_t));
@@ -1118,6 +1136,10 @@ config_t *config_load(const char *config_file) {
             log_warn("Config file '%s' not found, using defaults", config_file);
         }
         apply_env_overrides(config);
+        if (set_public_base_url(config) != 0) {
+            config_free(config);
+            return NULL;
+        }
         return config;
     }
 
@@ -1161,6 +1183,11 @@ config_t *config_load(const char *config_file) {
 
     /* Apply environment variable overrides */
     apply_env_overrides(config);
+
+    if (set_public_base_url(config) != 0) {
+        config_free(config);
+        return NULL;
+    }
 
     /* Validate password hashing iterations */
     if (config->secret_hash_max_iterations < config->secret_hash_min_iterations) {

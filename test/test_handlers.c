@@ -132,6 +132,22 @@ static int query_text(const char *sql, char *out, size_t out_size) {
     return v ? 0 : -1;
 }
 
+/* A JWT's payload, decoded, for reading its claims; the caller frees it */
+static char *token_payload(const char *jwt) {
+    const char *payload = strchr(jwt, '.');
+    const char *end = payload ? strchr(payload + 1, '.') : NULL;
+    if (!end) return NULL;
+    size_t len = (size_t)(end - payload - 1);
+    unsigned char *json = malloc(len + 1);
+    int n = json ? crypto_base64url_decode(payload + 1, len, json, len) : -1;
+    if (n <= 0) {
+        free(json);
+        return NULL;
+    }
+    json[n] = '\0';
+    return (char *)json;
+}
+
 #define FAIL(...) do { printf("✗ "); printf(__VA_ARGS__); printf("\n"); return 1; } while (0)
 
 /* ============================================================================
@@ -233,8 +249,8 @@ static int test_authorization_code_flow(void) {
                    g_ui_client, sizeof(g_ui_client)) != 0) {
         FAIL("no management UI client");
     }
-    char redirect[96];
-    snprintf(redirect, sizeof(redirect), "http://localhost:%d/callback", g_config->port);
+    char redirect[256];
+    snprintf(redirect, sizeof(redirect), "%s/callback", g_config->public_base_url);
     str_url_encode(g_redirect_enc, sizeof(g_redirect_enc), redirect);
 
     char code[2048], access[2048], rt[256], rt2[256];
@@ -286,6 +302,49 @@ static int test_authorization_code_flow(void) {
     if (userinfo_status(access) != 401) FAIL("replay left the chain's access token live");
     printf("✓ a refresh token rotates once; replaying it revokes the chain\n");
 
+    return 0;
+}
+
+/* ============================================================================
+ * The issuer
+ * ============================================================================ */
+
+/*
+ * Access tokens name the server's public address as their issuer, and resource
+ * servers pin it: https:// and server_host behind the proxy, with no port.
+ */
+static int test_issuer(void) {
+    printf("\n=== The issuer ===\n");
+
+    /* 1. A token names the address the server was configured with */
+    char code[2048], access[2048];
+    if (authorize(code, sizeof(code)) != 0) FAIL("/authorize did not redirect with a code");
+    Reply r = exchange(code, PKCE_VERIFIER);
+    int issued = r.status == 200 && field(&r, "access_token", access, sizeof(access)) == 0;
+    reply_free(&r);
+    if (!issued) FAIL("the code exchange failed");
+    char *payload = token_payload(access);
+    char *iss = payload ? json_get_string(payload, "iss") : NULL;
+    int same = iss && strcmp(iss, g_config->public_base_url) == 0;
+    if (!same) {
+        printf("✗ a token names '%s' as its issuer, not '%s'\n",
+               iss ? iss : "(none)", g_config->public_base_url);
+    }
+    free(iss);
+    free(payload);
+    if (!same) return 1;
+
+    /* 2. Named, it's https:// and the name, as the proxy in front serves it */
+    const char *host_env = g_config->server_host_env ? g_config->server_host_env
+                                                     : "AUTH_SERVER_HOST";
+    setenv(host_env, "auth.example.com", 1);
+    config_t *named = config_load("auth.conf");
+    unsetenv(host_env);
+    int ok = named && strcmp(named->public_base_url, "https://auth.example.com") == 0;
+    config_free(named);
+    if (!ok) FAIL("a server named auth.example.com doesn't call itself https://auth.example.com");
+
+    printf("✓ access tokens name the server's public address as their issuer\n");
     return 0;
 }
 
@@ -384,7 +443,8 @@ static int test_client_credentials(void) {
     if (introspect_active(token, rs_a, ka, sa) != 0) FAIL("a revoked token still introspects active");
     printf("✓ a revoked token introspects inactive\n");
 
-    /* 3. A client stored above the TTL cap gets tokens at the cap */
+    /* 3. A client stored above the TTL cap gets tokens at the cap: in expires_in,
+          and in the exp that a resource server verifying the JWT itself trusts */
     int cap = g_config->max_access_token_ttl_seconds;
     char sql[256];
     snprintf(sql, sizeof(sql), "UPDATE client SET access_token_ttl_seconds = %d "
@@ -393,12 +453,20 @@ static int test_client_credentials(void) {
     snprintf(form, sizeof(form), "grant_type=client_credentials&client_id=%s&client_key_id=%s"
              "&client_secret=%s", svc, ck, cs);
     r = post_form("/token", form);
-    int expires_in = 0;
+    int expires_in = 0, exp = 0, iat = 0;
     if (r.status != 200 || json_get_int(r.body, "expires_in", &expires_in) != 0 ||
-        expires_in != cap) {
-        FAIL("a client stored over the cap got expires_in %d, not %d", expires_in, cap);
+        field(&r, "access_token", token, sizeof(token)) != 0) {
+        FAIL("client_credentials over the cap answered %d", r.status);
     }
     reply_free(&r);
+    char *payload = token_payload(token);
+    int decoded = payload && json_get_int(payload, "exp", &exp) == 0 &&
+                  json_get_int(payload, "iat", &iat) == 0;
+    free(payload);
+    if (!decoded || expires_in != cap || exp - iat != cap) {
+        FAIL("a client stored over the cap got expires_in %d and exp - iat %d, not %d",
+             expires_in, exp - iat, cap);
+    }
 
     snprintf(json, sizeof(json), "{\"organization_id\":\"%s\",\"code_name\":\"too_long\","
              "\"display_name\":\"Too long\",\"client_type\":\"confidential\","
@@ -561,8 +629,8 @@ int main(void) {
     g_router = router_create();
     register_routes(g_router);
 
-    int failed = setup() || test_authorization_code_flow() || test_client_credentials() ||
-                 test_mfa_gates();
+    int failed = setup() || test_authorization_code_flow() || test_issuer() ||
+                 test_client_credentials() || test_mfa_gates();
 
     router_destroy(g_router);
     db_pool_shutdown();

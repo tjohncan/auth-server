@@ -24,12 +24,21 @@ typedef enum {
     PASSWORD_HASH_PBKDF2_SHA256
 } password_hash_algorithm_t;
 
+/* Longest public_base_url config_load accepts. The buffers that hold it with a
+ * path and a token appended are sized with room for it. */
+#define PUBLIC_BASE_URL_MAX 200
+
 /* Configuration structure */
 typedef struct {
     /* Server settings */
     char *host;
     int port;
     int workers;
+    /* Not a setting: derived from host and port by config_load. The address
+     * browsers and resource servers reach this server at: http://localhost:PORT
+     * when host is localhost, https://HOST otherwise. Every absolute URL the
+     * server hands out starts with it, and it is every access token's iss. */
+    char public_base_url[PUBLIC_BASE_URL_MAX + 1];
 
     /* Database settings */
     db_type_t db_type;

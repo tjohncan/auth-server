@@ -184,15 +184,8 @@ HttpResponse *rs_provision_user_handler(const HttpRequest *req) {
 
     if (info.was_created && info.invitation_token[0]) {
         char invite_url[512];
-        if (strcmp(g_config->host, "localhost") == 0) {
-            snprintf(invite_url, sizeof(invite_url),
-                     "http://localhost:%d/accept-invitation?token=%s",
-                     g_config->port, info.invitation_token);
-        } else {
-            snprintf(invite_url, sizeof(invite_url),
-                     "https://%s/accept-invitation?token=%s",
-                     g_config->host, info.invitation_token);
-        }
+        snprintf(invite_url, sizeof(invite_url), "%s/accept-invitation?token=%s",
+                 g_config->public_base_url, info.invitation_token);
 
         jsonbuf_appendf(jb, ",\"invitation\":{\"token\":\"");
         jsonbuf_append_escaped(jb, info.invitation_token);

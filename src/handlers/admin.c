@@ -41,21 +41,11 @@ int admin_bootstrap(db_handle_t *db,
         return -1;
     }
 
-    /* Build management API address and redirect URI from config.
-     * localhost uses http with port; anything else uses https. */
+    /* Management API address and redirect URI, at the server's public address */
     char mgmt_api_address[256];
     char mgmt_ui_redirect[256];
-    if (strcmp(config->host, "localhost") == 0) {
-        snprintf(mgmt_api_address, sizeof(mgmt_api_address),
-                 "http://localhost:%d/api", config->port);
-        snprintf(mgmt_ui_redirect, sizeof(mgmt_ui_redirect),
-                 "http://localhost:%d/callback", config->port);
-    } else {
-        snprintf(mgmt_api_address, sizeof(mgmt_api_address),
-                 "https://%s/api", config->host);
-        snprintf(mgmt_ui_redirect, sizeof(mgmt_ui_redirect),
-                 "https://%s/callback", config->host);
-    }
+    snprintf(mgmt_api_address, sizeof(mgmt_api_address), "%s/api", config->public_base_url);
+    snprintf(mgmt_ui_redirect, sizeof(mgmt_ui_redirect), "%s/callback", config->public_base_url);
 
     /* Create organization */
     long long org_pin;
