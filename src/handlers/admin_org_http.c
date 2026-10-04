@@ -25,6 +25,45 @@
  * Authentication Helpers (Dual Auth: Session Cookie OR Organization Key)
  * ========================================================================== */
 
+/* Declared in handlers.h; the localhost org-key endpoints in admin_http.c use it
+ * too. It lives here rather than in common.c so the response helpers there link
+ * without the database layer, which the HTTP and router tests don't need. */
+int try_org_key_auth(const HttpRequest *req, const char *operation,
+                     long long *out_org_pin, long long *out_key_pin) {
+    db_handle_t *db = db_pool_get_connection();
+    if (!db) {
+        log_error("Failed to get database connection for org key auth");
+        return -1;
+    }
+
+    const char *key_id_hex = http_request_get_header(req, "X-Org-Key-Id");
+    const char *key_secret = http_request_get_header(req, "X-Org-Key-Secret");
+
+    if (!key_id_hex || !key_secret) {
+        return -1;
+    }
+
+    unsigned char key_id[16];
+    if (hex_to_bytes(key_id_hex, key_id, 16) != 0) {
+        log_error("Invalid X-Org-Key-Id format");
+        return -1;
+    }
+
+    long long org_pin, key_pin;
+    if (organization_key_verify(db, key_id, key_secret, &org_pin, &key_pin) != 0) {
+        log_error("Organization key verification failed");
+        return -1;
+    }
+
+    log_key_usage(db, KEY_USAGE_ORGANIZATION, key_pin, operation,
+                  http_request_get_client_ip(req, NULL),
+                  http_request_get_header(req, "User-Agent"));
+
+    *out_org_pin = org_pin;
+    *out_key_pin = key_pin;
+    return 0;
+}
+
 /*
  * Authentication Context
  *

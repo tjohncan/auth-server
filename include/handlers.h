@@ -135,6 +135,8 @@ char *http_cookie_get_value(const char *cookie_header, const char *name);
  *
  * Extracts X-Org-Key-Id and X-Org-Key-Secret headers and validates them.
  * On success, logs usage to organization_key_usage with the given operation.
+ * Defined in admin_org_http.c, not common.c: it needs the database layer, and
+ * the helpers above don't.
  *
  * Parameters:
  *   req         - HTTP request containing auth headers

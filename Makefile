@@ -87,6 +87,11 @@ CRYPTO_SRCS = src/crypto/random.c src/crypto/argon2.c src/crypto/pbkdf2.c src/cr
 SRCS = src/main.c $(SERVER_SRCS) $(UTIL_SRCS) $(HANDLER_SRCS) $(DB_SRCS) $(CRYPTO_SRCS) $(DB_VENDOR_SRCS)
 OBJS = $(SRCS:.c=.o)
 
+# The SQLite amalgamation is compiled once, by the %.o rule below, and that object is
+# what the server and the test programs that need SQLite link. Compiling the 9 MB file
+# is most of a full build, and the test programs used to do it once each.
+DB_VENDOR_OBJS = $(DB_VENDOR_SRCS:.c=.o)
+
 # Target executable
 TARGET = auth-server
 
@@ -113,17 +118,24 @@ HEADERS := $(shell find include -name '*.h')
 $(filter-out vendor/%,$(OBJS)): $(HEADERS)
 
 # Nothing compiles the SQLite amalgamation until vendor/verify-sqlite.sh has checked
-# it against its pinned hashes, however it arrived. It runs on every build that could
-# compile it rather than once per stamp: hashing both files takes a fraction of a
-# second, and a stamp judged by file times would trust a replacement whose times were
-# restored, as unzip, cp -p and tar all do. Order-only, so a passing check never
-# forces a recompile. test/sanitize.sh, which compiles outside make, runs it too.
+# it against its pinned hashes, however it arrived. Only the object rule compiles it,
+# and the check runs whenever that rule is considered rather than once per stamp:
+# hashing both files takes a fraction of a second, and a stamp judged by file times
+# would trust a replacement whose times were restored, as unzip, cp -p and tar all do.
+# Order-only, so a passing check never forces a recompile. test/sanitize.sh, which
+# compiles outside make, runs it too.
+#
+# Nothing built with sanitizer flags depends on the object. test-sanitized appends
+# them as a target-specific variable, which make passes down to prerequisites, so an
+# object built under it would carry ASan into the next plain build's link; make
+# doesn't track flags, so nothing would ever rebuild it. The suites test-sanitized
+# runs don't link SQLite.
 ifeq ($(DB_BACKEND),sqlite)
 .PHONY: verify-sqlite
 verify-sqlite:
 	@sh vendor/verify-sqlite.sh
 
-vendor/sqlite/sqlite3.o test-http test-router test-db test-crypto: | verify-sqlite
+vendor/sqlite/sqlite3.o: | verify-sqlite
 endif
 
 # Debug build (security flags applied except _FORTIFY_SOURCE which requires -O1+)
@@ -147,19 +159,19 @@ test-str:
 	@echo "Test built! Run with: ./test-str"
 
 test-http:
-	$(CC) $(CFLAGS) $(SECURITY_FLAGS) test/test_http.c src/server/http.c src/handlers/common.c $(UTIL_SRCS) $(DB_SRCS) $(CRYPTO_SRCS) $(DB_VENDOR_SRCS) -o test-http $(LDFLAGS) $(SECURITY_LDFLAGS)
+	$(CC) $(CFLAGS) $(SECURITY_FLAGS) test/test_http.c src/server/http.c src/handlers/common.c $(UTIL_SRCS) -o test-http $(LDFLAGS) $(SECURITY_LDFLAGS)
 	@echo "HTTP parser test built! Run with: ./test-http"
 
 test-router:
-	$(CC) $(CFLAGS) $(SECURITY_FLAGS) test/test_router.c src/server/router.c src/server/http.c src/handlers/common.c $(UTIL_SRCS) $(DB_SRCS) $(CRYPTO_SRCS) $(DB_VENDOR_SRCS) -o test-router $(LDFLAGS) $(SECURITY_LDFLAGS)
+	$(CC) $(CFLAGS) $(SECURITY_FLAGS) test/test_router.c src/server/router.c src/server/http.c src/handlers/common.c $(UTIL_SRCS) -o test-router $(LDFLAGS) $(SECURITY_LDFLAGS)
 	@echo "Router test built! Run with: ./test-router"
 
-test-db:
-	$(CC) $(CFLAGS) $(SECURITY_FLAGS) test/test_db.c $(UTIL_SRCS) $(DB_SRCS) $(CRYPTO_SRCS) $(DB_VENDOR_SRCS) -o test-db $(LDFLAGS) $(SECURITY_LDFLAGS)
+test-db: $(DB_VENDOR_OBJS)
+	$(CC) $(CFLAGS) $(SECURITY_FLAGS) test/test_db.c $(UTIL_SRCS) $(DB_SRCS) $(CRYPTO_SRCS) $(DB_VENDOR_OBJS) -o test-db $(LDFLAGS) $(SECURITY_LDFLAGS)
 	@echo "Database test built! Run with: ./test-db"
 
-test-crypto:
-	$(CC) $(CFLAGS) $(SECURITY_FLAGS) test/test_crypto.c $(CRYPTO_SRCS) $(UTIL_SRCS) $(DB_SRCS) $(DB_VENDOR_SRCS) -o test-crypto $(LDFLAGS) $(SECURITY_LDFLAGS)
+test-crypto: $(DB_VENDOR_OBJS)
+	$(CC) $(CFLAGS) $(SECURITY_FLAGS) test/test_crypto.c $(CRYPTO_SRCS) $(UTIL_SRCS) $(DB_SRCS) $(DB_VENDOR_OBJS) -o test-crypto $(LDFLAGS) $(SECURITY_LDFLAGS)
 	@echo "Crypto test built! Run with: ./test-crypto"
 
 test-email:
