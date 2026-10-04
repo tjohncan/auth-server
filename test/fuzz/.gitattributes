@@ -1,0 +1,5 @@
+# Seeds are raw input bytes, not text. An HTTP request's CRLFs are part of the
+# input, and line-ending conversion on commit strips them, leaving requests the
+# parser rejects before it reaches anything a seed exists to cover.
+corpus/** -text
+crashes/** -text
