@@ -347,6 +347,10 @@ int client_resource_server_create(db_handle_t *db, long long user_account_pin,
  * - Session auth: Verifies user is org admin
  * - Org key auth: Verifies specific key is active
  *
+ * Also revokes the client's access tokens for that resource server, so linking
+ * the pair again brings none of them back. Refresh tokens stay: they aren't tied
+ * to one resource server, and can't mint a token for an unlinked one.
+ *
  * Returns: 0 on success, 1 if nothing was deleted (not found or caller not
  *          authorized), -1 on error
  */

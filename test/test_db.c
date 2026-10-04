@@ -51,7 +51,9 @@ static int read_stored_value(db_handle_t *db, const char *sql, char *out, size_t
     return (rc == DB_ROW && v) ? 0 : -1;
 }
 
-/* One organization, resource server and confidential client; pins are all 1. */
+/* One organization, resource server and confidential client, the client linked
+ * to the server as it must be to get tokens for it; pins are all 1. A test whose
+ * tokens have users links each user to the client too (client_user). */
 #define FIXTURE_ORG_RS_CLIENT \
     "INSERT INTO organization (id, code_name, display_name) " \
     "  VALUES (x'00000000000000000000000000000001', 'org', 'Org');" \
@@ -60,7 +62,9 @@ static int read_stored_value(db_handle_t *db, const char *sql, char *out, size_t
     "INSERT INTO client (id, organization_pin, code_name, client_type, grant_type, " \
     "                    display_name, access_token_ttl_seconds) " \
     "  VALUES (x'00000000000000000000000000000003', 1, 'cl', 'confidential', " \
-    "          'authorization_code', 'Client', 3600);"
+    "          'authorization_code', 'Client', 3600);" \
+    "INSERT INTO client_resource_server (organization_pin, client_pin, resource_server_pin) " \
+    "  VALUES (1, 1, 1);"
 
 static const unsigned char FIXTURE_CLIENT_ID[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x03};
 
@@ -177,7 +181,8 @@ static int test_credential_lifetimes(const config_t *config) {
     int failed = 1;
 
     if (db_execute_direct(sdb, FIXTURE_ORG_RS_CLIENT
-            "INSERT INTO user_account (id) VALUES (x'00000000000000000000000000000004');") != 0) {
+            "INSERT INTO user_account (id) VALUES (x'00000000000000000000000000000004');"
+            "INSERT INTO client_user (client_pin, user_account_pin) VALUES (1, 1);") != 0) {
         log_error("Lifetimes: could not insert fixtures");
         goto done;
     }
@@ -858,7 +863,10 @@ static int test_deactivated_user_tokens(const config_t *config) {
             "                    display_name, access_token_ttl_seconds) "
             "  VALUES (x'00000000000000000000000000000003', 1, 'cl', 'confidential', "
             "          'authorization_code', 'Client', 3600);"
-            "INSERT INTO user_account (id) VALUES (x'00000000000000000000000000000004');") != 0) {
+            "INSERT INTO user_account (id) VALUES (x'00000000000000000000000000000004');"
+            "INSERT INTO client_resource_server (organization_pin, client_pin, resource_server_pin) "
+            "  VALUES (1, 1, 1);"
+            "INSERT INTO client_user (client_pin, user_account_pin) VALUES (1, 1);") != 0) {
         log_error("Deactivation: could not insert fixtures");
         goto done;
     }
@@ -1000,7 +1008,8 @@ static int test_deactivation_revokes(const config_t *config) {
     /* Two users, pins 1 and 2 */
     if (db_execute_direct(sdb, FIXTURE_ORG_RS_CLIENT
             "INSERT INTO user_account (id) VALUES (x'00000000000000000000000000000004');"
-            "INSERT INTO user_account (id) VALUES (x'00000000000000000000000000000005');") != 0) {
+            "INSERT INTO user_account (id) VALUES (x'00000000000000000000000000000005');"
+            "INSERT INTO client_user (client_pin, user_account_pin) VALUES (1, 1), (1, 2);") != 0) {
         log_error("Revocation: could not insert fixtures");
         goto done;
     }
@@ -1154,6 +1163,210 @@ done:
     db_disconnect(sdb);
     if (!failed) {
         log_info("Deactivation revocation tests passed!");
+    }
+    return failed;
+}
+
+/* 1 if both liveness queries call the token active, 0 if both call it inactive,
+ * -1 if they disagree or fail */
+static int token_live(db_handle_t *db, const char *token, long long resource_server_pin) {
+    int active = -1;
+    if (oauth_introspect_token(db, token, NULL, resource_server_pin, &active,
+                               NULL, NULL, NULL, NULL, NULL, NULL) != 0) {
+        return -1;
+    }
+    return oauth_access_token_is_active(db, token) == active ? active : -1;
+}
+
+/* 1 if the user's refresh token is revoked, 0 if not, -1 if it can't be read */
+static int refresh_revoked(db_handle_t *db, int user_pin) {
+    char sql[96], value[8];
+    snprintf(sql, sizeof(sql),
+             "SELECT is_revoked FROM refresh_token WHERE user_account_pin = %d", user_pin);
+    if (read_stored_value(db, sql, value, sizeof(value)) != 0) return -1;
+    return strcmp(value, "1") == 0;
+}
+
+/*
+ * Unlinking withdraws tokens, and linking again doesn't bring them back.
+ *
+ * Unlinking a user from a client, or a client from a resource server, revokes
+ * the pair's tokens, so a new link revives none of them. Both liveness queries
+ * also read the links, for a token that escapes the revocation by being issued
+ * while the unlink runs. So each half unlinks, links again, and then un-revokes
+ * a token by hand while its link is gone. A universal client's users need no
+ * link, and unlinking from one revokes nothing.
+ *
+ * Returns 0 on success.
+ */
+static int test_unlink_revokes(const config_t *config) {
+    log_info("\nUnlink revocation tests");
+
+    db_handle_t *sdb = open_test_db(config);
+    if (!sdb) {
+        log_error("Unlink: could not open a test database");
+        return 1;
+    }
+
+    int failed = 1;
+
+    /* Besides the fixture's client 1 and resource server 1: resource server 2,
+       also linked to client 1; client 2, universal, linked to resource server 1;
+       users 1 and 2, linked to client 1; and user 1 an admin of the
+       organization, to unlink as. */
+    if (db_execute_direct(sdb, FIXTURE_ORG_RS_CLIENT
+            "INSERT INTO resource_server (id, organization_pin, code_name, display_name, address) "
+            "  VALUES (x'00000000000000000000000000000012', 1, 'rs2', 'RS 2', 'https://rs2.example');"
+            "INSERT INTO client (id, organization_pin, code_name, client_type, grant_type, "
+            "                    display_name, access_token_ttl_seconds, is_universal) "
+            "  VALUES (x'00000000000000000000000000000013', 1, 'ui', 'public', "
+            "          'authorization_code', 'Universal', 3600, 1);"
+            "INSERT INTO client_resource_server (organization_pin, client_pin, resource_server_pin) "
+            "  VALUES (1, 1, 2), (1, 2, 1);"
+            "INSERT INTO user_account (id) VALUES (x'00000000000000000000000000000004'),"
+            "                                     (x'00000000000000000000000000000005');"
+            "INSERT INTO client_user (client_pin, user_account_pin) VALUES (1, 1), (1, 2);"
+            "INSERT INTO organization_admin (organization_pin, user_account_pin) VALUES (1, 1);") != 0) {
+        log_error("Unlink: could not insert fixtures");
+        goto done;
+    }
+    const unsigned char user_ids[2][16] = {
+        {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x04},
+        {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x05},
+    };
+    const unsigned char rs_1[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x02};
+
+    /* Access tokens by resource server, client and user (0: no user), and a
+       refresh token for each user at client 1 */
+    const struct { long long rs, client, user; const char *token; } tokens[] = {
+        { 1, 1, 1, "unlink-user-1" },
+        { 1, 1, 2, "unlink-user-2" },
+        { 1, 2, 1, "unlink-universal" },
+        { 1, 1, 0, "unlink-machine-rs-1" },
+        { 2, 1, 0, "unlink-machine-rs-2" },
+    };
+    unsigned char id[16], code_id[16];
+    for (size_t i = 0; i < sizeof(tokens) / sizeof(tokens[0]); i++) {
+        if (oauth_token_create_access(sdb, tokens[i].rs, tokens[i].client, tokens[i].user,
+                                      NULL, NULL, tokens[i].token, "read", 3600, id) != 0 ||
+            token_live(sdb, tokens[i].token, tokens[i].rs) != 1) {
+            log_error("Unlink: %s isn't active to begin with", tokens[i].token);
+            goto done;
+        }
+    }
+    const char *codes[] = { "unlink-code-1", "unlink-code-2" };
+    const char *refresh[] = { "unlink-refresh-1", "unlink-refresh-2" };
+    for (int u = 0; u < 2; u++) {
+        if (oauth_auth_code_create(sdb, 1, FIXTURE_CLIENT_ID, u + 1, user_ids[u], codes[u],
+                                   NULL, NULL, 600, code_id) != 0 ||
+            oauth_token_create_refresh(sdb, 1, u + 1, code_id, refresh[u], "read",
+                                       3600, id) != 0) {
+            log_error("Unlink: could not create refresh tokens");
+            goto done;
+        }
+    }
+    log_info("  linked: every token active, the universal client's with no user link (OK)");
+
+    /* 1. Unlink user 1 from client 1: that pair's tokens die, nobody else's */
+    if (rs_client_user_unlink(sdb, 1, user_ids[0]) != 0) {
+        log_error("Unlink: could not unlink user 1 from client 1");
+        goto done;
+    }
+    if (token_live(sdb, "unlink-user-1", 1) != 0 || refresh_revoked(sdb, 1) != 1) {
+        log_error("Unlink: user 1's tokens at client 1 survived the unlink");
+        goto done;
+    }
+    if (token_live(sdb, "unlink-user-2", 1) != 1 || token_live(sdb, "unlink-universal", 1) != 1 ||
+        refresh_revoked(sdb, 2) != 0) {
+        log_error("Unlink: unlinking user 1 from client 1 touched other tokens");
+        goto done;
+    }
+    log_info("  user unlinked: the pair's tokens dead, nobody else's (OK)");
+
+    /* 2. Linked again: nothing comes back */
+    if (rs_client_user_link(sdb, 1, user_ids[0]) != 0 ||
+        token_live(sdb, "unlink-user-1", 1) != 0 || refresh_revoked(sdb, 1) != 1) {
+        log_error("Unlink: linking user 1 again brought their tokens back");
+        goto done;
+    }
+    log_info("  user linked again: nothing comes back (OK)");
+
+    /* 3. A token that escaped the revocation is refused while the link is gone,
+          and it is the link refusing it: linking again lets it through */
+    if (rs_client_user_unlink(sdb, 1, user_ids[0]) != 0 ||
+        db_execute_direct(sdb, "UPDATE access_token SET is_revoked = 0 "
+                               "WHERE client_pin = 1 AND user_account_pin = 1") != 0) {
+        log_error("Unlink: could not set up a token that escaped the revocation");
+        goto done;
+    }
+    if (token_live(sdb, "unlink-user-1", 1) != 0) {
+        log_error("Unlink: a token is active with its user unlinked from its client");
+        goto done;
+    }
+    if (rs_client_user_link(sdb, 1, user_ids[0]) != 0 || token_live(sdb, "unlink-user-1", 1) != 1) {
+        log_error("Unlink: the escaped token was refused by something other than the link");
+        goto done;
+    }
+    log_info("  escaped the revocation: refused while the user is unlinked (OK)");
+
+    /* 4. Unlinking from the universal client revokes nothing */
+    if (rs_client_user_unlink(sdb, 2, user_ids[0]) != 0 ||
+        token_live(sdb, "unlink-universal", 1) != 1) {
+        log_error("Unlink: unlinking a user from a universal client revoked their token");
+        goto done;
+    }
+    log_info("  universal client: unlinking revokes nothing (OK)");
+
+    /* 5. Unlink client 1 from resource server 1: the client's tokens there die,
+          user and machine alike; its token for resource server 2, another
+          client's for resource server 1, and its refresh tokens don't */
+    if (client_resource_server_delete(sdb, 1, -1, FIXTURE_CLIENT_ID, rs_1) != 0) {
+        log_error("Unlink: could not unlink client 1 from resource server 1");
+        goto done;
+    }
+    if (token_live(sdb, "unlink-machine-rs-1", 1) != 0 || token_live(sdb, "unlink-user-2", 1) != 0) {
+        log_error("Unlink: client 1's tokens for resource server 1 survived the unlink");
+        goto done;
+    }
+    if (token_live(sdb, "unlink-machine-rs-2", 2) != 1 ||
+        token_live(sdb, "unlink-universal", 1) != 1 || refresh_revoked(sdb, 2) != 0) {
+        log_error("Unlink: unlinking resource server 1 touched other tokens");
+        goto done;
+    }
+    log_info("  resource server unlinked: the client's tokens there dead, nothing else (OK)");
+
+    /* 6. Linked again: nothing comes back. Unlinked again, with a token that
+          escaped the revocation: refused, until the link returns */
+    if (client_resource_server_create(sdb, 1, -1, FIXTURE_CLIENT_ID, rs_1) != 0 ||
+        token_live(sdb, "unlink-machine-rs-1", 1) != 0) {
+        log_error("Unlink: linking resource server 1 again brought the client's token back");
+        goto done;
+    }
+    if (client_resource_server_delete(sdb, 1, -1, FIXTURE_CLIENT_ID, rs_1) != 0 ||
+        db_execute_direct(sdb, "UPDATE access_token SET is_revoked = 0 "
+                               "WHERE client_pin = 1 AND resource_server_pin = 1 "
+                               "AND user_account_pin IS NULL") != 0) {
+        log_error("Unlink: could not set up a token that escaped the revocation");
+        goto done;
+    }
+    if (token_live(sdb, "unlink-machine-rs-1", 1) != 0) {
+        log_error("Unlink: a token is active with its client unlinked from its server");
+        goto done;
+    }
+    if (client_resource_server_create(sdb, 1, -1, FIXTURE_CLIENT_ID, rs_1) != 0 ||
+        token_live(sdb, "unlink-machine-rs-1", 1) != 1) {
+        log_error("Unlink: the escaped token was refused by something other than the link");
+        goto done;
+    }
+    log_info("  resource server linked again: nothing comes back; an escaped token "
+             "is refused while unlinked (OK)");
+
+    failed = 0;
+
+done:
+    db_disconnect(sdb);
+    if (!failed) {
+        log_info("Unlink revocation tests passed!");
     }
     return failed;
 }
@@ -1480,6 +1693,11 @@ int main(void) {
     }
 
     if (test_deactivation_revokes(config) != 0) {
+        config_free(config);
+        return 1;
+    }
+
+    if (test_unlink_revokes(config) != 0) {
         config_free(config);
         return 1;
     }

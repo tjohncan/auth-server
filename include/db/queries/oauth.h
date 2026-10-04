@@ -480,13 +480,13 @@ int oauth_introspect_token(db_handle_t *db,
  * Check whether an access token is still active
  *
  * Access tokens are self-contained ES256 JWTs, so signature and expiry can be
- * verified offline. Two things cannot be: revocation, and whether the token's
- * client, its user, its resource server and the client's organization are still
- * active — both live in the database. Endpoints that accept a Bearer token
- * (e.g. GET /userinfo) must consult this to honor POST /revoke, replay-chain
- * revocation and deactivation; otherwise a revoked token, or one whose client,
- * user, resource server or organization has been deactivated, keeps working
- * until exp.
+ * verified offline. Two things cannot be: revocation, and whether what the token
+ * stands on still holds (its client, user, resource server and the client's
+ * organization still active, the client still linked to the resource server,
+ * the user still linked to the client) — both live in the database. Endpoints
+ * that accept a Bearer token (e.g. GET /userinfo) must consult this to honor
+ * POST /revoke, replay-chain revocation, deactivation and unlinking; otherwise
+ * such a token keeps working until exp.
  *
  * Applies the same liveness predicate as oauth_introspect_token(), but takes no
  * resource_server_pin — it answers only "is this token still valid at all", not

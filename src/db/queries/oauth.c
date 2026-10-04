@@ -1321,6 +1321,46 @@ int oauth_resource_server_authenticate(db_handle_t *db,
     return 1;
 }
 
+/*
+ * When an access token is live. Shared by introspection and
+ * oauth_access_token_is_active, so the two can't drift apart.
+ *
+ * Everything that withdraws a token is read here, at use time:
+ * - Deactivating a client, its organization or a resource server revokes
+ *   nothing, so each flag is read. A deactivated organization's or resource
+ *   server's credentials can't authenticate to introspect, but this doesn't lean
+ *   on that: oauth_access_token_is_active has no caller to authenticate.
+ * - Deactivating a user, unlinking a user from a client, and unlinking a client
+ *   from a resource server do revoke (user_set_active, rs_client_user_unlink,
+ *   client_resource_server_delete), and the account and both links are read too:
+ *   a token issued while one of those was running escapes its sweep, and so does
+ *   anything held from before the sweep existed. The revoking is what stops a
+ *   reactivation or a new link from bringing old tokens back.
+ * A client_credentials token (NULL user) has no account or user link to read,
+ * and a universal client's users need no link, as at sign-in.
+ */
+#define ACCESS_TOKEN_LIVE_FROM \
+    "FROM " TBL_ACCESS_TOKEN " at " \
+    "INNER JOIN " TBL_CLIENT " c ON c.pin = at.client_pin " \
+    "INNER JOIN " TBL_ORGANIZATION " o ON o.pin = c.organization_pin " \
+    "INNER JOIN " TBL_RESOURCE_SERVER " rs ON rs.pin = at.resource_server_pin " \
+    "LEFT JOIN " TBL_USER_ACCOUNT " ua ON ua.pin = at.user_account_pin "
+
+#define ACCESS_TOKEN_LIVE_WHERE \
+    "at.is_revoked = " BOOL_FALSE " " \
+    "AND c.is_active = " BOOL_TRUE " " \
+    "AND o.is_active = " BOOL_TRUE " " \
+    "AND rs.is_active = " BOOL_TRUE " " \
+    "AND (at.user_account_pin IS NULL OR ua.is_active = " BOOL_TRUE ") " \
+    "AND EXISTS (SELECT 1 FROM " TBL_CLIENT_RESOURCE_SERVER " crs " \
+    "            WHERE crs.client_pin = at.client_pin " \
+    "            AND crs.resource_server_pin = at.resource_server_pin) " \
+    "AND (at.user_account_pin IS NULL OR c.is_universal = " BOOL_TRUE " " \
+    "     OR EXISTS (SELECT 1 FROM " TBL_CLIENT_USER " cu " \
+    "                WHERE cu.client_pin = at.client_pin " \
+    "                AND cu.user_account_pin = at.user_account_pin)) " \
+    "AND (at.expected_expiry IS NULL OR at.expected_expiry > " NOW ") "
+
 int oauth_introspect_token(db_handle_t *db,
                            const char *token,
                            const char *token_type_hint,
@@ -1365,29 +1405,10 @@ int oauth_introspect_token(db_handle_t *db,
     const char *sql =
         "SELECT at.scopes, c.id, ua.id, rs.id, "
         UNIX_TS("at.expected_expiry") ", " UNIX_TS("at.issued_at") " "
-        "FROM " TBL_ACCESS_TOKEN " at "
-        "INNER JOIN " TBL_CLIENT " c ON c.pin = at.client_pin "
-        "INNER JOIN " TBL_ORGANIZATION " o ON o.pin = c.organization_pin "
-        "INNER JOIN " TBL_RESOURCE_SERVER " rs ON rs.pin = at.resource_server_pin "
-        "LEFT JOIN " TBL_USER_ACCOUNT " ua ON ua.pin = at.user_account_pin "
+        ACCESS_TOKEN_LIVE_FROM
         "WHERE at.token = " P"1 "
         "AND at.resource_server_pin = " P"2 "
-        "AND at.is_revoked = " BOOL_FALSE " "
-        "AND c.is_active = " BOOL_TRUE " "
-        /* Deactivating a client, its organization or a resource server revokes
-           nothing, so each is read here. A deactivated organization's or resource
-           server's credentials can't authenticate to ask, but this query doesn't
-           lean on that: oauth_access_token_is_active applies the same predicate
-           with no caller to authenticate. */
-        "AND o.is_active = " BOOL_TRUE " "
-        "AND rs.is_active = " BOOL_TRUE " "
-        /* Deactivating a user does revoke their tokens (user_set_active), but the
-           account is read here too: a token issued while that deactivation was
-           running escapes the sweep, and so does anything an account deactivated
-           before the sweep existed still holds. NULL user = a client_credentials
-           token, which has no account to be deactivated. */
-        "AND (at.user_account_pin IS NULL OR ua.is_active = " BOOL_TRUE ") "
-        "AND (at.expected_expiry IS NULL OR at.expected_expiry > " NOW ") "
+        "AND " ACCESS_TOKEN_LIVE_WHERE
         "LIMIT 1";
 
     db_stmt_t *stmt = NULL;
@@ -1491,23 +1512,11 @@ int oauth_access_token_is_active(db_handle_t *db, const char *token) {
         return -1;
     }
 
-    /* Same predicate oauth_introspect_token() applies: revoked tokens are dead,
-     * and so are the tokens of a deactivated client, of a deactivated user, of a
-     * client whose organization has been deactivated, and for a deactivated
-     * resource server. */
+    /* The predicate oauth_introspect_token() applies, without its resource server */
     const char *sql =
-        "SELECT 1 FROM " TBL_ACCESS_TOKEN " at "
-        "INNER JOIN " TBL_CLIENT " c ON c.pin = at.client_pin "
-        "INNER JOIN " TBL_ORGANIZATION " o ON o.pin = c.organization_pin "
-        "INNER JOIN " TBL_RESOURCE_SERVER " rs ON rs.pin = at.resource_server_pin "
-        "LEFT JOIN " TBL_USER_ACCOUNT " ua ON ua.pin = at.user_account_pin "
+        "SELECT 1 " ACCESS_TOKEN_LIVE_FROM
         "WHERE at.token = " P"1 "
-        "AND at.is_revoked = " BOOL_FALSE " "
-        "AND c.is_active = " BOOL_TRUE " "
-        "AND o.is_active = " BOOL_TRUE " "
-        "AND rs.is_active = " BOOL_TRUE " "
-        "AND (at.user_account_pin IS NULL OR ua.is_active = " BOOL_TRUE ") "
-        "AND (at.expected_expiry IS NULL OR at.expected_expiry > " NOW ") "
+        "AND " ACCESS_TOKEN_LIVE_WHERE
         "LIMIT 1";
 
     db_stmt_t *stmt = NULL;
@@ -1531,6 +1540,9 @@ int oauth_access_token_is_active(db_handle_t *db, const char *token) {
     log_error("Error checking whether access token is active");
     return -1;
 }
+
+#undef ACCESS_TOKEN_LIVE_FROM
+#undef ACCESS_TOKEN_LIVE_WHERE
 
 /*
  * Revoke a refresh token AND the access tokens issued under the same grant.

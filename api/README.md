@@ -614,6 +614,12 @@ Query: `client_id`, `resource_server_id` (both required)
 
 Returns `404` if there is no such link, or the client isn't the caller's.
 
+Unlinking also revokes the client's access tokens for that resource server, so linking the pair
+again brings none of them back. The client's refresh tokens stay valid, but can't get a token for a
+server the client is no longer linked to. A resource server that validates access tokens locally
+against `/.well-known/jwks.json` can't see the unlink, and keeps accepting a token until its `exp`;
+`POST /introspect` reports it inactive at once.
+
 ### Resource Server Keys
 
 API key management for resource server introspection authentication.
@@ -1324,6 +1330,7 @@ resource_server_secret=<resource_server_secret>
   - Expired tokens
   - Revoked tokens
   - Tokens whose user, client, resource server or client's organization has been deactivated
+  - Tokens whose client has been unlinked from the resource server, or whose user has been unlinked from the client (a universal client's users need no link)
   - Tokens not belonging to the authenticated resource server
   - Authentication failures
 - This prevents information disclosure per RFC 7662
@@ -1345,7 +1352,7 @@ OpenID Connect UserInfo endpoint (OIDC Core Section 5.3). Returns claims about t
 
 **Security**: Bearer token authentication. The access token (ES256 JWT) must be provided in the Authorization header. The token is verified against the server's current (and prior) signing keys.
 
-Signature and expiry are verified from the JWT itself, but a self-contained token cannot carry revocation state — so the token record is also consulted. A token revoked via `POST /revoke`, auto-revoked by replay-chain revocation, or whose user, client, resource server or client's organization has since been deactivated, is rejected here immediately rather than remaining usable until `exp`. This applies the same liveness predicate as `POST /introspect`.
+Signature and expiry are verified from the JWT itself, but a self-contained token cannot carry revocation state — so the token record is also consulted. A token revoked via `POST /revoke`, auto-revoked by replay-chain revocation, whose user, client, resource server or client's organization has since been deactivated, or whose client or user has since been unlinked, is rejected here immediately rather than remaining usable until `exp`. This applies the same liveness predicate as `POST /introspect`.
 
 **Request**:
 ```http
@@ -2924,6 +2931,12 @@ curl -X POST http://localhost:8080/api/rs/client-users \
 ### DELETE /api/rs/client-users
 
 Unlink a user from a client. Idempotent — succeeds even if not currently linked.
+
+Unlinking also revokes the user's refresh and access tokens for that client, so linking them again
+brings none of them back; the user's sign-in sessions stay. A universal client signs in any user
+without a link, so unlinking a user from one revokes nothing. An access token validated locally
+against `/.well-known/jwks.json` keeps working until its `exp`; `POST /introspect` reports it
+inactive at once.
 
 **Request Body**:
 ```json
