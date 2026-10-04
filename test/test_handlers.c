@@ -1,0 +1,573 @@
+/* strndup */
+#define _POSIX_C_SOURCE 200809L
+
+/*
+ * Handler-level tests: raw requests through the server's own route table,
+ * router and handlers, against an in-memory SQLite database, one flow per test.
+ *
+ * test-db pins the query functions underneath; this pins what the handlers add
+ * on top -- authentication, the MFA gates, status codes -- along the flows the
+ * README promises. Keep it to flows: what a single query returns belongs in
+ * test-db.
+ */
+#include "handlers.h"
+#include "server/router.h"
+#include "server/http.h"
+#include "util/config.h"
+#include "util/log.h"
+#include "util/str.h"
+#include "util/json.h"
+#include "db/db.h"
+#include "db/db_pool.h"
+#include "db/init/db_init.h"
+#include "crypto/encrypt.h"
+#include "crypto/password.h"
+#include "crypto/random.h"
+#include "crypto/totp.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <strings.h>
+#include <time.h>
+
+/* main.c's, read by the handlers */
+const config_t *g_config = NULL;
+
+static Router *g_router;
+
+/* ============================================================================
+ * Requests
+ * ============================================================================ */
+
+/* What a client sees of a response */
+typedef struct {
+    int status;
+    char *location;
+    char *cookie;      /* "__Host-session=..." from Set-Cookie, if any */
+    char *body;
+} Reply;
+
+static void reply_free(Reply *r) {
+    free(r->location);
+    free(r->cookie);
+    free(r->body);
+    memset(r, 0, sizeof(*r));
+}
+
+/* One request, handled the way main.c's router_request_handler does it: a
+ * private NUL-terminated copy, parsed, arriving from 127.0.0.1, dispatched. */
+static Reply send_raw(const char *raw) {
+    Reply r = {0};
+    size_t len = strlen(raw);
+    char *copy = malloc(len + 1);
+    memcpy(copy, raw, len + 1);
+
+    HttpRequest req = http_request_parse(copy, len);
+    str_copy(req.remote_ip, sizeof(req.remote_ip), "127.0.0.1");
+    HttpResponse *resp = req.method == HTTP_UNKNOWN
+        ? response_json_error(400, "Bad Request")
+        : router_dispatch(g_router, &req);
+    http_request_cleanup(&req);
+    free(copy);
+
+    r.status = resp->status_code;
+    for (int i = 0; i < resp->header_count; i++) {
+        const char *name = resp->headers[i].name, *value = resp->headers[i].value;
+        if (!r.location && strcasecmp(name, "Location") == 0) {
+            r.location = str_dup(value);
+        }
+        if (!r.cookie && strcasecmp(name, "Set-Cookie") == 0) {
+            const char *semi = strchr(value, ';');
+            r.cookie = semi ? strndup(value, (size_t)(semi - value)) : str_dup(value);
+        }
+    }
+    r.body = resp->body ? strndup(resp->body, resp->body_length) : str_dup("");
+    http_response_free(resp);
+    return r;
+}
+
+/* extra_headers: zero or more complete "Name: value\r\n" lines */
+static Reply request(const char *method, const char *target, const char *cookie,
+                     const char *extra_headers, const char *content_type,
+                     const char *body) {
+    static char raw[16384];
+    int n = snprintf(raw, sizeof(raw), "%s %s HTTP/1.0\r\n", method, target);
+    if (cookie) n += snprintf(raw + n, sizeof(raw) - n, "Cookie: %s\r\n", cookie);
+    if (extra_headers) n += snprintf(raw + n, sizeof(raw) - n, "%s", extra_headers);
+    if (content_type) n += snprintf(raw + n, sizeof(raw) - n, "Content-Type: %s\r\n", content_type);
+    if (body) {
+        snprintf(raw + n, sizeof(raw) - n, "Content-Length: %zu\r\n\r\n%s", strlen(body), body);
+    } else {
+        snprintf(raw + n, sizeof(raw) - n, "\r\n");
+    }
+    return send_raw(raw);
+}
+
+static Reply post_json(const char *path, const char *cookie, const char *json) {
+    return request("POST", path, cookie, NULL, "application/json", json);
+}
+
+static Reply post_form(const char *path, const char *form) {
+    return request("POST", path, NULL, NULL, "application/x-www-form-urlencoded", form);
+}
+
+/* A string field of a JSON reply, copied into out */
+static int field(const Reply *r, const char *key, char *out, size_t out_size) {
+    char *v = json_get_string(r->body, key);
+    if (!v) return -1;
+    snprintf(out, out_size, "%s", v);
+    free(v);
+    return 0;
+}
+
+/* First column of a one-row query, as text */
+static int query_text(const char *sql, char *out, size_t out_size) {
+    db_stmt_t *stmt = NULL;
+    out[0] = '\0';
+    if (db_prepare(db_pool_get_connection(), &stmt, sql) != 0) return -1;
+    int rc = db_step(stmt);
+    const char *v = rc == DB_ROW ? db_column_text(stmt, 0) : NULL;
+    if (v) snprintf(out, out_size, "%s", v);
+    db_finalize(stmt);
+    return v ? 0 : -1;
+}
+
+#define FAIL(...) do { printf("✗ "); printf(__VA_ARGS__); printf("\n"); return 1; } while (0)
+
+/* ============================================================================
+ * Shared state: the bootstrap admin and their organization
+ * ============================================================================ */
+
+static char g_admin_cookie[256];
+static char g_org_id[33];
+
+static int login(const char *username, const char *password, char *cookie, size_t size) {
+    char body[256];
+    snprintf(body, sizeof(body), "{\"username\":\"%s\",\"password\":\"%s\"}", username, password);
+    Reply r = post_json("/login", NULL, body);
+    int ok = r.status == 200 && r.cookie;
+    if (ok) snprintf(cookie, size, "%s", r.cookie);
+    reply_free(&r);
+    return ok ? 0 : -1;
+}
+
+static int setup(void) {
+    Reply r = post_json("/api/admin/bootstrap", NULL,
+                        "{\"username\":\"admin\",\"password\":\"correct horse battery\"}");
+    int status = r.status;
+    reply_free(&r);
+    if (status != 200) FAIL("bootstrap answered %d", status);
+    if (login("admin", "correct horse battery", g_admin_cookie, sizeof(g_admin_cookie)) != 0) {
+        FAIL("the bootstrap admin can't sign in");
+    }
+    if (query_text("SELECT lower(hex(id)) FROM organization WHERE code_name = 'system'",
+                   g_org_id, sizeof(g_org_id)) != 0) {
+        FAIL("no bootstrap organization");
+    }
+    return 0;
+}
+
+/* ============================================================================
+ * Authorization code with PKCE, and refresh-token rotation
+ * ============================================================================ */
+
+/* RFC 7636 Appendix B's verifier and its S256 challenge */
+#define PKCE_VERIFIER  "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+#define PKCE_CHALLENGE "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+
+static char g_ui_client[33];
+static char g_redirect_enc[128];
+
+/* /authorize as the admin, through the console's client; the code from the redirect */
+static int authorize(char *code, size_t size) {
+    char target[512];
+    snprintf(target, sizeof(target),
+             "/authorize?response_type=code&client_id=%s&redirect_uri=%s&state=st8"
+             "&code_challenge=" PKCE_CHALLENGE "&code_challenge_method=S256",
+             g_ui_client, g_redirect_enc);
+    Reply r = request("GET", target, g_admin_cookie, NULL, NULL, NULL);
+    const char *q = r.location ? strchr(r.location, '?') : NULL;
+    char *c = q ? http_query_get_param(q + 1, "code") : NULL;
+    char *state = q ? http_query_get_param(q + 1, "state") : NULL;
+    int ok = r.status == 302 && c && state && strcmp(state, "st8") == 0;
+    if (ok) snprintf(code, size, "%s", c);
+    free(c);
+    free(state);
+    reply_free(&r);
+    return ok ? 0 : -1;
+}
+
+static Reply exchange(const char *code, const char *verifier) {
+    char form[4096];
+    snprintf(form, sizeof(form),
+             "grant_type=authorization_code&code=%s&redirect_uri=%s&client_id=%s&code_verifier=%s",
+             code, g_redirect_enc, g_ui_client, verifier);
+    return post_form("/token", form);
+}
+
+static Reply refresh(const char *refresh_token) {
+    char form[1024];
+    snprintf(form, sizeof(form), "grant_type=refresh_token&refresh_token=%s&client_id=%s",
+             refresh_token, g_ui_client);
+    return post_form("/token", form);
+}
+
+static int userinfo_status(const char *access_token) {
+    char header[4096];
+    snprintf(header, sizeof(header), "Authorization: Bearer %s\r\n", access_token);
+    Reply r = request("GET", "/userinfo", NULL, header, NULL, NULL);
+    int status = r.status;
+    reply_free(&r);
+    return status;
+}
+
+/*
+ * A code exchanges once, and only with its PKCE verifier. Presenting it again
+ * is treated as theft: the tokens the first exchange issued are revoked. A
+ * refresh token rotates, and replaying a rotated one revokes its whole chain.
+ */
+static int test_authorization_code_flow(void) {
+    printf("\n=== Authorization code, PKCE and refresh rotation ===\n");
+
+    if (query_text("SELECT lower(hex(id)) FROM client WHERE code_name = 'management_ui'",
+                   g_ui_client, sizeof(g_ui_client)) != 0) {
+        FAIL("no management UI client");
+    }
+    char redirect[96];
+    snprintf(redirect, sizeof(redirect), "http://localhost:%d/callback", g_config->port);
+    str_url_encode(g_redirect_enc, sizeof(g_redirect_enc), redirect);
+
+    char code[2048], access[2048], rt[256], rt2[256];
+
+    /* 1. The wrong verifier is refused and the right one exchanges, so the
+          refusal was PKCE's (it's checked before the code is spent) */
+    if (authorize(code, sizeof(code)) != 0) FAIL("/authorize did not redirect with a code");
+    Reply r = exchange(code, "wrong-verifier-wrong-verifier-wrong-verifier-x");
+    if (r.status != 400) FAIL("an exchange with the wrong PKCE verifier answered %d", r.status);
+    reply_free(&r);
+    r = exchange(code, PKCE_VERIFIER);
+    if (r.status != 200 || field(&r, "access_token", access, sizeof(access)) != 0 ||
+        field(&r, "refresh_token", rt, sizeof(rt)) != 0) {
+        FAIL("the code exchange answered %d: %s", r.status, r.body);
+    }
+    reply_free(&r);
+    if (userinfo_status(access) != 200) FAIL("a fresh access token is refused at /userinfo");
+    printf("✓ a code exchanges only with its PKCE verifier\n");
+
+    /* 2. The same code again: refused, and the tokens it issued are revoked */
+    r = exchange(code, PKCE_VERIFIER);
+    if (r.status != 400) FAIL("a replayed code answered %d", r.status);
+    reply_free(&r);
+    if (userinfo_status(access) != 401) FAIL("the replay left the first access token live");
+    r = refresh(rt);
+    if (r.status != 400) FAIL("the replay left the first refresh token live");
+    reply_free(&r);
+    printf("✓ a code exchanges once; replaying it revokes what it issued\n");
+
+    /* 3. Rotation: a refresh token works once; replaying it kills its successor */
+    if (authorize(code, sizeof(code)) != 0) FAIL("/authorize did not redirect with a code");
+    r = exchange(code, PKCE_VERIFIER);
+    if (r.status != 200 || field(&r, "refresh_token", rt, sizeof(rt)) != 0) {
+        FAIL("the code exchange answered %d", r.status);
+    }
+    reply_free(&r);
+    r = refresh(rt);
+    if (r.status != 200 || field(&r, "refresh_token", rt2, sizeof(rt2)) != 0 ||
+        field(&r, "access_token", access, sizeof(access)) != 0) {
+        FAIL("rotating a refresh token answered %d", r.status);
+    }
+    reply_free(&r);
+    r = refresh(rt);
+    if (r.status != 400) FAIL("a rotated refresh token was accepted again");
+    reply_free(&r);
+    r = refresh(rt2);
+    if (r.status != 400) FAIL("replaying a rotated token left its successor live");
+    reply_free(&r);
+    if (userinfo_status(access) != 401) FAIL("replay left the chain's access token live");
+    printf("✓ a refresh token rotates once; replaying it revokes the chain\n");
+
+    return 0;
+}
+
+/* ============================================================================
+ * Client credentials, introspection, revocation, and the TTL cap
+ * ============================================================================ */
+
+/* POST a JSON body as the admin and return a string field of the reply */
+static int admin_create(const char *path, const char *json, const char *key,
+                        char *out, size_t size) {
+    Reply r = post_json(path, g_admin_cookie, json);
+    int ok = r.status == 200 && field(&r, key, out, size) == 0;
+    if (!ok) printf("  %s answered %d: %s\n", path, r.status, r.body);
+    reply_free(&r);
+    return ok ? 0 : -1;
+}
+
+static int introspect_active(const char *token, const char *rs, const char *key,
+                             const char *secret) {
+    char form[4096];
+    snprintf(form, sizeof(form),
+             "token=%s&resource_server_id=%s&resource_server_key_id=%s&resource_server_secret=%s",
+             token, rs, key, secret);
+    Reply r = post_form("/introspect", form);
+    int active = r.status == 200 ? (strstr(r.body, "\"active\":true") != NULL) : -1;
+    reply_free(&r);
+    return active;
+}
+
+/*
+ * A confidential client authenticates with its key and gets a token for the
+ * resource server it's linked to. Introspection answers only that server, a
+ * revoked token is inactive, and the server's access-token TTL cap applies even
+ * to a client stored above it.
+ */
+static int test_client_credentials(void) {
+    printf("\n=== Client credentials, introspection, revocation ===\n");
+
+    char json[512], rs_a[33], rs_b[33], svc[33];
+    char ck[33], cs[128], ka[33], sa[128], kb[33], sb[128];
+
+    snprintf(json, sizeof(json), "{\"organization_id\":\"%s\",\"code_name\":\"rs_a\","
+             "\"display_name\":\"RS A\",\"address\":\"https://a.example\"}", g_org_id);
+    if (admin_create("/api/admin/resource-servers", json, "id", rs_a, sizeof(rs_a)) != 0) return 1;
+    snprintf(json, sizeof(json), "{\"organization_id\":\"%s\",\"code_name\":\"rs_b\","
+             "\"display_name\":\"RS B\",\"address\":\"https://b.example\"}", g_org_id);
+    if (admin_create("/api/admin/resource-servers", json, "id", rs_b, sizeof(rs_b)) != 0) return 1;
+    snprintf(json, sizeof(json), "{\"organization_id\":\"%s\",\"code_name\":\"svc\","
+             "\"display_name\":\"Service\",\"client_type\":\"confidential\","
+             "\"grant_type\":\"client_credentials\",\"access_token_ttl_seconds\":600}", g_org_id);
+    if (admin_create("/api/admin/clients", json, "id", svc, sizeof(svc)) != 0) return 1;
+
+    snprintf(json, sizeof(json), "{\"client_id\":\"%s\",\"resource_server_id\":\"%s\"}", svc, rs_a);
+    Reply r = post_json("/api/admin/client-resource-servers", g_admin_cookie, json);
+    if (r.status != 200) FAIL("linking the client to RS A answered %d", r.status);
+    reply_free(&r);
+
+    snprintf(json, sizeof(json), "{\"client_id\":\"%s\"}", svc);
+    r = post_json("/api/admin/client-keys", g_admin_cookie, json);
+    if (field(&r, "key_id", ck, sizeof(ck)) != 0 || field(&r, "secret", cs, sizeof(cs)) != 0) {
+        FAIL("client key create answered %d", r.status);
+    }
+    reply_free(&r);
+    snprintf(json, sizeof(json), "{\"resource_server_id\":\"%s\"}", rs_a);
+    r = post_json("/api/admin/resource-server-keys", g_admin_cookie, json);
+    if (field(&r, "key_id", ka, sizeof(ka)) != 0 || field(&r, "secret", sa, sizeof(sa)) != 0) {
+        FAIL("RS A key create answered %d", r.status);
+    }
+    reply_free(&r);
+    snprintf(json, sizeof(json), "{\"resource_server_id\":\"%s\"}", rs_b);
+    r = post_json("/api/admin/resource-server-keys", g_admin_cookie, json);
+    if (field(&r, "key_id", kb, sizeof(kb)) != 0 || field(&r, "secret", sb, sizeof(sb)) != 0) {
+        FAIL("RS B key create answered %d", r.status);
+    }
+    reply_free(&r);
+
+    /* 1. A token for RS A; introspection answers RS A and no one else */
+    char form[4096], token[2048];
+    snprintf(form, sizeof(form), "grant_type=client_credentials&client_id=%s&client_key_id=%s"
+             "&client_secret=%s", svc, ck, cs);
+    r = post_form("/token", form);
+    if (r.status != 200 || field(&r, "access_token", token, sizeof(token)) != 0) {
+        FAIL("client_credentials answered %d: %s", r.status, r.body);
+    }
+    reply_free(&r);
+    if (introspect_active(token, rs_a, ka, sa) != 1) FAIL("RS A sees its own token inactive");
+    if (introspect_active(token, rs_b, kb, sb) != 0) FAIL("RS B can see RS A's token");
+    printf("✓ a client_credentials token introspects active for its server only\n");
+
+    /* 2. Revoked by its client: inactive */
+    snprintf(form, sizeof(form), "token=%s&client_id=%s&client_key_id=%s&client_secret=%s",
+             token, svc, ck, cs);
+    r = post_form("/revoke", form);
+    if (r.status != 200) FAIL("/revoke answered %d", r.status);
+    reply_free(&r);
+    if (introspect_active(token, rs_a, ka, sa) != 0) FAIL("a revoked token still introspects active");
+    printf("✓ a revoked token introspects inactive\n");
+
+    /* 3. A client stored above the TTL cap gets tokens at the cap */
+    int cap = g_config->max_access_token_ttl_seconds;
+    char sql[256];
+    snprintf(sql, sizeof(sql), "UPDATE client SET access_token_ttl_seconds = %d "
+             "WHERE id = x'%s'", cap + 3600, svc);
+    if (db_execute_direct(db_pool_get_connection(), sql) != 0) FAIL("could not raise the TTL");
+    snprintf(form, sizeof(form), "grant_type=client_credentials&client_id=%s&client_key_id=%s"
+             "&client_secret=%s", svc, ck, cs);
+    r = post_form("/token", form);
+    int expires_in = 0;
+    if (r.status != 200 || json_get_int(r.body, "expires_in", &expires_in) != 0 ||
+        expires_in != cap) {
+        FAIL("a client stored over the cap got expires_in %d, not %d", expires_in, cap);
+    }
+    reply_free(&r);
+
+    snprintf(json, sizeof(json), "{\"organization_id\":\"%s\",\"code_name\":\"too_long\","
+             "\"display_name\":\"Too long\",\"client_type\":\"confidential\","
+             "\"grant_type\":\"client_credentials\",\"access_token_ttl_seconds\":%d}",
+             g_org_id, cap + 1);
+    r = post_json("/api/admin/clients", g_admin_cookie, json);
+    if (r.status != 400) FAIL("creating a client over the TTL cap answered %d", r.status);
+    reply_free(&r);
+    printf("✓ the TTL cap holds at issuance and at client create\n");
+
+    /* 4. A key for a public client: refused, and no secret in the answer */
+    char pub[33];
+    snprintf(json, sizeof(json), "{\"organization_id\":\"%s\",\"code_name\":\"pub\","
+             "\"display_name\":\"Public\",\"client_type\":\"public\","
+             "\"grant_type\":\"authorization_code\",\"access_token_ttl_seconds\":600}", g_org_id);
+    if (admin_create("/api/admin/clients", json, "id", pub, sizeof(pub)) != 0) return 1;
+    snprintf(json, sizeof(json), "{\"client_id\":\"%s\"}", pub);
+    r = post_json("/api/admin/client-keys", g_admin_cookie, json);
+    if (r.status != 409 || strstr(r.body, "secret\":")) {
+        FAIL("a key for a public client answered %d: %s", r.status, r.body);
+    }
+    reply_free(&r);
+    r = request("DELETE", "/api/admin/client-keys?id=99999999999999999999999999999999",
+                g_admin_cookie, NULL, NULL, NULL);
+    if (r.status != 404) FAIL("revoking an unknown key answered %d", r.status);
+    reply_free(&r);
+    printf("✓ writes that match nothing answer 409/404, with no secret\n");
+
+    return 0;
+}
+
+/* ============================================================================
+ * MFA gates
+ * ============================================================================ */
+
+static int totp_now(const char *secret, char *code, size_t size) {
+    return crypto_totp_generate_code(secret, time(NULL), code, size);
+}
+
+/*
+ * Once a user has a factor, managing factors takes that factor, whatever the
+ * require preference says, so a password alone can't add, remove or replace
+ * one. With require on, the user's own endpoints and the admin API refuse a
+ * session that hasn't completed MFA.
+ */
+static int test_mfa_gates(void) {
+    printf("\n=== MFA gates ===\n");
+
+    /* A second user, an org admin, so the admin API can be checked too */
+    Reply r = post_json("/api/admin/users", NULL,
+                        "{\"username\":\"mfa-user\",\"password\":\"mfa user password\"}");
+    if (r.status != 200) FAIL("creating the MFA user answered %d", r.status);
+    reply_free(&r);
+    r = post_json("/api/admin/org-admins", NULL,
+                  "{\"username\":\"mfa-user\",\"org_code_name\":\"system\"}");
+    if (r.status != 200) FAIL("making them an org admin answered %d", r.status);
+    reply_free(&r);
+
+    char first[256], second[256], method[33], secret[64], code[16], json[256];
+    if (login("mfa-user", "mfa user password", first, sizeof(first)) != 0) FAIL("first sign-in");
+
+    /* Enroll: setup, then confirm with a code from the new secret */
+    r = post_json("/api/user/mfa/totp/setup", first, "{\"display_name\":\"phone\"}");
+    if (r.status != 200 || field(&r, "method_id", method, sizeof(method)) != 0 ||
+        field(&r, "secret", secret, sizeof(secret)) != 0) {
+        FAIL("TOTP setup answered %d", r.status);
+    }
+    reply_free(&r);
+    if (totp_now(secret, code, sizeof(code)) != 0) FAIL("could not make a TOTP code");
+    snprintf(json, sizeof(json), "{\"method_id\":\"%s\",\"code\":\"%s\"}", method, code);
+    r = post_json("/api/user/mfa/totp/confirm", first, json);
+    if (r.status != 200) FAIL("TOTP confirm answered %d", r.status);
+    reply_free(&r);
+
+    /* 1. Enrolled, require off, a password-only session: every factor-management
+          endpoint wants the factor first */
+    if (login("mfa-user", "mfa user password", second, sizeof(second)) != 0) FAIL("second sign-in");
+    char target[128];
+    snprintf(target, sizeof(target), "/api/user/mfa/methods?id=%s", method);
+    Reply gated[5] = {
+        post_json("/api/user/mfa/totp/setup", second, "{\"display_name\":\"other\"}"),
+        post_json("/api/user/mfa/totp/confirm", second, json),
+        request("DELETE", target, second, NULL, NULL, NULL),
+        post_json("/api/user/mfa/recovery-codes/regenerate", second, "{}"),
+        post_json("/api/user/mfa/require", second, "{\"enabled\":true}"),
+    };
+    const char *names[5] = { "setup", "confirm", "delete", "regenerate", "require" };
+    for (int i = 0; i < 5; i++) {
+        int bad = gated[i].status != 403;
+        if (bad) printf("✗ %s answered %d to a password-only session\n", names[i], gated[i].status);
+        reply_free(&gated[i]);
+        if (bad) return 1;
+    }
+    printf("✓ the five factor-management endpoints refuse a password-only session\n");
+
+    /* 2. The same session verifies the factor and is let through */
+    r = post_json("/api/user/mfa/verify", second, json);
+    if (r.status != 200) FAIL("verify answered %d", r.status);
+    reply_free(&r);
+    r = post_json("/api/user/mfa/require", second, "{\"enabled\":true}");
+    if (r.status != 200) FAIL("require answered %d after verifying", r.status);
+    reply_free(&r);
+    printf("✓ after the MFA step, factor management opens\n");
+
+    /* 3. Require on: a password-only session is refused by the user and admin APIs */
+    char third[256];
+    if (login("mfa-user", "mfa user password", third, sizeof(third)) != 0) FAIL("third sign-in");
+    r = request("GET", "/api/user/profile", third, NULL, NULL, NULL);
+    int profile = r.status;
+    reply_free(&r);
+    r = request("GET", "/api/admin/organizations", third, NULL, NULL, NULL);
+    int admin = r.status;
+    reply_free(&r);
+    if (profile != 403 || admin != 403) {
+        FAIL("with require on, a password-only session got profile %d, admin %d", profile, admin);
+    }
+    printf("✓ with require on, a password-only session is refused (403)\n");
+
+    return 0;
+}
+
+/* ============================================================================
+ * Main
+ * ============================================================================ */
+
+int main(void) {
+    log_init(LOG_ERROR);
+    printf("Handler Test Suite\n");
+
+#ifdef DB_BACKEND_POSTGRESQL
+    printf("Skipped: test-handlers runs in the SQLite build only.\n");
+    return 0;
+#endif
+
+    config_t *config = config_load("auth.conf");
+    if (!config) {
+        printf("✗ could not load auth.conf\n");
+        return 1;
+    }
+    /* One pass of Argon2: the flows sign in a dozen times, and the cost
+       parameters aren't what's under test here */
+    config->secret_hash_min_iterations = 1;
+    config->secret_hash_max_iterations = 1;
+    g_config = config;
+
+    /* One in-memory database, bound to this thread as a worker's would be */
+    if (encrypt_init(config->encryption_key) != 0 || crypto_password_init(config) != 0 ||
+        db_pool_init(1, DB_TYPE_SQLITE, ":memory:") != 0) {
+        printf("✗ setup failed\n");
+        return 1;
+    }
+    db_handle_t *db = db_pool_get_connection_by_index(0);
+    db_pool_set_connection(db);
+    const char *owner_role = config->db_owner_role ? config->db_owner_role : config->db_user;
+    if (db_init_schema(db, DB_TYPE_SQLITE, config->schema_dir, owner_role) < 0) {
+        printf("✗ schema setup failed\n");
+        return 1;
+    }
+
+    g_router = router_create();
+    register_routes(g_router);
+
+    int failed = setup() || test_authorization_code_flow() || test_client_credentials() ||
+                 test_mfa_gates();
+
+    router_destroy(g_router);
+    db_pool_shutdown();
+    config_free(config);
+
+    printf(failed ? "\n=== Handler tests FAILED ===\n" : "\n=== All Handler Tests Passed! ===\n");
+    return failed;
+}

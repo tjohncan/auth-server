@@ -45,15 +45,17 @@ jobs:
           rm sqlite3.zip
           sh vendor/verify-sqlite.sh
 
-      # test-db and test-crypto call config_load("auth.conf"). auth.conf is gitignored
-      # (it's the live, per-deployment config); the committed example is a complete
-      # SQLite config whose db_path (./data/auth.db) and schema_dir (./sql) both exist
-      # in a fresh checkout, so a straight copy is all CI needs.
+      # test-db, test-crypto and test-handlers call config_load("auth.conf"). auth.conf
+      # is gitignored (it's the live, per-deployment config); the committed example is
+      # a complete SQLite config whose schema_dir (./sql) exists in a fresh checkout, so
+      # a straight copy is all CI needs. No test opens its db_path; each makes its own
+      # database in memory.
       - name: Provide a test configuration
         run: cp auth.conf.example auth.conf
 
-      # `make test` builds and runs every suite (str, http, router, db, crypto), then
-      # replays the fuzz regression seeds under ASan+UBSan via fuzz-regress.
+      # `make test` builds and runs every suite (str, http, router, db, crypto,
+      # handlers), then replays the fuzz regression seeds under ASan+UBSan via
+      # fuzz-regress.
       # pipefail so make's exit code survives the pipe through tee —
       # the default shell is `bash -e`, which would otherwise see only tee succeed.
       - name: Build and run the test suite

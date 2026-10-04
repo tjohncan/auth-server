@@ -473,6 +473,7 @@ test/
 ├── test_str.c          # String utilities unit tests
 ├── test_db.c           # Database integration test
 ├── test_crypto.c       # Crypto test (random, password hashing, hmac, jwt)
+├── test_handlers.c     # Request flows through the real route table and handlers
 ├── test_email.c   # Infrastructure/deployment convenience check; not in standard "make test" battery 
 ├── sanitize.sh         # Build the whole server with ASan+UBSan, to drive by hand
 └── fuzz/               # Coverage-guided fuzzing (see fuzz/README.md)
@@ -531,6 +532,9 @@ vendor/
 - `make test-router` - Router tests
 - `make test-db` - Database integration test
 - `make test-crypto` - Crypto tests (random generation, password hashing, hmac, jwt)
+- `make test-handlers` - Request flows through the real route table and handlers: code
+    exchange with PKCE, refresh rotation and replay, client credentials and introspection,
+    the MFA gates
 - `make test` - All of the above, plus `fuzz-regress`
 - `make test-email` - Deliver a test email through the deployed "send script" (optional infrastructure)
 
