@@ -135,7 +135,8 @@ int str_url_encode(char *dst, size_t dst_size, const char *src);
  * str_url_decode - URL-decode a string (percent-decoding)
  *
  * Decodes percent-encoded characters (%XX) back to their original form.
- * Also converts '+' to space (form encoding compatibility).
+ * Also converts '+' to space (form encoding compatibility). A '%' that isn't
+ * followed by two hex digits is copied literally; %00 is refused.
  *
  * Parameters:
  *   dst      - Destination buffer

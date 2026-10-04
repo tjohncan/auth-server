@@ -186,6 +186,26 @@ void test_str_url_encode_decode(void) {
     assert(dec_len > 0);
     assert(strcmp(decoded, input) == 0);
     printf("Decode '%s' -> '%s' (%d bytes)\n", encoded, decoded, dec_len);
+
+    /* Only '%' and two hex digits is an escape. A sign or whitespace in their place
+       is not, so it can't smuggle in a byte the client never encoded: "%-1" used to
+       decode to 0xFF and "% 9" to a tab. A malformed escape is copied as it came. */
+    const struct { const char *in, *out; } escapes[] = {
+        { "%41%4a%4A", "AJJ" },
+        { "%-1",  "%-1" },
+        { "%+f",  "% f" },   /* the '+' after a literal '%' is still form-encoding's space */
+        { "% 9",  "% 9" },
+        { "%\t9", "%\t9" },
+        { "%zz",  "%zz" },
+        { "100%", "100%" },
+        { "%4",   "%4" },
+    };
+    for (size_t i = 0; i < sizeof(escapes) / sizeof(escapes[0]); i++) {
+        assert(str_url_decode(decoded, sizeof(decoded), escapes[i].in) >= 0);
+        assert(strcmp(decoded, escapes[i].out) == 0);
+    }
+    assert(str_url_decode(decoded, sizeof(decoded), "a%00b") == -1);
+    printf("Only %%XX with two hex digits decodes; malformed escapes copy literally; %%00 refused\n");
 }
 
 void test_str_html_escape(void) {

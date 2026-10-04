@@ -197,21 +197,19 @@ int str_url_decode(char *dst, size_t dst_size, const char *src) {
     const char *p = src;
 
     while (*p && written < dst_size - 1) {
-        if (*p == '%' && p[1] && p[2]) {
-            /* Decode %XX hex sequence */
-            char hex[3] = {p[1], p[2], '\0'};
-            char *end;
-            long val = strtol(hex, &end, 16);
+        /* Exactly two hex digits after the '%' (RFC 3986 pct-encoded). Checked digit
+           by digit rather than with strtol, which also takes a sign or leading
+           whitespace, so "%-1" would decode to 0xFF and "% 9" to a tab. Anything
+           else falls through and is copied literally. */
+        if (*p == '%' && isxdigit((unsigned char)p[1]) && isxdigit((unsigned char)p[2])) {
+            int hi = isdigit((unsigned char)p[1]) ? p[1] - '0' : tolower((unsigned char)p[1]) - 'a' + 10;
+            int lo = isdigit((unsigned char)p[2]) ? p[2] - '0' : tolower((unsigned char)p[2]) - 'a' + 10;
+            int val = hi * 16 + lo;
 
-            if (end == hex + 2) {
-                /* Reject NULL byte injection (%00) */
-                if (val == 0) return -1;
-                dst[written++] = (char)val;
-                p += 3;
-            } else {
-                /* Invalid hex - copy literally */
-                dst[written++] = *p++;
-            }
+            /* Reject NULL byte injection (%00) */
+            if (val == 0) return -1;
+            dst[written++] = (char)val;
+            p += 3;
         } else if (*p == '+') {
             /* Convert '+' to space (form encoding) */
             dst[written++] = ' ';
