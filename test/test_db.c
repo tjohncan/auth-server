@@ -1371,6 +1371,160 @@ done:
     return failed;
 }
 
+/* User 1's stored password hash */
+static int stored_password(db_handle_t *db, char *out, size_t out_size) {
+    return read_stored_value(db, "SELECT secret_hash FROM user_account WHERE pin = 1",
+                             out, out_size);
+}
+
+/*
+ * A password-reset link, an invitation and a recovery code each work once.
+ *
+ * Used once, each is refused after, as are a revoked or expired link, a link
+ * for an inactive account, and a code from a retired set; no refusal changes
+ * the password. Each redemption checks twice: up front, so a dead link costs
+ * no hash, and again in the statements that write, which are the authority: a
+ * redemption racing another passes the first check, and only the second stops
+ * it. From one connection the two can't be told apart, so this must also pass
+ * in a build whose up-front checks have been emptied out.
+ *
+ * Returns 0 on success.
+ */
+static int test_single_use(const config_t *config) {
+    log_info("\nSingle-use tests");
+
+    db_handle_t *sdb = open_test_db(config);
+    if (!sdb) {
+        log_error("Single-use: could not open a test database");
+        return 1;
+    }
+
+    int failed = 1;
+
+    /* One user, pin 1, and reset links: good, revoked, expired, and one more good
+       one for when the account is inactive */
+    const char *resets[] = { "single-reset", "single-reset-revoked", "single-reset-expired",
+                             "single-reset-inactive" };
+    if (db_execute_direct(sdb,
+            "INSERT INTO user_account (id) VALUES (x'00000000000000000000000000000004');") != 0) {
+        log_error("Single-use: could not insert the user");
+        goto done;
+    }
+    for (int i = 0; i < 4; i++) {
+        char reset_hash[SHA256_HEX_LENGTH], sql[512];
+        if (crypto_sha256_hex(resets[i], strlen(resets[i]), reset_hash, sizeof(reset_hash)) != 0) {
+            log_error("Single-use: could not hash a reset link");
+            goto done;
+        }
+        snprintf(sql, sizeof(sql),
+            "INSERT INTO password_reset_token "
+            "  (id, user_account_pin, token, issued_at, expected_expiry, is_revoked) "
+            "  VALUES (randomblob(16), 1, '%s', datetime('now'), datetime('now', '%s'), %d);",
+            reset_hash, i == 2 ? "-1 second" : "+1 hour", i == 1);
+        if (db_execute_direct(sdb, sql) != 0) {
+            log_error("Single-use: could not insert a reset link");
+            goto done;
+        }
+    }
+
+    char first[512], second[512], now[512];
+
+    /* 1. A reset link sets the password once; used, revoked or expired, it's
+          refused, and the password stays */
+    if (user_consume_password_reset_token(sdb, resets[0], "first password") != 0 ||
+        stored_password(sdb, first, sizeof(first)) != 0) {
+        log_error("Single-use: a good reset link didn't set the password");
+        goto done;
+    }
+    for (int i = 0; i < 3; i++) {
+        if (user_consume_password_reset_token(sdb, resets[i], "another password") != 1) {
+            log_error("Single-use: %s was accepted", i == 0 ? "a used reset link" : resets[i]);
+            goto done;
+        }
+    }
+    if (stored_password(sdb, now, sizeof(now)) != 0 || strcmp(now, first) != 0) {
+        log_error("Single-use: a refused reset link changed the password");
+        goto done;
+    }
+    log_info("  reset link: works once; used, revoked or expired, refused (OK)");
+
+    /* 2. An invitation, the same */
+    char invite[64], expired_invite[64], expired_hash[SHA256_HEX_LENGTH], sql[256];
+    if (user_create_invitation_token(sdb, 1, 0, 3600, NULL, invite) != 0 ||
+        user_create_invitation_token(sdb, 1, 0, 3600, NULL, expired_invite) != 0 ||
+        crypto_sha256_hex(expired_invite, strlen(expired_invite),
+                          expired_hash, sizeof(expired_hash)) != 0) {
+        log_error("Single-use: could not create invitations");
+        goto done;
+    }
+    snprintf(sql, sizeof(sql), "UPDATE invitation_token SET expected_expiry = "
+             "datetime('now', '-1 second') WHERE token = '%s'", expired_hash);
+    if (db_execute_direct(sdb, sql) != 0) {
+        log_error("Single-use: could not expire an invitation");
+        goto done;
+    }
+    if (user_consume_invitation_token(sdb, invite, "second password") != 0 ||
+        stored_password(sdb, second, sizeof(second)) != 0 || strcmp(second, first) == 0) {
+        log_error("Single-use: a good invitation didn't set the password");
+        goto done;
+    }
+    if (user_consume_invitation_token(sdb, invite, "another password") != 1 ||
+        user_consume_invitation_token(sdb, expired_invite, "another password") != 1 ||
+        stored_password(sdb, now, sizeof(now)) != 0 || strcmp(now, second) != 0) {
+        log_error("Single-use: a used or expired invitation was accepted");
+        goto done;
+    }
+    log_info("  invitation: works once; used or expired, refused (OK)");
+
+    /* 3. A live link for an account that is inactive, flagged directly, so no
+          sweep has voided the link: refused, and the password stays */
+    char inactive_invite[64];
+    if (user_create_invitation_token(sdb, 1, 0, 3600, NULL, inactive_invite) != 0 ||
+        db_execute_direct(sdb, "UPDATE user_account SET is_active = 0 WHERE pin = 1") != 0) {
+        log_error("Single-use: could not set up the inactive account");
+        goto done;
+    }
+    if (user_consume_password_reset_token(sdb, resets[3], "another password") != 1 ||
+        user_consume_invitation_token(sdb, inactive_invite, "another password") != 1 ||
+        stored_password(sdb, now, sizeof(now)) != 0 || strcmp(now, second) != 0) {
+        log_error("Single-use: a link for an inactive account was accepted");
+        goto done;
+    }
+    log_info("  inactive account: its live links refused (OK)");
+
+    /* 4. A recovery code works once and the set's other codes still work; once
+          the set is replaced, its unused codes don't */
+    const char *codes[] = { "single-code-1", "single-code-2" };
+    const char *new_codes[] = { "single-code-3" };
+    unsigned char set_id[16];
+    if (recovery_code_set_create(sdb, 1, codes, 2, set_id) != 0) {
+        log_error("Single-use: could not create recovery codes");
+        goto done;
+    }
+    if (recovery_code_verify(sdb, 1, codes[0]) != 1 ||
+        recovery_code_verify(sdb, 1, codes[0]) != 0 ||
+        recovery_code_verify(sdb, 1, "not-a-recovery-code") != 0) {
+        log_error("Single-use: a recovery code didn't work exactly once");
+        goto done;
+    }
+    if (recovery_code_set_create(sdb, 1, new_codes, 1, set_id) != 0 ||
+        recovery_code_verify(sdb, 1, codes[1]) != 0 ||
+        recovery_code_verify(sdb, 1, new_codes[0]) != 1) {
+        log_error("Single-use: a replaced set's code was accepted, or the new set's refused");
+        goto done;
+    }
+    log_info("  recovery code: works once; a replaced set's codes refused (OK)");
+
+    failed = 0;
+
+done:
+    db_disconnect(sdb);
+    if (!failed) {
+        log_info("Single-use tests passed!");
+    }
+    return failed;
+}
+
 /*
  * Authorization-scoped writes must report when they matched nothing.
  *
@@ -1698,6 +1852,11 @@ int main(void) {
     }
 
     if (test_unlink_revokes(config) != 0) {
+        config_free(config);
+        return 1;
+    }
+
+    if (test_single_use(config) != 0) {
         config_free(config);
         return 1;
     }

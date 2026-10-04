@@ -442,11 +442,14 @@ int user_lookup_password_reset_token(db_handle_t *db, const char *token);
 /*
  * Consume password reset token and set new password
  *
- * Single transaction: validate token, mark used, hash new password,
- * update user_account.
+ * Checks the token, hashes the new password outside any transaction, then in
+ * one transaction marks the token used and sets the password. Both statements
+ * re-check (the token, then the account), so a token used, revoked or expired
+ * since the first check, or an account deactivated since, is refused and nothing
+ * is written.
  *
- * Returns: 0 on success, 1 if token invalid/expired/used,
- *          -1 on error, -2 if password below minimum length
+ * Returns: 0 on success, 1 if token invalid/expired/used/revoked or the account
+ *          inactive, -1 on error, -2 if password below minimum length
  */
 int user_consume_password_reset_token(db_handle_t *db, const char *token,
                                        const char *new_password);
@@ -561,11 +564,13 @@ int user_lookup_invitation_token(db_handle_t *db, const char *token,
 /*
  * Consume invitation token (verify email + set password)
  *
- * Single transaction:
- *   1. Validate token (exists, not expired, not used, user active)
- *   2. Mark token used
- *   3. If email present and not yet verified: verify + squatter cleanup
- *   4. Hash and set password on user account
+ * Checks the token (exists, not expired, not used, user active) and the email for
+ * a conflict, and hashes the new password outside any transaction. Then, in one
+ * transaction:
+ *   1. Mark token used, re-checking it
+ *   2. If email present and not yet verified: verify + squatter cleanup
+ *   3. Set the password, re-checking that the account is active
+ * A re-check that fails rolls all of it back and returns 1.
  *
  * Returns: 0 on success,
  *          1 if token invalid/expired/used,

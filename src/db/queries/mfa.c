@@ -750,78 +750,46 @@ int recovery_code_verify(db_handle_t *db,
         return -1;
     }
 
-    /* Begin transaction (need to check and mark as used atomically) */
-    if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
-        log_error("Failed to begin transaction");
-        OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
-        return -1;
-    }
-
-    const char *select_sql =
-        "SELECT rc.pin "
-        "FROM " TBL_RECOVERY_CODE " rc "
-        "INNER JOIN " TBL_RECOVERY_CODE_SET " rcs ON rc.recovery_code_set_pin = rcs.pin "
-        "WHERE rcs.id = " P"1 "
-        "  AND rc.secret_hash = " P"2 "
-        "  AND rc.is_used = " BOOL_FALSE " "
-        "LIMIT 1";
-
-    db_stmt_t *select_stmt = NULL;
-    if (db_prepare(db, &select_stmt, select_sql) != 0) {
-        log_error("Failed to prepare recovery code select");
-        db_execute_trusted(db, "ROLLBACK");
-        OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
-        return -1;
-    }
-
-    db_bind_blob(select_stmt, 1, set.id, 16);
-    db_bind_text(select_stmt, 2, hash_hex, -1);
-    OPENSSL_cleanse(&set, sizeof(set));
-
-    int rc = db_step(select_stmt);
-
-    if (rc != DB_ROW) {
-        db_finalize(select_stmt);
-        db_execute_trusted(db, "ROLLBACK");
-        OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
-        log_debug("Recovery code not found or already used");
-        return 0;  /* Invalid */
-    }
-
-    long long code_pin = db_column_int64(select_stmt, 0);
-    db_finalize(select_stmt);
-    OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
-
-    /* Mark code as used */
-    const char *update_sql =
+    /* Check and use in one statement: it marks the matching code used only if
+     * the code is still unused and its set still active, and its RETURNING row
+     * is the verdict. Of two submissions of one code, the second matches
+     * nothing: SQLite runs them one at a time, and on PostgreSQL the second
+     * waits on the first's row lock and then finds the code used. */
+    const char *use_sql =
         "UPDATE " TBL_RECOVERY_CODE " "
         "SET is_used = " BOOL_TRUE ", "
         "    used_at = " NOW ", "
         "    updated_at = " NOW " "
-        "WHERE pin = " P"1 AND is_used = " BOOL_FALSE;
+        "WHERE recovery_code_set_pin = ("
+        "    SELECT pin FROM " TBL_RECOVERY_CODE_SET " "
+        "    WHERE id = " P"1 AND is_active = " BOOL_TRUE
+        ") "
+        "AND secret_hash = " P"2 "
+        "AND is_used = " BOOL_FALSE " "
+        "RETURNING pin";
 
-    db_stmt_t *update_stmt = NULL;
-    if (db_prepare(db, &update_stmt, update_sql) != 0) {
-        log_error("Failed to prepare recovery code update");
-        db_execute_trusted(db, "ROLLBACK");
+    db_stmt_t *use_stmt = NULL;
+    if (db_prepare(db, &use_stmt, use_sql) != 0) {
+        log_error("Failed to prepare recovery code use");
+        OPENSSL_cleanse(&set, sizeof(set));
+        OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
         return -1;
     }
 
-    db_bind_int64(update_stmt, 1, code_pin);
+    db_bind_blob(use_stmt, 1, set.id, 16);
+    db_bind_text(use_stmt, 2, hash_hex, -1);
+    OPENSSL_cleanse(&set, sizeof(set));
 
-    rc = db_step(update_stmt);
-    db_finalize(update_stmt);
+    int rc = db_step(use_stmt);
+    db_finalize(use_stmt);
+    OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
 
-    if (rc != DB_DONE) {
-        log_error("Failed to mark recovery code as used");
-        db_execute_trusted(db, "ROLLBACK");
-        return -1;
+    if (rc == DB_DONE) {
+        log_debug("Recovery code not found or already used");
+        return 0;  /* Invalid */
     }
-
-    /* Commit transaction */
-    if (db_execute_trusted(db, "COMMIT") != 0) {
-        log_error("Failed to commit transaction");
-        db_execute_trusted(db, "ROLLBACK");
+    if (rc != DB_ROW) {
+        log_error("Failed to use recovery code");
         return -1;
     }
 

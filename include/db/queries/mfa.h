@@ -95,7 +95,8 @@ int recovery_code_set_get_active(db_handle_t *db,
                                   long long user_account_pin,
                                   recovery_code_set_t *out_set);
 
-/* Verify recovery code (marks as used if valid)
+/* Verify recovery code (marks as used if valid). Checking and marking are one
+ * statement, so a code submitted twice at once is accepted once.
  * Returns: 1 if valid, 0 if invalid, -1 on error */
 int recovery_code_verify(db_handle_t *db,
                          long long user_account_pin,

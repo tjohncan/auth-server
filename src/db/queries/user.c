@@ -1994,7 +1994,14 @@ int user_consume_password_reset_token(db_handle_t *db, const char *token,
         return (hash_rc == -2) ? -2 : -1;
     }
 
-    /* Step 3: Transaction — mark token used + update password */
+    /* Step 3: Transaction — mark token used + update password.
+     *
+     * The lookup above is a fast path: a dead link costs no hash and gets the
+     * right page. These two statements are the authority, each for what it
+     * writes: marking the link used repeats the link's checks, and the password
+     * write requires the account still active. A link used, revoked or expired
+     * since, or an account deactivated since, matches no row, and the reset is
+     * refused and rolled back. */
     if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
         log_error("Failed to begin password reset transaction");
         OPENSSL_cleanse(salt, sizeof(salt));
@@ -2007,6 +2014,8 @@ int user_consume_password_reset_token(db_handle_t *db, const char *token,
         "SET is_used = " BOOL_TRUE ", used_at = " NOW ", updated_at = " NOW " "
         "WHERE token = " P"1 "
         "AND is_used = " BOOL_FALSE " "
+        "AND is_revoked = " BOOL_FALSE " "
+        "AND expected_expiry > " NOW " "
         "RETURNING is_used";
 
     db_stmt_t *use_stmt = NULL;
@@ -2035,7 +2044,8 @@ int user_consume_password_reset_token(db_handle_t *db, const char *token,
         "hash_iterations = " P"2, "
         "secret_hash = " P"3, "
         "updated_at = " NOW " "
-        "WHERE pin = " P"4 AND is_active = " BOOL_TRUE;
+        "WHERE pin = " P"4 AND is_active = " BOOL_TRUE " "
+        "RETURNING pin";
 
     db_stmt_t *update_stmt = NULL;
     if (db_prepare(db, &update_stmt, update_sql) != 0) {
@@ -2057,9 +2067,10 @@ int user_consume_password_reset_token(db_handle_t *db, const char *token,
     OPENSSL_cleanse(salt, sizeof(salt));
     OPENSSL_cleanse(hash, sizeof(hash));
 
-    if (rc != DB_DONE) {
-        log_error("Failed to update password");
+    if (rc != DB_ROW) {
         db_execute_trusted(db, "ROLLBACK");
+        if (rc == DB_DONE) return 1;  /* Deactivated since the link was marked used */
+        log_error("Failed to update password");
         return -1;
     }
 
@@ -2687,7 +2698,16 @@ int user_consume_invitation_token(db_handle_t *db, const char *token,
         return (hash_rc == -2) ? -2 : -1;
     }
 
-    /* Step 3: Transaction */
+    /* Step 3: Transaction.
+     *
+     * The lookup above is a fast path: a dead link costs no hash and gets the
+     * right page. Marking the link used and setting the password are the
+     * authority, each for what it writes: the first repeats the link's checks,
+     * the second requires the account still active. A link used or expired since
+     * (a deactivation voids it by marking it used), or an account deactivated
+     * since, matches no row, and the redemption is refused and rolled back, email
+     * verification included. So a second redemption racing the first can't set
+     * the password again. */
     if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
         log_error("Failed to begin invitation consume transaction");
         OPENSSL_cleanse(salt, sizeof(salt));
@@ -2700,7 +2720,9 @@ int user_consume_invitation_token(db_handle_t *db, const char *token,
         "UPDATE " TBL_INVITATION_TOKEN " "
         "SET is_used = " BOOL_TRUE ", used_at = " NOW ", updated_at = " NOW " "
         "WHERE token = " P"1 "
-        "AND is_used = " BOOL_FALSE;
+        "AND is_used = " BOOL_FALSE " "
+        "AND expected_expiry > " NOW " "
+        "RETURNING is_used";
 
     db_stmt_t *use_stmt = NULL;
     if (db_prepare(db, &use_stmt, use_sql) != 0) {
@@ -2715,11 +2737,12 @@ int user_consume_invitation_token(db_handle_t *db, const char *token,
     rc = db_step(use_stmt);
     db_finalize(use_stmt);
 
-    if (rc != DB_DONE) {
-        log_error("Failed to mark invitation token as used");
+    if (rc != DB_ROW) {
         db_execute_trusted(db, "ROLLBACK");
         OPENSSL_cleanse(salt, sizeof(salt));
         OPENSSL_cleanse(hash, sizeof(hash));
+        if (rc == DB_DONE) return 1;  /* Used, expired or voided since the lookup */
+        log_error("Failed to mark invitation token as used");
         return -1;
     }
 
@@ -2851,7 +2874,8 @@ int user_consume_invitation_token(db_handle_t *db, const char *token,
         "hash_iterations = " P"2, "
         "secret_hash = " P"3, "
         "updated_at = " NOW " "
-        "WHERE pin = " P"4 AND is_active = " BOOL_TRUE;
+        "WHERE pin = " P"4 AND is_active = " BOOL_TRUE " "
+        "RETURNING pin";
 
     db_stmt_t *update_stmt = NULL;
     if (db_prepare(db, &update_stmt, update_sql) != 0) {
@@ -2873,9 +2897,10 @@ int user_consume_invitation_token(db_handle_t *db, const char *token,
     OPENSSL_cleanse(salt, sizeof(salt));
     OPENSSL_cleanse(hash, sizeof(hash));
 
-    if (rc != DB_DONE) {
-        log_error("Failed to set password for invitation");
+    if (rc != DB_ROW) {
         db_execute_trusted(db, "ROLLBACK");
+        if (rc == DB_DONE) return 1;  /* Deactivated since the link was marked used */
+        log_error("Failed to set password for invitation");
         return -1;
     }
 
