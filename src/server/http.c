@@ -9,6 +9,7 @@
 #include <strings.h>  /* for strcasecmp */
 #include <stdlib.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <ctype.h>
 #include <stdbool.h>
 #include <arpa/inet.h>  /* for INET6_ADDRSTRLEN */
@@ -137,6 +138,39 @@ static bool parse_header_line(char *line, HttpHeader *header) {
 }
 
 /*
+ * Parse a Content-Length value: one or more ASCII digits, optionally surrounded by
+ * spaces or tabs (RFC 7230 §3.3.2, §3.2.3). Anything else is invalid: an empty
+ * value, a sign, a second number, trailing junk, or a value too large for size_t.
+ *
+ * Reads exactly `len` bytes and no further. The socket layer calls this on its read
+ * buffer, which is not NUL-terminated; strtol, which skips any leading whitespace
+ * including CR and LF and stops only at a non-digit, would run on into the body.
+ *
+ * Returns 0 with *out set, or -1 if the value is invalid.
+ */
+static int parse_content_length_value(const char *value, size_t len, size_t *out) {
+    size_t i = 0;
+    while (i < len && (value[i] == ' ' || value[i] == '\t')) i++;
+
+    size_t n = 0;
+    size_t digits = 0;
+    while (i < len && value[i] >= '0' && value[i] <= '9') {
+        size_t d = (size_t)(value[i] - '0');
+        if (n > (SIZE_MAX - d) / 10) return -1;
+        n = n * 10 + d;
+        digits++;
+        i++;
+    }
+    if (digits == 0) return -1;
+
+    while (i < len && (value[i] == ' ' || value[i] == '\t')) i++;
+    if (i != len) return -1;
+
+    *out = n;
+    return 0;
+}
+
+/*
  * Main parser - zero-copy, modifies buffer in place
  */
 HttpRequest http_request_parse(char *raw, size_t length) {
@@ -232,25 +266,27 @@ HttpRequest http_request_parse(char *raw, size_t length) {
         }
     }
 
+    /* Content-Length, read by the rule the socket layer framed the request with
+     * (http_scan_content_length). An invalid value makes the framing invalid, and
+     * RFC 7230 §3.3.3 has a server reject such a request rather than guess, so the
+     * parser refuses it too instead of falling back to whatever bytes arrived. */
+    const char *content_length_str = http_request_get_header(&req, "Content-Length");
+    size_t declared_length = 0;
+    if (content_length_str &&
+        parse_content_length_value(content_length_str, strlen(content_length_str),
+                                   &declared_length) != 0) {
+        req.method = HTTP_UNKNOWN;
+        return req;
+    }
+
     /* Body (if present) */
     size_t body_offset = body_start - raw;
     if (body_offset < length) {
         req.body = body_start;
         req.body_length = length - body_offset;
 
-        /* Check Content-Length header */
-        const char *content_length_str = http_request_get_header(&req, "Content-Length");
-        if (content_length_str) {
-            char *endptr;
-            long declared_length = strtol(content_length_str, &endptr, 10);
-
-            /* Validate: at least one digit parsed, no junk after, non-negative */
-            if (endptr > content_length_str && *endptr == '\0' && declared_length >= 0) {
-                if (req.body_length > (size_t)declared_length) {
-                    req.body_length = (size_t)declared_length;
-                }
-            }
-            /* If parse failed, ignore Content-Length (use actual body_length) */
+        if (content_length_str && req.body_length > declared_length) {
+            req.body_length = declared_length;
         }
 
         /* Content-Length is authoritative, so terminate the body at it. Without this the
@@ -398,6 +434,56 @@ size_t http_find_header_end(const char *buffer, size_t length, size_t already_sc
 
     const char *end = memmem(buffer + from, length - from, "\r\n\r\n", 4);
     return end ? (size_t)(end - buffer) + 4 : 0;
+}
+
+int http_scan_content_length(const char *headers, size_t header_len, size_t *out_length) {
+    if (!headers || !out_length) {
+        return -1;
+    }
+
+    const char *end = headers + header_len;
+
+    /* Header lines begin after the request line */
+    const char *p = memmem(headers, header_len, "\r\n", 2);
+    if (!p) {
+        return 1;
+    }
+    p += 2;
+
+    bool found = false;
+    size_t first_value = 0;
+
+    while (p < end) {
+        const char *line_end = memmem(p, (size_t)(end - p), "\r\n", 2);
+        if (!line_end) break;
+        size_t line_len = (size_t)(line_end - p);
+
+        /* ">= 15", not "> 15": a bare "Content-Length:" with nothing after it is an
+           invalid value, not an absent header */
+        if (line_len >= 15 && strncasecmp(p, "Content-Length:", 15) == 0) {
+            size_t value;
+            if (parse_content_length_value(p + 15, line_len - 15, &value) != 0) {
+                return -1;
+            }
+            if (!found) {
+                first_value = value;
+                found = true;
+            } else if (value != first_value) {
+                /* Two lengths: which one frames the request is exactly what a
+                   smuggling attempt wants the two ends of a proxy to disagree on */
+                return -2;
+            }
+        }
+
+        p = line_end + 2;
+    }
+
+    if (!found) {
+        return 1;
+    }
+
+    *out_length = first_value;
+    return 0;
 }
 
 /* ============================================================================

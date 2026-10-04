@@ -8,7 +8,7 @@ hands one blob of bytes to one function; the fuzzer generates the blobs.
 
 | Target | Function | Surface |
 |---|---|---|
-| `http` | `http_request_parse` + accessors | Socket-facing request parser: in-place pointer arithmetic over attacker bytes. |
+| `http` | `http_request_parse` + accessors, `http_find_header_end`, `http_scan_content_length` | Socket-facing request parser: in-place pointer arithmetic over attacker bytes, and the framing scans the socket layer runs on its unterminated read buffer. |
 | `jwt`  | `jwt_decode_auth_request` | Authorization-code decoder: HMAC verify, base64url, hand-rolled JSON, hex decode. |
 | `json` | `json_utf8_valid`, `json_escapes_valid`, `json_get_*`, `json_unescape` | Every request body: the whole-body checks, then the field readers and the in-place `\u` decoder. |
 

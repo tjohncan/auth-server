@@ -1,5 +1,6 @@
 /*
- * Fuzz harness for the HTTP request path (http_request_parse + its accessors).
+ * Fuzz harness for the HTTP request path (http_request_parse + its accessors), and
+ * the socket layer's framing scans (http_find_header_end, http_scan_content_length).
  * See test/fuzz/README.md for how to build and run.
  *
  * The harness models src/main.c:router_request_handler() byte for byte: same
@@ -54,6 +55,24 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
         }
         if (http_find_header_end((const char *)data, size, 0) == 0 && found != 0) {
             abort();   /* resuming found one where scanning everything did not */
+        }
+    }
+
+    /* The socket layer's Content-Length scan, which runs once the header end is
+     * found. Its buffer is NOT NUL-terminated, so it gets an exactly-sized heap
+     * copy: reading even one byte past the block lands outside the allocation,
+     * where ASan sees it. (Replay mode reads into a large static buffer, which
+     * would hide exactly that.) */
+    {
+        size_t header_end = http_find_header_end((const char *)data, size, 0);
+        if (header_end) {
+            char *exact = malloc(header_end);
+            if (exact) {
+                memcpy(exact, data, header_end);
+                size_t length = 0;
+                http_scan_content_length(exact, header_end, &length);
+                free(exact);
+            }
         }
     }
 

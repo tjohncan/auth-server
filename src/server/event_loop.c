@@ -1,4 +1,4 @@
-/* Define _GNU_SOURCE for SO_REUSEPORT and memmem */
+/* Define _GNU_SOURCE for SO_REUSEPORT */
 #define _GNU_SOURCE
 
 #include "server/event_loop.h"
@@ -10,7 +10,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>  /* strncasecmp */
 #include <stdbool.h>
 #include <stdatomic.h>
 #include <unistd.h>
@@ -407,77 +406,6 @@ static void handle_accept(EventLoop *loop, int listen_fd) {
 }
 
 /*
- * extract_content_length - Quick scan for Content-Length header value
- *
- * Scans for "Content-Length: 123" without full HTTP parsing.
- * Used to determine if we need to read request body.
- *
- * SECURITY: Detects multiple Content-Length headers (request smuggling attack).
- * Per RFC 7230 Section 3.3.2: Multiple Content-Length with different values = REJECT.
- *
- * Returns: 0 if found (sets *out_length), -1 if not found, -2 if multiple/conflicting
- */
-static int extract_content_length(const char *buffer, size_t buffer_len, size_t *out_length) {
-    /* Look for "Content-Length:" (case-insensitive) */
-    const char *p = buffer;
-    const char *end = buffer + buffer_len;
-    bool found = false;
-    size_t first_value = 0;
-
-    while (p < end) {
-        /* Find next line */
-        const char *line_start = p;
-        const char *line_end = memmem(p, end - p, "\r\n", 2);
-        if (!line_end) break;
-
-        size_t line_len = line_end - line_start;
-
-        /* Check if this line starts with "Content-Length:" (case-insensitive) */
-        if (line_len > 15 && strncasecmp(line_start, "Content-Length:", 15) == 0) {
-            /* Found it! Extract the number */
-            const char *value_start = line_start + 15;
-
-            /* Skip whitespace */
-            while (value_start < line_end && (*value_start == ' ' || *value_start == '\t')) {
-                value_start++;
-            }
-
-            /* Parse number */
-            char *endptr;
-            long length = strtol(value_start, &endptr, 10);
-
-            /* Validate: at least one digit parsed, non-negative, no trailing garbage */
-            if (endptr > value_start && length >= 0 &&
-                (*endptr == '\r' || *endptr == '\n' || *endptr == '\0' || *endptr == ' ')) {
-                if (!found) {
-                    /* First Content-Length header */
-                    first_value = (size_t)length;
-                    found = true;
-                } else {
-                    /* Multiple Content-Length headers! */
-                    if (first_value != (size_t)length) {
-                        /* Different values = request smuggling attack */
-                        log_warn("Multiple Content-Length headers with different values detected");
-                        return -2;
-                    }
-                    /* Same value = accept (redundant but harmless) */
-                }
-            }
-        }
-
-        /* Next line */
-        p = line_end + 2;
-    }
-
-    if (found) {
-        *out_length = first_value;
-        return 0;  /* Success */
-    }
-
-    return -1;  /* Not found */
-}
-
-/*
  * handle_read - Read data from connection
  *
  * Returns: 0 if more data expected, 1 if request complete, -1 on error/close
@@ -549,12 +477,20 @@ static int handle_read(Connection *conn, size_t max_request_size) {
             /* Everything below reads the header block, so it runs once per
              * request rather than once per chunk. */
             size_t content_length = 0;
-            int cl_result = extract_content_length(conn->read_buffer, conn->header_end,
-                                                   &content_length);
+            int cl_result = http_scan_content_length(conn->read_buffer, conn->header_end,
+                                                     &content_length);
 
             if (cl_result == -2) {
                 /* Multiple/conflicting Content-Length headers (request smuggling attack) */
                 log_warn("Rejecting request with conflicting Content-Length headers from connection %lu",
+                        conn->connection_id);
+                return -1;
+            }
+
+            if (cl_result == -1) {
+                /* Not 1*DIGIT: the framing is invalid (RFC 7230 §3.3.3), so there is
+                 * no right number of body bytes to wait for */
+                log_warn("Rejecting request with an invalid Content-Length from connection %lu",
                         conn->connection_id);
                 return -1;
             }
@@ -572,7 +508,7 @@ static int handle_read(Connection *conn, size_t max_request_size) {
             }
 
             if (cl_result != 0) {
-                /* No Content-Length (cl_result == -1), request is complete (GET/HEAD/etc.) */
+                /* No Content-Length (cl_result == 1), request is complete (GET/HEAD/etc.) */
                 log_debug("Received complete request (%zu bytes) from connection %lu",
                          conn->bytes_read, conn->connection_id);
                 return 1;

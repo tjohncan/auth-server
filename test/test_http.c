@@ -489,6 +489,94 @@ void test_header_end_scan(void) {
     printf("✓ the FIRST delimiter wins when the body contains another\n");
 }
 
+/*
+ * The socket layer's Content-Length scan runs on its read buffer, which has no
+ * terminator, so each case is copied into an exactly-sized heap allocation and
+ * scanned up to the header end, as handle_read does. Under ASan (make
+ * test-sanitized), reading one byte past the block reads outside the allocation.
+ */
+static int scan_exact(const char *raw, size_t *out_length) {
+    size_t len = strlen(raw);
+    char *exact = malloc(len);
+    assert(exact);
+    memcpy(exact, raw, len);
+    size_t header_end = http_find_header_end(exact, len, 0);
+    assert(header_end);
+    int rc = http_scan_content_length(exact, header_end, out_length);
+    free(exact);
+    return rc;
+}
+
+void test_content_length_scan(void) {
+    printf("\n=== Test: Content-Length scan ===\n");
+
+    static const struct {
+        const char *raw;
+        int rc;
+        size_t length;
+        const char *what;
+    } cases[] = {
+        { "POST / HTTP/1.0\r\nContent-Length: 42\r\n\r\n",               0, 42, "a plain value" },
+        { "POST / HTTP/1.0\r\ncontent-length:7\r\n\r\n",                 0, 7,  "lower case, no space" },
+        { "POST / HTTP/1.0\r\nContent-Length: \t 9 \t\r\n\r\n",          0, 9,  "spaces and tabs around the digits" },
+        { "POST / HTTP/1.0\r\nContent-Length: 3\r\nContent-Length: 3\r\n\r\n", 0, 3, "two lines that agree" },
+        { "POST / HTTP/1.0\r\nHost: x\r\n\r\n",                           1, 0,  "no Content-Length" },
+        { "Content-Length: 5 / HTTP/1.0\r\nHost: x\r\n\r\n",             1, 0,  "the request line isn't a header" },
+        { "POST / HTTP/1.0\r\nContent-Length:\r\n\r\n",                  -1, 0, "an empty value" },
+        { "POST / HTTP/1.0\r\nContent-Length: +5\r\n\r\n",               -1, 0, "a sign" },
+        { "POST / HTTP/1.0\r\nContent-Length: -1\r\n\r\n",               -1, 0, "a negative" },
+        { "POST / HTTP/1.0\r\nContent-Length: 5x\r\n\r\n",               -1, 0, "trailing junk" },
+        { "POST / HTTP/1.0\r\nContent-Length: 5 6\r\n\r\n",              -1, 0, "two numbers" },
+        { "POST / HTTP/1.0\r\nContent-Length: 0x10\r\n\r\n",             -1, 0, "hex" },
+        { "POST / HTTP/1.0\r\nContent-Length: 99999999999999999999999\r\n\r\n", -1, 0, "a value too big for size_t" },
+        { "POST / HTTP/1.0\r\nContent-Length: 3\r\nContent-Length: 4\r\n\r\n", -2, 0, "two lines that disagree" },
+    };
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        size_t length = 0;
+        int rc = scan_exact(cases[i].raw, &length);
+        assert(rc == cases[i].rc);
+        if (rc == 0) assert(length == cases[i].length);
+        printf("✓ %s: %d\n", cases[i].what, rc);
+    }
+
+    /* The regression (test/fuzz/crashes/http/03). A blank value sent strtol over the
+     * CRLFCRLF into the body, and on past the end of the read buffer when the body's
+     * digits ran that far. The body here is all digits to the last byte. */
+    {
+        const char *head = "POST /login HTTP/1.0\r\nHost: x\r\nContent-Length: \r\n\r\n";
+        size_t head_len = strlen(head);
+        size_t len = head_len + 4000;
+        char *exact = malloc(len);
+        assert(exact);
+        memcpy(exact, head, head_len);
+        memset(exact + head_len, '7', len - head_len);
+
+        size_t header_end = http_find_header_end(exact, len, 0);
+        assert(header_end == head_len);
+        size_t length = 0;
+        assert(http_scan_content_length(exact, header_end, &length) == -1);
+        free(exact);
+        printf("✓ a blank value followed by a body of digits is invalid, read within the headers\n");
+    }
+
+    /* The parser applies the same rule, so the two layers can't disagree about
+     * where the body ends */
+    {
+        char bad[] = "POST /api HTTP/1.0\r\nContent-Length: 5x\r\n\r\nhello";
+        HttpRequest parsed = http_request_parse(bad, strlen(bad));
+        assert(parsed.method == HTTP_UNKNOWN);
+        http_request_cleanup(&parsed);
+
+        char good[] = "POST /api HTTP/1.0\r\nContent-Length:  5 \r\n\r\nhello!";
+        parsed = http_request_parse(good, strlen(good));
+        assert(parsed.method == HTTP_POST);
+        assert(parsed.body_length == 5 && strcmp(parsed.body, "hello") == 0);
+        http_request_cleanup(&parsed);
+        printf("✓ the parser refuses what the scan refuses, and reads the same length\n");
+    }
+}
+
 void test_cross_origin(void) {
     printf("\n=== Test: Cross-origin detection ===\n");
 
@@ -554,6 +642,7 @@ int main(void) {
     test_real_world_request();
     test_malformed_requests();
     test_header_end_scan();
+    test_content_length_scan();
     test_cross_origin();
 
     printf("\n=== All Tests Passed! ===\n\n");
