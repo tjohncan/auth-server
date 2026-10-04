@@ -32,19 +32,20 @@
 #define DEFAULT_CONNECTION_TIMEOUT_MS 30000         /* 30 seconds */
 #define INITIAL_READ_BUFFER_SIZE 4096               /* 4KB initial buffer */
 
-/* Ceiling on an UNTERMINATED header block. The check fires once bytes_read passes
- * this, and since the buffer doubles (4, 8, 16, 32 KB) and the test runs after the
- * recv, at most 32 KB is ever held. That is the same header-block total nginx
- * allows by default — large_client_header_buffers is `4 8k`, four buffers of 8 KB
- * each, with any single line capped at 8 KB — so this is not a guess at what is
- * generous, it is the ceiling the edge in front of us already enforces.
- * Without it a client can
- * make every connection buffer max_request_size of headers that will never be
- * parsed, and each new byte triggers a rescan of everything received so far —
- * and it cannot time out, because last_activity is refreshed on every recv.
- * Applies only before the delimiter is found; after it the body is entitled to
- * grow to max_request_size, which is what that limit is for. */
-#define MAX_HEADER_BYTES 16384
+/* Ceiling on the header block: the CRLFCRLF that ends it has to fall within the
+ * first MAX_HEADER_BYTES bytes, or the request is refused. That is the header-block
+ * total nginx allows by default — large_client_header_buffers is `4 8k`, four
+ * buffers of 8 KB each, with any single line capped at 8 KB — so this is not a
+ * guess at what is generous, it is the ceiling the edge in front of us already
+ * enforces. The rule is on where the block ends, not on how many bytes have arrived
+ * when a check runs, so a request passes or fails the same way however the network
+ * splits it into reads. The read buffer doubles (4, 8, 16, 32 KB), so this is also
+ * the most an unterminated block can occupy.
+ * Without it a client can make every connection buffer max_request_size of headers
+ * that will never be parsed, and it cannot time out, because last_activity is
+ * refreshed on every recv. Applies only before the delimiter is found; after it the
+ * body is entitled to grow to max_request_size, which is what that limit is for. */
+#define MAX_HEADER_BYTES 32768
 #define MAX_EPOLL_EVENTS 1024                       /* Process up to 1024 events per epoll_wait */
 
 /* ============================================================================
@@ -465,12 +466,16 @@ static int handle_read(Connection *conn, size_t max_request_size) {
             conn->header_end = http_find_header_end(conn->read_buffer, conn->bytes_read,
                                                     scanned_before);
 
+            /* Judged by where the block ends: past the limit, or not ended
+             * anywhere within it, whichever read the bytes came in */
+            if (conn->header_end > MAX_HEADER_BYTES ||
+                (!conn->header_end && conn->bytes_read >= MAX_HEADER_BYTES)) {
+                log_warn("Header block exceeds %d bytes on connection %lu, closing",
+                         MAX_HEADER_BYTES, conn->connection_id);
+                return -1;
+            }
+
             if (!conn->header_end) {
-                if (conn->bytes_read > MAX_HEADER_BYTES) {
-                    log_warn("Header block exceeds %d bytes on connection %lu, closing",
-                             MAX_HEADER_BYTES, conn->connection_id);
-                    return -1;
-                }
                 continue;  /* headers still incomplete */
             }
 
