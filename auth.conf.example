@@ -80,7 +80,11 @@ jwt_clock_skew_seconds = 0
 
 # Database Cleaner - Background thread for purging old data
 # Continuously purges expired sessions, tokens, usage logs, and history records
-# to prevent unbounded database growth
+# to prevent unbounded database growth. It visits one table per interval and
+# deletes batch_size rows at a time, and stays on a table for up to two seconds
+# while its batches come back full. A table it can't clear in that time is
+# logged as a warning; if that keeps happening, the table fills faster than the
+# cleaner keeps up, and a larger batch size or shorter interval helps.
 cleaner_enabled = true
 cleaner_interval_seconds = 10
 cleaner_batch_size = 1000

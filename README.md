@@ -91,6 +91,8 @@ Database abstraction supporting SQLite and PostgreSQL.
 - **Cleaner** (`cleaner.c`, `include/db/cleaner.h`) - Background thread for purging old sessions, tokens, 
     usage logs, and history records. Prevents unbounded database growth with configurable retention periods. 
     Uses dedicated connection (not from pool). Randomized table rotation prevents thundering herd in horizontal deployments.
+    Keeps purging a table while its batches come back full, for up to two seconds a visit, and warns when one
+    still has a backlog after that.
 
 ### Utilities (`src/util/`)
 Common helper functions.
