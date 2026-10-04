@@ -11,15 +11,21 @@ CC = gcc
 CFLAGS = -Wall -Wextra -std=c11 -O2 -Iinclude
 LDFLAGS = -lpthread -lm -ldl -largon2 -lssl -lcrypto
 
+# Goals that compile no database code: the fuzz targets, the str, http and router
+# suites (on their own or under test-sanitized), and the email delivery test. A fresh
+# clone can run them before it has vendored the 9 MB SQLite amalgamation or
+# installed libpq. DB_GOALS is what is left of the named goals without them, or
+# `all` when none is named, and the backend checks below run only when it isn't
+# empty: one exempt goal on the command line doesn't excuse the others.
+NO_DB_GOALS = clean help fuzz fuzz-regress test-str test-http test-router test-email test-sanitized
+DB_GOALS = $(if $(MAKECMDGOALS),$(filter-out $(NO_DB_GOALS),$(MAKECMDGOALS)),all)
+
 # Configure database backend
 ifeq ($(DB_BACKEND),sqlite)
     CFLAGS += -Ivendor/sqlite -DDB_BACKEND_SQLITE
     DB_VENDOR_SRCS = vendor/sqlite/sqlite3.c
     ifeq ($(wildcard vendor/sqlite/sqlite3.c),)
-        # The fuzz targets and test-str compile only the parser and a few utils — no
-        # database. Exempt them so a fresh clone can fuzz and run the string/JSON tests
-        # before vendoring a 9 MB amalgamation that neither of them links.
-        ifeq ($(filter clean fuzz fuzz-regress test-str,$(MAKECMDGOALS)),)
+        ifneq ($(DB_GOALS),)
             $(error SQLite amalgamation not found at vendor/sqlite/sqlite3.c — see vendor/setup_notes.txt)
         endif
     endif
@@ -35,9 +41,9 @@ else ifeq ($(DB_BACKEND),postgresql)
         # rather than after this block because a bare -isystem consumes the NEXT flag
         # as its argument: -fstack-protector-strong silently becomes an include
         # directory and the build succeeds unhardened, with no diagnostic. The exempt
-        # targets below still compile C, so skipping the $(error) must not leave the
-        # bad flag behind.
-        ifeq ($(filter clean fuzz fuzz-regress test-str,$(MAKECMDGOALS)),)
+        # goals still compile C, so skipping the $(error) must not leave the bad flag
+        # behind.
+        ifneq ($(DB_GOALS),)
             $(error pg_config not found — install libpq-dev)
         endif
     else
@@ -192,7 +198,7 @@ test: test-str test-http test-router test-db test-crypto test-handlers
 	@$(MAKE) --no-print-directory fuzz-regress
 
 
-# Three of the five suites, rebuilt under ASan+UBSan.
+# Three of the six suites, rebuilt under ASan+UBSan.
 #
 # `make test` already replays the fuzz corpus under sanitizers, and stops there:
 # the unit suites themselves build without them. That leaves the arithmetic most
@@ -200,10 +206,12 @@ test: test-str test-http test-router test-db test-crypto test-handlers
 # and the routing added for CORS and HEAD — which is exactly the code where an
 # off-by-one is likeliest and review is weakest.
 #
-# str, http and router, deliberately not all five. None of the three opens a
-# database. test-db is left out because it opens the configured one and its value
-# is integration coverage rather than memory safety, and test-crypto because
-# Argon2 at 64 MiB under ASan costs real time for no arithmetic payoff.
+# str, http and router, deliberately not all six. None of the three links the
+# database, so this needs no amalgamation and no configuration. The other three
+# link the SQLite object, which nothing built with sanitizer flags may (see its
+# rule above), and they wouldn't repay it: db and handlers are integration coverage
+# rather than memory safety, and Argon2 at 64 MiB under ASan costs crypto real time
+# for no arithmetic payoff.
 #
 # CFLAGS is assigned with `=`, so overriding it on the command line would replace
 # it wholesale and drop -Iinclude; appending through a target-specific variable is
