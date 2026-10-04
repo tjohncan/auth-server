@@ -333,6 +333,62 @@ done:
 }
 
 /*
+ * History tables, the audit trail sql/README.md describes: once
+ * db_init_history_tables has built them from the schema, every UPDATE and DELETE on
+ * a table keyed by pin copies the row as it was into history__<table>, marked 'U'
+ * or 'D'. Running the init again on a database that already has them must not
+ * stack a second set of triggers, which would write every change twice.
+ *
+ * Returns 0 on success.
+ */
+static int test_history_tables(const config_t *config) {
+    log_info("\nHistory table tests");
+
+    db_handle_t *sdb = open_test_db(config);
+    if (!sdb) {
+        log_error("History: could not open a test database");
+        return 1;
+    }
+
+    int failed = 1;
+    char value[256];
+
+    if (db_init_history_tables(sdb, DB_TYPE_SQLITE, 1) != 0 ||
+        db_init_history_tables(sdb, DB_TYPE_SQLITE, 0) != 0) {
+        log_error("History: could not create the history tables");
+        goto done;
+    }
+
+    if (db_execute_direct(sdb,
+            "INSERT INTO organization (id, code_name, display_name) "
+            "  VALUES (x'00000000000000000000000000000001', 'org', 'Before');"
+            "UPDATE organization SET display_name = 'After' WHERE pin = 1;"
+            "DELETE FROM organization WHERE pin = 1;") != 0) {
+        log_error("History: could not change the row");
+        goto done;
+    }
+
+    if (read_stored_value(sdb,
+            "SELECT group_concat(history_triggering_action_code || ':' || display_name, ' ') "
+            "FROM (SELECT * FROM history__organization ORDER BY history_pin)",
+            value, sizeof(value)) != 0 ||
+        strcmp(value, "U:Before D:After") != 0) {
+        log_error("History: expected 'U:Before D:After', got '%s'", value);
+        goto done;
+    }
+    log_info("  an update and a delete each keep the row as it was, once (OK)");
+
+    failed = 0;
+
+done:
+    db_disconnect(sdb);
+    if (!failed) {
+        log_info("History table tests passed!");
+    }
+    return failed;
+}
+
+/*
  * Signing-key cache — the claim is that it is VALIDATED on every use, never
  * trusted for an interval.
  *
@@ -1366,266 +1422,20 @@ int main(void) {
     log_info("Database Integration Test");
 
 #ifdef DB_BACKEND_POSTGRESQL
-    /* The connection below is only built for SQLite's db_path, and the tests
-       above run on SQLite in memory. The PostgreSQL backend has no runtime
-       tests; saying so beats failing to connect. */
+    /* Every test below runs on SQLite in memory. The PostgreSQL backend has no
+       runtime tests; saying so beats pretending. */
     log_info("Skipped: test-db runs in the SQLite build only.");
     return 0;
 #endif
 
-    /* Load configuration */
-    log_info("Loading configuration...");
+    /* The configuration supplies the schema directory, the encryption key and the
+       hashing settings. Each test opens its own in-memory database (open_test_db);
+       none of them touches the database auth.conf points at. */
     config_t *config = config_load("auth.conf");
     if (!config) {
         log_error("Failed to load configuration");
         return 1;
     }
-
-    log_info("Configuration loaded:");
-    log_info("  Server: %s:%d (workers=%d)", config->host, config->port, config->workers);
-    log_info("  Database type: %s", config->db_type == DB_TYPE_SQLITE ? "SQLite" : "PostgreSQL");
-    log_info("  Database path: %s", config->db_path ? config->db_path : "(none)");
-    log_info("  Schema dir: %s", config->schema_dir);
-
-    /* Connect to database */
-    log_info("Connecting to database...");
-    db_handle_t *db = NULL;
-    const char *connection_string = config->db_type == DB_TYPE_SQLITE
-        ? config->db_path
-        : ""; /* PostgreSQL connection string not yet implemented */
-
-    int result = db_connect(&db, config->db_type, connection_string);
-    if (result != 0) {
-        log_error("Failed to connect to database");
-        config_free(config);
-        return 1;
-    }
-
-    log_info("Connected successfully");
-
-    /* Initialize schema */
-    log_info("Initializing schema...");
-    const char *owner_role = config->db_owner_role ? config->db_owner_role : config->db_user;
-    result = db_init_schema(db, config->db_type, config->schema_dir, owner_role);
-    if (result < 0) {
-        log_error("Failed to initialize schema");
-        db_disconnect(db);
-        config_free(config);
-        return 1;
-    }
-
-    int fresh_schema = (result == 0);
-    log_info("Schema initialized (%s)", fresh_schema ? "created" : "already existed");
-
-    /* Initialize history tables if enabled */
-    if (config->enable_history_tables) {
-        result = db_init_history_tables(db, config->db_type, fresh_schema);
-        if (result != 0) {
-            log_error("Failed to initialize history tables");
-            db_disconnect(db);
-            config_free(config);
-            return 1;
-        }
-    } else {
-        log_info("History tables disabled in configuration");
-    }
-
-    /* Test query: List all tables */
-    log_info("Testing query...");
-    db_result_t *query_result = NULL;
-#ifdef DB_BACKEND_SQLITE
-    result = db_query(db, &query_result, "SELECT name FROM sqlite_master WHERE type='table';");
-#endif
-#ifdef DB_BACKEND_POSTGRESQL
-    result = db_query(db, &query_result,
-        "SELECT table_schema || '.' || table_name "
-        "FROM information_schema.tables "
-        "WHERE table_schema IN ('keys','security','session','lookup','logging') "
-        "ORDER BY table_schema, table_name;");
-#endif
-    if (result != 0) {
-        log_error("Query failed: %s", db_error(db));
-        db_disconnect(db);
-        config_free(config);
-        return 1;
-    }
-
-    int row_count = db_result_row_count(query_result);
-    int col_count = db_result_column_count(query_result);
-    log_info("Query returned %d rows, %d columns", row_count, col_count);
-
-    /* Print table names */
-    log_info("Tables in database:");
-    for (int i = 0; i < row_count; i++) {
-        const char *table_name = db_result_get(query_result, i, 0);
-        log_info("  - %s", table_name ? table_name : "(null)");
-    }
-
-    db_result_free(query_result);
-
-    /* Test prepared statement: Query grant_type lookup table */
-    log_info("\nTesting prepared statement API...");
-
-    const char *sql =
-        "SELECT grant_type, description "
-        "FROM " TBL_GRANT_TYPE " "
-        "WHERE grant_type = " P"1";
-
-    db_stmt_t *stmt = NULL;
-    result = db_prepare(db, &stmt, sql);
-    if (result != 0) {
-        log_error("Prepare failed: %s", db_error(db));
-        db_disconnect(db);
-        config_free(config);
-        return 1;
-    }
-
-    log_info("Statement prepared successfully");
-
-    /* Test 1: Query for 'authorization_code' */
-    db_bind_text(stmt, 1, "authorization_code", -1);
-
-    result = db_step(stmt);
-    if (result == DB_ROW) {
-        const char *grant_type = db_column_text(stmt, 0);
-        const char *description = db_column_text(stmt, 1);
-        log_info("Found: %s - %s", grant_type, description);
-    } else if (result == DB_DONE) {
-        log_warn("No rows returned for 'authorization_code'");
-    } else {
-        log_error("Step failed: %s", db_error(db));
-        db_finalize(stmt);
-        db_disconnect(db);
-        config_free(config);
-        return 1;
-    }
-
-    /* Test 2: Reset and query for 'client_credentials' */
-    db_reset(stmt);
-    db_bind_text(stmt, 1, "client_credentials", -1);
-
-    result = db_step(stmt);
-    if (result == DB_ROW) {
-        const char *grant_type = db_column_text(stmt, 0);
-        const char *description = db_column_text(stmt, 1);
-        log_info("Found: %s - %s", grant_type, description);
-    } else if (result == DB_DONE) {
-        log_warn("No rows returned for 'client_credentials'");
-    } else {
-        log_error("Step failed: %s", db_error(db));
-        db_finalize(stmt);
-        db_disconnect(db);
-        config_free(config);
-        return 1;
-    }
-
-    /* Test 3: Query for non-existent grant type */
-    db_reset(stmt);
-    db_bind_text(stmt, 1, "nonexistent_grant", -1);
-
-    result = db_step(stmt);
-    if (result == DB_DONE) {
-        log_info("Correctly returned no rows for nonexistent grant type");
-    } else if (result == DB_ROW) {
-        log_error("Unexpectedly found row for nonexistent grant type");
-        db_finalize(stmt);
-        db_disconnect(db);
-        config_free(config);
-        return 1;
-    } else {
-        log_error("Step failed: %s", db_error(db));
-        db_finalize(stmt);
-        db_disconnect(db);
-        config_free(config);
-        return 1;
-    }
-
-    db_finalize(stmt);
-    log_info("Prepared statement tests passed!");
-
-    /* Test bind/column for all parameter types via SELECT passthrough */
-    log_info("\nTesting bind/column types...");
-
-    const char *type_sql =
-        "SELECT " P"1, " P"2, " P"3, " P"4";
-
-    db_stmt_t *type_stmt = NULL;
-    result = db_prepare(db, &type_stmt, type_sql);
-    if (result != 0) {
-        log_error("Prepare type test failed: %s", db_error(db));
-        db_disconnect(db);
-        config_free(config);
-        return 1;
-    }
-
-    /* Bind: int, int64, blob, null */
-    db_bind_int(type_stmt, 1, 7777777);
-    db_bind_int64(type_stmt, 2, 631411200000LL);
-    unsigned char test_blob[] = {0xDA, 0xDA};
-    db_bind_blob(type_stmt, 3, test_blob, sizeof(test_blob));
-    db_bind_null(type_stmt, 4);
-
-    result = db_step(type_stmt);
-    if (result != DB_ROW) {
-        log_error("Type test: expected row, got %d", result);
-        db_finalize(type_stmt);
-        db_disconnect(db);
-        config_free(config);
-        return 1;
-    }
-
-    /* Verify int */
-    int int_val = db_column_int(type_stmt, 0);
-    if (int_val != 7777777) {
-        log_error("Type test: int expected 7777777, got %d", int_val);
-        db_finalize(type_stmt);
-        db_disconnect(db);
-        config_free(config);
-        return 1;
-    }
-    log_info("  int:   %d (OK)", int_val);
-
-    /* Verify int64 */
-    long long int64_val = db_column_int64(type_stmt, 1);
-    if (int64_val != 631411200000LL) {
-        log_error("Type test: int64 expected 631411200000, got %lld", int64_val);
-        db_finalize(type_stmt);
-        db_disconnect(db);
-        config_free(config);
-        return 1;
-    }
-    log_info("  int64: %lld (OK)", int64_val);
-
-    /* Verify blob */
-    const unsigned char *blob_val = db_column_blob(type_stmt, 2);
-    int blob_len = db_column_bytes(type_stmt, 2);
-    if (!blob_val || blob_len != 2 ||
-        blob_val[0] != 0xDA || blob_val[1] != 0xDA) {
-        log_error("Type test: blob mismatch (len=%d)", blob_len);
-        db_finalize(type_stmt);
-        db_disconnect(db);
-        config_free(config);
-        return 1;
-    }
-    log_info("  blob:  0xDADA (%d bytes) (OK)", blob_len);
-
-    /* Verify null */
-    int null_type = db_column_type(type_stmt, 3);
-    if (null_type != DB_NULL) {
-        log_error("Type test: expected NULL type (%d), got %d", DB_NULL, null_type);
-        db_finalize(type_stmt);
-        db_disconnect(db);
-        config_free(config);
-        return 1;
-    }
-    log_info("  null:  (OK)");
-
-    db_finalize(type_stmt);
-    log_info("Bind/column type tests passed!");
-
-    /* Disconnect */
-    log_info("\nDisconnecting...");
-    db_disconnect(db);
 
     /* Field encryption and password hashing, set up as main.c does: usernames and
        signing keys are sealed with the one, passwords and API keys hashed with
@@ -1638,7 +1448,8 @@ int main(void) {
 
     if (test_storage_at_rest(config) != 0 ||
         test_credential_lifetimes(config) != 0 ||
-        test_schema_constraints(config) != 0) {
+        test_schema_constraints(config) != 0 ||
+        test_history_tables(config) != 0) {
         config_free(config);
         return 1;
     }
