@@ -684,6 +684,143 @@ static int test_account_recovery(void) {
 }
 
 /* ============================================================================
+ * Provisioning
+ * ============================================================================ */
+
+static char g_rs_auth[512];  /* a provisioning resource server's credential fields */
+
+static Reply provision(const char *email) {
+    char json[768];
+    snprintf(json, sizeof(json), "{%s,\"email\":\"%s\"}", g_rs_auth, email);
+    return post_json("/api/rs/users", NULL, json);
+}
+
+/* The token in a reply's invitation, given for the resource server to deliver;
+   -1 if the reply has none */
+static int invitation_token(const Reply *r, char *out, size_t size) {
+    const char *invitation = strstr(r->body, "\"invitation\":");
+    char *token = invitation ? json_get_string(invitation + 13, "token") : NULL;
+    if (!token) return -1;
+    snprintf(out, size, "%s", token);
+    free(token);
+    return 0;
+}
+
+/* The reply is about this user, and says this about creating it */
+static int provisioned(const Reply *r, const char *user, int created) {
+    char id[33];
+    return r->status == 200 && field(r, "user_id", id, sizeof(id)) == 0 &&
+           strcmp(id, user) == 0 &&
+           strstr(r->body, created ? "\"created\":true" : "\"created\":false") != NULL;
+}
+
+/*
+ * Provisioning an address twice makes one account, not two: one still pending
+ * is invited again, its earlier invitation voided, up to five times an hour.
+ * Accepted, the address is verified and finds the account without inviting it.
+ * A deactivated pending account is found, and not invited. In a build without
+ * email support each link comes back for the resource server to deliver; with
+ * it, the server emails them and none comes back, which this can't read.
+ */
+static int test_provisioning(void) {
+    printf("\n=== Provisioning ===\n");
+#ifdef EMAIL_SUPPORT
+    printf("Skipped: with email support, invitation links don't come back to be read.\n");
+    return 0;
+#endif
+
+    char json[512], rs[33], key[33], secret[128], target[96];
+    snprintf(json, sizeof(json), "{\"organization_id\":\"%s\",\"code_name\":\"rs_prov\","
+             "\"display_name\":\"Provisioning\",\"address\":\"https://prov.example\"}", g_org_id);
+    if (admin_create("/api/admin/resource-servers", json, "id", rs, sizeof(rs)) != 0) return 1;
+    snprintf(target, sizeof(target), "/api/admin/resource-servers?id=%s", rs);
+    Reply r = request("PUT", target, g_admin_cookie, NULL, "application/json",
+                      "{\"allow_user_provisioning\":true}");
+    if (r.status != 200) FAIL("enabling provisioning answered %d", r.status);
+    reply_free(&r);
+    snprintf(json, sizeof(json), "{\"resource_server_id\":\"%s\"}", rs);
+    r = post_json("/api/admin/resource-server-keys", g_admin_cookie, json);
+    if (field(&r, "key_id", key, sizeof(key)) != 0 || field(&r, "secret", secret, sizeof(secret)) != 0) {
+        FAIL("RS key create answered %d", r.status);
+    }
+    reply_free(&r);
+    snprintf(g_rs_auth, sizeof(g_rs_auth), "\"resource_server_id\":\"%s\","
+             "\"resource_server_key_id\":\"%s\",\"resource_server_secret\":\"%s\"",
+             rs, key, secret);
+
+    /* 1. A new address gets an account and an invitation; the same address
+          again, four times, gets that account invited again, and only the
+          newest invitation works */
+    char user[33], tokens[5][64];
+    r = provision("pending@example.com");
+    if (r.status != 200 || field(&r, "user_id", user, sizeof(user)) != 0 ||
+        !provisioned(&r, user, 1) || invitation_token(&r, tokens[0], sizeof(tokens[0])) != 0) {
+        FAIL("provisioning a new address answered %d: %s", r.status, r.body);
+    }
+    reply_free(&r);
+    for (int i = 1; i < 5; i++) {
+        r = provision("pending@example.com");
+        if (!provisioned(&r, user, 0) || invitation_token(&r, tokens[i], sizeof(tokens[i])) != 0) {
+            FAIL("provisioning a pending address again answered %d: %s", r.status, r.body);
+        }
+        reply_free(&r);
+    }
+    for (int i = 0; i < 4; i++) {
+        if (user_consume_invitation_token(db_pool_get_connection(), tokens[i], "a password") != 1) {
+            FAIL("an earlier invitation still works after a newer one");
+        }
+    }
+    printf("✓ a pending address finds its account, invited again, and only the newest link works\n");
+
+    /* 2. A sixth in the hour: the account, and no invitation */
+    r = provision("pending@example.com");
+    if (!provisioned(&r, user, 0) || strstr(r.body, "\"invitation\"")) {
+        FAIL("a sixth provisioning in the hour answered %d: %s", r.status, r.body);
+    }
+    reply_free(&r);
+    printf("✓ five invitations an hour, then none\n");
+
+    /* 3. Accepted, the address is verified, and finds the account without
+          inviting it */
+    char accepted[33], token[64];
+    r = provision("accepted@example.com");
+    if (r.status != 200 || field(&r, "user_id", accepted, sizeof(accepted)) != 0 ||
+        invitation_token(&r, token, sizeof(token)) != 0) {
+        FAIL("provisioning a new address answered %d", r.status);
+    }
+    reply_free(&r);
+    if (user_consume_invitation_token(db_pool_get_connection(), token, "an accepted password") != 0) {
+        FAIL("a fresh invitation was refused");
+    }
+    r = provision("accepted@example.com");
+    if (!provisioned(&r, accepted, 0) || strstr(r.body, "\"invitation\"") ||
+        !strstr(r.body, "\"is_verified\":true")) {
+        FAIL("an accepted address answered %d: %s", r.status, r.body);
+    }
+    reply_free(&r);
+    printf("✓ once accepted, the verified address finds the account, and no one is invited\n");
+
+    /* 4. Deactivated while pending: found, inactive, and not invited */
+    char banned[33];
+    r = provision("deactivated@example.com");
+    if (r.status != 200 || field(&r, "user_id", banned, sizeof(banned)) != 0) {
+        FAIL("provisioning a new address answered %d", r.status);
+    }
+    reply_free(&r);
+    snprintf(json, sizeof(json), "{\"user_id\":\"%s\"}", banned);
+    if (post_status("/api/admin/users/deactivate", json) != 200) FAIL("could not deactivate");
+    r = provision("deactivated@example.com");
+    if (!provisioned(&r, banned, 0) || strstr(r.body, "\"invitation\"") ||
+        !strstr(r.body, "\"is_active\":false")) {
+        FAIL("a deactivated pending account answered %d: %s", r.status, r.body);
+    }
+    reply_free(&r);
+    printf("✓ a deactivated pending account is found, and not invited\n");
+
+    return 0;
+}
+
+/* ============================================================================
  * Main
  * ============================================================================ */
 
@@ -725,7 +862,8 @@ int main(void) {
     register_routes(g_router);
 
     int failed = setup() || test_authorization_code_flow() || test_issuer() ||
-                 test_client_credentials() || test_mfa_gates() || test_account_recovery();
+                 test_client_credentials() || test_mfa_gates() || test_account_recovery() ||
+                 test_provisioning();
 
     router_destroy(g_router);
     db_pool_shutdown();

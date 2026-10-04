@@ -548,15 +548,15 @@ typedef struct {
 /*
  * Create invitation token
  *
- * Direct insert — no rate limiting (RS are trusted callers).
- * Caller provides user_account_pin and optional user_email_pin
- * from the RS provisioning flow.
+ * For a new account, or one still pending invited again. At most five per
+ * account in an hour, like reset links; the newest is the only one that works,
+ * the earlier ones voided in the same transaction.
  *
  * Parameters:
  *   user_email_pin - Email PIN (0 for no email)
  *   out_token      - Output: token string (caller buffer, >= 44 bytes)
  *
- * Returns: 0 on success, -1 on error
+ * Returns: 0 on success, 1 if five were issued in the last hour, -1 on error
  */
 int user_create_invitation_token(db_handle_t *db,
                                   long long user_account_pin,
@@ -620,6 +620,18 @@ typedef struct {
 int user_find_by_identity(db_handle_t *db, const char *username,
                            const char *email,
                            user_identity_t *out_match);
+
+/*
+ * Find the pending account holding an address: one provisioned for it that
+ * hasn't accepted its invitation, so has no password yet and holds the address
+ * unverified. The oldest, if there are two. Doesn't filter by is_active.
+ *
+ * out_email_pin - Output: the pin of that address's row, for a new invitation
+ *
+ * Returns: 0 found, 1 none, -1 on error
+ */
+int user_find_pending_by_email(db_handle_t *db, const char *email,
+                               user_identity_t *out_match, long long *out_email_pin);
 
 /*
  * Create user account without password

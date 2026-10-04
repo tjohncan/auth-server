@@ -2579,25 +2579,41 @@ int user_create_invitation_token(db_handle_t *db,
     char ttl_str[16];
     snprintf(ttl_str, sizeof(ttl_str), "%d", ttl_seconds);
 
-    const char *sql =
-        "INSERT INTO " TBL_INVITATION_TOKEN " "
-        "(id, user_account_pin, user_email_pin, token, issued_at, "
-        "expected_expiry, source_ip) "
-        "VALUES (" P"1, " P"2, " P"3, " P"4, " NOW ", "
-        INTERVAL_SECONDS(P"5") ", " P"6)";
-
-    db_stmt_t *stmt = NULL;
-    if (db_prepare(db, &stmt, sql) != 0) {
-        log_error("Failed to prepare invitation token insert");
-        OPENSSL_cleanse(token, sizeof(token));
-        return -1;
-    }
-
     char token_hash[SHA256_HEX_LENGTH];
     if (crypto_sha256_hex(token, strlen(token), token_hash, sizeof(token_hash)) != 0) {
         log_error("Failed to hash invitation token");
         OPENSSL_cleanse(token, sizeof(token));
-        db_finalize(stmt);
+        return -1;
+    }
+
+    if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
+        log_error("Failed to begin transaction");
+        OPENSSL_cleanse(token, sizeof(token));
+        return -1;
+    }
+
+    /* At most five in an hour per account, as for reset links: provisioning an
+       account that is still pending invites it again, and that mustn't become a
+       way to flood a mailbox */
+    const char *sql =
+        "INSERT INTO " TBL_INVITATION_TOKEN " "
+        "(id, user_account_pin, user_email_pin, token, issued_at, "
+        "expected_expiry, source_ip) "
+        "SELECT " P"1, " P"2, " P"3, " P"4, " NOW ", "
+        INTERVAL_SECONDS(P"5") ", " P"6 "
+        "WHERE NOT EXISTS ("
+            "SELECT 1 FROM " TBL_INVITATION_TOKEN " T "
+            "WHERE T.user_account_pin = " P"2 "
+            "AND T.issued_at > " SECONDS_AGO("3600") " "
+            "LIMIT 1 OFFSET 4"
+        ") "
+        "RETURNING id";
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        log_error("Failed to prepare invitation token insert");
+        db_execute_trusted(db, "ROLLBACK");
+        OPENSSL_cleanse(token, sizeof(token));
         return -1;
     }
 
@@ -2619,15 +2635,43 @@ int user_create_invitation_token(db_handle_t *db,
     int rc = db_step(stmt);
     db_finalize(stmt);
 
-    if (rc == DB_DONE) {
-        memcpy(out_token, token, VERIFICATION_TOKEN_BUF_SIZE);
+    if (rc != DB_ROW) {
+        db_execute_trusted(db, "ROLLBACK");
         OPENSSL_cleanse(token, sizeof(token));
-        return 0;
+        if (rc == DB_DONE) return 1;  /* Five already this hour */
+        log_error("Failed to insert invitation token");
+        return -1;
     }
 
+    /* Only the newest invitation works: the earlier ones are voided, as used */
+    const char *void_sql =
+        "UPDATE " TBL_INVITATION_TOKEN " "
+        "SET is_used = " BOOL_TRUE ", used_at = " NOW ", updated_at = " NOW " "
+        "WHERE user_account_pin = " P"1 AND id != " P"2 AND is_used = " BOOL_FALSE;
+
+    if (db_prepare(db, &stmt, void_sql) != 0) {
+        log_error("Failed to prepare the earlier invitations' voiding");
+        db_execute_trusted(db, "ROLLBACK");
+        OPENSSL_cleanse(token, sizeof(token));
+        return -1;
+    }
+
+    db_bind_int64(stmt, 1, user_account_pin);
+    db_bind_blob(stmt, 2, id, sizeof(id));
+
+    rc = db_step(stmt);
+    db_finalize(stmt);
+
+    if (rc != DB_DONE || db_execute_trusted(db, "COMMIT") != 0) {
+        log_error("Failed to void the earlier invitations");
+        db_execute_trusted(db, "ROLLBACK");
+        OPENSSL_cleanse(token, sizeof(token));
+        return -1;
+    }
+
+    memcpy(out_token, token, VERIFICATION_TOKEN_BUF_SIZE);
     OPENSSL_cleanse(token, sizeof(token));
-    log_error("Failed to insert invitation token");
-    return -1;
+    return 0;
 }
 
 int user_lookup_invitation_token(db_handle_t *db, const char *token,
@@ -3180,6 +3224,76 @@ int user_find_by_identity(db_handle_t *db, const char *username,
     }
 
     return 1;  /* Not found */
+}
+
+int user_find_pending_by_email(db_handle_t *db, const char *email,
+                               user_identity_t *out_match, long long *out_email_pin) {
+    if (!db || !email || !out_match || !out_email_pin) {
+        log_error("Invalid arguments to user_find_pending_by_email");
+        return -1;
+    }
+
+    memset(out_match, 0, sizeof(*out_match));
+    *out_email_pin = 0;
+
+    char lower_buf[256];
+    str_to_lower(lower_buf, sizeof(lower_buf), email);
+    char hash_hex[HMAC_SHA256_HEX_LENGTH];
+    if (hash_field(lower_buf, hash_hex, sizeof(hash_hex)) != 0) {
+        log_error("Failed to hash email for the pending match");
+        return -1;
+    }
+
+    /* No password yet is what pending means. The oldest, if provisioning by an
+       older build made two for one address. */
+    const char *sql =
+        "SELECT U.pin, U.id, U.username, U.is_active, E.pin "
+        "FROM " TBL_USER_EMAIL " E "
+        "JOIN " TBL_USER_ACCOUNT " U ON U.pin = E.user_account_pin "
+        "WHERE E.email_hash = " P"1 AND E.is_verified = " BOOL_FALSE " "
+        "AND U.secret_hash IS NULL "
+        "ORDER BY U.pin "
+        "LIMIT 1";
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        log_error("Failed to prepare the pending account match");
+        return -1;
+    }
+
+    db_bind_text(stmt, 1, hash_hex, -1);
+
+    int rc = db_step(stmt);
+    if (rc != DB_ROW) {
+        db_finalize(stmt);
+        if (rc == DB_DONE) return 1;
+        log_error("Error in the pending account match");
+        return -1;
+    }
+
+    out_match->user_account_pin = db_column_int64(stmt, 0);
+
+    const unsigned char *id_blob = db_column_blob(stmt, 1);
+    if (!id_blob || db_column_bytes(stmt, 1) != 16) {
+        log_error("Malformed user id in the pending account match");
+        db_finalize(stmt);
+        return -1;
+    }
+    memcpy(out_match->user_id, id_blob, 16);
+
+    const char *encrypted = (const char *)db_column_text(stmt, 2);
+    if (encrypted && decrypt_field(encrypted, out_match->username,
+                                   sizeof(out_match->username)) != 0) {
+        log_error("Failed to decrypt username in the pending account match");
+        db_finalize(stmt);
+        return -1;
+    }
+
+    out_match->is_active = db_column_int(stmt, 3);
+    *out_email_pin = db_column_int64(stmt, 4);
+
+    db_finalize(stmt);
+    return 0;
 }
 
 int user_create_no_password(db_handle_t *db, const char *username,

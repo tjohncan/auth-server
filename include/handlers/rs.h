@@ -27,7 +27,7 @@ typedef struct {
     user_email_t *emails;       /* Array (caller must free) */
     int email_count;
     int was_created;            /* 1 if user was newly created */
-    char invitation_token[44];  /* Token string (empty if not created) */
+    char invitation_token[44];  /* Token string (empty if none was issued) */
 } rs_user_info_t;
 
 /*
@@ -40,6 +40,9 @@ void rs_user_info_free(rs_user_info_t *info);
  *
  * If user exists (by username or verified email): returns user info.
  * If user doesn't exist: creates user (no password), creates invitation token.
+ * An account still pending (no password yet) that holds the email unverified
+ * is the user too, found by email alone or by its username, and is invited
+ * again: a fresh token, within the hourly limit, unless it's deactivated.
  * At least one of username or email required.
  *
  * Parameters:

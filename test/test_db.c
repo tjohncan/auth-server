@@ -1485,24 +1485,25 @@ static int test_single_use(const config_t *config) {
     }
     log_info("  reset link: works once; used, revoked or expired, refused (OK)");
 
-    /* 2. An invitation, the same */
+    /* 2. An invitation, the same. (Each new one voids the account's earlier
+          ones, so each is made when it's needed.) */
     char invite[64], expired_invite[64], expired_hash[SHA256_HEX_LENGTH], sql[256];
     if (user_create_invitation_token(sdb, 1, 0, 3600, NULL, invite) != 0 ||
-        user_create_invitation_token(sdb, 1, 0, 3600, NULL, expired_invite) != 0 ||
+        user_consume_invitation_token(sdb, invite, "second password") != 0 ||
+        stored_password(sdb, second, sizeof(second)) != 0 || strcmp(second, first) == 0) {
+        log_error("Single-use: a good invitation didn't set the password");
+        goto done;
+    }
+    if (user_create_invitation_token(sdb, 1, 0, 3600, NULL, expired_invite) != 0 ||
         crypto_sha256_hex(expired_invite, strlen(expired_invite),
                           expired_hash, sizeof(expired_hash)) != 0) {
-        log_error("Single-use: could not create invitations");
+        log_error("Single-use: could not create an invitation to expire");
         goto done;
     }
     snprintf(sql, sizeof(sql), "UPDATE invitation_token SET expected_expiry = "
              "datetime('now', '-1 second') WHERE token = '%s'", expired_hash);
     if (db_execute_direct(sdb, sql) != 0) {
         log_error("Single-use: could not expire an invitation");
-        goto done;
-    }
-    if (user_consume_invitation_token(sdb, invite, "second password") != 0 ||
-        stored_password(sdb, second, sizeof(second)) != 0 || strcmp(second, first) == 0) {
-        log_error("Single-use: a good invitation didn't set the password");
         goto done;
     }
     if (user_consume_invitation_token(sdb, invite, "another password") != 1 ||

@@ -182,28 +182,31 @@ HttpResponse *rs_provision_user_handler(const HttpRequest *req) {
     append_user_json(jb, &info);
     jsonbuf_appendf(jb, ",\"created\":%s", info.was_created ? "true" : "false");
 
-    if (info.was_created && info.invitation_token[0]) {
+    if (info.invitation_token[0]) {
         char invite_url[512];
         snprintf(invite_url, sizeof(invite_url), "%s/accept-invitation?token=%s",
                  g_config->public_base_url, info.invitation_token);
 
-        jsonbuf_appendf(jb, ",\"invitation\":{\"token\":\"");
-        jsonbuf_append_escaped(jb, info.invitation_token);
-        jsonbuf_appendf(jb, "\",\"url\":\"");
-        jsonbuf_append_escaped(jb, invite_url);
-        jsonbuf_appendf(jb, "\"}");
-
+        int by_email = 0;
 #ifdef EMAIL_SUPPORT
-        /* Send invitation email if user has an email */
-        if (email && info.was_created) {
+        /* Accepting an invitation verifies the address it was sent to, as proof
+         * of control. So when the server can email the link, only the mailbox
+         * gets it: a resource server holding it could verify an address it
+         * doesn't control. Handed to the email command or not, it isn't
+         * returned; provisioning the account again sends a fresh one. A server
+         * with no email command configured can't email, and is treated as a
+         * build without email support. */
+        if (email && g_config->email_command && g_config->email_command[0]) {
+            by_email = 1;
             char *body_text = template_render("emails/invitation.txt",
                                                "URL", invite_url, NULL);
             char *body_html = template_render("emails/invitation.html",
                                                "URL", invite_url, NULL);
 
-            if (body_text && body_html)
-                email_send(g_config, email, "Set up your account",
-                           body_text, body_html);
+            int sent = body_text && body_html &&
+                       email_send(g_config, email, "Set up your account",
+                                  body_text, body_html) == 0;
+            jsonbuf_appendf(jb, ",\"invitation\":{\"emailed\":%s}", sent ? "true" : "false");
 
             if (body_text) OPENSSL_cleanse(body_text, strlen(body_text));
             free(body_text);
@@ -211,6 +214,14 @@ HttpResponse *rs_provision_user_handler(const HttpRequest *req) {
             free(body_html);
         }
 #endif
+        /* No address, or no way to email: the resource server delivers it */
+        if (!by_email) {
+            jsonbuf_appendf(jb, ",\"invitation\":{\"emailed\":false,\"token\":\"");
+            jsonbuf_append_escaped(jb, info.invitation_token);
+            jsonbuf_appendf(jb, "\",\"url\":\"");
+            jsonbuf_append_escaped(jb, invite_url);
+            jsonbuf_appendf(jb, "\"}");
+        }
         OPENSSL_cleanse(invite_url, sizeof(invite_url));
     }
 

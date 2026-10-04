@@ -2797,8 +2797,15 @@ All endpoints require RS key authentication and `allow_user_provisioning = true`
 
 ### POST /api/rs/users
 
-Find or create a user. If user exists (by username or verified email), returns user info.
-If user doesn't exist, creates user (active, no password), creates invitation token, and optionally sends invitation email.
+Find or create a user. A user is found by username, or by an email address they have verified,
+and their info is returned. A user who doesn't exist is created (active, no password) with an
+invitation to set a password.
+
+An account still pending (provisioned, its invitation not yet accepted) holds its address
+unverified. Provisioning that address again finds it, by the email alone or with its username,
+instead of creating a second account, and invites it again: a fresh invitation, the earlier ones
+voided. One account gets at most five invitations in an hour; past that it's returned without
+one. A deactivated account is found like any other and never invited (see `is_active` above).
 
 At least one of `username` or `email` required. If both are provided and they match two different existing users, returns 409 (ambiguous).
 
@@ -2826,7 +2833,7 @@ At least one of `username` or `email` required. If both are provided and they ma
 }
 ```
 
-**Success Response — new user** (200 OK):
+**Success Response — new user, or a pending one invited again** (200 OK):
 ```json
 {
   "user_id": "d4e5f6...",
@@ -2836,11 +2843,17 @@ At least one of `username` or `email` required. If both are provided and they ma
     {"address": "jdoe@example.com", "is_verified": false, "is_primary": true}
   ],
   "created": true,
+  "invitation": {"emailed": true}
+}
+```
+
+Or, when the server can't email it:
+```json
   "invitation": {
+    "emailed": false,
     "token": "abc123...",
     "url": "https://host/accept-invitation?token=abc123..."
   }
-}
 ```
 
 **Error Responses**:
@@ -2849,12 +2862,22 @@ At least one of `username` or `email` required. If both are provided and they ma
 - `403` — user provisioning not enabled
 - `409` — ambiguous match (username and email resolve to different users)
 
-**Notes**:
-- The `invitation` object is only present when `created` is `true`
-- When `EMAIL_SUPPORT=1`, an invitation email is automatically sent to the provided email address
-- The invitation URL is always returned regardless of `EMAIL_SUPPORT` so the RS can deliver it through its own channel
-- Created users have no password — they must use the invitation link to set one
-- Invitation tokens expire after `invitation_token_ttl_seconds` (default 72 hours)
+**Invitations**:
+- The `invitation` object is present whenever this call issued one, for a new account or a pending one.
+- Accepting an invitation sets the password and verifies the address it went to. So when the
+  server can email it (built with `EMAIL_SUPPORT=1`, an `email_command` configured, and an
+  address given), it's emailed and never returned: `"emailed": true` once the server has handed
+  it to its email command. `"emailed": false` with no link means that hand-off failed;
+  provisioning again sends a fresh one.
+- Otherwise (no email support, no `email_command`, or provisioning by username alone) the link
+  comes back for the resource server to deliver. A server that can't email still verifies the
+  address when the link is accepted, on the resource server's word. Such a deployment trusts
+  every resource server it lets provision with that, so enable provisioning only for ones you trust.
+- Invitation tokens expire after `invitation_token_ttl_seconds` (default 72 hours).
+
+**Usernames**: a username is a first-come handle with no proof behind it, and provisioning by
+username returns whichever account holds that name. A resource server that cares who someone is
+should go by an address marked `is_verified`.
 
 **Example**:
 ```bash

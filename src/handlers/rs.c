@@ -53,10 +53,41 @@ int rs_handler_provision_user(db_handle_t *db, long long rs_pin,
     if (rc == -1) return -1;
     if (rc == 2) return 2;  /* ambiguous */
 
+    /* An account provisioned for this address that hasn't accepted its
+     * invitation holds the address unverified, which the match above doesn't
+     * look at. By email alone, that account is the person; with a username,
+     * it's them if the username found it too. Either way they're invited again,
+     * rather than a second account made for the same address. */
+    long long pending_email_pin = 0;
+    int invite_again = 0;
+    if (email) {
+        user_identity_t pending;
+        int pending_rc = user_find_pending_by_email(db, email, &pending, &pending_email_pin);
+        if (pending_rc == -1) return -1;
+        if (pending_rc == 0 && rc == 1 && !username) {
+            match = pending;
+            rc = 0;
+            invite_again = 1;
+        } else if (pending_rc == 0 && rc == 0 &&
+                   pending.user_account_pin == match.user_account_pin) {
+            invite_again = 1;
+        }
+    }
+
     if (rc == 0) {
-        /* User found — return info, no invitation */
+        /* User found — return info, and a fresh invitation if still pending */
         out_info->was_created = 0;
-        return populate_user_info(db, &match, out_info);
+        if (populate_user_info(db, &match, out_info) != 0) return -1;
+
+        /* Not for a deactivated account: nothing a resource server does brings
+           one back. A 1 is the hourly limit, and means no invitation this time. */
+        if (invite_again && match.is_active &&
+            user_create_invitation_token(db, match.user_account_pin, pending_email_pin,
+                                         invitation_ttl, source_ip,
+                                         out_info->invitation_token) == -1) {
+            return -1;
+        }
+        return 0;
     }
 
     /* User not found — create without password */
