@@ -327,6 +327,22 @@ int user_change_password(db_handle_t *db, long long user_account_pin,
                          const char *new_password);
 
 /*
+ * Set a user's password, for the operator (POST /api/admin/users/set-password)
+ *
+ * No current password, and the account may be inactive: after a compromise, the
+ * recovery order is deactivate, set the password, reactivate, and the old
+ * password works at no point in between. It doesn't reactivate, and like
+ * user_change_password it leaves sessions and tokens alone; deactivating is what
+ * evicts. Outstanding reset links and invitations are voided in the same
+ * transaction, since either could set another password over this one.
+ *
+ * Returns: 0 on success, 1 if no such user, -1 on error,
+ *          -2 if password below minimum length
+ */
+int user_set_password(db_handle_t *db, const unsigned char *user_id,
+                      const char *new_password);
+
+/*
  * Change username
  *
  * Validates format, checks uniqueness, and updates username.

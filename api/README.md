@@ -341,14 +341,11 @@ Deactivate a user account. Idempotent — deactivating an already-inactive user 
 
 Deactivated users cannot log in or create new sessions. Deactivation also closes the user's sessions, revokes their refresh and access tokens, and voids any password-reset, passwordless-login or invitation link still outstanding, so reactivating the account later brings none of them back: whoever held them has to sign in again. A resource server that validates access tokens locally against `/.well-known/jwks.json` cannot see deactivation or revocation, because a self-contained token carries no liveness state, and will keep accepting one until its `exp`. Resource servers that need deactivation to take effect immediately should use `POST /introspect`.
 
-Deactivation doesn't change the password, and a deactivated account can't have it changed: no
-reset link can be requested or used, and nobody can sign in to change it. So whoever knows the
-password can sign in again once the account is reactivated. After a compromise, the order today
-is: deactivate; reset MFA if a factor was stolen; reactivate when the user is ready; the user
-signs in at once, changes the password and enrolls a factor. Someone holding the old password
-can still get in between reactivation and that change. What would close that window is a way to
-set a new password while the account is still deactivated, through an emailed link or one the
-operator hands over; that doesn't exist yet.
+Deactivation doesn't change the password, and the user can't change it while deactivated: no
+reset link can be requested or used, and nobody can sign in. The operator can, with
+`POST /api/admin/users/set-password`. After a compromise, the order is: deactivate; set a new
+password and give it to the user out of band; reset MFA if a factor was stolen; reactivate. The
+old password works at no point in between.
 
 **Request Body**:
 ```json
@@ -422,6 +419,53 @@ the user too, and follow the recovery order under `POST /api/admin/users/deactiv
 curl -X POST http://localhost:8080/api/admin/users/reset-mfa \
   -H "Content-Type: application/json" \
   -d '{"user_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"}'
+```
+
+---
+
+### POST /api/admin/users/set-password
+
+Set a user's password, for an operator handing one over out of band: after a compromise, or
+in a build without email, where there is no reset link to send. No current password is needed,
+and it works whether or not the account is active; it doesn't reactivate one. Any
+password-reset link or invitation still outstanding is voided, since either could set another
+password over this one.
+
+Sessions and tokens are left alone; deactivation is what evicts those, so after a compromise
+follow the order under `POST /api/admin/users/deactivate`. The password has the same minimum
+length as any other. Nothing makes the user change it at their next sign-in: give it to them by
+a channel you trust, and they can change it themselves once signed in.
+
+**Request Body**:
+```json
+{
+  "user_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+  "password": "a temporary password"
+}
+```
+
+| Field    | Type   | Required | Description           |
+|----------|--------|----------|-----------------------|
+| user_id  | string | Yes      | 32-character hex UUID |
+| password | string | Yes      | The new password      |
+
+**Success Response** (200 OK):
+```json
+{
+  "message": "Password set"
+}
+```
+
+**Error Responses**:
+- **400** — missing or invalid user_id, missing password, or a password below the minimum length
+- **403** — not from localhost
+- **404** — user not found
+
+**Example**:
+```bash
+curl -X POST http://localhost:8080/api/admin/users/set-password \
+  -H "Content-Type: application/json" \
+  -d '{"user_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4", "password": "a temporary password"}'
 ```
 
 ---
@@ -2737,6 +2781,7 @@ All endpoints require RS key authentication and `allow_user_provisioning = true`
 - **Content-Type**: `application/json` for all endpoints (including GET)
 - **Audience**: Resource server backends
 - **Browser aliases**: `POST /api/rs/users/lookup` and `POST /api/rs/client-users/list` are provided as POST alternatives to the GET endpoints, since browsers cannot send GET requests with a JSON body. Same handlers, identical behavior.
+- **`is_active: false`**: the server's operator has deactivated the account. It can't sign in, and its sessions and tokens are closed. Users belong to the server, not to any resource server, so nothing a resource server does (provisioning, linking, inviting) reactivates one; send the user to the operator. Provisioning finds a deactivated user like any other and returns them as they are, without an invitation.
 
 ### Auth Fields (required on all endpoints)
 

@@ -44,10 +44,11 @@ void register_routes(Router *router) {
     router_add(router, HTTP_GET, "/api/admin/client-keys", admin_get_client_keys_handler);
     router_add(router, HTTP_DELETE, "/api/admin/client-keys", admin_delete_client_key_handler);
 
-    /* User activate/deactivate (localhost-only) */
+    /* User activate/deactivate, MFA reset and password (localhost-only) */
     router_add(router, HTTP_POST, "/api/admin/users/activate", server_activate_user_handler);
     router_add(router, HTTP_POST, "/api/admin/users/deactivate", server_deactivate_user_handler);
     router_add(router, HTTP_POST, "/api/admin/users/reset-mfa", server_reset_user_mfa_handler);
+    router_add(router, HTTP_POST, "/api/admin/users/set-password", server_set_user_password_handler);
 
     router_add(router, HTTP_POST, "/login", login_handler);
     router_add(router, HTTP_GET, "/api/user/management-setups", management_setups_handler);

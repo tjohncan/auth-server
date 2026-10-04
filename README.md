@@ -574,7 +574,7 @@ See **[sql/README.md](sql/README.md)** for full schema documentation. Key design
 **User Sovereignty**
 - Users are independent entities — once created, no organization or resource server can modify, delete, or impersonate them
 - Resource servers can invite users and control access to their own clients, but cannot alter user credentials or profile
-- Account-level moderation (activate/deactivate) is reserved for the server administrator (localhost-only)
+- Account-level moderation (activate/deactivate, MFA reset, setting a password) is reserved for the server administrator (localhost-only)
 
 **Stateless Authorization Codes**
 - Authorization codes are signed JWTs containing all required state
@@ -639,8 +639,9 @@ survive it. Compromise recovery has stronger, explicit paths here — account de
 token revocation — and password change isn't asked to carry that weight.
 Mass invalidation is a cost paid by every user on every routine rotation, in order to evict an
 attacker who, in the case that actually matters, already knows the new password. Deactivation
-evicts but leaves the password as it was; the API reference gives the order for handing the
-account back.
+evicts but leaves the password as it was. The operator sets a new one while the account is
+still deactivated (`POST /api/admin/users/set-password`, localhost-only), and the API reference
+gives the order for handing the account back.
 
 **Defaults are permissive; policy is the deployer's.**
 The shipped `encryption_key` is a public placeholder and `password_min_length` is 1. The server

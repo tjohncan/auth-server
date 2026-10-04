@@ -1242,6 +1242,118 @@ int user_change_password(db_handle_t *db, long long user_account_pin,
     return 1;  /* Success */
 }
 
+int user_set_password(db_handle_t *db, const unsigned char *user_id,
+                      const char *new_password) {
+    if (!db || !user_id || !new_password) {
+        log_error("Invalid arguments to user_set_password");
+        return -1;
+    }
+
+    /* Hashed before the transaction, which on SQLite holds the write lock */
+    char salt[PASSWORD_SALT_HEX_MAX_LENGTH];
+    int iterations;
+    char hash[PASSWORD_HASH_HEX_MAX_LENGTH];
+
+    int hash_rc = crypto_password_hash(new_password, strlen(new_password),
+                            salt, sizeof(salt),
+                            &iterations,
+                            hash, sizeof(hash));
+    if (hash_rc != 0) {
+        log_error("Failed to hash the password to set");
+        OPENSSL_cleanse(salt, sizeof(salt));
+        return (hash_rc == -2) ? -2 : -1;
+    }
+
+    if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
+        log_error("Failed to begin transaction");
+        OPENSSL_cleanse(salt, sizeof(salt));
+        OPENSSL_cleanse(hash, sizeof(hash));
+        return -1;
+    }
+
+    /* Active or not: a deactivated account's password is the one this is for */
+    const char *update_sql =
+        "UPDATE " TBL_USER_ACCOUNT " "
+        "SET salt = " P"1, "
+        "hash_iterations = " P"2, "
+        "secret_hash = " P"3, "
+        "updated_at = " NOW " "
+        "WHERE id = " P"4 "
+        "RETURNING pin";
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, update_sql) != 0) {
+        log_error("Failed to prepare password update statement");
+        db_execute_trusted(db, "ROLLBACK");
+        OPENSSL_cleanse(salt, sizeof(salt));
+        OPENSSL_cleanse(hash, sizeof(hash));
+        return -1;
+    }
+
+    db_bind_text(stmt, 1, salt, -1);
+    db_bind_int(stmt, 2, iterations);
+    db_bind_text(stmt, 3, hash, -1);
+    db_bind_blob(stmt, 4, user_id, 16);
+
+    int rc = db_step(stmt);
+    long long user_account_pin = rc == DB_ROW ? db_column_int64(stmt, 0) : 0;
+    db_finalize(stmt);
+
+    OPENSSL_cleanse(salt, sizeof(salt));
+    OPENSSL_cleanse(hash, sizeof(hash));
+
+    if (rc != DB_ROW) {
+        db_execute_trusted(db, "ROLLBACK");
+        if (rc == DB_DONE) return 1;  /* No such user */
+        log_error("Failed to set password");
+        return -1;
+    }
+
+    /* A reset link or an invitation still outstanding could set another
+     * password over this one, so they are voided with it */
+    const char *void_steps[] = {
+        "UPDATE " TBL_PASSWORD_RESET_TOKEN " "
+        "SET is_revoked = " BOOL_TRUE ", revoked_at = " NOW ", updated_at = " NOW " "
+        "WHERE user_account_pin = " P"1 AND is_used = " BOOL_FALSE
+        " AND is_revoked = " BOOL_FALSE,
+
+        /* No revoked flag; marking it used is what refuses it */
+        "UPDATE " TBL_INVITATION_TOKEN " "
+        "SET is_used = " BOOL_TRUE ", used_at = " NOW ", updated_at = " NOW " "
+        "WHERE user_account_pin = " P"1 AND is_used = " BOOL_FALSE,
+    };
+
+    for (size_t i = 0; i < sizeof(void_steps) / sizeof(void_steps[0]); i++) {
+        if (db_prepare(db, &stmt, void_steps[i]) != 0) {
+            log_error("Failed to prepare the link voiding statement");
+            db_execute_trusted(db, "ROLLBACK");
+            return -1;
+        }
+
+        db_bind_int64(stmt, 1, user_account_pin);
+
+        rc = db_step(stmt);
+        db_finalize(stmt);
+
+        if (rc != DB_DONE) {
+            log_error("Failed to void the account's reset and invitation links");
+            db_execute_trusted(db, "ROLLBACK");
+            return -1;
+        }
+    }
+
+    if (db_execute_trusted(db, "COMMIT") != 0) {
+        log_error("Failed to commit the password");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    char user_id_hex[33];
+    bytes_to_hex(user_id, 16, user_id_hex, sizeof(user_id_hex));
+    log_info("Password set by the operator for user_id=%s", user_id_hex);
+    return 0;
+}
+
 int user_change_username(db_handle_t *db, long long user_account_pin,
                          const unsigned char *user_account_id,
                          const char *new_username) {

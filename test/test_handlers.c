@@ -20,9 +20,11 @@
 #include "db/db.h"
 #include "db/db_pool.h"
 #include "db/init/db_init.h"
+#include "db/queries/user.h"
 #include "crypto/encrypt.h"
 #include "crypto/password.h"
 #include "crypto/random.h"
+#include "crypto/sha256.h"
 #include "crypto/totp.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -589,6 +591,99 @@ static int test_mfa_gates(void) {
 }
 
 /* ============================================================================
+ * Account recovery
+ * ============================================================================ */
+
+static int post_status(const char *path, const char *json) {
+    Reply r = post_json(path, NULL, json);
+    int status = r.status;
+    reply_free(&r);
+    return status;
+}
+
+/*
+ * The operator sets a password, whether or not the account is active. After a
+ * compromise: deactivate, set a new password, reactivate, and the old password
+ * works at no point in between. An invitation outstanding can't set another.
+ */
+static int test_account_recovery(void) {
+    printf("\n=== Account recovery ===\n");
+
+    char user_id[33], json[256], cookie[256], sql[128], pin[24], invite[64];
+    Reply r = post_json("/api/admin/users", NULL,
+                        "{\"username\":\"recovered\",\"password\":\"the old password\"}");
+    int status = r.status;
+    int created = status == 200 && field(&r, "user_id", user_id, sizeof(user_id)) == 0;
+    reply_free(&r);
+    if (!created) FAIL("creating the user answered %d", status);
+
+    /* 1. Active, with an invitation and a reset link outstanding: the new password
+          signs in, the old one doesn't, and neither link can set another */
+    char reset_hash[SHA256_HEX_LENGTH], insert[512];
+    snprintf(sql, sizeof(sql), "SELECT pin FROM user_account WHERE id = x'%s'", user_id);
+    if (query_text(sql, pin, sizeof(pin)) != 0 ||
+        user_create_invitation_token(db_pool_get_connection(), atoll(pin), 0, 3600, NULL,
+                                     invite) != 0 ||
+        crypto_sha256_hex("recovery-reset", 14, reset_hash, sizeof(reset_hash)) != 0) {
+        FAIL("could not plant an invitation");
+    }
+    /* A reset link is a row with a known token hash: all its redemption reads */
+    snprintf(insert, sizeof(insert),
+             "INSERT INTO password_reset_token (id, user_account_pin, token, issued_at, "
+             "expected_expiry) VALUES (randomblob(16), %s, '%s', datetime('now'), "
+             "datetime('now', '+1 hour'))", pin, reset_hash);
+    if (db_execute_direct(db_pool_get_connection(), insert) != 0) FAIL("could not plant a reset link");
+    snprintf(json, sizeof(json), "{\"user_id\":\"%s\",\"password\":\"the new password\"}", user_id);
+    status = post_status("/api/admin/users/set-password", json);
+    if (status != 200) FAIL("set-password answered %d", status);
+    if (login("recovered", "the new password", cookie, sizeof(cookie)) != 0 ||
+        login("recovered", "the old password", cookie, sizeof(cookie)) == 0) {
+        FAIL("after set-password, the new password doesn't sign in, or the old one does");
+    }
+    if (user_consume_invitation_token(db_pool_get_connection(), invite, "an invited password") != 1) {
+        FAIL("an invitation outstanding when the password was set can still set another");
+    }
+    if (user_consume_password_reset_token(db_pool_get_connection(), "recovery-reset",
+                                          "a reset password") != 1) {
+        FAIL("a reset link outstanding when the password was set can still set another");
+    }
+    printf("✓ the operator sets a password, and no outstanding link can override it\n");
+
+    /* 2. The recovery order: deactivate, set, reactivate. Nothing signs in until
+          reactivation, and then only the password set */
+    snprintf(json, sizeof(json), "{\"user_id\":\"%s\"}", user_id);
+    status = post_status("/api/admin/users/deactivate", json);
+    if (status != 200) FAIL("deactivating answered %d", status);
+    snprintf(json, sizeof(json), "{\"user_id\":\"%s\",\"password\":\"the recovered password\"}",
+             user_id);
+    status = post_status("/api/admin/users/set-password", json);
+    if (status != 200) FAIL("set-password on a deactivated account answered %d", status);
+    if (login("recovered", "the recovered password", cookie, sizeof(cookie)) == 0 ||
+        login("recovered", "the new password", cookie, sizeof(cookie)) == 0) {
+        FAIL("a deactivated account signed in");
+    }
+    snprintf(json, sizeof(json), "{\"user_id\":\"%s\"}", user_id);
+    status = post_status("/api/admin/users/activate", json);
+    if (status != 200) FAIL("reactivating answered %d", status);
+    if (login("recovered", "the recovered password", cookie, sizeof(cookie)) != 0 ||
+        login("recovered", "the new password", cookie, sizeof(cookie)) == 0) {
+        FAIL("after reactivation, the password set doesn't sign in, or the one before it does");
+    }
+    printf("✓ deactivate, set, reactivate: nothing signs in until then, and only the new password\n");
+
+    /* 3. An unknown user is 404, and the minimum length applies */
+    status = post_status("/api/admin/users/set-password",
+                         "{\"user_id\":\"ffffffffffffffffffffffffffffffff\",\"password\":\"whatever\"}");
+    if (status != 404) FAIL("set-password for an unknown user answered %d", status);
+    snprintf(json, sizeof(json), "{\"user_id\":\"%s\",\"password\":\"\"}", user_id);
+    status = post_status("/api/admin/users/set-password", json);
+    if (status != 400) FAIL("set-password with an empty password answered %d", status);
+    printf("✓ an unknown user is 404, and the minimum length applies\n");
+
+    return 0;
+}
+
+/* ============================================================================
  * Main
  * ============================================================================ */
 
@@ -630,7 +725,7 @@ int main(void) {
     register_routes(g_router);
 
     int failed = setup() || test_authorization_code_flow() || test_issuer() ||
-                 test_client_credentials() || test_mfa_gates();
+                 test_client_credentials() || test_mfa_gates() || test_account_recovery();
 
     router_destroy(g_router);
     db_pool_shutdown();

@@ -193,6 +193,9 @@ HttpResponse *server_deactivate_user_handler(const HttpRequest *req);
 /* POST /api/admin/users/reset-mfa - Remove a user's MFA methods and recovery codes (localhost-only) */
 HttpResponse *server_reset_user_mfa_handler(const HttpRequest *req);
 
+/* POST /api/admin/users/set-password - Set a user's password, active or not (localhost-only) */
+HttpResponse *server_set_user_password_handler(const HttpRequest *req);
+
 /* ============================================================================
  * Authentication Endpoints
  * ============================================================================ */

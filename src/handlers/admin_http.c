@@ -766,6 +766,7 @@ HttpResponse *admin_revoke_organization_key_handler(const HttpRequest *req) {
  * POST /api/admin/users/activate
  * POST /api/admin/users/deactivate
  * POST /api/admin/users/reset-mfa
+ * POST /api/admin/users/set-password
  * ========================================================================== */
 
 /*
@@ -842,4 +843,35 @@ HttpResponse *server_reset_user_mfa_handler(const HttpRequest *req) {
     if (rc != 0) return response_json_error(500, "Internal error");
 
     return response_json_ok("{\"message\":\"MFA reset\"}");
+}
+
+/*
+ * Sets a user's password, for an operator handing one over out of band: after
+ * a compromise, or where there is no email to reset by. Works while the account
+ * is deactivated and doesn't reactivate it; see user_set_password.
+ */
+HttpResponse *server_set_user_password_handler(const HttpRequest *req) {
+
+    db_handle_t *db = NULL;
+    unsigned char user_id[16];
+    HttpResponse *req_err = server_user_request(req, &db, user_id);
+    if (req_err) return req_err;
+
+    char *password = json_get_string(req->body ? req->body : "", "password");
+    if (!password) return response_json_error(400, "password required");
+
+    int rc = user_set_password(db, user_id, password);
+    OPENSSL_cleanse(password, strlen(password));
+    free(password);
+
+    if (rc == 1) return response_json_error(404, "User not found");
+    if (rc == -2) {
+        char msg[128];
+        snprintf(msg, sizeof(msg),
+                 "Password must be at least %d characters", crypto_password_min_length());
+        return response_json_error(400, msg);
+    }
+    if (rc != 0) return response_json_error(500, "Internal error");
+
+    return response_json_ok("{\"message\":\"Password set\"}");
 }
