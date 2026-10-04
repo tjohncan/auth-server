@@ -641,7 +641,9 @@ int user_get_by_id(db_handle_t *db, const unsigned char *user_id,
  * and access tokens, and voids their outstanding password-reset,
  * passwordless-login and invitation links, in the same transaction, so
  * reactivating later brings none of them back. It does that on every call,
- * already inactive or not. Activating an active user is a no-op.
+ * already inactive or not. Reactivating an inactive user sweeps the same way,
+ * for anything created while the deactivation ran. Activating an active user is
+ * a no-op.
  * active: 1 = active, 0 = inactive
  *
  * Returns: 0 success, 1 not found, -1 on error

@@ -300,7 +300,8 @@ curl -X POST http://localhost:8080/api/admin/org-admins \
 Activate a user account. Idempotent — activating an already-active user succeeds silently without touching the row.
 
 Reactivation restores the account, not what deactivation closed: the user signs in again, and
-no earlier session, token or emailed link comes back.
+no earlier session, token or emailed link comes back. That includes one created in the instant a
+deactivation ran, which escaped it: reactivating closes whatever the account holds.
 
 **Request Body**:
 ```json

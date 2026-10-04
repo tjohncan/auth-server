@@ -990,7 +990,8 @@ done:
  * still in date. user_set_active must close the sessions, revoke the refresh and
  * access tokens and void the password-reset, passwordless-login and invitation
  * links when it deactivates, leave another user's alone, and sweep an account an
- * older build flagged inactive without revoking anything.
+ * older build flagged inactive without revoking anything. Reactivating, it must
+ * close whatever the account came to hold while the deactivation ran.
  *
  * Returns 0 on success.
  */
@@ -1156,6 +1157,42 @@ static int test_deactivation_revokes(const config_t *config) {
         goto done;
     }
     log_info("  unknown id reported (OK)");
+
+    /* 5. Whatever an inactive account holds escaped its deactivation's sweep, made
+          by a sign-in that read the account as active an instant before. Planted
+          here while user 1 is inactive, and reactivating closes it. A new session
+          of user 2's survives that, and activating user 2, already active, too. */
+    unsigned char planted_id[16], planted_code[16];
+    if (user_set_active(sdb, user_ids[0], 0) != 0 ||
+        oauth_session_create(sdb, 1, user_ids[0], "escaped-session", "password",
+                             NULL, NULL, 3600, planted_id) != 0 ||
+        oauth_auth_code_create(sdb, 1, FIXTURE_CLIENT_ID, 1, user_ids[0], "escaped-code",
+                               NULL, NULL, 600, planted_code) != 0 ||
+        oauth_token_create_refresh(sdb, 1, 1, planted_code, "escaped-refresh", "read",
+                                   3600, planted_id) != 0 ||
+        oauth_token_create_access(sdb, 1, 1, 1, NULL, NULL, "escaped-access", "read",
+                                  3600, planted_id) != 0 ||
+        oauth_session_create(sdb, 2, user_ids[1], "bystander-session", "password",
+                             NULL, NULL, 3600, planted_id) != 0) {
+        log_error("Revocation: could not plant what escaped the sweep");
+        goto done;
+    }
+    if (user_set_active(sdb, user_ids[0], 1) != 0 ||
+        oauth_session_get_by_token(sdb, "escaped-session", &session) == 0 ||
+        read_stored_value(sdb, "SELECT MIN(is_revoked) FROM refresh_token "
+                               "WHERE user_account_pin = 1",
+                          revoked, sizeof(revoked)) != 0 || strcmp(revoked, "1") != 0 ||
+        oauth_access_token_is_active(sdb, "escaped-access") != 0) {
+        log_error("Revocation: what escaped the deactivation survived reactivation");
+        goto done;
+    }
+    if (user_set_active(sdb, user_ids[1], 1) != 0 ||
+        oauth_session_get_by_token(sdb, "bystander-session", &session) != 0) {
+        log_error("Revocation: reactivating closed another user's session, or activating "
+                  "an active account closed its own");
+        goto done;
+    }
+    log_info("  reactivated: what escaped the deactivation is closed, nothing else (OK)");
 
     failed = 0;
 

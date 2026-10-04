@@ -3327,8 +3327,14 @@ int user_set_active(db_handle_t *db, const unsigned char *user_id, int active) {
      * deactivating also closes the sessions, revokes the refresh and access
      * tokens, and voids outstanding password-reset, passwordless-login and
      * invitation links. It does so on every call, which sweeps up whatever an
-     * account deactivated by an older build still holds. */
-    if (!val) {
+     * account deactivated by an older build still holds.
+     *
+     * Reactivating sweeps again. An inactive account can't come by any of these
+     * legitimately, so whatever it holds now was created while its deactivation
+     * ran and escaped that sweep: a sign-in that read the account as active an
+     * instant before, say. Activating an account that is already active touches
+     * nothing. */
+    if (!val || !current) {
         const char *revoke_steps[] = {
             "UPDATE " TBL_BROWSER " "
             "SET is_closed = " BOOL_TRUE ", closed_at = " NOW ", updated_at = " NOW " "
@@ -3359,7 +3365,7 @@ int user_set_active(db_handle_t *db, const unsigned char *user_id, int active) {
 
         for (size_t i = 0; i < sizeof(revoke_steps) / sizeof(revoke_steps[0]); i++) {
             if (db_prepare(db, &stmt, revoke_steps[i]) != 0) {
-                log_error("Failed to prepare deactivation revoke statement");
+                log_error("Failed to prepare the account sweep");
                 db_execute_trusted(db, "ROLLBACK");
                 return -1;
             }
@@ -3370,7 +3376,7 @@ int user_set_active(db_handle_t *db, const unsigned char *user_id, int active) {
             db_finalize(stmt);
 
             if (rc != DB_DONE) {
-                log_error("Failed to revoke sessions and tokens on deactivation");
+                log_error("Failed to close the account's sessions, tokens and links");
                 db_execute_trusted(db, "ROLLBACK");
                 return -1;
             }
