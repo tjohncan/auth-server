@@ -56,6 +56,16 @@ static pthread_mutex_t g_cleaner_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_cleaner_cond = PTHREAD_COND_INITIALIZER;
 static int g_cleaner_stop_flag = 0;
 
+/* Whether one more task fits. A table left out is never purged, and history
+ * tables are the ones retention exists to bound, so that's an error, not a
+ * silent skip. */
+static int cleaner_has_room(const char *table_name) {
+    if (g_num_active_cleaners < MAX_TABLES) return 1;
+    log_error("Cleaner: no room for %s past MAX_TABLES (%d), so it will never be purged; "
+              "raise MAX_TABLES in src/db/cleaner.c", table_name, MAX_TABLES);
+    return 0;
+}
+
 /*
  * Default config values
  */
@@ -216,7 +226,7 @@ static void discover_history_tables(db_handle_t *db, cleaner_config_t *config) {
 
     while (db_step(stmt) == DB_ROW) {
         const char *table_name = (const char *)db_column_text(stmt, 0);
-        if (table_name && g_num_active_cleaners < MAX_TABLES) {
+        if (table_name && cleaner_has_room(table_name)) {
             char *name_copy = str_dup(table_name);
             if (name_copy) {
                 g_active_cleaners[g_num_active_cleaners++] = (table_cleaner_t){
@@ -251,7 +261,7 @@ static void discover_history_tables(db_handle_t *db, cleaner_config_t *config) {
 
     while (db_step(stmt) == DB_ROW) {
         const char *full_table_name = (const char *)db_column_text(stmt, 0);
-        if (full_table_name && g_num_active_cleaners < MAX_TABLES) {
+        if (full_table_name && cleaner_has_room(full_table_name)) {
             char *name_copy = str_dup(full_table_name);
             if (name_copy) {
                 g_active_cleaners[g_num_active_cleaners++] = (table_cleaner_t){
@@ -513,7 +523,7 @@ static void cleaner_init(db_handle_t *db, cleaner_config_t *config) {
     /* Filter: only include tables that exist */
     for (int i = 0; i < num_all; i++) {
         if (table_exists(db, all_possible[i].table_name)) {
-            if (g_num_active_cleaners < MAX_TABLES) {
+            if (cleaner_has_room(all_possible[i].table_name)) {
                 g_active_cleaners[g_num_active_cleaners++] = all_possible[i];
                 log_info("Cleaner: monitoring %s (retention: %d days)",
                          all_possible[i].description, all_possible[i].retention_days);
