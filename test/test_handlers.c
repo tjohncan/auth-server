@@ -941,12 +941,14 @@ static int invited(const Reply *r, const char *email, char *token, size_t size) 
 }
 
 /*
- * Provisioning an address twice makes one account, not two: one still pending
- * is invited again, its earlier invitation voided, up to five times an hour.
- * Accepted, the address is verified and finds the account without inviting it.
- * A deactivated pending account is found, and not invited. In a build without
- * email support each link comes back for the resource server to deliver; with
- * it, the server emails them and none comes back.
+ * Provisioning an address twice makes one account, not two. With email support
+ * one still pending is invited again, to the mailbox, up to five times an hour,
+ * and only the newest invitation works once it's handed off. Without, it isn't:
+ * the link would come back to whichever resource server asked. Accepted, the
+ * address is verified and finds the account without inviting it. A deactivated
+ * pending account is found, and not invited. In a build without email support
+ * each link comes back for the resource server to deliver; with it, the server
+ * emails them and none comes back.
  */
 static int test_provisioning(void) {
     printf("\n=== Provisioning ===\n");
@@ -970,9 +972,12 @@ static int test_provisioning(void) {
              "\"resource_server_key_id\":\"%s\",\"resource_server_secret\":\"%s\"",
              rs, key, secret);
 
-    /* 1. A new address gets an account and an invitation; the same address
-          again, four times, gets that account invited again, and only the
-          newest invitation works */
+    /* 1. A new address gets an account and an invitation. The same address
+          again finds that account rather than making another. With email
+          support it's invited again, to the mailbox, four more times, and only
+          the newest invitation works. Without, the link would come back to
+          whichever resource server asked, so it isn't invited, and the link it
+          has still works */
     char user[33], tokens[5][64];
     r = provision("pending@example.com");
     if (r.status != 200 || field(&r, "user_id", user, sizeof(user)) != 0 ||
@@ -981,6 +986,17 @@ static int test_provisioning(void) {
         FAIL("provisioning a new address answered %d: %s", r.status, r.body);
     }
     reply_free(&r);
+#ifndef EMAIL_SUPPORT
+    r = provision("pending@example.com");
+    if (!provisioned(&r, user, 0) || strstr(r.body, "\"invitation\"")) {
+        FAIL("without email, a pending address again answered %d: %s", r.status, r.body);
+    }
+    reply_free(&r);
+    if (user_consume_invitation_token(db_pool_get_connection(), tokens[0], "a password") != 0) {
+        FAIL("provisioning a pending address again voided its link");
+    }
+    printf("✓ a pending address finds its account, and without email isn't invited again\n");
+#else
     for (int i = 1; i < 5; i++) {
         r = provision("pending@example.com");
         if (!provisioned(&r, user, 0) ||
@@ -1002,10 +1018,28 @@ static int test_provisioning(void) {
         FAIL("a sixth provisioning in the hour answered %d: %s", r.status, r.body);
     }
     reply_free(&r);
-#ifdef EMAIL_SUPPORT
     if (!mail_none()) FAIL("a sixth invitation in the hour was emailed");
-#endif
     printf("✓ five invitations an hour, then none\n");
+
+    /* A hand-off that fails (here, mail that can't be rendered) sends nothing,
+       says so, and leaves the link the user already has working */
+    char first[64];
+    r = provision("unsent@example.com");
+    if (invited(&r, "unsent@example.com", first, sizeof(first)) != 0) {
+        FAIL("provisioning a new address answered %d", r.status);
+    }
+    reply_free(&r);
+    template_cleanup();
+    r = provision("unsent@example.com");
+    template_init("./templates");
+    int said = strstr(r.body, "\"invitation\":{\"emailed\":false}") != NULL;
+    reply_free(&r);
+    if (!said || !mail_none()) FAIL("a failed hand-off wasn't reported, or something was sent");
+    if (user_consume_invitation_token(db_pool_get_connection(), first, "a password") != 0) {
+        FAIL("a failed hand-off voided the link the user already had");
+    }
+    printf("✓ a failed hand-off says so, and the link the user has still works\n");
+#endif
 
     /* 3. Accepted, the address is verified, and finds the account without
           inviting it */

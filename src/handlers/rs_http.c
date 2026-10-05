@@ -164,11 +164,21 @@ HttpResponse *rs_provision_user_handler(const HttpRequest *req) {
         return response_json_error(400, validation_error);
     }
 
+    /* Accepting an invitation verifies the address it was sent to, as proof
+     * of control. So when the server can email the link, only the mailbox
+     * gets it: a resource server holding it could verify an address it
+     * doesn't control. A server with no email command configured can't email,
+     * and is treated as a build without email support. */
+    int by_email = 0;
+#ifdef EMAIL_SUPPORT
+    by_email = email && g_config->email_command && g_config->email_command[0];
+#endif
+
     rs_user_info_t info = {0};
     int rc = rs_handler_provision_user(auth.db, auth.rs_pin, username, email,
                                         g_config->invitation_token_ttl_seconds,
                                         http_request_get_client_ip(req, NULL),
-                                        &info);
+                                        by_email, &info);
 
     if (rc != 0) {
         free(username);
@@ -187,17 +197,12 @@ HttpResponse *rs_provision_user_handler(const HttpRequest *req) {
         snprintf(invite_url, sizeof(invite_url), "%s/accept-invitation?token=%s",
                  g_config->public_base_url, info.invitation_token);
 
-        int by_email = 0;
 #ifdef EMAIL_SUPPORT
-        /* Accepting an invitation verifies the address it was sent to, as proof
-         * of control. So when the server can email the link, only the mailbox
-         * gets it: a resource server holding it could verify an address it
-         * doesn't control. Handed to the email command or not, it isn't
-         * returned; provisioning the account again sends a fresh one. A server
-         * with no email command configured can't email, and is treated as a
-         * build without email support. */
-        if (email && g_config->email_command && g_config->email_command[0]) {
-            by_email = 1;
+        /* Handed to the email command or not, it isn't returned; provisioning
+         * the account again sends a fresh one. The account's earlier links are
+         * voided only once this one is on its way, so a hand-off that fails
+         * leaves the user the one they may already have. */
+        if (by_email) {
             char *body_text = template_render("emails/invitation.txt",
                                                "URL", invite_url, NULL);
             char *body_html = template_render("emails/invitation.html",
@@ -206,6 +211,9 @@ HttpResponse *rs_provision_user_handler(const HttpRequest *req) {
             int sent = body_text && body_html &&
                        email_send(g_config, email, "Set up your account",
                                   body_text, body_html) == 0;
+            if (sent && user_void_other_invitations(auth.db, info.invitation_token) != 0) {
+                log_error("Invitation emailed, but the account's earlier ones are still valid");
+            }
             jsonbuf_appendf(jb, ",\"invitation\":{\"emailed\":%s}", sent ? "true" : "false");
 
             if (body_text) OPENSSL_cleanse(body_text, strlen(body_text));

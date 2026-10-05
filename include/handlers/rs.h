@@ -41,8 +41,10 @@ void rs_user_info_free(rs_user_info_t *info);
  * If user exists (by username or verified email): returns user info.
  * If user doesn't exist: creates user (no password), creates invitation token.
  * An account still pending (no password yet) that holds the email unverified
- * is the user too, found by email alone or by its username, and is invited
- * again: a fresh token, within the hourly limit, unless it's deactivated.
+ * is the user too, found by email alone or by its username. It's invited again
+ * (a fresh token, within the hourly limit, unless it's deactivated) only when
+ * the invitation goes to the mailbox: one handed back would give whichever
+ * resource server asked an account another may have provisioned.
  * At least one of username or email required.
  *
  * Parameters:
@@ -52,6 +54,8 @@ void rs_user_info_free(rs_user_info_t *info);
  *   email          - Email address (can be NULL if username provided)
  *   invitation_ttl - Invitation token TTL in seconds
  *   source_ip      - Client IP for audit trail
+ *   by_email       - 1 if an invitation will be emailed to `email` rather than
+ *                    returned to the resource server
  *   out_info       - Output: user info (caller must call rs_user_info_free)
  *
  * Returns: 0 success, 1 provisioning not allowed, 2 ambiguous match, -1 error
@@ -59,7 +63,7 @@ void rs_user_info_free(rs_user_info_t *info);
 int rs_handler_provision_user(db_handle_t *db, long long rs_pin,
                                const char *username, const char *email,
                                int invitation_ttl, const char *source_ip,
-                               rs_user_info_t *out_info);
+                               int by_email, rs_user_info_t *out_info);
 
 /*
  * Look up user without creating

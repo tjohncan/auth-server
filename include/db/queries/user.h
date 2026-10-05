@@ -549,8 +549,9 @@ typedef struct {
  * Create invitation token
  *
  * For a new account, or one still pending invited again. At most five per
- * account in an hour, like reset links; the newest is the only one that works,
- * the earlier ones voided in the same transaction.
+ * account in an hour, like reset links. The account's earlier invitations
+ * stay valid: user_void_other_invitations voids them once this one has been
+ * handed on, so one that never arrives costs the user nothing.
  *
  * Parameters:
  *   user_email_pin - Email PIN (0 for no email)
@@ -564,6 +565,14 @@ int user_create_invitation_token(db_handle_t *db,
                                   int ttl_seconds,
                                   const char *source_ip,
                                   char *out_token);
+
+/*
+ * Void every unused invitation of the account this token invites, but this
+ * one, so only the newest works
+ *
+ * Returns: 0 on success (whether or not there were any), -1 on error
+ */
+int user_void_other_invitations(db_handle_t *db, const char *token);
 
 /*
  * Look up invitation token (read-only)

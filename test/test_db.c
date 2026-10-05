@@ -1567,8 +1567,7 @@ static int test_single_use(const config_t *config) {
     }
     log_info("  reset link: works once; used, revoked or expired, refused (OK)");
 
-    /* 2. An invitation, the same. (Each new one voids the account's earlier
-          ones, so each is made when it's needed.) */
+    /* 2. An invitation, the same */
     char invite[64], expired_invite[64], expired_hash[SHA256_HEX_LENGTH], sql[256];
     if (user_create_invitation_token(sdb, 1, 0, 3600, NULL, invite) != 0 ||
         user_consume_invitation_token(sdb, invite, "second password") != 0 ||

@@ -2574,12 +2574,6 @@ int user_create_invitation_token(db_handle_t *db,
         return -1;
     }
 
-    if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
-        log_error("Failed to begin transaction");
-        OPENSSL_cleanse(token, sizeof(token));
-        return -1;
-    }
-
     /* At most five in an hour per account, as for reset links: provisioning an
        account that is still pending invites it again, and that mustn't become a
        way to flood a mailbox */
@@ -2600,7 +2594,6 @@ int user_create_invitation_token(db_handle_t *db,
     db_stmt_t *stmt = NULL;
     if (db_prepare(db, &stmt, sql) != 0) {
         log_error("Failed to prepare invitation token insert");
-        db_execute_trusted(db, "ROLLBACK");
         OPENSSL_cleanse(token, sizeof(token));
         return -1;
     }
@@ -2620,41 +2613,52 @@ int user_create_invitation_token(db_handle_t *db,
     db_finalize(stmt);
 
     if (rc != DB_ROW) {
-        db_execute_trusted(db, "ROLLBACK");
         OPENSSL_cleanse(token, sizeof(token));
         if (rc == DB_DONE) return 1;  /* Five already this hour */
         log_error("Failed to insert invitation token");
         return -1;
     }
 
-    /* Only the newest invitation works: the earlier ones are voided, as used */
-    const char *void_sql =
-        "UPDATE " TBL_INVITATION_TOKEN " "
-        "SET is_used = " BOOL_TRUE ", used_at = " NOW ", updated_at = " NOW " "
-        "WHERE user_account_pin = " P"1 AND id != " P"2 AND is_used = " BOOL_FALSE;
-
-    if (db_prepare(db, &stmt, void_sql) != 0) {
-        log_error("Failed to prepare the earlier invitations' voiding");
-        db_execute_trusted(db, "ROLLBACK");
-        OPENSSL_cleanse(token, sizeof(token));
-        return -1;
-    }
-
-    db_bind_int64(stmt, 1, user_account_pin);
-    db_bind_blob(stmt, 2, id, sizeof(id));
-
-    rc = db_step(stmt);
-    db_finalize(stmt);
-
-    if (rc != DB_DONE || db_execute_trusted(db, "COMMIT") != 0) {
-        log_error("Failed to void the earlier invitations");
-        db_execute_trusted(db, "ROLLBACK");
-        OPENSSL_cleanse(token, sizeof(token));
-        return -1;
-    }
-
     memcpy(out_token, token, VERIFICATION_TOKEN_BUF_SIZE);
     OPENSSL_cleanse(token, sizeof(token));
+    return 0;
+}
+
+int user_void_other_invitations(db_handle_t *db, const char *token) {
+    if (!db || !token) {
+        log_error("Invalid arguments to user_void_other_invitations");
+        return -1;
+    }
+
+    char token_hash[SHA256_HEX_LENGTH];
+    if (crypto_sha256_hex(token, strlen(token), token_hash, sizeof(token_hash)) != 0) {
+        log_error("Failed to hash invitation token");
+        return -1;
+    }
+
+    /* Voided as used, which is what refuses them */
+    const char *sql =
+        "UPDATE " TBL_INVITATION_TOKEN " "
+        "SET is_used = " BOOL_TRUE ", used_at = " NOW ", updated_at = " NOW " "
+        "WHERE user_account_pin = ("
+            "SELECT user_account_pin FROM " TBL_INVITATION_TOKEN " WHERE token = " P"1"
+        ") AND token != " P"1 AND is_used = " BOOL_FALSE;
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        log_error("Failed to prepare the earlier invitations' voiding");
+        return -1;
+    }
+
+    db_bind_text(stmt, 1, token_hash, -1);
+
+    int rc = db_step(stmt);
+    db_finalize(stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Failed to void the earlier invitations");
+        return -1;
+    }
     return 0;
 }
 

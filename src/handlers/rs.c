@@ -33,7 +33,7 @@ static int populate_user_info(db_handle_t *db, const user_identity_t *match,
 int rs_handler_provision_user(db_handle_t *db, long long rs_pin,
                                const char *username, const char *email,
                                int invitation_ttl, const char *source_ip,
-                               rs_user_info_t *out_info) {
+                               int by_email, rs_user_info_t *out_info) {
     if (!db || (!username && !email) || !out_info) {
         log_error("Invalid arguments to rs_handler_provision_user");
         return -1;
@@ -56,8 +56,14 @@ int rs_handler_provision_user(db_handle_t *db, long long rs_pin,
     /* An account provisioned for this address that hasn't accepted its
      * invitation holds the address unverified, which the match above doesn't
      * look at. By email alone, that account is the person; with a username,
-     * it's them if the username found it too. Either way they're invited again,
-     * rather than a second account made for the same address. */
+     * it's them if the username found it too. Either way it's found, rather
+     * than a second account made for the same address.
+     *
+     * It's invited again only when the invitation goes to the mailbox. One
+     * handed back goes to whichever resource server asked, and nothing says
+     * that's the one that provisioned the account: any other could name the
+     * address, take the link, and so take over an account another tenant made
+     * and linked to its clients. */
     long long pending_email_pin = 0;
     int invite_again = 0;
     if (email) {
@@ -67,10 +73,10 @@ int rs_handler_provision_user(db_handle_t *db, long long rs_pin,
         if (pending_rc == 0 && rc == 1 && !username) {
             match = pending;
             rc = 0;
-            invite_again = 1;
+            invite_again = by_email;
         } else if (pending_rc == 0 && rc == 0 &&
                    pending.user_account_pin == match.user_account_pin) {
-            invite_again = 1;
+            invite_again = by_email;
         }
     }
 

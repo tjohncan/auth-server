@@ -2811,9 +2811,13 @@ invitation to set a password.
 
 An account still pending (provisioned, its invitation not yet accepted) holds its address
 unverified. Provisioning that address again finds it, by the email alone or with its username,
-instead of creating a second account, and invites it again: a fresh invitation, the earlier ones
-voided. One account gets at most five invitations in an hour; past that it's returned without
-one. A deactivated account is found like any other and never invited (see `is_active` above).
+instead of creating a second account. A server that can email (see **Invitations** below)
+invites it again: a fresh invitation to the mailbox, which voids the earlier ones once it's
+handed to the email command. One account gets at most five invitations in an hour; past that
+it's returned without one. A server that can't email returns it without an invitation, since
+the link would come back to whichever resource server asked, and the account may be another
+tenant's. A deactivated account is found like any other and never invited (see `is_active`
+above).
 
 At least one of `username` or `email` required. If both are provided and they match two different existing users, returns 409 (ambiguous).
 
@@ -2841,7 +2845,7 @@ At least one of `username` or `email` required. If both are provided and they ma
 }
 ```
 
-**Success Response — new user, or a pending one invited again** (200 OK):
+**Success Response — new user** (200 OK):
 ```json
 {
   "user_id": "d4e5f6...",
@@ -2864,6 +2868,9 @@ Or, when the server can't email it:
   }
 ```
 
+**Success Response — a pending user invited again** (200 OK, only on a server that can email):
+the account as it is, with `"created": false`, and `"invitation": {"emailed": true}`.
+
 **Error Responses**:
 - `400` — missing username and email
 - `401` — authentication failed
@@ -2871,16 +2878,21 @@ Or, when the server can't email it:
 - `409` — ambiguous match (username and email resolve to different users)
 
 **Invitations**:
-- The `invitation` object is present whenever this call issued one, for a new account or a pending one.
+- The `invitation` object is present whenever this call issued one, for a new account or a
+  pending one. Its presence, not `created`, says whether a link went out.
 - Accepting an invitation sets the password and verifies the address it went to. So when the
   server can email it (built with `EMAIL_SUPPORT=1`, an `email_command` configured, and an
   address given), it's emailed and never returned: `"emailed": true` once the server has handed
-  it to its email command. `"emailed": false` with no link means that hand-off failed;
-  provisioning again sends a fresh one.
+  it to its email command, which also voids the account's earlier invitations. `"emailed": false`
+  with no link means that hand-off failed, and any earlier link still works; provisioning again
+  sends a fresh one.
 - Otherwise (no email support, no `email_command`, or provisioning by username alone) the link
-  comes back for the resource server to deliver. A server that can't email still verifies the
-  address when the link is accepted, on the resource server's word. Such a deployment trusts
-  every resource server it lets provision with that, so enable provisioning only for ones you trust.
+  comes back for the resource server to deliver, and only for an account this call created. A
+  server that can't email still verifies the address when the link is accepted, on the resource
+  server's word. Such a deployment trusts every resource server it lets provision with that, so
+  enable provisioning only for ones you trust. A link lost there can't be issued again; the
+  operator can set a password (`POST /api/admin/users/set-password`) for an account with a
+  username.
 - Invitation tokens expire after `invitation_token_ttl_seconds` (default 72 hours).
 
 **Usernames**: a username is a first-come handle with no proof behind it, and provisioning by
