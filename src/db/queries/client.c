@@ -91,11 +91,7 @@ int client_create_bootstrap(db_handle_t *db, const char *org_code_name,
     db_bind_text(stmt, 5, client_type, -1);
     db_bind_text(stmt, 6, grant_type, -1);
 
-    if (note != NULL) {
-        db_bind_text(stmt, 7, note, -1);
-    } else {
-        db_bind_null(stmt, 7);
-    }
+    db_bind_text_or_null(stmt, 7, note);
 
     db_bind_int(stmt, 8, require_mfa);
     db_bind_int(stmt, 9, access_token_ttl_seconds);
@@ -166,11 +162,7 @@ int client_add_redirect_uri_bootstrap(db_handle_t *db, const unsigned char *clie
     db_bind_blob(stmt, 1, client_id, 16);
     db_bind_text(stmt, 2, redirect_uri, -1);
 
-    if (note != NULL) {
-        db_bind_text(stmt, 3, note, -1);
-    } else {
-        db_bind_null(stmt, 3);
-    }
+    db_bind_text_or_null(stmt, 3, note);
 
     int rc = db_step(stmt);
     db_finalize(stmt);
@@ -275,11 +267,7 @@ int client_create(db_handle_t *db,
     db_bind_text(stmt, 5, client_type, -1);
     db_bind_text(stmt, 6, grant_type, -1);
 
-    if (note != NULL) {
-        db_bind_text(stmt, 7, note, -1);
-    } else {
-        db_bind_null(stmt, 7);
-    }
+    db_bind_text_or_null(stmt, 7, note);
 
     db_bind_int(stmt, 8, require_mfa);
     db_bind_int(stmt, 9, access_token_ttl_seconds);
@@ -1167,11 +1155,7 @@ int client_redirect_uri_create(db_handle_t *db, long long user_account_pin,
     db_bind_blob(stmt, 1, client_id, 16);
     db_bind_text(stmt, 2, redirect_uri, -1);
 
-    if (note != NULL) {
-        db_bind_text(stmt, 3, note, -1);
-    } else {
-        db_bind_null(stmt, 3);
-    }
+    db_bind_text_or_null(stmt, 3, note);
 
     if (is_org_key_auth) {
         db_bind_int64(stmt, 4, organization_key_pin);
@@ -1872,11 +1856,7 @@ int client_key_create(db_handle_t *db,
     db_bind_int(stmt, 4, iterations);
     db_bind_text(stmt, 5, hash_hex, -1);
 
-    if (note != NULL) {
-        db_bind_text(stmt, 6, note, -1);
-    } else {
-        db_bind_null(stmt, 6);
-    }
+    db_bind_text_or_null(stmt, 6, note);
 
     if (is_org_key_auth) {
         db_bind_int64(stmt, 7, organization_key_pin);

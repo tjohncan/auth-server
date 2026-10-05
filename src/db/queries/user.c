@@ -1571,11 +1571,7 @@ int user_create_email_verification_token(db_handle_t *db,
     db_bind_blob(stmt, 1, id, sizeof(id));
     db_bind_text(stmt, 2, token_hash, -1);
     db_bind_text(stmt, 3, ttl_str, -1);
-    if (source_ip) {
-        db_bind_text(stmt, 4, source_ip, -1);
-    } else {
-        db_bind_null(stmt, 4);
-    }
+    db_bind_text_or_null(stmt, 4, source_ip);
     db_bind_int64(stmt, 5, user_account_pin);
     db_bind_text(stmt, 6, email_hash, -1);
 
@@ -1980,11 +1976,7 @@ int user_create_password_reset_token(db_handle_t *db, const char *email,
     db_bind_blob(stmt, 1, id, sizeof(id));
     db_bind_text(stmt, 2, token_hash, -1);
     db_bind_text(stmt, 3, ttl_str, -1);
-    if (source_ip) {
-        db_bind_text(stmt, 4, source_ip, -1);
-    } else {
-        db_bind_null(stmt, 4);
-    }
+    db_bind_text_or_null(stmt, 4, source_ip);
     db_bind_text(stmt, 5, email_hash, -1);
 
     int rc = db_step(stmt);
@@ -2276,11 +2268,7 @@ int user_create_passwordless_login_token(db_handle_t *db, const char *email,
     db_bind_text(stmt, 2, encrypted_email, -1);
     db_bind_text(stmt, 3, token_hash, -1);
     db_bind_text(stmt, 4, ttl_str, -1);
-    if (source_ip) {
-        db_bind_text(stmt, 5, source_ip, -1);
-    } else {
-        db_bind_null(stmt, 5);
-    }
+    db_bind_text_or_null(stmt, 5, source_ip);
     if (return_to && return_to[0]) {
         db_bind_text(stmt, 6, return_to, -1);
     } else {
@@ -2626,11 +2614,7 @@ int user_create_invitation_token(db_handle_t *db,
     }
     db_bind_text(stmt, 4, token_hash, -1);
     db_bind_text(stmt, 5, ttl_str, -1);
-    if (source_ip) {
-        db_bind_text(stmt, 6, source_ip, -1);
-    } else {
-        db_bind_null(stmt, 6);
-    }
+    db_bind_text_or_null(stmt, 6, source_ip);
 
     int rc = db_step(stmt);
     db_finalize(stmt);

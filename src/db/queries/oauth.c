@@ -232,11 +232,7 @@ int oauth_session_create(db_handle_t *db, long long user_account_pin,
     db_bind_text(stmt, 3, token_hash, -1);
     db_bind_text(stmt, 4, authentication_method, -1);
 
-    if (source_ip != NULL) {
-        db_bind_text(stmt, 5, source_ip, -1);
-    } else {
-        db_bind_null(stmt, 5);
-    }
+    db_bind_text_or_null(stmt, 5, source_ip);
 
     if (user_agent != NULL) {
         int ua_len = (int)strlen(user_agent);
@@ -514,17 +510,9 @@ int oauth_auth_code_create(db_handle_t *db, long long client_pin,
     db_bind_int64(stmt, 3, user_account_pin);
     db_bind_text(stmt, 4, code_hash, -1);
 
-    if (code_challenge != NULL) {
-        db_bind_text(stmt, 5, code_challenge, -1);
-    } else {
-        db_bind_null(stmt, 5);
-    }
+    db_bind_text_or_null(stmt, 5, code_challenge);
 
-    if (code_challenge_method != NULL) {
-        db_bind_text(stmt, 6, code_challenge_method, -1);
-    } else {
-        db_bind_null(stmt, 6);
-    }
+    db_bind_text_or_null(stmt, 6, code_challenge_method);
 
     db_bind_text(stmt, 7, ttl_str, -1);
 
@@ -717,11 +705,7 @@ int oauth_token_create_access(db_handle_t *db, long long resource_server_pin,
     db_bind_text(stmt, 7, token_hash, -1);
 
     /* Bind scopes (optional) */
-    if (scopes != NULL) {
-        db_bind_text(stmt, 8, scopes, -1);
-    } else {
-        db_bind_null(stmt, 8);
-    }
+    db_bind_text_or_null(stmt, 8, scopes);
 
     db_bind_text(stmt, 9, ttl_str, -1);
 
@@ -799,11 +783,7 @@ int oauth_token_create_refresh(db_handle_t *db, long long client_pin,
     db_bind_text(stmt, 5, token_hash, -1);
 
     /* Bind scopes (optional) */
-    if (scopes != NULL) {
-        db_bind_text(stmt, 6, scopes, -1);
-    } else {
-        db_bind_null(stmt, 6);
-    }
+    db_bind_text_or_null(stmt, 6, scopes);
 
     db_bind_text(stmt, 7, ttl_str, -1);
 
@@ -1909,10 +1889,7 @@ void log_key_usage(db_handle_t *db, key_usage_type_t type, long long key_pin,
 
     db_bind_int64(stmt, 1, key_pin);
 
-    if (source_ip)
-        db_bind_text(stmt, 2, source_ip, -1);
-    else
-        db_bind_null(stmt, 2);
+    db_bind_text_or_null(stmt, 2, source_ip);
 
     if (user_agent) {
         int ua_len = (int)strlen(user_agent);
@@ -1922,10 +1899,7 @@ void log_key_usage(db_handle_t *db, key_usage_type_t type, long long key_pin,
         db_bind_null(stmt, 3);
     }
 
-    if (operation)
-        db_bind_text(stmt, 4, operation, -1);
-    else
-        db_bind_null(stmt, 4);
+    db_bind_text_or_null(stmt, 4, operation);
 
     if (db_step(stmt) != DB_DONE)
         log_warn("log_key_usage: INSERT failed for %s", table);

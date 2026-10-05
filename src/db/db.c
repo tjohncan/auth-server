@@ -1718,6 +1718,10 @@ int db_bind_null(db_stmt_t *stmt, int index) {
     }
 }
 
+int db_bind_text_or_null(db_stmt_t *stmt, int index, const char *value) {
+    return value ? db_bind_text(stmt, index, value, -1) : db_bind_null(stmt, index);
+}
+
 int db_step(db_stmt_t *stmt) {
     if (!stmt) {
         log_error("Invalid arguments to db_step");

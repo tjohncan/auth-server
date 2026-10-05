@@ -1086,11 +1086,7 @@ void mfa_log_usage(db_handle_t *db,
     db_bind_int64(stmt, 1, user_mfa_pin);
     db_bind_int(stmt, 2, success ? 1 : 0);
 
-    if (source_ip) {
-        db_bind_text(stmt, 3, source_ip, -1);
-    } else {
-        db_bind_null(stmt, 3);
-    }
+    db_bind_text_or_null(stmt, 3, source_ip);
 
     if (user_agent) {
         int ua_len = (int)strlen(user_agent);

@@ -179,6 +179,15 @@ int db_bind_blob(db_stmt_t *stmt, int index, const void *value, int len);
 int db_bind_null(db_stmt_t *stmt, int index);
 
 /*
+ * Bind an optional text parameter: SQL NULL when value is NULL
+ *
+ * For columns that may be NULL. db_bind_text refuses NULL on purpose, so that a
+ * required value that's missing fails loudly; this says at the call site that
+ * NULL is allowed there.
+ */
+int db_bind_text_or_null(db_stmt_t *stmt, int index, const char *value);
+
+/*
  * Execute statement / fetch next row
  *
  * Returns:

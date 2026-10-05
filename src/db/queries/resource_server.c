@@ -119,11 +119,7 @@ int resource_server_create_bootstrap(db_handle_t *db, const char *org_code_name,
     db_bind_text(stmt, 4, display_name, -1);
     db_bind_text(stmt, 5, address, -1);
 
-    if (note != NULL) {
-        db_bind_text(stmt, 6, note, -1);
-    } else {
-        db_bind_null(stmt, 6);
-    }
+    db_bind_text_or_null(stmt, 6, note);
 
     /* Execute and get returned pin */
     int rc = db_step(stmt);
@@ -229,11 +225,7 @@ int resource_server_create(db_handle_t *db,
     db_bind_text(stmt, 4, display_name, -1);
     db_bind_text(stmt, 5, address, -1);
 
-    if (note != NULL) {
-        db_bind_text(stmt, 6, note, -1);
-    } else {
-        db_bind_null(stmt, 6);
-    }
+    db_bind_text_or_null(stmt, 6, note);
 
     if (is_org_key_auth) {
         db_bind_int64(stmt, 7, organization_key_pin);
@@ -820,11 +812,7 @@ int resource_server_key_create(db_handle_t *db,
     db_bind_int(stmt, 4, iterations);
     db_bind_text(stmt, 5, hash_hex, -1);
 
-    if (note != NULL) {
-        db_bind_text(stmt, 6, note, -1);
-    } else {
-        db_bind_null(stmt, 6);
-    }
+    db_bind_text_or_null(stmt, 6, note);
 
     if (is_org_key_auth) {
         db_bind_int64(stmt, 7, organization_key_pin);
