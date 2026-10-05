@@ -390,5 +390,14 @@ int validate_redirect_uri(const char *uri, char *error_msg, size_t error_len) {
         return -1;
     }
 
+    /* RFC 6749 3.1.2: no fragment. The code is appended as a query, and after a
+     * '#' it would land inside the fragment instead. */
+    if (strchr(uri, '#')) {
+        if (error_msg && error_len > 0) {
+            snprintf(error_msg, error_len, "Redirect URI must not contain a fragment (#)");
+        }
+        return -1;
+    }
+
     return 0;
 }

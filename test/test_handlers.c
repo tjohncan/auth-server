@@ -452,6 +452,40 @@ static int test_authorization_code_flow(void) {
 }
 
 /* ============================================================================
+ * Redirect URIs
+ * ============================================================================ */
+
+/*
+ * A redirect URI never has a fragment, which the code would land inside. Plain
+ * http is the client deployer's call, to any host.
+ */
+static int test_redirect_uris(void) {
+    printf("\n=== Redirect URIs ===\n");
+
+    static const struct { const char *uri; int status; } cases[] = {
+        { "https://app.example.com/callback", 200 },
+        { "http://localhost:3000/callback", 200 },
+        { "http://app.example.com/callback", 200 },
+        { "https://app.example.com/cb#x", 400 },
+        { "http://localhost/cb#x", 400 },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char json[256];
+        snprintf(json, sizeof(json), "{\"client_id\":\"%s\",\"redirect_uri\":\"%s\"}",
+                 g_ui_client, cases[i].uri);
+        Reply r = post_json("/api/admin/client-redirect-uris", g_admin_cookie, json);
+        int status = r.status;
+        reply_free(&r);
+        if (status != cases[i].status) {
+            FAIL("registering %s answered %d, not %d", cases[i].uri, status, cases[i].status);
+        }
+    }
+    printf("✓ a redirect URI with a fragment is refused\n");
+
+    return 0;
+}
+
+/* ============================================================================
  * The issuer
  * ============================================================================ */
 
@@ -1281,7 +1315,8 @@ int main(void) {
     g_router = router_create();
     register_routes(g_router);
 
-    int failed = setup() || test_authorization_code_flow() || test_issuer() ||
+    int failed = setup() || test_authorization_code_flow() || test_redirect_uris() ||
+                 test_issuer() ||
                  test_client_credentials() || test_mfa_gates() || test_localhost_only() ||
                  test_account_recovery() || test_form_password_length() ||
 #ifdef EMAIL_SUPPORT
