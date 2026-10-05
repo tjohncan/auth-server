@@ -67,6 +67,7 @@ typedef struct Connection {
     char remote_ip[INET6_ADDRSTRLEN];  /* Client IP address (IPv4 or IPv6, for logging) */
     uint64_t connection_id;       /* Unique across workers, for logging/debugging */
     struct timespec last_activity; /* Last read/write time (for timeout detection) */
+    struct timespec opened_at;    /* When accepted: one request per connection, so its deadline */
 
     void *userdata;               /* Shared context from handler_context (not owned by connection) */
 
@@ -107,7 +108,8 @@ typedef struct {
     int port;                     /* Port to listen on */
     int backlog;                  /* Listen queue size (default: 128) */
     size_t max_request_size;      /* Max request size in bytes (default: 1MB) */
-    int connection_timeout_ms;    /* Close idle connections after this (default: 30s) */
+    int connection_timeout_ms;    /* Close a connection idle this long, or still reading
+                                     its request this long after it opened (default: 30s) */
     int max_connections_per_worker; /* Max concurrent connections per worker (0 = unlimited) */
     RequestHandler handler;       /* Application request handler */
     void *handler_context;        /* Passed to handler (e.g., router) */

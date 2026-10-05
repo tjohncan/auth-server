@@ -41,9 +41,11 @@
  * splits it into reads. The read buffer doubles (4, 8, 16, 32 KB), so this is also
  * the most an unterminated block can occupy.
  * Without it a client can make every connection buffer max_request_size of headers
- * that will never be parsed, and it cannot time out, because last_activity is
- * refreshed on every recv. Applies only before the delimiter is found; after it the
- * body is entitled to grow to max_request_size, which is what that limit is for. */
+ * that will never be parsed. That bounds memory, not time: the idle timeout can't
+ * close such a connection, because last_activity is refreshed on every recv, so
+ * close_idle_connections also gives a request a deadline from the connection's
+ * opening. Applies only before the delimiter is found; after it the body is entitled
+ * to grow to max_request_size, which is what that limit is for. */
 #define MAX_HEADER_BYTES 32768
 #define MAX_EPOLL_EVENTS 1024                       /* Process up to 1024 events per epoll_wait */
 
@@ -70,6 +72,10 @@ struct EventLoop {
     Connection *connections_head;
     Connection *connections_tail;
     int active_connections;        /* Current count of active connections */
+
+    /* accept4() failed for want of descriptors or memory, with connections maybe
+     * still queued: retried on every pass of the loop until it succeeds */
+    bool accept_failing;
 };
 
 /*
@@ -175,6 +181,7 @@ static Connection *connection_create(int fd, const char *remote_ip, uint64_t con
     conn->state = CONN_STATE_READING_HEADERS;
     conn->connection_id = connection_id;
     clock_gettime(CLOCK_MONOTONIC, &conn->last_activity);
+    conn->opened_at = conn->last_activity;
 
     /* Allocate initial read buffer */
     conn->read_buffer = malloc(INITIAL_READ_BUFFER_SIZE);
@@ -333,8 +340,34 @@ static void handle_accept(EventLoop *loop, int listen_fd) {
                 /* No more connections to accept right now - this is normal */
                 return;
             }
-            log_error("accept4() failed: %s", strerror(errno));
+
+            /* That connection failed before we took it (accept(2) passes a new
+             * socket's pending network errors this way): the next may be fine */
+            if (errno == EINTR || errno == ECONNABORTED || errno == EPROTO ||
+                errno == ENETDOWN || errno == ENOPROTOOPT || errno == EHOSTDOWN ||
+                errno == EHOSTUNREACH || errno == EOPNOTSUPP || errno == ENETUNREACH
+#ifdef ENONET
+                || errno == ENONET
+#endif
+                ) {
+                continue;
+            }
+
+            /* Out of descriptors or memory (EMFILE, ENFILE, ENOBUFS, ENOMEM). The
+             * listening socket is edge-triggered, so connections still queued won't
+             * be announced again until another arrives: the loop retries on its
+             * next pass instead, at least once a second. Logged once until it
+             * clears, since every retry fails the same way. */
+            if (!loop->accept_failing) {
+                log_error("accept4() failed: %s; retrying until it clears", strerror(errno));
+            }
+            loop->accept_failing = true;
             return;
+        }
+
+        if (loop->accept_failing) {
+            log_info("accept4() is accepting connections again");
+            loop->accept_failing = false;
         }
 
         /* Reject if at connection limit */
@@ -637,6 +670,13 @@ static void handle_connection_event(EventLoop *loop, Connection *conn, uint32_t 
 
 /*
  * close_idle_connections - Check for and close timed-out connections
+ *
+ * Idle is measured from the last byte either way, so a client trickling a byte
+ * every few seconds is never idle: one every 29 s held a connection through a
+ * 32 KB header block for about eleven days. So a request also has to arrive
+ * whole within the same timeout of its connection opening, however steadily it
+ * trickles. One request per connection (HTTP/1.0, closed after the response),
+ * so the connection's age is the request's.
  */
 static void close_idle_connections(EventLoop *loop) {
     if (loop->config.connection_timeout_ms <= 0) return;  /* Timeout disabled */
@@ -650,9 +690,16 @@ static void close_idle_connections(EventLoop *loop) {
 
         long idle_ms = (now.tv_sec - conn->last_activity.tv_sec) * 1000
                      + (now.tv_nsec - conn->last_activity.tv_nsec) / 1000000;
+        long age_ms = (now.tv_sec - conn->opened_at.tv_sec) * 1000
+                    + (now.tv_nsec - conn->opened_at.tv_nsec) / 1000000;
         if (idle_ms >= loop->config.connection_timeout_ms) {
             log_info("Closing idle connection %lu (idle for %ldms)",
                     conn->connection_id, idle_ms);
+            close_connection(loop, conn);
+        } else if (conn->state == CONN_STATE_READING_HEADERS &&
+                   age_ms >= loop->config.connection_timeout_ms) {
+            log_info("Closing connection %lu: its request didn't arrive within %dms",
+                    conn->connection_id, loop->config.connection_timeout_ms);
             close_connection(loop, conn);
         }
 
@@ -726,6 +773,12 @@ int event_loop_run(EventLoop *loop, RequestHandler handler, void *context) {
                 Connection *conn = (Connection *)events[i].data.ptr;
                 handle_connection_event(loop, conn, events[i].events);
             }
+        }
+
+        /* Connections left queued by a failed accept: closing others above may
+         * have freed what it lacked */
+        if (loop->accept_failing) {
+            handle_accept(loop, listen_fd);
         }
 
         /* Check for idle connections every 5 seconds (wall-clock time)
