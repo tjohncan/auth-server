@@ -201,6 +201,16 @@ int crypto_password_min_iterations(void) {
     return g_min_iterations;
 }
 
+void crypto_password_verify_dummy(const char *password, size_t password_len) {
+    /* Drawn like a real hash's, not pinned to the minimum: with a range
+     * configured, real hashes average its middle, and a cheaper dummy would
+     * tell an existing account from a missing one by time */
+    crypto_password_verify(password, password_len,
+                           "00000000000000000000000000000000",
+                           crypto_random_int_range(g_min_iterations, g_max_iterations),
+                           "0000000000000000000000000000000000000000000000000000000000000000");
+}
+
 int crypto_password_verify(const char *password, size_t password_len,
                           const char *salt_hex, int iterations,
                           const char *expected_hash_hex) {

@@ -408,10 +408,7 @@ int user_verify_password(db_handle_t *db, const char *username,
     if (rc != DB_ROW) {
         db_finalize(stmt);
         /* Perform dummy verification to equalize timing (prevents user enumeration) */
-        crypto_password_verify(password, strlen(password),
-                               "00000000000000000000000000000000",
-                               crypto_password_min_iterations(),
-                               "0000000000000000000000000000000000000000000000000000000000000000");
+        crypto_password_verify_dummy(password, strlen(password));
         return 0;  /* User not found = invalid password */
     }
 
@@ -495,10 +492,7 @@ int user_verify_password_by_email(db_handle_t *db, const char *email,
     if (rc != DB_ROW) {
         db_finalize(stmt);
         /* Dummy verification to equalize timing */
-        crypto_password_verify(password, strlen(password),
-                               "00000000000000000000000000000000",
-                               crypto_password_min_iterations(),
-                               "0000000000000000000000000000000000000000000000000000000000000000");
+        crypto_password_verify_dummy(password, strlen(password));
         return 0;
     }
 

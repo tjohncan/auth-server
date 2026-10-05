@@ -132,8 +132,16 @@ int crypto_password_verify(const char *password, size_t password_len,
                           const char *expected_hash_hex);
 
 /*
- * Get configured minimum iterations (for dummy verification on unknown users)
+ * Get configured minimum iterations (recovery codes are hashed at it)
  */
 int crypto_password_min_iterations(void);
+
+/*
+ * Verify a password against nothing, at the cost of a real verification: the
+ * configured algorithm, at an iteration count drawn the way crypto_password_hash
+ * draws one. For an account that doesn't exist or can't sign in, so its answer
+ * takes as long as a wrong password's would.
+ */
+void crypto_password_verify_dummy(const char *password, size_t password_len);
 
 #endif /* CRYPTO_PASSWORD_H */
