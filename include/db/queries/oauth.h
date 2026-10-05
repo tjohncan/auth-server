@@ -472,12 +472,13 @@ int oauth_access_token_is_active(db_handle_t *db, const char *token);
  * - Validates token belongs to authenticated client_pin
  * - Returns success even if token doesn't exist (prevents enumeration)
  * - Idempotent (revoking already-revoked token succeeds)
- * - Revoking a REFRESH token cascades to the access tokens issued under the same
- *   grant (RFC 7009 Section 2.1). Without that cascade a logout is theatre: the
- *   refresh token dies while an access token lifted out of storage keeps working
- *   until it expires. Revoking an ACCESS token revokes only that token.
- * - Does NOT revoke the whole rotation chain — that is oauth_revoke_token_chain(),
- *   which exists for replay detection, a different (hostile) event.
+ * - Revoking a REFRESH token revokes its whole grant: every refresh token of its
+ *   rotation chain, and every access token issued under it, the code exchange's
+ *   and each rotation's (RFC 7009 Section 2.1). Without that cascade a logout is
+ *   theatre: the refresh token dies while an access token lifted out of storage
+ *   keeps working until it expires. Revoking an ACCESS token revokes only that token.
+ * - The same tokens oauth_revoke_token_chain() revokes on a replay, which is
+ *   logged as an attack; this is an ordinary logout.
  *
  * Parameters:
  *   db              - Database handle
@@ -503,13 +504,16 @@ int oauth_revoke_token(db_handle_t *db,
  *
  * For authorization code replay:
  *   - Pass the authorization_code_id as origin_id
+ *   - Revokes the access token the code's exchange issued, even when its client
+ *     issues no refresh tokens
  *   - Revokes all refresh tokens derived from that code
  *   - Revokes all access tokens linked to those refresh tokens
  *
  * For refresh token replay:
  *   - Pass the origin_refresh_token_id as origin_id
  *   - Revokes all refresh tokens in the rotation chain
- *   - Revokes all access tokens linked to those refresh tokens
+ *   - Revokes all access tokens linked to those refresh tokens, and the one the
+ *     code exchange issued
  *
  * Implementation:
  *   - Sets is_revoked = 1, revoked_at = current_timestamp on all affected tokens

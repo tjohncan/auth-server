@@ -1517,109 +1517,158 @@ int oauth_access_token_is_active(db_handle_t *db, const char *token) {
 #undef ACCESS_TOKEN_LIVE_WHERE
 
 /*
- * Revoke a refresh token AND the access tokens issued under the same grant.
+ * Revoke a grant: every refresh token of the rotation chain that starts at
+ * origin (the generation-1 token, which every later generation points back
+ * to), and every access token issued under it.
  *
- * RFC 7009 Section 2.1: revoking a refresh token SHOULD also invalidate the access
- * tokens issued from it. Without this, logging out is theatre — the refresh token dies
- * while the access token someone lifted out of storage keeps working until it expires.
+ * Access tokens hang off the chain two ways. One minted by a rotation carries
+ * refresh_token_id = the refresh token issued with it. The one minted by the
+ * code exchange carries refresh_token_id = NULL and authorization_code_id = the
+ * code, which only the generation-1 refresh token also carries. So a grant
+ * revoked from its newest refresh token still reaches the exchange's access
+ * token and each earlier rotation's.
  *
- * Two links have to be followed, not one:
+ * Either argument may be NULL. A replayed code passes its own id, since a
+ * client that issues no refresh tokens leaves the code's access token with no
+ * chain to be found by. A chain found from a refresh token passes no code, and
+ * its generation-1 token supplies it.
  *
- *   - Access tokens minted by a *rotation* carry refresh_token_id = <this token>.
- *   - The access token minted by the *original code exchange* carries
- *     refresh_token_id = NULL and authorization_code_id = <the code>. The generation-1
- *     refresh token carries that same authorization_code_id, which is how we reach it.
- *     Rotated refresh tokens have authorization_code_id = NULL, so that arm simply
- *     never matches for them (in SQL, `col = NULL` is never true) — which is correct.
- *
- * Following only refresh_token_id would leave the most ordinary logout of all — log in,
- * do some work, log out, having never refreshed — with a fully live access token.
- *
- * Returns: 1 if a refresh token was revoked, 0 if none matched, -1 on error.
+ * Runs in the caller's transaction. Returns 0, or -1 on error.
  */
-static int revoke_refresh_and_its_access_tokens(db_handle_t *db,
-                                                 const char *token_hash,
-                                                 long long client_pin) {
+static int revoke_grant(db_handle_t *db, const unsigned char *origin,
+                        const unsigned char *code_id,
+                        int *out_refresh_revoked, int *out_access_revoked) {
+    const char *access_sql =
+        "UPDATE " TBL_ACCESS_TOKEN " "
+        "SET is_revoked = " BOOL_TRUE ", "
+        "revoked_at = " NOW ", "
+        "updated_at = " NOW " "
+        "WHERE ("
+            "authorization_code_id = " P"2 "
+            "OR refresh_token_id IN ("
+                "SELECT id FROM " TBL_REFRESH_TOKEN " "
+                "WHERE id = " P"1" " OR origin_refresh_token_id = " P"1"
+            ") OR authorization_code_id = ("
+                "SELECT authorization_code_id FROM " TBL_REFRESH_TOKEN " "
+                "WHERE id = " P"1" " LIMIT 1"
+            ")"
+        ") AND is_revoked = " BOOL_FALSE " "
+        "RETURNING id";
+
     const char *refresh_sql =
         "UPDATE " TBL_REFRESH_TOKEN " "
         "SET is_revoked = " BOOL_TRUE ", "
         "revoked_at = " NOW ", "
         "updated_at = " NOW " "
-        "WHERE token = " P"1 "
-        "AND client_pin = " P"2 "
+        "WHERE (id = " P"1" " OR origin_refresh_token_id = " P"1" ") "
         "AND is_revoked = " BOOL_FALSE " "
-        "RETURNING id, authorization_code_id";
+        "RETURNING id";
+
+    const char *steps[] = { access_sql, refresh_sql };
+    int *counts[] = { out_access_revoked, out_refresh_revoked };
+
+    for (int i = 0; i < 2; i++) {
+        db_stmt_t *stmt = NULL;
+        if (db_prepare(db, &stmt, steps[i]) != 0) {
+            log_error("Failed to prepare a grant's revocation");
+            return -1;
+        }
+
+        if (origin) {
+            db_bind_blob(stmt, 1, origin, 16);
+        } else {
+            db_bind_null(stmt, 1);
+        }
+        if (i == 0) {
+            if (code_id) {
+                db_bind_blob(stmt, 2, code_id, 16);
+            } else {
+                db_bind_null(stmt, 2);
+            }
+        }
+
+        int n = 0, rc;
+        while ((rc = db_step(stmt)) == DB_ROW) {
+            n++;
+        }
+        db_finalize(stmt);
+
+        if (rc != DB_DONE) {
+            log_error("Failed to revoke a grant's tokens");
+            return -1;
+        }
+        *counts[i] = n;
+    }
+
+    return 0;
+}
+
+/*
+ * Revoke a refresh token's whole grant, for POST /revoke.
+ *
+ * RFC 7009 Section 2.1: revoking a refresh token SHOULD also invalidate the access
+ * tokens issued from it. Without this, logging out is theatre — the refresh token dies
+ * while the access token someone lifted out of storage keeps working until it expires.
+ * That means all of them: a client that has refreshed holds the code exchange's and each
+ * rotation's, any of them still in date. Only the newest refresh token works, but one
+ * presented from earlier in the chain revokes the newest too, since it's the same grant.
+ *
+ * Returns: 1 if it is this client's refresh token, 0 if not, -1 on error.
+ */
+static int revoke_refresh_and_its_access_tokens(db_handle_t *db,
+                                                 const char *token_hash,
+                                                 long long client_pin) {
+    if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
+        log_error("Failed to begin refresh token revocation");
+        return -1;
+    }
+
+    /* Generation 1 has no origin: it is its own */
+    const char *origin_sql =
+        "SELECT coalesce(origin_refresh_token_id, id) FROM " TBL_REFRESH_TOKEN " "
+        "WHERE token = " P"1 "
+        "AND client_pin = " P"2";
 
     db_stmt_t *stmt = NULL;
-    if (db_prepare(db, &stmt, refresh_sql) != 0) {
+    if (db_prepare(db, &stmt, origin_sql) != 0) {
         log_error("Failed to prepare refresh token revocation");
+        db_execute_trusted(db, "ROLLBACK");
         return -1;
     }
 
     db_bind_text(stmt, 1, token_hash, -1);
     db_bind_int64(stmt, 2, client_pin);
 
-    if (db_step(stmt) != DB_ROW) {
+    int rc = db_step(stmt);
+    if (rc != DB_ROW) {
         db_finalize(stmt);
-        return 0;  /* Not this client's refresh token, or already revoked */
-    }
-
-    unsigned char refresh_id[16];
-    const unsigned char *id_blob = db_column_blob(stmt, 0);
-    if (!id_blob || db_column_bytes(stmt, 0) != 16) {
-        db_finalize(stmt);
-        log_error("Invalid refresh token ID returned during revocation");
+        db_execute_trusted(db, "ROLLBACK");
+        if (rc == DB_DONE) return 0;  /* Not this client's refresh token */
+        log_error("Error looking up the refresh token to revoke");
         return -1;
     }
-    memcpy(refresh_id, id_blob, 16);
 
-    /* NULL on rotated tokens; set only on the generation-1 token from the code exchange */
-    unsigned char auth_code_id[16];
-    int have_auth_code = 0;
-    if (db_column_type(stmt, 1) != DB_NULL) {
-        const unsigned char *ac_blob = db_column_blob(stmt, 1);
-        if (ac_blob && db_column_bytes(stmt, 1) == 16) {
-            memcpy(auth_code_id, ac_blob, 16);
-            have_auth_code = 1;
-        }
+    unsigned char origin[16];
+    const unsigned char *origin_blob = db_column_blob(stmt, 0);
+    if (!origin_blob || db_column_bytes(stmt, 0) != 16) {
+        db_finalize(stmt);
+        db_execute_trusted(db, "ROLLBACK");
+        log_error("Invalid refresh token chain origin during revocation");
+        return -1;
     }
-
+    memcpy(origin, origin_blob, 16);
     db_finalize(stmt);
 
-    /* Cascade to every access token of the same grant */
-    const char *access_sql =
-        "UPDATE " TBL_ACCESS_TOKEN " "
-        "SET is_revoked = " BOOL_TRUE ", "
-        "revoked_at = " NOW ", "
-        "updated_at = " NOW " "
-        "WHERE is_revoked = " BOOL_FALSE " "
-        "AND (refresh_token_id = " P"1"
-        " OR authorization_code_id = " P"2"
-        ") "
-        "RETURNING id";
-
-    db_stmt_t *cascade = NULL;
-    if (db_prepare(db, &cascade, access_sql) != 0) {
-        /* The refresh token IS revoked — report that honestly rather than failing the
-         * whole call, but make the partial outcome loud. */
-        log_warn("Refresh token revoked, but failed to prepare access token cascade");
-        return 1;
+    int refresh_revoked = 0, access_revoked = 0;
+    if (revoke_grant(db, origin, NULL, &refresh_revoked, &access_revoked) != 0 ||
+        db_execute_trusted(db, "COMMIT") != 0) {
+        db_execute_trusted(db, "ROLLBACK");
+        log_error("Failed to revoke a refresh token's grant");
+        return -1;
     }
 
-    db_bind_blob(cascade, 1, refresh_id, 16);
-    if (have_auth_code) {
-        db_bind_blob(cascade, 2, auth_code_id, 16);
-    } else {
-        db_bind_null(cascade, 2);
-    }
-
-    int cascaded = 0;
-    while (db_step(cascade) == DB_ROW) {
-        cascaded++;
-    }
-    db_finalize(cascade);
-
-    log_info("Revoked refresh token and %d access token(s) from the same grant", cascaded);
+    log_info("Revoked a refresh token's grant: %d refresh, %d access token(s)",
+             refresh_revoked, access_revoked);
     return 1;
 }
 
@@ -1648,11 +1697,10 @@ int oauth_revoke_token(db_handle_t *db,
         try_refresh_first = 0;
     }
 
-    /* Try revoking as refresh token (cascades to its access tokens) */
+    /* Try revoking as refresh token (cascades to its whole grant) */
     if (try_refresh_first) {
-        if (revoke_refresh_and_its_access_tokens(db, token_hash, client_pin) == 1) {
-            return 0;
-        }
+        int refresh_rc = revoke_refresh_and_its_access_tokens(db, token_hash, client_pin);
+        if (refresh_rc != 0) return refresh_rc == 1 ? 0 : -1;
     }
 
     /* Try revoking as access token */
@@ -1667,15 +1715,22 @@ int oauth_revoke_token(db_handle_t *db,
         "RETURNING id";
 
     db_stmt_t *stmt = NULL;
-    if (db_prepare(db, &stmt, access_sql) == 0) {
-        db_bind_text(stmt, 1, token_hash, -1);
-        db_bind_int64(stmt, 2, client_pin);
+    if (db_prepare(db, &stmt, access_sql) != 0) {
+        log_error("Failed to prepare access token revocation");
+        return -1;
+    }
 
-        if (db_step(stmt) == DB_ROW) {
-            revoked = 1;
-        }
+    db_bind_text(stmt, 1, token_hash, -1);
+    db_bind_int64(stmt, 2, client_pin);
 
-        db_finalize(stmt);
+    int rc = db_step(stmt);
+    db_finalize(stmt);
+
+    if (rc == DB_ROW) {
+        revoked = 1;
+    } else if (rc != DB_DONE) {
+        log_error("Error revoking access token");
+        return -1;
     }
 
     if (revoked) {
@@ -1685,9 +1740,8 @@ int oauth_revoke_token(db_handle_t *db,
 
     /* If hint was access_token and we didn't find it, try refresh token as fallback */
     if (!try_refresh_first) {
-        if (revoke_refresh_and_its_access_tokens(db, token_hash, client_pin) == 1) {
-            return 0;
-        }
+        int refresh_rc = revoke_refresh_and_its_access_tokens(db, token_hash, client_pin);
+        if (refresh_rc != 0) return refresh_rc == 1 ? 0 : -1;
     }
 
     /* Per RFC 7009: return success even if token not found (prevents enumeration) */
@@ -1716,10 +1770,16 @@ int oauth_revoke_token_chain(db_handle_t *db,
 
     /* Resolve chain origin: the gen-1 refresh token ID that anchors the chain.
      * Gen 1 has origin_refresh_token_id = NULL in DB, gen 2+ point back to gen 1.
-     * For auth code replay, look up gen-1 by authorization_code_id first. */
+     * For auth code replay, look up gen-1 by authorization_code_id first: a
+     * client that issues no refresh tokens has none, and then the code's own
+     * access token is the whole grant. */
     unsigned char chain_origin[16];
+    const unsigned char *origin = chain_origin;
+    const unsigned char *code_id = NULL;
 
     if (is_authorization_code) {
+        code_id = origin_id;
+
         const char *lookup_sql =
             "SELECT id FROM " TBL_REFRESH_TOKEN " "
             "WHERE authorization_code_id = " P"1 "
@@ -1734,23 +1794,24 @@ int oauth_revoke_token_chain(db_handle_t *db,
 
         db_bind_blob(lookup_stmt, 1, origin_id, 16);
 
-        if (db_step(lookup_stmt) == DB_ROW) {
+        int rc = db_step(lookup_stmt);
+        if (rc == DB_ROW) {
             const unsigned char *id_blob = db_column_blob(lookup_stmt, 0);
             int blob_len = db_column_bytes(lookup_stmt, 0);
-            if (blob_len != 16) {
+            if (!id_blob || blob_len != 16) {
                 db_finalize(lookup_stmt);
                 db_execute_trusted(db, "ROLLBACK");
                 log_error("Invalid refresh token ID length in chain lookup");
                 return -1;
             }
             memcpy(chain_origin, id_blob, 16);
+        } else if (rc == DB_DONE) {
+            origin = NULL;
         } else {
             db_finalize(lookup_stmt);
             db_execute_trusted(db, "ROLLBACK");
-            log_debug("No refresh token found for authorization code");
-            if (out_refresh_revoked) *out_refresh_revoked = 0;
-            if (out_access_revoked) *out_access_revoked = 0;
-            return 0;
+            log_error("Error in chain origin lookup");
+            return -1;
         }
         db_finalize(lookup_stmt);
     } else {
@@ -1758,60 +1819,10 @@ int oauth_revoke_token_chain(db_handle_t *db,
         memcpy(chain_origin, origin_id, 16);
     }
 
-    /* Revoke entire chain: gen 1 (id = origin) + gen 2+ (origin_refresh_token_id = origin) */
-
-    /* Step 1: Revoke access tokens (including initial token from code exchange) */
-    const char *access_sql =
-        "UPDATE " TBL_ACCESS_TOKEN " "
-        "SET is_revoked = " BOOL_TRUE ", "
-        "revoked_at = " NOW ", "
-        "updated_at = " NOW " "
-        "WHERE ("
-            "refresh_token_id IN ("
-                "SELECT id FROM " TBL_REFRESH_TOKEN " "
-                "WHERE id = " P"1" " OR origin_refresh_token_id = " P"1"
-            ") OR authorization_code_id = ("
-                "SELECT authorization_code_id FROM " TBL_REFRESH_TOKEN " "
-                "WHERE id = " P"1" " LIMIT 1"
-            ")"
-        ") AND is_revoked = " BOOL_FALSE " "
-        "RETURNING id";
-
-    db_stmt_t *access_stmt = NULL;
-    if (db_prepare(db, &access_stmt, access_sql) != 0) {
+    if (revoke_grant(db, origin, code_id, &refresh_count, &access_count) != 0) {
         db_execute_trusted(db, "ROLLBACK");
-        log_error("Failed to prepare access token revocation");
         return -1;
     }
-
-    db_bind_blob(access_stmt, 1, chain_origin, 16);
-    while (db_step(access_stmt) == DB_ROW) {
-        access_count++;
-    }
-    db_finalize(access_stmt);
-
-    /* Step 2: Revoke refresh tokens */
-    const char *refresh_sql =
-        "UPDATE " TBL_REFRESH_TOKEN " "
-        "SET is_revoked = " BOOL_TRUE ", "
-        "revoked_at = " NOW ", "
-        "updated_at = " NOW " "
-        "WHERE (id = " P"1" " OR origin_refresh_token_id = " P"1" ") "
-        "AND is_revoked = " BOOL_FALSE " "
-        "RETURNING id";
-
-    db_stmt_t *refresh_stmt = NULL;
-    if (db_prepare(db, &refresh_stmt, refresh_sql) != 0) {
-        db_execute_trusted(db, "ROLLBACK");
-        log_error("Failed to prepare refresh token revocation");
-        return -1;
-    }
-
-    db_bind_blob(refresh_stmt, 1, chain_origin, 16);
-    while (db_step(refresh_stmt) == DB_ROW) {
-        refresh_count++;
-    }
-    db_finalize(refresh_stmt);
 
     if (refresh_count == 0 && access_count == 0) {
         db_execute_trusted(db, "ROLLBACK");

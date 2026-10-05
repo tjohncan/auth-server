@@ -304,6 +304,87 @@ static int test_authorization_code_flow(void) {
     if (userinfo_status(access) != 401) FAIL("replay left the chain's access token live");
     printf("✓ a refresh token rotates once; replaying it revokes the chain\n");
 
+    /* 4. Logging out after two rotations: revoking the newest refresh token
+          revokes every access token of the grant, the exchange's included */
+    char at[3][2048], rt3[256];
+    if (authorize(code, sizeof(code)) != 0) FAIL("/authorize did not redirect with a code");
+    r = exchange(code, PKCE_VERIFIER);
+    if (r.status != 200 || field(&r, "access_token", at[0], sizeof(at[0])) != 0 ||
+        field(&r, "refresh_token", rt, sizeof(rt)) != 0) {
+        FAIL("the code exchange answered %d", r.status);
+    }
+    reply_free(&r);
+    for (int i = 1; i < 3; i++) {
+        r = refresh(rt);
+        if (r.status != 200 || field(&r, "access_token", at[i], sizeof(at[i])) != 0 ||
+            field(&r, "refresh_token", rt3, sizeof(rt3)) != 0) {
+            FAIL("rotation %d answered %d", i, r.status);
+        }
+        reply_free(&r);
+        snprintf(rt, sizeof(rt), "%s", rt3);
+    }
+    char form[512];
+    snprintf(form, sizeof(form), "token=%s&client_id=%s", rt, g_ui_client);
+    r = post_form("/revoke", form);
+    if (r.status != 200) FAIL("/revoke answered %d", r.status);
+    reply_free(&r);
+    for (int i = 0; i < 3; i++) {
+        if (userinfo_status(at[i]) != 401) FAIL("after logout, access token %d is still live", i);
+    }
+    printf("✓ revoking the newest refresh token revokes every access token of the grant\n");
+
+    /* 5. An earlier refresh token of a grant revokes the newest too */
+    if (authorize(code, sizeof(code)) != 0) FAIL("/authorize did not redirect with a code");
+    r = exchange(code, PKCE_VERIFIER);
+    if (r.status != 200 || field(&r, "refresh_token", rt, sizeof(rt)) != 0) {
+        FAIL("the code exchange answered %d", r.status);
+    }
+    reply_free(&r);
+    r = refresh(rt);
+    if (r.status != 200 || field(&r, "refresh_token", rt2, sizeof(rt2)) != 0 ||
+        field(&r, "access_token", access, sizeof(access)) != 0) {
+        FAIL("rotating a refresh token answered %d", r.status);
+    }
+    reply_free(&r);
+    snprintf(form, sizeof(form), "token=%s&client_id=%s", rt, g_ui_client);
+    r = post_form("/revoke", form);
+    if (r.status != 200) FAIL("/revoke answered %d", r.status);
+    reply_free(&r);
+    r = refresh(rt2);
+    if (r.status != 400 || userinfo_status(access) != 401) {
+        FAIL("revoking a grant's earlier refresh token left its newest live (%d)", r.status);
+    }
+    reply_free(&r);
+    printf("✓ an earlier refresh token of the grant revokes it all\n");
+
+    /* 6. A client that issues no refresh tokens: replaying its code still
+          revokes the access token the first exchange issued */
+    if (db_execute_direct(db_pool_get_connection(),
+                          "UPDATE client SET issue_refresh_tokens = 0 "
+                          "WHERE code_name = 'management_ui'") != 0) {
+        FAIL("could not turn refresh tokens off");
+    }
+    if (authorize(code, sizeof(code)) != 0) FAIL("/authorize did not redirect with a code");
+    r = exchange(code, PKCE_VERIFIER);
+    int ok = r.status == 200 && field(&r, "access_token", access, sizeof(access)) == 0 &&
+             !strstr(r.body, "refresh_token");
+    reply_free(&r);
+    r = exchange(code, PKCE_VERIFIER);
+    int replay = r.status;
+    reply_free(&r);
+    int live = userinfo_status(access);
+    if (db_execute_direct(db_pool_get_connection(),
+                          "UPDATE client SET issue_refresh_tokens = 1 "
+                          "WHERE code_name = 'management_ui'") != 0) {
+        FAIL("could not turn refresh tokens back on");
+    }
+    if (!ok) FAIL("without refresh tokens, the code exchange went wrong");
+    if (replay != 400 || live != 401) {
+        FAIL("without refresh tokens, a replayed code answered %d and left /userinfo at %d",
+             replay, live);
+    }
+    printf("✓ with no refresh tokens, replaying a code still revokes its access token\n");
+
     return 0;
 }
 

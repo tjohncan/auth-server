@@ -1001,7 +1001,7 @@ code_verifier=<pkce_verifier>
 ```json
 {"error": "invalid_grant", "error_description": "Invalid authorization code"}
 ```
-Note: Replayed codes and genuinely invalid codes return the same error to prevent information disclosure. Replay triggers automatic revocation of the entire token chain.
+Note: Replayed codes and genuinely invalid codes return the same error to prevent information disclosure. Replay triggers automatic revocation of the entire token chain: the access token the first exchange issued (also for a client that issues no refresh tokens), and every refresh and access token issued from it since.
 
 #### Refresh Token Grant
 
@@ -1288,10 +1288,13 @@ client_secret=<client_secret>         # confidential clients only
 - **A client authentication failure IS reported** (`invalid_client`), per RFC 7009 §2.2.1. A
   confidential client that omits or fumbles its secret is told so, rather than being handed a
   `200 OK` while its token quietly stays alive.
-- **Revoking a refresh token also revokes the access tokens issued under the same grant**
-  (RFC 7009 §2.1). This is what makes a logout an actual logout: without it the refresh token
-  dies while an access token lifted from storage keeps working until it expires. Revoking an
-  *access* token revokes only that token.
+- **A revocation the server couldn't complete answers `503`**: the token may still be live, so
+  retry (RFC 7009 §2.2.1).
+- **Revoking a refresh token revokes its whole grant** (RFC 7009 §2.1): every access token
+  issued under it, the code exchange's and each refresh's, and the grant's refresh tokens,
+  including a newer one when an earlier one is revoked. This is what makes a logout an actual
+  logout: without it the refresh token dies while an access token lifted from storage keeps
+  working until it expires. Revoking an *access* token revokes only that token.
 - Only the token's own client can revoke it — the lookup is scoped to the `client_id` supplied.
 - Revocation is idempotent.
 

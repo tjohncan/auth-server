@@ -1196,8 +1196,9 @@ HttpResponse *jwks_handler(const HttpRequest *req) {
  *   Body: token=<token>&token_type_hint=<hint>&client_id=<uuid>&client_key_id=<uuid>&client_secret=<secret>
  *
  * Response:
- *   200 OK (always, even if token is invalid or already revoked)
+ *   200 OK, even if token is invalid or already revoked
  *   Per RFC 7009: prevents information disclosure to unauthorized parties
+ *   503 if the revocation couldn't be completed (the token may still be live)
  */
 HttpResponse *revoke_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/x-www-form-urlencoded");
@@ -1286,9 +1287,12 @@ HttpResponse *revoke_handler(const HttpRequest *req) {
     cleanse_free(token);
     free(token_type_hint);
 
+    /* A revocation that didn't complete is no 200: the client would take the logout
+     * as done. RFC 7009 Section 2.2.1 has 503 for this, and the client must then
+     * assume the token still exists and may retry. */
     if (revoke_result != 0) {
         log_error("Error during token revocation");
-        /* Still return 200 OK per RFC 7009 */
+        return response_json_error(503, "Service unavailable");
     }
 
     /* RFC 7009: The authorization server responds with HTTP status code 200
