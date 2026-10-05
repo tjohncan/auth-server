@@ -2886,9 +2886,12 @@ All endpoints require RS key authentication and `allow_user_provisioning = true`
 - **Authentication**: RS key credentials in JSON body (same key pair used for `/introspect`)
 - **Authorization**: `allow_user_provisioning` must be enabled on the resource server
 - **What it opens**: lookups and provisioning reach every user on the server, not only those
-  linked to this resource server's clients. A resource server with provisioning on can find
-  anyone by `user_id`, username or verified address, and the reply lists all of that user's
-  addresses, verified or not. Enable it only for resource servers you'd trust with that.
+  linked to this resource server's clients. That's what lets a resource server tell whether
+  someone already has an account before it invites them. It can find anyone by `user_id`,
+  username or verified address, and the reply gives that user's username and all their
+  addresses, verified or not. Each organization's admins (or its org keys) switch provisioning
+  on for their own resource servers, so on a shared server every organization is trusted with
+  that much.
 - **Scope**: Client-user operations scoped to clients linked to the authenticated RS
 - **Content-Type**: `application/json` for all endpoints (including GET)
 - **Audience**: Resource server backends
