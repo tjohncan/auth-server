@@ -344,13 +344,20 @@ curl -X POST http://localhost:8080/api/admin/users/activate \
 
 Deactivate a user account. Idempotent — deactivating an already-inactive user succeeds, and closes anything the account still has open.
 
-Deactivated users cannot log in or create new sessions. Deactivation also closes the user's sessions, revokes their refresh and access tokens, and voids any password-reset, passwordless-login or invitation link still outstanding, so reactivating the account later brings none of them back: whoever held them has to sign in again. A resource server that validates access tokens locally against `/.well-known/jwks.json` cannot see deactivation or revocation, because a self-contained token carries no liveness state, and will keep accepting one until its `exp`. Resource servers that need deactivation to take effect immediately should use `POST /introspect`.
+Deactivated users cannot log in or create new sessions. Deactivation also closes the user's sessions, revokes their refresh and access tokens, and voids any password-reset, passwordless-login, invitation or email-verification link still outstanding, so reactivating the account later brings none of them back: whoever held them has to sign in again. A resource server that validates access tokens locally against `/.well-known/jwks.json` cannot see deactivation or revocation, because a self-contained token carries no liveness state, and will keep accepting one until its `exp`. Resource servers that need deactivation to take effect immediately should use `POST /introspect`.
 
 Deactivation doesn't change the password, and the user can't change it while deactivated: no
 reset link can be requested or used, and nobody can sign in. The operator can, with
 `POST /api/admin/users/set-password`. After a compromise, the order is: deactivate; set a new
-password and give it to the user out of band; reset MFA if a factor was stolen; reactivate. The
-old password works at no point in between.
+password and give it to the user out of band; reset MFA (`POST /api/admin/users/reset-mfa`),
+since whoever held the account may have enrolled a factor or regenerated recovery codes of
+their own, and that isn't one stolen; reactivate. The old password works at no point in
+between.
+
+Whatever else the attacker changed while signed in stays. In particular, an address they added
+and verified still receives password-reset links, and passwordless sign-in links if they turned
+that on. Once reactivated, the user should remove any address they don't recognize and check
+the passwordless setting, before anything else.
 
 **Request Body**:
 ```json

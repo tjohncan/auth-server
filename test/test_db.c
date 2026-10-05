@@ -1497,7 +1497,8 @@ static int stored_password(db_handle_t *db, char *out, size_t out_size) {
 }
 
 /*
- * A password-reset link, an invitation and a recovery code each work once.
+ * A password-reset link, an invitation, an email-verification link and a
+ * recovery code each work once.
  *
  * Used once, each is refused after, as are a revoked or expired link, a link
  * for an inactive account, and a code from a retired set; no refusal changes
@@ -1595,6 +1596,44 @@ static int test_single_use(const config_t *config) {
     }
     log_info("  invitation: works once; used or expired, refused (OK)");
 
+    /* 2b. An email-verification link, the same: good, revoked, expired, and one
+           more good one for when the account is inactive */
+    char verify[4][64];
+    email_verification_result_t verified;
+    if (user_add_email(sdb, 1, "single@example.com") != 0) {
+        log_error("Single-use: could not add an address");
+        goto done;
+    }
+    for (int i = 0; i < 4; i++) {
+        char verify_hash[SHA256_HEX_LENGTH];
+        if (user_create_email_verification_token(sdb, 1, "single@example.com", 3600, NULL,
+                                                 verify[i]) != 0 ||
+            crypto_sha256_hex(verify[i], strlen(verify[i]), verify_hash, sizeof(verify_hash)) != 0) {
+            log_error("Single-use: could not create a verification link");
+            goto done;
+        }
+        snprintf(sql, sizeof(sql), i == 1
+                 ? "UPDATE email_verification_token SET is_revoked = 1 WHERE token = '%s'"
+                 : "UPDATE email_verification_token SET expected_expiry = "
+                   "datetime('now', '-1 second') WHERE token = '%s'", verify_hash);
+        if ((i == 1 || i == 2) && db_execute_direct(sdb, sql) != 0) {
+            log_error("Single-use: could not revoke or expire a verification link");
+            goto done;
+        }
+    }
+    if (user_verify_email_token(sdb, verify[0], &verified) != 0) {
+        log_error("Single-use: a good verification link was refused");
+        goto done;
+    }
+    for (int i = 0; i < 3; i++) {
+        if (user_verify_email_token(sdb, verify[i], &verified) != 1) {
+            log_error("Single-use: a %s verification link was accepted",
+                      i == 0 ? "used" : i == 1 ? "revoked" : "expired");
+            goto done;
+        }
+    }
+    log_info("  verification link: works once; used, revoked or expired, refused (OK)");
+
     /* 3. A live link for an account that is inactive, flagged directly, so no
           sweep has voided the link: refused, and the password stays */
     char inactive_invite[64];
@@ -1605,6 +1644,7 @@ static int test_single_use(const config_t *config) {
     }
     if (user_consume_password_reset_token(sdb, resets[3], "another password") != 1 ||
         user_consume_invitation_token(sdb, inactive_invite, "another password") != 1 ||
+        user_verify_email_token(sdb, verify[3], &verified) != 1 ||
         stored_password(sdb, now, sizeof(now)) != 0 || strcmp(now, second) != 0) {
         log_error("Single-use: a link for an inactive account was accepted");
         goto done;

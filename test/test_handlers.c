@@ -894,6 +894,87 @@ static int test_account_recovery(void) {
 }
 
 /* ============================================================================
+ * Emailed links
+ * ============================================================================ */
+
+#ifdef EMAIL_SUPPORT
+/*
+ * Through the mail, end to end: an address verified by its link, and a reset
+ * link to it that sets the password. A verification link outstanding when the
+ * account is deactivated is void after reactivation, like the other links: an
+ * address someone added while they held the account doesn't verify after the
+ * operator's recovery, so it can't then take reset links.
+ */
+static int test_email_links(void) {
+    printf("\n=== Emailed links ===\n");
+
+    char user_id[33], cookie[256], token[64], form[160], json[96];
+    Reply r = post_json("/api/admin/users", NULL,
+                        "{\"username\":\"mailer\",\"password\":\"mailer password\"}");
+    int created = r.status == 200 && field(&r, "user_id", user_id, sizeof(user_id)) == 0;
+    reply_free(&r);
+    if (!created || login("mailer", "mailer password", cookie, sizeof(cookie)) != 0) {
+        FAIL("could not create and sign in the user");
+    }
+
+    /* 1. Added, then verified by the link mailed to it; a reset link mailed to
+          the verified address sets the password */
+    const char *steps[][2] = {
+        { "/api/user/emails", "{\"email\":\"mailer@example.com\"}" },
+        { "/email-verification-token", "{\"email\":\"mailer@example.com\"}" },
+    };
+    for (int i = 0; i < 2; i++) {
+        r = post_json(steps[i][0], cookie, steps[i][1]);
+        if (r.status != 200) FAIL("%s answered %d", steps[i][0], r.status);
+        reply_free(&r);
+    }
+    if (mail_token("mailer@example.com", token, sizeof(token)) != 0) FAIL("no verification mail");
+    snprintf(form, sizeof(form), "token=%s", token);
+    r = post_form("/verify-email", form);
+    if (r.status != 200) FAIL("the verification link answered %d", r.status);
+    reply_free(&r);
+    r = post_json("/request-password-reset", NULL, "{\"email\":\"mailer@example.com\"}");
+    if (r.status != 200) FAIL("requesting a reset answered %d", r.status);
+    reply_free(&r);
+    if (mail_token("mailer@example.com", token, sizeof(token)) != 0) FAIL("no reset mail");
+    snprintf(form, sizeof(form), "token=%s&password=the+reset+password", token);
+    r = post_form("/reset-password", form);
+    if (r.status != 200) FAIL("the reset link answered %d", r.status);
+    reply_free(&r);
+    if (login("mailer", "the reset password", cookie, sizeof(cookie)) != 0 ||
+        login("mailer", "mailer password", cookie, sizeof(cookie)) == 0) {
+        FAIL("after the reset, the new password doesn't sign in, or the old one does");
+    }
+    printf("✓ an address verifies by its mailed link, and a reset link to it sets the password\n");
+
+    /* 2. A verification link outstanding at deactivation is void after
+          reactivation */
+    if (login("mailer", "the reset password", cookie, sizeof(cookie)) != 0) FAIL("can't sign in");
+    r = post_json("/api/user/emails", cookie, "{\"email\":\"added@example.com\"}");
+    int added = r.status;
+    reply_free(&r);
+    r = post_json("/email-verification-token", cookie, "{\"email\":\"added@example.com\"}");
+    int sent = r.status;
+    reply_free(&r);
+    if (added != 200 || sent != 200 || mail_token("added@example.com", token, sizeof(token)) != 0) {
+        FAIL("adding an address and mailing its link answered %d, %d", added, sent);
+    }
+    snprintf(json, sizeof(json), "{\"user_id\":\"%s\"}", user_id);
+    if (post_status("/api/admin/users/deactivate", json) != 200 ||
+        post_status("/api/admin/users/activate", json) != 200) {
+        FAIL("could not deactivate and reactivate");
+    }
+    snprintf(form, sizeof(form), "token=%s", token);
+    r = post_form("/verify-email", form);
+    if (r.status != 400) FAIL("a verification link from before deactivation answered %d", r.status);
+    reply_free(&r);
+    printf("✓ deactivation voids an outstanding verification link\n");
+
+    return 0;
+}
+#endif
+
+/* ============================================================================
  * Provisioning
  * ============================================================================ */
 
@@ -1154,7 +1235,11 @@ int main(void) {
 
     int failed = setup() || test_authorization_code_flow() || test_issuer() ||
                  test_client_credentials() || test_mfa_gates() || test_localhost_only() ||
-                 test_account_recovery() || test_provisioning();
+                 test_account_recovery() ||
+#ifdef EMAIL_SUPPORT
+                 test_email_links() ||
+#endif
+                 test_provisioning();
 
     router_destroy(g_router);
     db_pool_shutdown();

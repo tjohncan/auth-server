@@ -1764,12 +1764,17 @@ int user_verify_email_token(db_handle_t *db, const char *token,
         return -1;
     }
 
-    /* Step 2: Mark token as used (RETURNING detects concurrent consumption) */
+    /* Step 2: Mark token as used. This statement is the check, with all of the
+     * lookup's conditions on the link: one voided or expired since the lookup
+     * (a deactivation's sweep, say) isn't used, and RETURNING shows whether this
+     * call is the one that used it. */
     const char *use_sql =
         "UPDATE " TBL_EMAIL_VERIFICATION_TOKEN " "
         "SET is_used = " BOOL_TRUE ", used_at = " NOW ", updated_at = " NOW " "
         "WHERE token = " P"1 "
         "AND is_used = " BOOL_FALSE " "
+        "AND is_revoked = " BOOL_FALSE " "
+        "AND expected_expiry > " NOW " "
         "RETURNING is_used";
 
     db_stmt_t *use_stmt = NULL;
@@ -1788,11 +1793,16 @@ int user_verify_email_token(db_handle_t *db, const char *token,
         return (rc == DB_DONE) ? 1 : -1;
     }
 
-    /* Step 3: Mark email as verified */
+    /* Step 3: Mark email as verified, while its account is active: one
+     * deactivated since the lookup gets nothing verified */
     const char *verify_sql =
         "UPDATE " TBL_USER_EMAIL " "
         "SET is_verified = " BOOL_TRUE ", verified_at = " NOW ", updated_at = " NOW " "
-        "WHERE pin = " P"1";
+        "WHERE pin = " P"1 "
+        "AND user_account_pin = ("
+            "SELECT pin FROM " TBL_USER_ACCOUNT " WHERE pin = " P"2 AND is_active = " BOOL_TRUE
+        ") "
+        "RETURNING pin";
 
     db_stmt_t *verify_stmt = NULL;
     if (db_prepare(db, &verify_stmt, verify_sql) != 0) {
@@ -1802,12 +1812,14 @@ int user_verify_email_token(db_handle_t *db, const char *token,
     }
 
     db_bind_int64(verify_stmt, 1, user_email_pin);
+    db_bind_int64(verify_stmt, 2, user_account_pin);
     rc = db_step(verify_stmt);
     db_finalize(verify_stmt);
 
-    if (rc != DB_DONE) {
-        log_error("Failed to mark email as verified");
+    if (rc != DB_ROW) {
         db_execute_trusted(db, "ROLLBACK");
+        if (rc == DB_DONE) return 1;  /* Deactivated since the lookup */
+        log_error("Failed to mark email as verified");
         return -1;
     }
 
@@ -3537,9 +3549,11 @@ int user_set_active(db_handle_t *db, const unsigned char *user_id, int active) {
      * every session and token the account still held, an attacker's included,
      * MFA-complete sessions and all, and every emailed link still in date. So
      * deactivating also closes the sessions, revokes the refresh and access
-     * tokens, and voids outstanding password-reset, passwordless-login and
-     * invitation links. It does so on every call, which sweeps up whatever an
-     * account deactivated by an older build still holds.
+     * tokens, and voids outstanding password-reset, passwordless-login,
+     * invitation and email-verification links (an address an attacker added
+     * would otherwise still verify, and then take reset links). It does so on
+     * every call, which sweeps up whatever an account deactivated by an older
+     * build still holds.
      *
      * Reactivating sweeps again. An inactive account can't come by any of these
      * legitimately, so whatever it holds now was created while its deactivation
@@ -3564,6 +3578,12 @@ int user_set_active(db_handle_t *db, const unsigned char *user_id, int active) {
             "SET is_revoked = " BOOL_TRUE ", revoked_at = " NOW ", updated_at = " NOW " "
             "WHERE user_account_pin = " P"1 AND is_used = " BOOL_FALSE
             " AND is_revoked = " BOOL_FALSE,
+
+            "UPDATE " TBL_EMAIL_VERIFICATION_TOKEN " "
+            "SET is_revoked = " BOOL_TRUE ", revoked_at = " NOW ", updated_at = " NOW " "
+            "WHERE user_email_pin IN ("
+                "SELECT pin FROM " TBL_USER_EMAIL " WHERE user_account_pin = " P"1"
+            ") AND is_used = " BOOL_FALSE " AND is_revoked = " BOOL_FALSE,
 
             /* These two have no revoked flag; marking them used is what refuses them */
             "UPDATE " TBL_PASSWORDLESS_LOGIN_TOKEN " "

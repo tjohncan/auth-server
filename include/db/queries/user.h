@@ -675,7 +675,8 @@ int user_get_by_id(db_handle_t *db, const unsigned char *user_id,
  *
  * Deactivating also closes the user's browser sessions, revokes their refresh
  * and access tokens, and voids their outstanding password-reset,
- * passwordless-login and invitation links, in the same transaction, so
+ * passwordless-login, invitation and email-verification links, in the same
+ * transaction, so
  * reactivating later brings none of them back. It does that on every call,
  * already inactive or not. Reactivating an inactive user sweeps the same way,
  * for anything created while the deactivation ran. Activating an active user is
