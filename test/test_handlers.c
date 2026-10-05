@@ -1042,8 +1042,9 @@ static int test_provisioning(void) {
 #endif
 
     /* 3. Accepted, the address is verified, and finds the account without
-          inviting it */
-    char accepted[33], token[64];
+          inviting it. The account has no username: it signs in by the address,
+          with or without email support */
+    char accepted[33], token[64], cookie[256];
     r = provision("accepted@example.com");
     if (r.status != 200 || field(&r, "user_id", accepted, sizeof(accepted)) != 0 ||
         invited(&r, "accepted@example.com", token, sizeof(token)) != 0) {
@@ -1060,6 +1061,11 @@ static int test_provisioning(void) {
     }
     reply_free(&r);
     printf("✓ once accepted, the verified address finds the account, and no one is invited\n");
+    if (login("accepted@example.com", "an accepted password", cookie, sizeof(cookie)) != 0 ||
+        login("accepted@example.com", "a wrong password", cookie, sizeof(cookie)) == 0) {
+        FAIL("an account provisioned by address can't sign in by it, or signs in with anything");
+    }
+    printf("✓ an account provisioned by address alone signs in with it\n");
 
     /* 4. Deactivated while pending: found, inactive, and not invited */
     char banned[33];

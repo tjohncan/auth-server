@@ -865,9 +865,11 @@ Standard OAuth2 endpoints for authentication and token management.
 
 User authentication endpoint. Creates browser session on successful login.
 
-The `username` field accepts either a username or a verified email address
-(when built with `EMAIL_SUPPORT=1`). If the value contains `@`, it is
-treated as an email lookup against verified addresses.
+The `username` field accepts either a username or a verified email address. If the
+value contains `@` (which no username can), it is treated as an email lookup against
+verified addresses. That works in every build: without `EMAIL_SUPPORT`, an address is
+verified by accepting an invitation, and an account provisioned with only an address has
+no username to sign in with.
 
 **Request Body**:
 ```json
@@ -877,7 +879,7 @@ treated as an email lookup against verified addresses.
 }
 ```
 
-Or with email (requires `EMAIL_SUPPORT`):
+Or with email:
 ```json
 {
   "username": "alice@example.com",

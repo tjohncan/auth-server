@@ -31,11 +31,12 @@ int session_authenticate_and_create(db_handle_t *db,
     unsigned char user_id[16];
     int valid;
 
-#ifdef EMAIL_SUPPORT
+    /* No username has an '@', so one means an address, in every build: without
+       email support an invitation verifies it, and an account provisioned with
+       only an address has nothing else to sign in with */
     if (strchr(username, '@'))
         valid = user_verify_password_by_email(db, username, password, &user_pin, user_id);
     else
-#endif
         valid = user_verify_password(db, username, password, &user_pin, user_id);
 
     if (valid != 1) {

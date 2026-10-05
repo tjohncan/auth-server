@@ -456,7 +456,6 @@ int user_verify_password(db_handle_t *db, const char *username,
     return valid;  /* 1 if valid, 0 if invalid, -1 on error */
 }
 
-#ifdef EMAIL_SUPPORT
 int user_verify_password_by_email(db_handle_t *db, const char *email,
                                    const char *password, long long *out_pin,
                                    unsigned char *out_id) {
@@ -541,7 +540,6 @@ int user_verify_password_by_email(db_handle_t *db, const char *email,
 
     return valid;
 }
-#endif /* EMAIL_SUPPORT */
 
 int user_make_org_admin(db_handle_t *db, const unsigned char *user_id,
                         const char *org_code_name) {
