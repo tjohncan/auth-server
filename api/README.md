@@ -1109,7 +1109,7 @@ resource=<resource_address>
 | client_id     | Yes        | Client UUID (hex-encoded)                              |
 | client_key_id | Yes        | Client key UUID (hex-encoded, identifies which secret) |
 | client_secret | Yes        | Client secret (plaintext)                              |
-| scope         | No         | Requested scopes (space-separated)                     |
+| scope         | No         | Requested scopes (space-separated); not checked against any list, see below |
 | resource      | No         | Resource server address (RFC 8707)                     |
 
 **Success Response** (200 OK):
@@ -1123,6 +1123,9 @@ resource=<resource_address>
 ```
 
 **Notes**:
+- The scope is whatever the client asks for: only its syntax is checked, and no list says
+  which scopes a client may have. Resource servers authorize by `client_id` and `sub`, not
+  by scope (README, Deliberate Tradeoffs).
 - No refresh token issued (machine clients re-authenticate when token expires)
 - Only available for confidential clients with `grant_type=client_credentials`
 - Requires client authentication with client_key_id + client_secret
@@ -1149,7 +1152,7 @@ OAuth2 authorization endpoint (RFC 6749 Section 3.1). Initiates authorization co
 | response_type         | string        | Yes         | Must be "code"                                               |
 | client_id             | string (UUID) | Yes         | Client identifier                                            |
 | redirect_uri          | string        | Yes         | Registered callback URL                                      |
-| scope                 | string        | No          | Space-separated scope list                                   |
+| scope                 | string        | No          | Space-separated scope list; any scope is accepted (see the README's Deliberate Tradeoffs) |
 | state                 | string        | No          | CSRF protection token                                        |
 | code_challenge        | string        | Yes         | PKCE challenge (required for all authorization_code clients) |
 | code_challenge_method | string        | Yes         | Must be "S256"                                               |
@@ -1379,7 +1382,7 @@ resource_server_secret=<resource_server_secret>
 |------------|---------|----------------------------------------------------------------|
 | active     | boolean | Always `true` for valid tokens                                 |
 | token_type | string  | Always `"Bearer"`                                              |
-| scope      | string  | Space-separated scopes (optional)                              |
+| scope      | string  | Space-separated scopes (optional), as the client asked for them: not validated |
 | client_id  | string  | Client UUID (hex) that owns the token                          |
 | sub        | string  | User account UUID (hex), omitted for client_credentials tokens |
 | aud        | string  | Resource server UUID (hex, audience)                           |
@@ -2801,6 +2804,10 @@ All endpoints require RS key authentication and `allow_user_provisioning = true`
 
 - **Authentication**: RS key credentials in JSON body (same key pair used for `/introspect`)
 - **Authorization**: `allow_user_provisioning` must be enabled on the resource server
+- **What it opens**: lookups and provisioning reach every user on the server, not only those
+  linked to this resource server's clients. A resource server with provisioning on can find
+  anyone by `user_id`, username or verified address, and the reply lists all of that user's
+  addresses, verified or not. Enable it only for resource servers you'd trust with that.
 - **Scope**: Client-user operations scoped to clients linked to the authenticated RS
 - **Content-Type**: `application/json` for all endpoints (including GET)
 - **Audience**: Resource server backends

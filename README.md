@@ -289,16 +289,19 @@ Manages cryptographic signing keys for JWTs with automatic rotation.
     (`encryption_key`), as `e1:`-prefixed values; public keys are stored in plaintext
 - At startup the server opens one sealed value already in the database (a signing key, else
     a username or email address) and refuses to start if `encryption_key` won't open it, so
-    a wrong key fails there rather than at the first sign-in
-- A stored key that will not decrypt (an `encryption_key` that differs from the one that
-    stored it) stops token issuance, `/userinfo` and the JWKS endpoint, with an error naming
-    both tables; it is never silently regenerated. `/introspect` and `/revoke` don't use the
-    keys and keep working. The fix is to restore that `encryption_key`, which sign-in needs
-    too. Only if it is lost for good, delete the rows in both tables, which regenerates the
-    keys on next use. Refresh tokens and sessions survive that. Outstanding access tokens
-    stop verifying against the published keys and at `/userinfo`, but `/introspect` reports
-    them active until they expire, so deleting the rows is no way to retire leaked tokens:
-    revoke them, or deactivate the user.
+    a wrong key fails there rather than at the first sign-in. The fix is to start with the key
+    that sealed the data. Deleting the signing-key rows doesn't get past the check once there
+    are users: it goes on to a username or address sealed under the same key. A key lost for
+    good loses everything sealed under it (every username, address and TOTP secret), and no
+    one can sign in, so keep a copy of `encryption_key` wherever the database is backed up
+- A stored signing key that will not decrypt while the rest of the database does (rows
+    copied in from another deployment, say) stops token issuance, `/userinfo` and the JWKS
+    endpoint, with an error naming both tables; it is never silently regenerated.
+    `/introspect` and `/revoke` don't use the keys and keep working. Deleting the rows in
+    both tables regenerates the keys on next use, and refresh tokens and sessions survive
+    that. Outstanding access tokens stop verifying against the published keys and at
+    `/userinfo`, but `/introspect` reports them active until they expire, so deleting the
+    rows is no way to retire leaked tokens: revoke them, or deactivate the user.
 
 **Rotation:**
 - **Passive mechanism**: Keys checked on every use, rotated if stale
@@ -668,6 +671,15 @@ There is no consent screen: `/authorize` issues a code immediately for an authen
 authorized user. Authorization is enforced structurally instead — a user must be explicitly
 linked to a client (`client_user`) before `/authorize` will issue anything, and only a
 resource server or an org admin can create that link.
+
+**Scope is whatever the client asked for.**
+`/authorize` and the `client_credentials` grant check only a scope's syntax, and there is no
+list anywhere of the scopes a client may request or a resource server will honor. The string
+becomes the token's `scope` claim and introspection's `scope` as asked; a refresh can only
+narrow it. So any client can ask for any scope, including a user running their own PKCE flow
+through a public client. A resource server must not grant anything on scope alone: who may
+act is the token's `sub` and `client_id`, which the server does check (`client_user` and
+`client_resource_server` links). Use scope only to narrow what a token already allowed.
 
 **A malformed header line fails the whole request; it is not skipped.**
 A line in the header block with no colon (including an obsolete `obs-fold` continuation) gets
