@@ -88,6 +88,15 @@ static bool parse_request_line(char *line, HttpRequest *req) {
     if (!space2) return false;
     *space2 = '\0';  /* Null-terminate path */
 
+    /* No control characters or DEL in the target (RFC 7230's request-target has
+     * none; a client percent-encodes them). Lines split only at CRLF, so a bare LF
+     * here would reach the request log line and start a forged one. The method
+     * needs no such check: only exact names parse, and a request whose method
+     * doesn't is refused before anything logs it. */
+    for (const char *c = path_start; *c; c++) {
+        if ((unsigned char)*c < 0x21 || *c == 0x7F) return false;
+    }
+
     /* Split path and query string */
     char *question = strchr(path_start, '?');
     if (question) {

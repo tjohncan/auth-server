@@ -265,6 +265,31 @@ void test_malformed_requests(void) {
         printf("✓ Unsupported HTTP version rejected\n");
     }
 
+    /* Test 4b: Control characters in the target, which the request log line
+       would print: a bare LF starting a forged line, a tab, ESC, DEL. Encoded,
+       the same bytes are fine */
+    {
+        const char *bad[] = {
+            "GET /x\n[2026-10-05\t12:00:00]\tWARN\t:\tRefresh\ttoken\treplay HTTP/1.0\r\n\r\n",
+            "GET /x\ty HTTP/1.0\r\n\r\n",
+            "GET /x?q=\x1b[2J HTTP/1.0\r\n\r\n",
+            "GET /x\x7f HTTP/1.0\r\n\r\n",
+        };
+        for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            char req[128];
+            snprintf(req, sizeof(req), "%s", bad[i]);
+            HttpRequest parsed = http_request_parse(req, strlen(req));
+            assert(parsed.method == HTTP_UNKNOWN);
+            http_request_cleanup(&parsed);
+        }
+        char ok[] = "GET /x?q=%0A%09%1B HTTP/1.0\r\n\r\n";
+        HttpRequest parsed = http_request_parse(ok, strlen(ok));
+        assert(parsed.method == HTTP_GET);
+        assert(strcmp(parsed.query_string, "q=%0A%09%1B") == 0);
+        http_request_cleanup(&parsed);
+        printf("✓ Control characters in the target rejected; percent-encoded, accepted\n");
+    }
+
     /* Test 5: Excessive headers (over 50 limit) */
     {
         char req[8192];
