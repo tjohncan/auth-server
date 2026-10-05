@@ -26,6 +26,7 @@ test-router
 test-db
 test-crypto
 test-handlers
+test-handlers-email
 test-email
 
 # Fuzzing and sanitizer artifacts.

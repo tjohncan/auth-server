@@ -540,6 +540,8 @@ vendor/
 - `make test-handlers` - Request flows through the real route table and handlers: code
     exchange with PKCE, refresh rotation and replay, client credentials and introspection,
     the MFA gates
+- `make test-handlers-email` - The same flows with email support compiled in, plus the ones
+    only it has; the email command is a capture the tests read the links back from
 - `make test` - All of the above, plus `fuzz-regress`
 - `make test-email` - Deliver a test email through the deployed "send script" (optional infrastructure)
 

@@ -155,7 +155,7 @@ release: clean $(TARGET)
 
 # Clean build artifacts
 clean:
-	rm -f src/*.o src/**/*.o src/**/**/*.o vendor/**/*.o $(TARGET) test-str test-http test-router test-db test-crypto test-handlers test-email
+	rm -f src/*.o src/**/*.o src/**/**/*.o vendor/**/*.o $(TARGET) test-str test-http test-router test-db test-crypto test-handlers test-handlers-email test-email
 	rm -rf fuzz-replay fuzz-replay-http fuzz-replay-jwt fuzz-replay-json fuzz_http fuzz_jwt fuzz_json fuzz_http_replay auth-server-asan .fuzz-work
 	@echo "Cleaned build artifacts (crash seeds in test/fuzz/crashes/ are kept — they are tests)"
 
@@ -184,6 +184,15 @@ test-handlers: $(DB_VENDOR_OBJS)
 	$(CC) $(CFLAGS) $(SECURITY_FLAGS) test/test_handlers.c src/server/router.c src/server/http.c $(HANDLER_SRCS) $(UTIL_SRCS) $(DB_SRCS) $(CRYPTO_SRCS) $(DB_VENDOR_OBJS) -o test-handlers $(LDFLAGS) $(SECURITY_LDFLAGS)
 	@echo "Handler test built! Run with: ./test-handlers"
 
+# The handler suite again with email support compiled in, whatever EMAIL_SUPPORT says,
+# so the flows that exist only there (emailed invitations, reset and verification links)
+# run in every `make test`. It points the email command at a capture of what would have
+# been sent. Compiled from source like test-handlers, so the flag reaches every file;
+# the SQLite object it shares includes no project header.
+test-handlers-email: $(DB_VENDOR_OBJS)
+	$(CC) $(CFLAGS) -DEMAIL_SUPPORT $(SECURITY_FLAGS) test/test_handlers.c src/server/router.c src/server/http.c $(HANDLER_SRCS) $(filter-out src/util/email.c,$(UTIL_SRCS)) src/util/email.c $(DB_SRCS) $(CRYPTO_SRCS) $(DB_VENDOR_OBJS) -o test-handlers-email $(LDFLAGS) $(SECURITY_LDFLAGS)
+	@echo "Handler test with email support built! Run with: ./test-handlers-email"
+
 test-email:
 ifeq ($(EMAIL_SUPPORT),1)
 	$(CC) $(CFLAGS) $(SECURITY_FLAGS) test/test_email.c $(UTIL_SRCS) -o test-email $(LDFLAGS) $(SECURITY_LDFLAGS)
@@ -192,9 +201,9 @@ else
 	@echo "Email support not enabled. Build with: make EMAIL_SUPPORT=1 test-email"
 endif
 
-test: test-str test-http test-router test-db test-crypto test-handlers
+test: test-str test-http test-router test-db test-crypto test-handlers test-handlers-email
 	@echo "All tests built! Running..."
-	./test-str && ./test-http && ./test-router && ./test-db && ./test-crypto && ./test-handlers
+	./test-str && ./test-http && ./test-router && ./test-db && ./test-crypto && ./test-handlers && ./test-handlers-email
 	@$(MAKE) --no-print-directory fuzz-regress
 
 
@@ -299,6 +308,8 @@ help:
 	@echo "  make test-router    - Build router test"
 	@echo "  make test-db        - Build database integration test"
 	@echo "  make test-crypto    - Build crypto test (random generation, password hashing, hmac, jwt)"
+	@echo "  make test-handlers  - Build request-flow test (route table, handlers, in-memory DB)"
+	@echo "  make test-handlers-email - The same, with email support compiled in"
 	@echo "  make test-email     - Build email delivery test (requires EMAIL_SUPPORT=1)"
 	@echo "  make test           - Build and run all tests (excludes test-email)"
 	@echo "  make clean          - Remove build artifacts"
@@ -309,5 +320,5 @@ help:
 	@echo "  make fuzz           - Coverage-guided fuzz (clang; FUZZ_TARGET=http|jwt|json, FUZZ_TIME=60)"
 	@echo "  make sanitize       - Build the whole server with ASan+UBSan to drive by hand"
 
-.PHONY: all debug release clean help test test-str test-http test-router test-db test-crypto test-handlers test-email \
+.PHONY: all debug release clean help test test-str test-http test-router test-db test-crypto test-handlers test-handlers-email test-email \
         test-sanitized fuzz fuzz-regress sanitize

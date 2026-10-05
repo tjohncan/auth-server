@@ -31,6 +31,12 @@
 #include <string.h>
 #include <strings.h>
 #include <time.h>
+#ifdef EMAIL_SUPPORT
+#include "util/template.h"
+#include <dirent.h>
+#include <signal.h>
+#include <unistd.h>
+#endif
 
 /* main.c's, read by the handlers */
 const config_t *g_config = NULL;
@@ -151,6 +157,63 @@ static char *token_payload(const char *jwt) {
 }
 
 #define FAIL(...) do { printf("✗ "); printf(__VA_ARGS__); printf("\n"); return 1; } while (0)
+
+/* ============================================================================
+ * Mail, in a build with email support
+ * ============================================================================ */
+
+#ifdef EMAIL_SUPPORT
+/* The email command saves what it's given here, one JSON file per message */
+static char g_outbox[64];
+
+/* A message waiting in the outbox, read and removed; -1 if none came within
+   wait_ms (the email command runs in a child process, so it can lag) */
+static int mail_take(int wait_ms, char *json, size_t size) {
+    for (int waited = 0; waited <= wait_ms; waited += 20) {
+        DIR *dir = opendir(g_outbox);
+        struct dirent *e;
+        char path[128] = "";
+        while (dir && !path[0] && (e = readdir(dir))) {
+            size_t n = strlen(e->d_name);
+            if (n > 5 && strcmp(e->d_name + n - 5, ".json") == 0) {
+                snprintf(path, sizeof(path), "%s/%s", g_outbox, e->d_name);
+            }
+        }
+        if (dir) closedir(dir);
+        if (path[0]) {
+            FILE *f = fopen(path, "r");
+            size_t len = f ? fread(json, 1, size - 1, f) : 0;
+            if (f) fclose(f);
+            unlink(path);
+            json[len] = '\0';
+            return 0;
+        }
+        struct timespec pause = {0, 20 * 1000 * 1000};
+        nanosleep(&pause, NULL);
+    }
+    return -1;
+}
+
+/* The token in the link of the one message just sent, which must be to `to` */
+static int mail_token(const char *to, char *token, size_t size) {
+    char json[8192];
+    if (mail_take(5000, json, sizeof(json)) != 0) return -1;
+    char *rcpt = json_get_string(json, "to");
+    char *text = json_get_string(json, "body_text");
+    const char *t = text ? strstr(text, "token=") : NULL;
+    int ok = rcpt && strcmp(rcpt, to) == 0 && t;
+    if (ok) snprintf(token, size, "%.*s", (int)strcspn(t + 6, " \r\n"), t + 6);
+    free(rcpt);
+    free(text);
+    return ok ? 0 : -1;
+}
+
+/* Nothing was sent: no message turns up in a while */
+static int mail_none(void) {
+    char json[8192];
+    return mail_take(300, json, sizeof(json)) != 0;
+}
+#endif
 
 /* ============================================================================
  * Shared state: the bootstrap admin and their organization
@@ -861,20 +924,32 @@ static int provisioned(const Reply *r, const char *user, int created) {
            strstr(r->body, created ? "\"created\":true" : "\"created\":false") != NULL;
 }
 
+/* The invitation a reply says was issued to this address: without email support,
+   the token the reply carries for the resource server to deliver; with it, the one
+   emailed, and the reply carries none. -1 if there was none. */
+static int invited(const Reply *r, const char *email, char *token, size_t size) {
+#ifdef EMAIL_SUPPORT
+    if (invitation_token(r, token, size) == 0 ||
+        !strstr(r->body, "\"invitation\":{\"emailed\":true}")) {
+        return -1;
+    }
+    return mail_token(email, token, size);
+#else
+    (void)email;
+    return invitation_token(r, token, size);
+#endif
+}
+
 /*
  * Provisioning an address twice makes one account, not two: one still pending
  * is invited again, its earlier invitation voided, up to five times an hour.
  * Accepted, the address is verified and finds the account without inviting it.
  * A deactivated pending account is found, and not invited. In a build without
  * email support each link comes back for the resource server to deliver; with
- * it, the server emails them and none comes back, which this can't read.
+ * it, the server emails them and none comes back.
  */
 static int test_provisioning(void) {
     printf("\n=== Provisioning ===\n");
-#ifdef EMAIL_SUPPORT
-    printf("Skipped: with email support, invitation links don't come back to be read.\n");
-    return 0;
-#endif
 
     char json[512], rs[33], key[33], secret[128], target[96];
     snprintf(json, sizeof(json), "{\"organization_id\":\"%s\",\"code_name\":\"rs_prov\","
@@ -901,13 +976,15 @@ static int test_provisioning(void) {
     char user[33], tokens[5][64];
     r = provision("pending@example.com");
     if (r.status != 200 || field(&r, "user_id", user, sizeof(user)) != 0 ||
-        !provisioned(&r, user, 1) || invitation_token(&r, tokens[0], sizeof(tokens[0])) != 0) {
+        !provisioned(&r, user, 1) ||
+        invited(&r, "pending@example.com", tokens[0], sizeof(tokens[0])) != 0) {
         FAIL("provisioning a new address answered %d: %s", r.status, r.body);
     }
     reply_free(&r);
     for (int i = 1; i < 5; i++) {
         r = provision("pending@example.com");
-        if (!provisioned(&r, user, 0) || invitation_token(&r, tokens[i], sizeof(tokens[i])) != 0) {
+        if (!provisioned(&r, user, 0) ||
+            invited(&r, "pending@example.com", tokens[i], sizeof(tokens[i])) != 0) {
             FAIL("provisioning a pending address again answered %d: %s", r.status, r.body);
         }
         reply_free(&r);
@@ -925,6 +1002,9 @@ static int test_provisioning(void) {
         FAIL("a sixth provisioning in the hour answered %d: %s", r.status, r.body);
     }
     reply_free(&r);
+#ifdef EMAIL_SUPPORT
+    if (!mail_none()) FAIL("a sixth invitation in the hour was emailed");
+#endif
     printf("✓ five invitations an hour, then none\n");
 
     /* 3. Accepted, the address is verified, and finds the account without
@@ -932,7 +1012,7 @@ static int test_provisioning(void) {
     char accepted[33], token[64];
     r = provision("accepted@example.com");
     if (r.status != 200 || field(&r, "user_id", accepted, sizeof(accepted)) != 0 ||
-        invitation_token(&r, token, sizeof(token)) != 0) {
+        invited(&r, "accepted@example.com", token, sizeof(token)) != 0) {
         FAIL("provisioning a new address answered %d", r.status);
     }
     reply_free(&r);
@@ -950,7 +1030,8 @@ static int test_provisioning(void) {
     /* 4. Deactivated while pending: found, inactive, and not invited */
     char banned[33];
     r = provision("deactivated@example.com");
-    if (r.status != 200 || field(&r, "user_id", banned, sizeof(banned)) != 0) {
+    if (r.status != 200 || field(&r, "user_id", banned, sizeof(banned)) != 0 ||
+        invited(&r, "deactivated@example.com", token, sizeof(token)) != 0) {
         FAIL("provisioning a new address answered %d", r.status);
     }
     reply_free(&r);
@@ -973,7 +1054,11 @@ static int test_provisioning(void) {
 
 int main(void) {
     log_init(LOG_ERROR);
+#ifdef EMAIL_SUPPORT
+    printf("Handler Test Suite (with email support)\n");
+#else
     printf("Handler Test Suite\n");
+#endif
 
 #ifdef DB_BACKEND_POSTGRESQL
     printf("Skipped: test-handlers runs in the SQLite build only.\n");
@@ -990,6 +1075,25 @@ int main(void) {
     config->secret_hash_min_iterations = 1;
     config->secret_hash_max_iterations = 1;
     g_config = config;
+
+#ifdef EMAIL_SUPPORT
+    /* Mail goes to a capture: the email command writes each message to a file of
+       its own, renamed into place once whole, and the flows read the links back.
+       Children reaped as main.c has them, and the templates the mails render. */
+    snprintf(g_outbox, sizeof(g_outbox), "/tmp/test-handlers-outbox.XXXXXX");
+    char command[160];
+    if (!mkdtemp(g_outbox) ||
+        snprintf(command, sizeof(command),
+                 "f=$(mktemp %s/mail.XXXXXX) && cat > \"$f\" && mv \"$f\" \"$f.json\"",
+                 g_outbox) >= (int)sizeof(command) ||
+        template_init("./templates") != 0) {
+        printf("✗ mail capture setup failed\n");
+        return 1;
+    }
+    free(config->email_command);
+    config->email_command = str_dup(command);
+    signal(SIGCHLD, SIG_IGN);
+#endif
 
     /* One in-memory database, bound to this thread as a worker's would be */
     if (encrypt_init(config->encryption_key) != 0 || crypto_password_init(config) != 0 ||
@@ -1015,6 +1119,14 @@ int main(void) {
     router_destroy(g_router);
     db_pool_shutdown();
     config_free(config);
+
+#ifdef EMAIL_SUPPORT
+    /* Anything a failed flow left unread, then the outbox itself */
+    char leftover[8192];
+    while (mail_take(0, leftover, sizeof(leftover)) == 0) {}
+    rmdir(g_outbox);
+    template_cleanup();
+#endif
 
     printf(failed ? "\n=== Handler tests FAILED ===\n" : "\n=== All Handler Tests Passed! ===\n");
     return failed;
