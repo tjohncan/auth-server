@@ -2723,6 +2723,12 @@ or
 - Every call (valid or invalid) is logged to the MFA usage audit table.
 - Method must be confirmed (`is_confirmed = 1`) and owned by the authenticated user.
 - On success (`valid: true`), sets `mfa_completed = true` on the session, unblocking `/authorize`.
+- **429** after 5 failed codes in a minute on the method, or 10 in the last 24 hours across all
+  of the user's methods, even for a right code. The daily limit is what keeps guessing out of
+  reach (about a 1% chance a year, against 2% a day with the per-minute limit alone), at the
+  cost that whoever has the password can use up the user's day. A successful code doesn't
+  reset the count. A recovery code still works (`POST /api/user/mfa/recover`), and the
+  operator's `POST /api/admin/users/reset-mfa` clears it.
 
 ---
 

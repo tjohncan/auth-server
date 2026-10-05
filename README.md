@@ -628,7 +628,8 @@ the secret, both get in. Single-use doesn't stop an attacker who *has* the secre
 30 seconds. It doesn't stop real-time relay phishing either: the bot beats the human it's
 proxying, so the attacker gets in regardless and the *victim* is the one who gets rejected.
 What it reliably produces is a race between legitimate co-holders of the same seed. Guessing,
-as opposed to observing, is capped by per-method rate limiting.
+as opposed to observing, is capped: 5 failures a minute per method, and 10 a day per user
+across methods, which leaves someone holding the password about a 1% chance a year.
 
 **A user's first MFA method can be enrolled with the password alone.**
 Once a user has a factor, managing factors (adding, deleting, regenerating recovery codes,

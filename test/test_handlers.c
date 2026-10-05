@@ -782,6 +782,82 @@ static int test_mfa_gates(void) {
     return 0;
 }
 
+/*
+ * Ten failed codes in a day, across the user's methods, refuse even a right
+ * code; failures older than a day don't count. (The per-minute limit is
+ * avoided by dating the failures hours back.)
+ */
+static int test_mfa_daily_cap(void) {
+    printf("\n=== MFA daily cap ===\n");
+
+    char cookie[256], method[33], secret[64], code[16], json[256], sql[256];
+    Reply r = post_json("/api/admin/users", NULL,
+                        "{\"username\":\"capped\",\"password\":\"capped password\"}");
+    int status = r.status;
+    reply_free(&r);
+    if (status != 200 || login("capped", "capped password", cookie, sizeof(cookie)) != 0) {
+        FAIL("could not create and sign in the user");
+    }
+    r = post_json("/api/user/mfa/totp/setup", cookie, "{\"display_name\":\"phone\"}");
+    if (r.status != 200 || field(&r, "method_id", method, sizeof(method)) != 0 ||
+        field(&r, "secret", secret, sizeof(secret)) != 0) {
+        FAIL("TOTP setup answered %d", r.status);
+    }
+    reply_free(&r);
+    if (totp_now(secret, code, sizeof(code)) != 0) FAIL("could not make a TOTP code");
+    snprintf(json, sizeof(json), "{\"method_id\":\"%s\",\"code\":\"%s\"}", method, code);
+    r = post_json("/api/user/mfa/totp/confirm", cookie, json);
+    status = r.status;
+    reply_free(&r);
+    if (status != 200) FAIL("TOTP confirm answered %d", status);
+
+    /* 1. Ten failures two hours ago: a right code is refused */
+    snprintf(sql, sizeof(sql),
+             "INSERT INTO user_mfa_usage (user_mfa_pin, submitted_at, success) "
+             "SELECT pin, datetime('now', '-2 hours'), 0 FROM user_mfa WHERE id = x'%s'", method);
+    for (int i = 0; i < 10; i++) {
+        if (db_execute_direct(db_pool_get_connection(), sql) != 0) FAIL("could not plant failures");
+    }
+    if (totp_now(secret, code, sizeof(code)) != 0) FAIL("could not make a TOTP code");
+    snprintf(json, sizeof(json), "{\"method_id\":\"%s\",\"code\":\"%s\"}", method, code);
+    r = post_json("/api/user/mfa/verify", cookie, json);
+    status = r.status;
+    reply_free(&r);
+    if (status != 429) FAIL("after ten failures in a day, a right code answered %d", status);
+
+    /* 2. Nine: the right code works */
+    snprintf(sql, sizeof(sql),
+             "DELETE FROM user_mfa_usage WHERE rowid = (SELECT max(rowid) FROM user_mfa_usage "
+             "WHERE success = 0 AND user_mfa_pin = (SELECT pin FROM user_mfa WHERE id = x'%s'))",
+             method);
+    if (db_execute_direct(db_pool_get_connection(), sql) != 0) FAIL("could not remove a failure");
+    r = post_json("/api/user/mfa/verify", cookie, json);
+    int nine = r.status == 200 && strstr(r.body, "\"valid\":true") != NULL;
+    reply_free(&r);
+    if (!nine) FAIL("after nine failures in a day, a right code was refused");
+    printf("✓ ten failed codes in a day refuse even a right one; nine don't\n");
+
+    /* 3. Failures older than a day don't count */
+    snprintf(sql, sizeof(sql),
+             "UPDATE user_mfa_usage SET submitted_at = datetime('now', '-25 hours') "
+             "WHERE success = 0 AND user_mfa_pin = (SELECT pin FROM user_mfa WHERE id = x'%s')",
+             method);
+    if (db_execute_direct(db_pool_get_connection(), sql) != 0) FAIL("could not age the failures");
+    snprintf(sql, sizeof(sql),
+             "INSERT INTO user_mfa_usage (user_mfa_pin, submitted_at, success) "
+             "SELECT pin, datetime('now', '-25 hours'), 0 FROM user_mfa WHERE id = x'%s'", method);
+    for (int i = 0; i < 5; i++) {
+        if (db_execute_direct(db_pool_get_connection(), sql) != 0) FAIL("could not plant failures");
+    }
+    r = post_json("/api/user/mfa/verify", cookie, json);
+    int aged = r.status == 200 && strstr(r.body, "\"valid\":true") != NULL;
+    reply_free(&r);
+    if (!aged) FAIL("fourteen failures more than a day old still refused a right code");
+    printf("✓ failures more than a day old don't count\n");
+
+    return 0;
+}
+
 /* ============================================================================
  * Localhost only
  * ============================================================================ */
@@ -1409,7 +1485,8 @@ int main(void) {
 
     int failed = setup() || test_authorization_code_flow() || test_redirect_uris() ||
                  test_issuer() ||
-                 test_client_credentials() || test_mfa_gates() || test_localhost_only() ||
+                 test_client_credentials() || test_mfa_gates() || test_mfa_daily_cap() ||
+                 test_localhost_only() ||
                  test_account_recovery() || test_operator_addresses() ||
                  test_form_password_length() ||
 #ifdef EMAIL_SUPPORT

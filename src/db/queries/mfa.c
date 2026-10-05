@@ -153,18 +153,33 @@ int mfa_method_get_by_id(db_handle_t *db,
         return -1;
     }
 
+    /* Rate limited: 5 failures in the last minute on this method, or 10 in the
+     * last day across all of the user's methods. Three codes in a million are
+     * valid at any moment (the current step and one either side), so 5 a minute
+     * alone let someone with the password guess 7,200 times a day: about 2% a
+     * day, even odds within a month. 10 a day is about 1% a year. A successful
+     * code doesn't reset the day's count, and the operator's MFA reset (new
+     * methods, new pins) clears it. */
     const char *sql =
-        "SELECT id, pin, user_account_pin, mfa_method, display_name, secret, "
-        "       is_confirmed, confirmed_at, "
+        "SELECT M.id, M.pin, M.user_account_pin, M.mfa_method, M.display_name, M.secret, "
+        "       M.is_confirmed, M.confirmed_at, "
         "       EXISTS ("
         "           SELECT 1 FROM " TBL_USER_MFA_USAGE " "
-        "           WHERE user_mfa_pin = " TBL_USER_MFA ".pin "
+        "           WHERE user_mfa_pin = M.pin "
         "           AND success = " BOOL_FALSE " "
         "           AND submitted_at > " SECONDS_AGO("60") " "
         "           LIMIT 1 OFFSET 4"
+        "       ) OR EXISTS ("
+        "           SELECT 1 FROM " TBL_USER_MFA_USAGE " "
+        "           WHERE user_mfa_pin IN ("
+        "               SELECT pin FROM " TBL_USER_MFA " WHERE user_account_pin = M.user_account_pin"
+        "           ) "
+        "           AND success = " BOOL_FALSE " "
+        "           AND submitted_at > " SECONDS_AGO("86400") " "
+        "           LIMIT 1 OFFSET 9"
         "       ) AS is_rate_limited "
-        "FROM " TBL_USER_MFA " "
-        "WHERE id = " P"1 "
+        "FROM " TBL_USER_MFA " M "
+        "WHERE M.id = " P"1 "
         "LIMIT 1";
 
     db_stmt_t *stmt = NULL;
