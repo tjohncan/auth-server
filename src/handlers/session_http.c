@@ -51,6 +51,30 @@ static HttpResponse *response_html_error(int status_code, const char *message) {
     return resp;
 }
 
+/*
+ * A form's password, URL-decoded into a new buffer (cleanse_free it). The
+ * buffer is as long as the encoded value, so decoding never truncates, and the
+ * limit is PASSWORD_MAX_LENGTH, as for every JSON endpoint that takes one.
+ *
+ * Returns: 0, 1 if it's longer than a password may be, -1 if it can't be
+ * decoded (an encoded NUL), -2 if out of memory
+ */
+static int form_password(const char *encoded, char **out_password) {
+    size_t size = strlen(encoded) + 1;
+    char *password = malloc(size);
+    if (!password) return -2;
+
+    int len = str_url_decode(password, size, encoded);
+    if (len < 0 || len > PASSWORD_MAX_LENGTH) {
+        OPENSSL_cleanse(password, size);
+        free(password);
+        return len < 0 ? -1 : 1;
+    }
+
+    *out_password = password;
+    return 0;
+}
+
 /* Session token size: 32 bytes (256 bits) — matches session.c */
 #define SESSION_TOKEN_BYTES 32
 
@@ -1045,17 +1069,25 @@ HttpResponse *reset_password_handler(const HttpRequest *req) {
         return response_html_error(400, "Missing token or password");
     }
 
-    /* URL-decode password (form-encoded) */
-    char password[256];
-    if (str_url_decode(password, sizeof(password), password_enc) < 0) {
-        cleanse_free(token);
-        cleanse_free(password_enc);
-        return response_html_error(400, "Invalid request");
-    }
+    char *password = NULL;
+    int decoded = form_password(password_enc, &password);
     cleanse_free(password_enc);
+    if (decoded != 0) {
+        cleanse_free(token);
+        if (decoded == 1) {
+            char msg[128];
+            snprintf(msg, sizeof(msg), "Password must be at most %d characters.",
+                     PASSWORD_MAX_LENGTH);
+            HttpResponse *resp = response_template(400, "pages/reset-password-error.html",
+                "MESSAGE", msg, NULL);
+            return resp ? resp : response_json_error(400, msg);
+        }
+        return decoded == -2 ? response_html_error(500, "Internal server error")
+                             : response_html_error(400, "Invalid request");
+    }
 
     int rc = user_consume_password_reset_token(db, token, password);
-    OPENSSL_cleanse(password, sizeof(password));
+    cleanse_free(password);
     cleanse_free(token);
 
     if (rc == -2) {
@@ -1187,17 +1219,25 @@ HttpResponse *accept_invitation_handler(const HttpRequest *req) {
         return response_html_error(400, "Missing token or password");
     }
 
-    /* URL-decode password (form-encoded) */
-    char password[256];
-    if (str_url_decode(password, sizeof(password), password_enc) < 0) {
-        cleanse_free(token);
-        cleanse_free(password_enc);
-        return response_html_error(400, "Invalid request");
-    }
+    char *password = NULL;
+    int decoded = form_password(password_enc, &password);
     cleanse_free(password_enc);
+    if (decoded != 0) {
+        cleanse_free(token);
+        if (decoded == 1) {
+            char msg[128];
+            snprintf(msg, sizeof(msg), "Password must be at most %d characters.",
+                     PASSWORD_MAX_LENGTH);
+            HttpResponse *resp = response_template(400, "pages/accept-invitation-error.html",
+                "MESSAGE", msg, NULL);
+            return resp ? resp : response_json_error(400, msg);
+        }
+        return decoded == -2 ? response_html_error(500, "Internal server error")
+                             : response_html_error(400, "Invalid request");
+    }
 
     int rc = user_consume_invitation_token(db, token, password);
-    OPENSSL_cleanse(password, sizeof(password));
+    cleanse_free(password);
     cleanse_free(token);
 
     if (rc == -2) {

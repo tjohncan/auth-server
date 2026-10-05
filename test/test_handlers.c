@@ -31,8 +31,8 @@
 #include <string.h>
 #include <strings.h>
 #include <time.h>
-#ifdef EMAIL_SUPPORT
 #include "util/template.h"
+#ifdef EMAIL_SUPPORT
 #include <dirent.h>
 #include <signal.h>
 #include <unistd.h>
@@ -223,7 +223,7 @@ static char g_admin_cookie[256];
 static char g_org_id[33];
 
 static int login(const char *username, const char *password, char *cookie, size_t size) {
-    char body[256];
+    char body[1200];
     snprintf(body, sizeof(body), "{\"username\":\"%s\",\"password\":\"%s\"}", username, password);
     Reply r = post_json("/login", NULL, body);
     int ok = r.status == 200 && r.cookie;
@@ -894,6 +894,52 @@ static int test_account_recovery(void) {
 }
 
 /* ============================================================================
+ * Form passwords
+ * ============================================================================ */
+
+/*
+ * The invitation form takes a password as long as the JSON endpoints do, 1024
+ * bytes, and past that says so instead of answering "Invalid request". (The
+ * reset form, with email support, shares the decoding.)
+ */
+static int test_form_password_length(void) {
+    printf("\n=== Form password length ===\n");
+
+    char user_id[33], sql[128], pin[24], invite[64], password[1026], form[1200];
+    Reply r = post_json("/api/admin/users", NULL,
+                        "{\"username\":\"longpass\",\"password\":\"a short password\"}");
+    int created = r.status == 200 && field(&r, "user_id", user_id, sizeof(user_id)) == 0;
+    reply_free(&r);
+    snprintf(sql, sizeof(sql), "SELECT pin FROM user_account WHERE id = x'%s'", user_id);
+    if (!created || query_text(sql, pin, sizeof(pin)) != 0 ||
+        user_create_invitation_token(db_pool_get_connection(), atoll(pin), 0, 3600, NULL,
+                                     invite) != 0) {
+        FAIL("could not create the user and an invitation");
+    }
+
+    memset(password, 'p', 1025);
+    password[1025] = '\0';
+    snprintf(form, sizeof(form), "token=%s&password=%s", invite, password);
+    r = post_form("/accept-invitation", form);
+    if (r.status != 400 || !strstr(r.body, "at most 1024")) {
+        FAIL("a 1025-byte password answered %d: %.120s", r.status, r.body);
+    }
+    reply_free(&r);
+    password[1024] = '\0';
+    snprintf(form, sizeof(form), "token=%s&password=%s", invite, password);
+    r = post_form("/accept-invitation", form);
+    int status = r.status;
+    reply_free(&r);
+    char cookie[256];
+    if (status != 200 || login("longpass", password, cookie, sizeof(cookie)) != 0) {
+        FAIL("a 1024-byte password answered %d, or doesn't sign in", status);
+    }
+    printf("✓ a 1024-byte password is accepted, and a longer one refused with the reason\n");
+
+    return 0;
+}
+
+/* ============================================================================
  * Emailed links
  * ============================================================================ */
 
@@ -1197,17 +1243,19 @@ int main(void) {
     config->secret_hash_max_iterations = 1;
     g_config = config;
 
+    /* The pages and mails the handlers render, loaded as main.c loads them */
+    template_init("./templates");
+
 #ifdef EMAIL_SUPPORT
     /* Mail goes to a capture: the email command writes each message to a file of
        its own, renamed into place once whole, and the flows read the links back.
-       Children reaped as main.c has them, and the templates the mails render. */
+       Children reaped as main.c has them. */
     snprintf(g_outbox, sizeof(g_outbox), "/tmp/test-handlers-outbox.XXXXXX");
     char command[160];
     if (!mkdtemp(g_outbox) ||
         snprintf(command, sizeof(command),
                  "f=$(mktemp %s/mail.XXXXXX) && cat > \"$f\" && mv \"$f\" \"$f.json\"",
-                 g_outbox) >= (int)sizeof(command) ||
-        template_init("./templates") != 0) {
+                 g_outbox) >= (int)sizeof(command)) {
         printf("✗ mail capture setup failed\n");
         return 1;
     }
@@ -1235,7 +1283,7 @@ int main(void) {
 
     int failed = setup() || test_authorization_code_flow() || test_issuer() ||
                  test_client_credentials() || test_mfa_gates() || test_localhost_only() ||
-                 test_account_recovery() ||
+                 test_account_recovery() || test_form_password_length() ||
 #ifdef EMAIL_SUPPORT
                  test_email_links() ||
 #endif
@@ -1250,8 +1298,8 @@ int main(void) {
     char leftover[8192];
     while (mail_take(0, leftover, sizeof(leftover)) == 0) {}
     rmdir(g_outbox);
-    template_cleanup();
 #endif
+    template_cleanup();
 
     printf(failed ? "\n=== Handler tests FAILED ===\n" : "\n=== All Handler Tests Passed! ===\n");
     return failed;
