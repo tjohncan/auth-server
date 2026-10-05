@@ -348,16 +348,20 @@ Deactivated users cannot log in or create new sessions. Deactivation also closes
 
 Deactivation doesn't change the password, and the user can't change it while deactivated: no
 reset link can be requested or used, and nobody can sign in. The operator can, with
-`POST /api/admin/users/set-password`. After a compromise, the order is: deactivate; set a new
-password and give it to the user out of band; reset MFA (`POST /api/admin/users/reset-mfa`),
-since whoever held the account may have enrolled a factor or regenerated recovery codes of
-their own, and that isn't one stolen; reactivate. The old password works at no point in
-between.
+`POST /api/admin/users/set-password`. After a compromise, the order is:
 
-Whatever else the attacker changed while signed in stays. In particular, an address they added
-and verified still receives password-reset links, and passwordless sign-in links if they turned
-that on. Once reactivated, the user should remove any address they don't recognize and check
-the passwordless setting, before anything else.
+1. Deactivate.
+2. Set a new password and give it to the user out of band.
+3. Reset MFA (`POST /api/admin/users/reset-mfa`), since whoever held the account may have
+   enrolled a factor or regenerated recovery codes of their own, and that isn't one stolen.
+4. Check the user's addresses (`GET /api/admin/users/emails`). An address someone added and
+   verified while they held the account still takes password-reset links, and passwordless
+   sign-in links if they turned that on. If one looks suspicious (the user doesn't recognize
+   it, or it was added or verified during the compromise), remove it
+   (`DELETE /api/admin/users/emails`). Nothing needs removing if everything checks out.
+5. Reactivate.
+
+The old password works at no point in between.
 
 **Request Body**:
 ```json
@@ -478,6 +482,83 @@ a channel you trust, and they can change it themselves once signed in.
 curl -X POST http://localhost:8080/api/admin/users/set-password \
   -H "Content-Type: application/json" \
   -d '{"user_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4", "password": "a temporary password"}'
+```
+
+---
+
+### GET /api/admin/users/emails
+
+List a user's email addresses, with when each was added and verified, active or not: for
+checking an account during recovery (see the order under `POST /api/admin/users/deactivate`).
+Up to 100; `total` counts them all.
+
+**Request Body**:
+```json
+{
+  "user_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"
+}
+```
+
+**Success Response** (200 OK):
+```json
+{
+  "emails": [
+    {"address": "alice@example.com", "is_verified": true, "is_primary": true,
+     "added_at": "2026-03-02 09:14:00", "verified_at": "2026-03-02 09:20:11"},
+    {"address": "someone@elsewhere.example", "is_verified": true, "is_primary": false,
+     "added_at": "2026-10-04 23:51:07", "verified_at": "2026-10-04 23:52:40"}
+  ],
+  "total": 2
+}
+```
+
+`verified_at` is `null` for an address not verified.
+
+**Error Responses**:
+- **400** — missing or invalid user_id
+- **403** — not from localhost
+- **404** — user not found
+
+**Example**:
+```bash
+curl -X GET http://localhost:8080/api/admin/users/emails \
+  -H "Content-Type: application/json" \
+  -d '{"user_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"}'
+```
+
+---
+
+### DELETE /api/admin/users/emails
+
+Remove an address from a user's account, with any verification or invitation link outstanding
+for it. Works while the account is deactivated, so a suspicious address can go before the
+account is handed back. Matching is case-insensitive.
+
+**Request Body**:
+```json
+{
+  "user_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+  "email": "someone@elsewhere.example"
+}
+```
+
+**Success Response** (200 OK):
+```json
+{
+  "message": "Email deleted"
+}
+```
+
+**Error Responses**:
+- **400** — missing or invalid user_id, or missing email
+- **403** — not from localhost
+- **404** — user not found, or the user has no such address (so a typo isn't taken for a removal)
+
+**Example**:
+```bash
+curl -X DELETE http://localhost:8080/api/admin/users/emails \
+  -H "Content-Type: application/json" \
+  -d '{"user_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4", "email": "someone@elsewhere.example"}'
 ```
 
 ---

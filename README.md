@@ -584,7 +584,7 @@ See **[sql/README.md](sql/README.md)** for full schema documentation. Key design
 **User Sovereignty**
 - Users are independent entities — once created, no organization or resource server can modify, delete, or impersonate them
 - Resource servers can invite users and control access to their own clients, but cannot alter user credentials or profile
-- Account-level moderation (activate/deactivate, MFA reset, setting a password) is reserved for the server administrator (localhost-only)
+- Account-level moderation (activate/deactivate, MFA reset, setting a password, removing an address) is reserved for the server administrator (localhost-only)
 
 **Stateless Authorization Codes**
 - Authorization codes are signed JWTs containing all required state

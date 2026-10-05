@@ -218,6 +218,8 @@ typedef struct {
     char email_address[256];
     int is_primary;
     int is_verified;
+    char added_at[32];       /* When it was added */
+    char verified_at[32];    /* When it was verified; empty if it isn't */
 } user_email_t;
 
 /*
@@ -255,9 +257,11 @@ int user_add_email(db_handle_t *db, long long user_account_pin,
                    const char *email);
 
 /*
- * Delete email from user account (idempotent)
+ * Delete email from user account (idempotent), with its verification and
+ * invitation links
  *
- * Returns: 0 on success (including no-op), -1 on error
+ * Returns: 0 on success, 1 if the account has no such address (nothing
+ * changed), -1 on error
  */
 int user_delete_email(db_handle_t *db, long long user_account_pin,
                       const char *email);

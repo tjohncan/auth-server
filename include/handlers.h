@@ -259,6 +259,12 @@ HttpResponse *server_reset_user_mfa_handler(const HttpRequest *req);
 /* POST /api/admin/users/set-password - Set a user's password, active or not (localhost-only) */
 HttpResponse *server_set_user_password_handler(const HttpRequest *req);
 
+/* GET /api/admin/users/emails - List a user's addresses, with when added and verified (localhost-only) */
+HttpResponse *server_list_user_emails_handler(const HttpRequest *req);
+
+/* DELETE /api/admin/users/emails - Remove an address from a user's account (localhost-only) */
+HttpResponse *server_delete_user_email_handler(const HttpRequest *req);
+
 /* ============================================================================
  * Authentication Endpoints
  * ============================================================================ */

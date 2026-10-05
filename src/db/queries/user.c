@@ -759,7 +759,8 @@ int user_get_emails(db_handle_t *db, long long user_account_pin,
     }
 
     const char *sql =
-        "SELECT email_address, is_primary, is_verified, COUNT(*) OVER() as total_count "
+        "SELECT email_address, is_primary, is_verified, created_at, verified_at, "
+        "COUNT(*) OVER() as total_count "
         "FROM " TBL_USER_EMAIL " "
         "WHERE user_account_pin = " P"1 "
         "ORDER BY is_primary DESC, created_at ASC "
@@ -782,15 +783,20 @@ int user_get_emails(db_handle_t *db, long long user_account_pin,
 
     while (db_step(stmt) == DB_ROW) {
         user_email_t email;
+        memset(&email, 0, sizeof(email));
 
         /* Extract and decrypt email_address */
         const char *encrypted_email = (const char *)db_column_text(stmt, 0);
         int is_primary = db_column_int(stmt, 1);
         int is_verified = db_column_int(stmt, 2);
+        const char *added_at = (const char *)db_column_text(stmt, 3);
+        const char *verified_at = (const char *)db_column_text(stmt, 4);
+        if (added_at) str_copy(email.added_at, sizeof(email.added_at), added_at);
+        if (verified_at) str_copy(email.verified_at, sizeof(email.verified_at), verified_at);
 
         /* Extract total count from first row (same in all rows) */
         if (first_row) {
-            total_count = db_column_int(stmt, 3);
+            total_count = db_column_int(stmt, 5);
             first_row = 0;
         }
 
@@ -976,7 +982,8 @@ int user_delete_email(db_handle_t *db, long long user_account_pin,
     /* Delete the email row */
     const char *sql =
         "DELETE FROM " TBL_USER_EMAIL " "
-        "WHERE user_account_pin = " P"1 AND email_hash = " P"2";
+        "WHERE user_account_pin = " P"1 AND email_hash = " P"2 "
+        "RETURNING pin";
 
     db_stmt_t *stmt = NULL;
     if (db_prepare(db, &stmt, sql) != 0) {
@@ -991,7 +998,7 @@ int user_delete_email(db_handle_t *db, long long user_account_pin,
     rc = db_step(stmt);
     db_finalize(stmt);
 
-    if (rc != DB_DONE) {
+    if (rc != DB_ROW && rc != DB_DONE) {
         log_error("Failed to delete user_email");
         db_execute_trusted(db, "ROLLBACK");
         return -1;
@@ -1003,7 +1010,7 @@ int user_delete_email(db_handle_t *db, long long user_account_pin,
         return -1;
     }
 
-    return 0;
+    return rc == DB_ROW ? 0 : 1;
 }
 
 int user_set_primary_email(db_handle_t *db, long long user_account_pin,

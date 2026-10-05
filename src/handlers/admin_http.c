@@ -907,3 +907,85 @@ HttpResponse *server_set_user_password_handler(const HttpRequest *req) {
 
     return response_json_ok("{\"message\":\"Password set\"}");
 }
+
+/* ============================================================================
+ * GET /api/admin/users/emails
+ * DELETE /api/admin/users/emails
+ * ========================================================================== */
+
+/*
+ * Lists a user's addresses, with when each was added and verified. For an
+ * operator recovering an account: an address someone added and verified while
+ * they held it still takes password-reset and passwordless links, and the
+ * dates show what's new.
+ */
+HttpResponse *server_list_user_emails_handler(const HttpRequest *req) {
+
+    db_handle_t *db = NULL;
+    unsigned char user_id[16];
+    HttpResponse *req_err = server_user_request(req, &db, user_id);
+    if (req_err) return req_err;
+
+    user_identity_t user;
+    int rc = user_get_by_id(db, user_id, &user);
+    if (rc == 1) return response_json_error(404, "User not found");
+    if (rc != 0) return response_json_error(500, "Internal error");
+
+    user_email_t *emails = NULL;
+    int count = 0, total = 0;
+    if (user_get_emails(db, user.user_account_pin, 100, 0, &emails, &count, &total) != 0) {
+        return response_json_error(500, "Internal error");
+    }
+
+    JsonBuf *jb = jsonbuf_new(512 + count * 512);
+    jsonbuf_appendf(jb, "{\"emails\":[");
+    for (int i = 0; i < count; i++) {
+        jsonbuf_appendf(jb, "%s{\"address\":\"", i > 0 ? "," : "");
+        jsonbuf_append_escaped(jb, emails[i].email_address);
+        jsonbuf_appendf(jb, "\",\"is_verified\":%s,\"is_primary\":%s,\"added_at\":\"",
+                        emails[i].is_verified ? "true" : "false",
+                        emails[i].is_primary ? "true" : "false");
+        jsonbuf_append_escaped(jb, emails[i].added_at);
+        if (emails[i].verified_at[0]) {
+            jsonbuf_appendf(jb, "\",\"verified_at\":\"");
+            jsonbuf_append_escaped(jb, emails[i].verified_at);
+            jsonbuf_appendf(jb, "\"}");
+        } else {
+            jsonbuf_appendf(jb, "\",\"verified_at\":null}");
+        }
+    }
+    jsonbuf_appendf(jb, "],\"total\":%d}", total);
+
+    free(emails);
+    return jsonbuf_to_response(jb, 200);
+}
+
+/*
+ * Removes an address from a user's account, with any verification or
+ * invitation link outstanding for it. Works while the account is deactivated,
+ * so the operator can remove what the user doesn't recognize before handing
+ * the account back. An address the account doesn't have is a 404, so a typo
+ * doesn't pass for a removal.
+ */
+HttpResponse *server_delete_user_email_handler(const HttpRequest *req) {
+
+    db_handle_t *db = NULL;
+    unsigned char user_id[16];
+    HttpResponse *req_err = server_user_request(req, &db, user_id);
+    if (req_err) return req_err;
+
+    char *email = json_get_string(req->body ? req->body : "", "email");
+    if (!email) return response_json_error(400, "email required");
+
+    user_identity_t user;
+    int rc = user_get_by_id(db, user_id, &user);
+    if (rc == 0) rc = user_delete_email(db, user.user_account_pin, email);
+    else if (rc == 1) rc = 2;
+    free(email);
+
+    if (rc == 2) return response_json_error(404, "User not found");
+    if (rc == 1) return response_json_error(404, "The user has no such address");
+    if (rc != 0) return response_json_error(500, "Internal error");
+
+    return response_json_ok("{\"message\":\"Email deleted\"}");
+}

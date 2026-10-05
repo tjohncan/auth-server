@@ -927,6 +927,98 @@ static int test_account_recovery(void) {
     return 0;
 }
 
+/*
+ * The operator lists a user's addresses, with when each was added and
+ * verified, and removes one the user doesn't recognize; one not on the account
+ * is a 404, not a silent success. With email support, the removed address no
+ * longer takes reset links.
+ */
+static int test_operator_addresses(void) {
+    printf("\n=== The operator and a user's addresses ===\n");
+
+    char user_id[33], cookie[256], json[256], sql[256];
+    Reply r = post_json("/api/admin/users", NULL,
+                        "{\"username\":\"checked\",\"password\":\"checked password\"}");
+    int created = r.status == 200 && field(&r, "user_id", user_id, sizeof(user_id)) == 0;
+    reply_free(&r);
+    if (!created || login("checked", "checked password", cookie, sizeof(cookie)) != 0) {
+        FAIL("could not create and sign in the user");
+    }
+    /* Theirs is added second, and verified as if by its link */
+    const char *added[] = { "{\"email\":\"mine@example.com\"}", "{\"email\":\"theirs@example.com\"}" };
+    for (int i = 0; i < 2; i++) {
+        r = post_json("/api/user/emails", cookie, added[i]);
+        int status = r.status;
+        reply_free(&r);
+        if (status != 200) FAIL("adding an address answered %d", status);
+    }
+    snprintf(sql, sizeof(sql),
+             "UPDATE user_email SET is_verified = 1, verified_at = datetime('now') WHERE pin = "
+             "(SELECT max(pin) FROM user_email WHERE user_account_pin = "
+             "(SELECT pin FROM user_account WHERE id = x'%s'))", user_id);
+    if (db_execute_direct(db_pool_get_connection(), sql) != 0) FAIL("could not verify theirs");
+
+    /* 1. Listed, with verified state and dates */
+    snprintf(json, sizeof(json), "{\"user_id\":\"%s\"}", user_id);
+    r = request("GET", "/api/admin/users/emails", NULL, NULL, "application/json", json);
+    if (r.status != 200 || !strstr(r.body, "\"total\":2") ||
+        !strstr(r.body, "\"address\":\"theirs@example.com\",\"is_verified\":true") ||
+        !strstr(r.body, "\"address\":\"mine@example.com\",\"is_verified\":false") ||
+        !strstr(r.body, "\"verified_at\":null") || !strstr(r.body, "\"added_at\":\"20")) {
+        FAIL("listing the addresses answered %d: %s", r.status, r.body);
+    }
+    reply_free(&r);
+    printf("✓ the operator lists a user's addresses, with when each was added and verified\n");
+
+#ifdef EMAIL_SUPPORT
+    char token[64];
+    r = post_json("/request-password-reset", NULL, "{\"email\":\"theirs@example.com\"}");
+    reply_free(&r);
+    if (mail_token("theirs@example.com", token, sizeof(token)) != 0) {
+        FAIL("a verified address added to the account took no reset link");
+    }
+#endif
+
+    /* 2. Removed, matched without regard to case; then it's gone, and another
+          removal is a 404 */
+    snprintf(json, sizeof(json), "{\"user_id\":\"%s\",\"email\":\"THEIRS@example.com\"}", user_id);
+    r = request("DELETE", "/api/admin/users/emails", NULL, NULL, "application/json", json);
+    int removed = r.status;
+    reply_free(&r);
+    r = request("DELETE", "/api/admin/users/emails", NULL, NULL, "application/json", json);
+    int again = r.status;
+    reply_free(&r);
+    snprintf(json, sizeof(json), "{\"user_id\":\"%s\"}", user_id);
+    r = request("GET", "/api/admin/users/emails", NULL, NULL, "application/json", json);
+    int left = r.status == 200 && strstr(r.body, "\"total\":1") && !strstr(r.body, "theirs");
+    reply_free(&r);
+    if (removed != 200 || again != 404 || !left) {
+        FAIL("removing an address answered %d, again %d, and it was %s", removed, again,
+             left ? "gone" : "still listed");
+    }
+#ifdef EMAIL_SUPPORT
+    r = post_json("/request-password-reset", NULL, "{\"email\":\"theirs@example.com\"}");
+    reply_free(&r);
+    if (!mail_none()) FAIL("a removed address still took a reset link");
+#endif
+    printf("✓ the operator removes one, and removing one the user hasn't is a 404\n");
+
+    /* 3. An unknown user is a 404 both ways */
+    const char *unknown = "{\"user_id\":\"ffffffffffffffffffffffffffffffff\",\"email\":\"x@example.com\"}";
+    r = request("GET", "/api/admin/users/emails", NULL, NULL, "application/json", unknown);
+    int listed = r.status;
+    reply_free(&r);
+    r = request("DELETE", "/api/admin/users/emails", NULL, NULL, "application/json", unknown);
+    int deleted = r.status;
+    reply_free(&r);
+    if (listed != 404 || deleted != 404) {
+        FAIL("an unknown user answered %d to the list and %d to the removal", listed, deleted);
+    }
+    printf("✓ an unknown user is a 404\n");
+
+    return 0;
+}
+
 /* ============================================================================
  * Form passwords
  * ============================================================================ */
@@ -1318,7 +1410,8 @@ int main(void) {
     int failed = setup() || test_authorization_code_flow() || test_redirect_uris() ||
                  test_issuer() ||
                  test_client_credentials() || test_mfa_gates() || test_localhost_only() ||
-                 test_account_recovery() || test_form_password_length() ||
+                 test_account_recovery() || test_operator_addresses() ||
+                 test_form_password_length() ||
 #ifdef EMAIL_SUPPORT
                  test_email_links() ||
 #endif
