@@ -201,6 +201,18 @@ int main(void) {
         log_info("  DB Path: %s", config->db_path);
     }
 
+    /* Where the client's address comes from. A typo refuses to start rather than
+       quietly falling back, which behind a load balancer would record whatever
+       address each client chose to send. */
+    if (http_set_client_ip_header(config->client_ip_header) != 0) {
+        log_error("Unknown client_ip_header '%s': use x-real-ip, x-forwarded-for or none",
+                  config->client_ip_header);
+        config_free(config);
+        return 1;
+    }
+    log_info("  Client address from: %s",
+             config->client_ip_header ? config->client_ip_header : "x-real-ip");
+
     /* Initialize password hashing module */
     log_info("Initializing password hashing...");
     if (crypto_password_init(config) != 0) {

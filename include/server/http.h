@@ -125,25 +125,29 @@ const char *http_request_get_header(const HttpRequest *req, const char *name);
 int http_request_is_cross_origin(const HttpRequest *req);
 
 /*
- * http_request_get_client_ip - Get real client IP from headers
+ * http_set_client_ip_header - Which header carries the client's address
  *
- * When behind a reverse proxy, the socket IP will be the proxy.
- * This extracts the real client IP from standard proxy headers.
+ * Behind a reverse proxy the socket peer is the proxy, so the client's address
+ * comes from a header the proxy sets. Only that header is trustworthy: one the
+ * proxy passes through untouched is the client's to fill in, so there's no safe
+ * order to try them in, and the deployer names the one their proxy sets.
+ *   "x-real-ip"       X-Real-IP, which the shipped nginx overwrites (the default)
+ *   "x-forwarded-for" the last X-Forwarded-For entry, the one the nearest proxy
+ *                     appended (an AWS ALB in front of the server)
+ *   "none"            no address
+ * NULL means the default. Called once at startup, before any request.
  *
- * Standard proxy server headers (set by trusted reverse proxy):
- *   X-Real-IP: client_ip (single address, preferred)
- *   X-Forwarded-For: client_ip, proxy1_ip, proxy2_ip (comma-separated chain)
- *
- * Priority:
- *   1. X-Real-IP (single IP, clean)
- *   2. X-Forwarded-For (extracts first IP from comma-separated list)
- *   3. Falls back to socket_ip if neither present
- *
- * Returns a single IP address consistently across all paths.
+ * Returns: 0, or -1 for a name it doesn't know (nothing changed)
+ */
+int http_set_client_ip_header(const char *name);
+
+/*
+ * http_request_get_client_ip - The client's address, from the header
+ * http_set_client_ip_header named
  *
  * Parameters:
  *   req       - Parsed HTTP request
- *   socket_ip - IP from socket (fallback if no headers)
+ *   socket_ip - Returned when the header is absent (every caller passes NULL)
  *
  * Returns: Client IP string (thread-local or header value, don't free)
  */

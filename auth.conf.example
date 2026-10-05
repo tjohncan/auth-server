@@ -17,6 +17,18 @@ server_host = localhost
 server_port = 8080
 server_workers = 0
 
+# Which request header carries the client's address, as set by the proxy in front of
+# the server. It's recorded as source_ip on sessions, key-usage logs, MFA attempts and
+# emailed links; nothing grants or refuses access by it. Only the header your proxy
+# overwrites can be trusted: one it passes through is the client's to fill in, so
+# there is no safe order to try them in.
+#   x-real-ip        X-Real-IP, which the shipped nginx sets (the default)
+#   x-forwarded-for  the last X-Forwarded-For entry, which the nearest proxy appended:
+#                    an AWS ALB, or similar, directly in front of the server
+#   none             record no address
+# An unknown value refuses to start.
+# client_ip_header = x-real-ip
+
 # Database — "sqlite" or "postgresql"
 db_type = sqlite
 

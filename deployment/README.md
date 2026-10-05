@@ -134,14 +134,13 @@ Permissions-Policy, and the full CSP as a header rather than the pages' `<meta>`
 has to come from whatever sits in front of the server. With an ALB, that means
 configuring the load balancer's header settings or the WAF to add them.
 
-The client address the server records (`source_ip` on sessions, key-usage logs, MFA
-attempts and emailed links) comes from `X-Real-IP`, or else the first entry of
-`X-Forwarded-For`. The shipped nginx overwrites `X-Real-IP` with the real peer. An ALB does
-neither: it passes a client's own `X-Real-IP` through, and appends the real address to the
-end of whatever `X-Forwarded-For` the client sent. So behind an ALB alone, every recorded
-`source_ip` is whatever the client chose to send: treat those columns as unverified there.
-(Putting nginx between the ALB and the server, with `real_ip` configured as
-`deployment/nginx/nginx.conf` describes, restores them.)
+Set `client_ip_header = x-forwarded-for` in auth.conf. The client address the server
+records (`source_ip` on sessions, key-usage logs, MFA attempts and emailed links) comes from
+the header that setting names, `X-Real-IP` by default, which the shipped nginx overwrites
+with the real peer. An ALB doesn't touch `X-Real-IP`, so a client could put anything there.
+It appends the real address to the end of `X-Forwarded-For`, and `x-forwarded-for` reads that
+last entry. (Putting nginx between the ALB and the server, with `real_ip` configured as
+`deployment/nginx/nginx.conf` describes, works with the default instead.)
 
 ### Bare Binary with systemd
 

@@ -211,6 +211,15 @@ static void set_config_value(config_t *config, const char *key, const char *valu
         } else {
             log_error("Failed to allocate memory for mothership_url_env");
         }
+    } else if (strcmp(key, "client_ip_header") == 0) {
+        /* Checked at startup by http_set_client_ip_header, which refuses a typo */
+        new_value = str_dup(value);
+        if (new_value) {
+            free(config->client_ip_header);
+            config->client_ip_header = new_value;
+        } else {
+            log_error("Failed to allocate memory for client_ip_header");
+        }
     }
     /* Database settings */
     else if (strcmp(key, "db_type") == 0) {
@@ -1305,6 +1314,7 @@ void config_free(config_t *config) {
     free(config->server_port_env);
     free(config->mothership_url_env);
     free(config->mothership_url);
+    free(config->client_ip_header);
 
     free(config->encryption_key);
 

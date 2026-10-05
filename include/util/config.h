@@ -110,6 +110,9 @@ typedef struct {
     /* Branding */
     char *mothership_url;  /* Optional parent/brand URL shown on index page */
 
+    /* Which header the proxy in front sets with the client's address (NULL: x-real-ip) */
+    char *client_ip_header;
+
 #ifdef EMAIL_SUPPORT
     /* Email delivery */
     char *email_command;     /* Shell command to exec for sending email (receives JSON on stdin) */

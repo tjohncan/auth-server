@@ -358,39 +358,61 @@ int http_request_is_cross_origin(const HttpRequest *req) {
     return strcasecmp(sep + 3, host) != 0;
 }
 
+/* Which header carries the client's address; see http_set_client_ip_header.
+ * Set once at startup, before the workers start, and only read after. */
+static enum {
+    CLIENT_IP_X_REAL_IP,
+    CLIENT_IP_X_FORWARDED_FOR,
+    CLIENT_IP_NONE
+} g_client_ip_header = CLIENT_IP_X_REAL_IP;
+
+int http_set_client_ip_header(const char *name) {
+    if (!name || strcasecmp(name, "x-real-ip") == 0) {
+        g_client_ip_header = CLIENT_IP_X_REAL_IP;
+    } else if (strcasecmp(name, "x-forwarded-for") == 0) {
+        g_client_ip_header = CLIENT_IP_X_FORWARDED_FOR;
+    } else if (strcasecmp(name, "none") == 0) {
+        g_client_ip_header = CLIENT_IP_NONE;
+    } else {
+        return -1;
+    }
+    return 0;
+}
+
 const char *http_request_get_client_ip(const HttpRequest *req, const char *socket_ip) {
-    /* Check X-Real-IP first (single IP from trusted reverse proxy).
-     * This server must sit behind a trusted reverse proxy in any real deployment, for TLS. */
-    const char *real_ip = http_request_get_header(req, "X-Real-IP");
-    if (real_ip && real_ip[0] != '\0') {
-        return real_ip;
+    /* X-Real-IP, as the shipped nginx sets it: overwritten with the real peer. No
+     * falling back to X-Forwarded-For when it's absent, since its first entry is
+     * whatever the client sent. */
+    if (g_client_ip_header == CLIENT_IP_X_REAL_IP) {
+        const char *real_ip = http_request_get_header(req, "X-Real-IP");
+        return (real_ip && real_ip[0] != '\0') ? real_ip : socket_ip;
     }
 
-    /* Check X-Forwarded-For (comma-separated chain from trusted reverse proxy)
-     * Format: "client_ip, proxy1_ip, proxy2_ip"
-     * Extract only the first IP (the original client) for consistency */
-    const char *forwarded = http_request_get_header(req, "X-Forwarded-For");
-    if (forwarded && forwarded[0] != '\0') {
-        /* Thread-local buffer for extracted IP (one per thread, no contention) */
-        static __thread char first_ip[INET6_ADDRSTRLEN];
-
-        const char *comma = strchr(forwarded, ',');
-        size_t len = comma ? (size_t)(comma - forwarded) : strlen(forwarded);
-
-        /* Clamp to buffer size */
-        if (len >= sizeof(first_ip)) {
-            len = sizeof(first_ip) - 1;
+    /* The last X-Forwarded-For entry: the address the nearest proxy appended to
+     * whatever chain the client sent. A proxy that adds its own header line
+     * instead of appending is covered by taking the last line. */
+    if (g_client_ip_header == CLIENT_IP_X_FORWARDED_FOR) {
+        const char *forwarded = NULL;
+        for (int i = 0; i < req->header_count; i++) {
+            if (req->headers[i].name && strcasecmp(req->headers[i].name, "X-Forwarded-For") == 0) {
+                forwarded = req->headers[i].value;
+            }
         }
+        if (!forwarded) return socket_ip;
 
-        memcpy(first_ip, forwarded, len);
-        first_ip[len] = '\0';
+        const char *comma = strrchr(forwarded, ',');
+        const char *last = comma ? comma + 1 : forwarded;
+        while (*last == ' ' || *last == '\t') last++;
+        size_t len = strlen(last);
+        while (len > 0 && (last[len - 1] == ' ' || last[len - 1] == '\t')) len--;
+        if (len == 0) return socket_ip;
 
-        /* Trim trailing whitespace (leading space rare in first position) */
-        while (len > 0 && (first_ip[len-1] == ' ' || first_ip[len-1] == '\t')) {
-            first_ip[--len] = '\0';
-        }
-
-        return first_ip;
+        /* Thread-local buffer for the extracted address (one per thread) */
+        static __thread char last_ip[INET6_ADDRSTRLEN];
+        if (len >= sizeof(last_ip)) len = sizeof(last_ip) - 1;
+        memcpy(last_ip, last, len);
+        last_ip[len] = '\0';
+        return last_ip;
     }
 
     /* DESIGN DECISION: no proxy header means no client IP, and we do NOT substitute

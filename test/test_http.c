@@ -658,6 +658,50 @@ void test_cross_origin(void) {
     printf("✓ Origin with no Host: cross-origin\n");
 }
 
+/* The client address, from the request with these extra header lines */
+static int client_ip_is(const char *headers, const char *expected) {
+    char raw[512];
+    snprintf(raw, sizeof(raw), "GET /x HTTP/1.0\r\n%s\r\n", headers);
+    HttpRequest req = http_request_parse(raw, strlen(raw));
+    assert(req.method == HTTP_GET);
+    const char *ip = http_request_get_client_ip(&req, NULL);
+    int same = expected ? (ip && strcmp(ip, expected) == 0) : ip == NULL;
+    http_request_cleanup(&req);
+    return same;
+}
+
+void test_client_ip(void) {
+    printf("\n=== Test: Client address header ===\n");
+
+    const char *both = "X-Real-IP: 1.1.1.1\r\nX-Forwarded-For: 2.2.2.2, 3.3.3.3\r\n";
+
+    /* Default: X-Real-IP only, never the client-written first X-Forwarded-For entry */
+    assert(http_set_client_ip_header(NULL) == 0);
+    assert(client_ip_is(both, "1.1.1.1"));
+    assert(client_ip_is("X-Forwarded-For: 2.2.2.2, 3.3.3.3\r\n", NULL));
+    printf("✓ x-real-ip: X-Real-IP, and no falling back to X-Forwarded-For\n");
+
+    /* x-forwarded-for: the last entry, the one the nearest proxy appended,
+       whatever X-Real-IP says, from the last of several header lines, trimmed */
+    assert(http_set_client_ip_header("X-Forwarded-For") == 0);
+    assert(client_ip_is(both, "3.3.3.3"));
+    assert(client_ip_is("X-Forwarded-For: 9.9.9.9\r\nX-Forwarded-For: 4.4.4.4,5.5.5.5 \r\n",
+                        "5.5.5.5"));
+    assert(client_ip_is("X-Forwarded-For: 2001:db8::7\r\n", "2001:db8::7"));
+    assert(client_ip_is("X-Real-IP: 1.1.1.1\r\n", NULL));
+    assert(client_ip_is("X-Forwarded-For: 2.2.2.2, \r\n", NULL));
+    printf("✓ x-forwarded-for: the last entry of the last line, X-Real-IP ignored\n");
+
+    assert(http_set_client_ip_header("none") == 0);
+    assert(client_ip_is(both, NULL));
+    printf("✓ none: no address\n");
+
+    assert(http_set_client_ip_header("x-forwarded_for") == -1);
+    assert(client_ip_is(both, NULL));  /* still none: a refused name changes nothing */
+    assert(http_set_client_ip_header(NULL) == 0);
+    printf("✓ an unknown name is refused and changes nothing\n");
+}
+
 int main(void) {
     log_init(LOG_INFO);
     log_info("HTTP Parser Test Suite");
@@ -669,6 +713,7 @@ int main(void) {
     test_header_end_scan();
     test_content_length_scan();
     test_cross_origin();
+    test_client_ip();
 
     printf("\n=== All Tests Passed! ===\n\n");
 
