@@ -44,7 +44,8 @@ enable_history_tables = true
 # Protects usernames, emails, MFA secrets and signing keys against database compromise
 # IMPORTANT: Customize this in production! Use encryption_key_env to load from environment
 # Set it before the first start and then leave it: re-keying isn't supported yet, so after
-# a change nothing sealed under the old value can be read, and nobody can sign in.
+# a change nothing sealed under the old value can be read, and nobody can sign in. The
+# server refuses to start with a key that doesn't open what the database already holds.
 encryption_key = customize_me
 # encryption_key_env = MY_ENCRYPTION_KEY
 

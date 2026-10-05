@@ -287,6 +287,9 @@ Manages cryptographic signing keys for JWTs with automatic rotation.
 - Current + prior keys retained for graceful rotation
 - HMAC secrets and ES256 private keys are stored encrypted with the field-encryption key
     (`encryption_key`), as `e1:`-prefixed values; public keys are stored in plaintext
+- At startup the server opens one sealed value already in the database (a signing key, else
+    a username or email address) and refuses to start if `encryption_key` won't open it, so
+    a wrong key fails there rather than at the first sign-in
 - A stored key that will not decrypt (an `encryption_key` that differs from the one that
     stored it) stops token issuance, `/userinfo` and the JWKS endpoint, with an error naming
     both tables; it is never silently regenerated. `/introspect` and `/revoke` don't use the

@@ -622,6 +622,86 @@ done:
     return failed;
 }
 
+/* signing_key_check_encryption_key under the configured key and under another;
+   1 if they come out as want_right and want_wrong */
+static int key_check_is(db_handle_t *db, const config_t *config, int want_right,
+                        int want_wrong) {
+    int right = signing_key_check_encryption_key(db);
+    if (encrypt_init("not-the-key-that-sealed-these") != 0) return 0;
+    int wrong = signing_key_check_encryption_key(db);
+    if (encrypt_init(config->encryption_key) != 0) return 0;
+    return right == want_right && wrong == want_wrong;
+}
+
+/*
+ * The server refuses to start with an encryption_key that doesn't open what the
+ * database holds. The check opens the first sealed value it finds: a signing
+ * key, else a username or email address. A fresh database has nothing to open,
+ * and a signing key in the older plaintext format proves nothing, so neither
+ * stops a start.
+ *
+ * Returns 0 on success.
+ */
+static int test_encryption_key_check(const config_t *config) {
+    log_info("\nEncryption key check tests");
+
+    db_handle_t *sdb = open_test_db(config);
+    if (!sdb) {
+        log_error("Key check: could not open a test database");
+        return 1;
+    }
+
+    int failed = 1;
+    signing_key_t *es = NULL, *hmac = NULL;
+    unsigned char user_id[16];
+
+    /* 1. Fresh: nothing to open, under either key */
+    if (!key_check_is(sdb, config, 0, 0)) {
+        log_error("Key check: a fresh database didn't pass under any key");
+        goto done;
+    }
+    log_info("  fresh database: nothing to check (OK)");
+
+    /* 2. A user and no signing keys yet: the username decides */
+    if (user_create(sdb, "keycheck", NULL, "a password", user_id) != 0) {
+        log_error("Key check: could not create a user");
+        goto done;
+    }
+    if (!key_check_is(sdb, config, 0, -1)) {
+        log_error("Key check: a username didn't tell the right key from a wrong one");
+        goto done;
+    }
+    log_info("  users only: a username tells the right key from a wrong one (OK)");
+
+    /* 3. Signing keys, the auth-request one in the older plaintext format: it's
+          passed over, and the access-token key decides */
+    signing_key_thread_cleanup();
+    if (signing_key_get_or_rotate(sdb, SIGNING_KEY_ACCESS_TOKEN, &es) != 0 ||
+        signing_key_get_or_rotate(sdb, SIGNING_KEY_AUTH_REQUEST, &hmac) != 0 ||
+        db_execute_direct(sdb, "UPDATE auth_request_signing "
+                               "SET current_secret = 'legacy-plaintext-secret'") != 0) {
+        log_error("Key check: could not set up signing keys");
+        goto done;
+    }
+    if (!key_check_is(sdb, config, 0, -1)) {
+        log_error("Key check: the access-token key didn't tell the right key from a wrong one");
+        goto done;
+    }
+    log_info("  a plaintext signing key passed over, the next one decides (OK)");
+
+    failed = 0;
+
+done:
+    signing_key_free(es);
+    signing_key_free(hmac);
+    signing_key_thread_cleanup();
+    db_disconnect(sdb);
+    if (!failed) {
+        log_info("Encryption key check tests passed!");
+    }
+    return failed;
+}
+
 /*
  * MFA-management gate — keyed on enrollment (has_mfa), not on the require_mfa
  * preference.
@@ -1890,6 +1970,11 @@ int main(void) {
     }
 
     if (test_unlink_revokes(config) != 0) {
+        config_free(config);
+        return 1;
+    }
+
+    if (test_encryption_key_check(config) != 0) {
         config_free(config);
         return 1;
     }

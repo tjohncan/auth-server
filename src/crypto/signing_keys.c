@@ -261,6 +261,66 @@ static char *open_key_material(const char *stored, const char *table, const char
     return copy;
 }
 
+int signing_key_check_encryption_key(db_handle_t *db) {
+    if (!db) {
+        log_error("Invalid arguments to signing_key_check_encryption_key");
+        return -1;
+    }
+
+    /* Sealed values, in the order tried; the first one present decides. A
+       signing key still in the older plaintext format proves nothing either way,
+       and is passed over. */
+    static const struct { const char *sql; const char *what; int prefixed; } sealed[] = {
+        { "SELECT current_secret FROM " TBL_AUTH_REQUEST_SIGNING " LIMIT 1",
+          TBL_AUTH_REQUEST_SIGNING ".current_secret", 1 },
+        { "SELECT current_private_key FROM " TBL_ACCESS_TOKEN_SIGNING " LIMIT 1",
+          TBL_ACCESS_TOKEN_SIGNING ".current_private_key", 1 },
+        { "SELECT username FROM " TBL_USER_ACCOUNT " WHERE username IS NOT NULL LIMIT 1",
+          "a username", 0 },
+        { "SELECT email_address FROM " TBL_USER_EMAIL " LIMIT 1",
+          "an email address", 0 },
+    };
+
+    for (size_t i = 0; i < sizeof(sealed) / sizeof(sealed[0]); i++) {
+        db_stmt_t *stmt = NULL;
+        if (db_prepare(db, &stmt, sealed[i].sql) != 0) {
+            log_error("Failed to prepare the encryption key check");
+            return -1;
+        }
+
+        int rc = db_step(stmt);
+        if (rc != DB_ROW) {
+            db_finalize(stmt);
+            if (rc == DB_DONE) continue;
+            log_error("Failed to read a sealed value for the encryption key check");
+            return -1;
+        }
+
+        const char *stored = db_column_text(stmt, 0);
+        if (!stored || (sealed[i].prefixed &&
+                        strncmp(stored, SIGNING_KEY_SEALED_PREFIX,
+                                SIGNING_KEY_SEALED_PREFIX_LEN) != 0)) {
+            db_finalize(stmt);
+            continue;
+        }
+        if (sealed[i].prefixed) stored += SIGNING_KEY_SEALED_PREFIX_LEN;
+
+        char plaintext[ENCRYPT_FIELD_MAX_LENGTH + 1];
+        int opened = decrypt_field(stored, plaintext, sizeof(plaintext)) == 0;
+        OPENSSL_cleanse(plaintext, sizeof(plaintext));
+        db_finalize(stmt);
+
+        if (opened) return 0;
+        log_error("encryption_key does not open %s already in the database: it is not the "
+                  "key that sealed it. Start with that one (encryption_key in auth.conf, or "
+                  "AUTH_ENCRYPTION_KEY). Sign-in, token issuance and every other sealed value "
+                  "need it.", sealed[i].what);
+        return -1;
+    }
+
+    return 0;  /* Nothing sealed yet: a fresh database */
+}
+
 /* ============================================================================
  * Database Operations
  * ============================================================================ */

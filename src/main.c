@@ -311,6 +311,16 @@ int main(void) {
         log_info("History tables disabled in configuration");
     }
 
+    /* The wrong encryption_key stops the server here, rather than showing up as
+       failed sign-ins and token issuance once it's serving */
+    if (signing_key_check_encryption_key(setup_db) != 0) {
+        log_error("Refusing to start: encryption_key does not match the database");
+        db_pool_shutdown();
+        encrypt_cleanup();
+        config_free(config);
+        return 1;
+    }
+
     /* Start cleaner thread */
     cleaner_config_t cleaner_cfg;
     cleaner_config_from_main_config(&cleaner_cfg, config);
