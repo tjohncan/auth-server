@@ -564,6 +564,20 @@ static int test_mfa_gates(void) {
     }
     printf("✓ the five factor-management endpoints refuse a password-only session\n");
 
+    /* Their own profile and the admin API are another rule: those ask for the
+       factor only once the user requires it */
+    r = request("GET", "/api/user/profile", second, NULL, NULL, NULL);
+    int open_profile = r.status;
+    reply_free(&r);
+    r = request("GET", "/api/admin/organizations", second, NULL, NULL, NULL);
+    int open_admin = r.status;
+    reply_free(&r);
+    if (open_profile != 200 || open_admin != 200) {
+        FAIL("with require off, a password-only session got profile %d, admin %d",
+             open_profile, open_admin);
+    }
+    printf("✓ while require is off, the same session reaches its profile and the admin API\n");
+
     /* 2. The same session verifies the factor and is let through */
     r = post_json("/api/user/mfa/verify", second, json);
     if (r.status != 200) FAIL("verify answered %d", r.status);

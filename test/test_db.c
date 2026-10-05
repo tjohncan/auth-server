@@ -286,7 +286,8 @@ done:
  * Two guarantees the schema makes and the code leans on without checking:
  * foreign keys are enforced -- SQLite leaves them off unless each connection
  * asks, which db_connect does -- and require_mfa cannot be on without has_mfa,
- * which oauth_session_mfa_pending relies on to cover both flags.
+ * which the factor-management gate (SESSION_MFA_IF_ENROLLED) relies on to cover
+ * both flags.
  *
  * Returns 0 on success.
  */
@@ -709,9 +710,10 @@ done:
  * The case that matters: a user who has enrolled a factor but not opted in to
  * "require". A gate reading the preference would pass their password-only
  * session -- and several gated endpoints end in a factor that session could then
- * present. The decision itself is oauth_session_mfa_pending(); what can silently
- * break it is the session lookup not carrying has_mfa, which would make the gate
- * read 0 and wave everyone through. So this drives the real lookup.
+ * present. The decision itself is session_authenticate's (handlers.h), and
+ * test-handlers drives it end to end; what can silently break it from here is
+ * the session lookup not carrying has_mfa or mfa_completed, which would make the
+ * gate read 0 and wave everyone through. So this drives the real lookup.
  *
  * Returns 0 on success.
  */
@@ -759,7 +761,7 @@ static int test_mfa_management_gate(const config_t *config) {
         log_error("MFA gate: session lookup failed");
         goto done;
     }
-    if (s.user_has_mfa != 0 || oauth_session_mfa_pending(&s)) {
+    if (s.user_has_mfa != 0 || s.mfa_completed != 0) {
         log_error("MFA gate: unenrolled user gated (has_mfa=%d)", s.user_has_mfa);
         goto done;
     }
@@ -772,7 +774,7 @@ static int test_mfa_management_gate(const config_t *config) {
         log_error("MFA gate: could not mark user enrolled");
         goto done;
     }
-    if (s.user_has_mfa != 1 || s.user_requires_mfa != 0 || !oauth_session_mfa_pending(&s)) {
+    if (s.user_has_mfa != 1 || s.user_requires_mfa != 0 || s.mfa_completed != 0) {
         log_error("MFA gate: enrolled user with password-only session NOT gated "
                   "(has_mfa=%d require_mfa=%d mfa_completed=%d)",
                   s.user_has_mfa, s.user_requires_mfa, s.mfa_completed);
@@ -781,12 +783,12 @@ static int test_mfa_management_gate(const config_t *config) {
     log_info("  enrolled, require off, password-only session: gated (OK)");
 
     /* 3. Once the session completes MFA, the gate opens. */
-    if (oauth_session_set_mfa_completed(sdb, token) != 0 ||
+    if (oauth_session_set_mfa_completed(sdb, session_id) != 0 ||
         oauth_session_get_by_token(sdb, token, &s) != 0) {
         log_error("MFA gate: could not complete MFA on session");
         goto done;
     }
-    if (oauth_session_mfa_pending(&s)) {
+    if (s.mfa_completed != 1) {
         log_error("MFA gate: still gated after MFA completion");
         goto done;
     }
@@ -851,7 +853,7 @@ static int test_mfa_reset(const config_t *config) {
     unsigned char session_id[16];
     oauth_session_info_t s;
     if (oauth_session_create(sdb, 1, user1, token, "password", NULL, NULL, 3600, session_id) != 0 ||
-        oauth_session_get_by_token(sdb, token, &s) != 0 || !oauth_session_mfa_pending(&s)) {
+        oauth_session_get_by_token(sdb, token, &s) != 0 || !s.user_has_mfa || s.mfa_completed) {
         log_error("MFA reset: the password-only session should start out gated");
         goto done;
     }
@@ -885,7 +887,7 @@ static int test_mfa_reset(const config_t *config) {
     log_info("  methods deleted, recovery codes revoked, both flags clear (OK)");
     log_info("  another user's MFA untouched (OK)");
 
-    if (oauth_session_get_by_token(sdb, token, &s) != 0 || oauth_session_mfa_pending(&s)) {
+    if (oauth_session_get_by_token(sdb, token, &s) != 0 || s.user_has_mfa) {
         log_error("MFA reset: the session is still held at the gate");
         goto done;
     }
@@ -1114,7 +1116,7 @@ static int test_deactivation_revokes(const config_t *config) {
         unsigned char id[16], code_id[16];
         if (oauth_session_create(sdb, u + 1, user_ids[u], sessions[u], "password",
                                  NULL, NULL, 3600, id) != 0 ||
-            oauth_session_set_mfa_completed(sdb, sessions[u]) != 0 ||
+            oauth_session_set_mfa_completed(sdb, id) != 0 ||
             oauth_auth_code_create(sdb, 1, FIXTURE_CLIENT_ID, u + 1, user_ids[u], codes[u],
                                    NULL, NULL, 600, code_id) != 0 ||
             oauth_token_create_refresh(sdb, 1, u + 1, code_id, refresh[u], "read",

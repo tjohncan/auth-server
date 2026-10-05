@@ -5,6 +5,7 @@
 #include "server/router.h"
 #include "util/config.h"
 #include "util/json.h"
+#include "db/queries/oauth.h"
 
 /* Global configuration (set once in main.c, read-only thereafter) */
 extern const config_t *g_config;
@@ -18,6 +19,68 @@ extern const config_t *g_config;
  * longer path so it is sent first, and /authorize would sign the visitor in as
  * the attacker. Every Set-Cookie below already meets the prefix's rules. */
 #define SESSION_COOKIE_NAME "__Host-session"
+
+/* ============================================================================
+ * Session Authentication
+ * ============================================================================ */
+
+/*
+ * What a session must have proved, beyond signing in, for an endpoint to let it
+ * through. Every session-authenticated endpoint names one, so none can leave
+ * the MFA question unasked. The two MFA rules differ on purpose; unifying them
+ * either way changes behavior.
+ *
+ * SESSION_MFA_IF_ENROLLED, for managing factors (TOTP setup and confirm, method
+ *   deletion, recovery-code regeneration, the require toggle): a user who has a
+ *   factor proves it first. Keyed on enrollment, not on the require_mfa
+ *   preference, because several of these end in a factor the session can then
+ *   present (fresh recovery codes, a newly enrolled authenticator): gated on the
+ *   preference, a password-only session could satisfy a client's require_mfa
+ *   for any user who has enrolled but not opted in. require_mfa implies has_mfa
+ *   (schema CHECK), so this covers both. A user with no factor yet isn't gated:
+ *   first enrollment is open to whoever holds the password, by necessity (see
+ *   "Deliberate Tradeoffs" in README.md).
+ *
+ * SESSION_MFA_IF_REQUIRED, for the user's own /api/user endpoints and the cookie
+ *   leg of /api/admin: the factor once the user has turned require on. MFA is
+ *   optional until the user, or a client at /authorize, requires it, and
+ *   enrolling must not lock a user out of their own profile. For an admin with
+ *   require on, /login asks for the factor before the console loads, and a
+ *   session that skipped that step gets 403 "MFA verification required" from the
+ *   admin API as from /api/user, which the console turns into the MFA step. The
+ *   management UI client's own require_mfa stays off: the console is where a
+ *   first factor gets enrolled, and a client that requires MFA turns away users
+ *   who have none. Set on that client anyway, it is enforced by /authorize when
+ *   the console signs in, not by the admin API, which never learns the client.
+ *
+ * SESSION_MFA_NONE, for the MFA step itself (verify, recover) and for listing
+ *   one's own methods.
+ *
+ * /authorize applies the client's rule on top, in oauth_authorize.
+ */
+typedef enum {
+    SESSION_MFA_NONE,
+    SESSION_MFA_IF_ENROLLED,
+    SESSION_MFA_IF_REQUIRED
+} session_mfa_policy_t;
+
+/*
+ * Authenticate a request by its session cookie, under an MFA policy
+ *
+ * Returns: 0 with *out_session filled, 1 if there is no session cookie, 2 if it
+ *          names no live session, 3 if the session owes the factor the policy
+ *          asks for
+ */
+int session_authenticate(const HttpRequest *req, db_handle_t *db,
+                         session_mfa_policy_t policy, oauth_session_info_t *out_session);
+
+/*
+ * session_authenticate, answered: NULL with *out_session filled, or the error
+ * response, 401 without a live session and 403 "MFA verification required"
+ * when it owes a factor
+ */
+HttpResponse *session_require(const HttpRequest *req, db_handle_t *db,
+                              session_mfa_policy_t policy, oauth_session_info_t *out_session);
 
 /*
  * Handler function declarations

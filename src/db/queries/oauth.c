@@ -406,17 +406,9 @@ int oauth_session_close(db_handle_t *db, const char *session_token) {
     }
 }
 
-int oauth_session_set_mfa_completed(db_handle_t *db, const char *session_token) {
-    if (!db || !session_token) {
+int oauth_session_set_mfa_completed(db_handle_t *db, const unsigned char *session_id) {
+    if (!db || !session_id) {
         log_error("Invalid arguments to oauth_session_set_mfa_completed");
-        return -1;
-    }
-
-    /* Hash session token for lookup */
-    char token_hash[SHA256_HEX_LENGTH];
-    if (crypto_sha256_hex(session_token, strlen(session_token),
-                          token_hash, sizeof(token_hash)) != 0) {
-        log_error("Failed to hash session token");
         return -1;
     }
 
@@ -425,7 +417,7 @@ int oauth_session_set_mfa_completed(db_handle_t *db, const char *session_token) 
         "SET mfa_completed = " BOOL_TRUE ", "
         "mfa_completed_at = " NOW ", "
         "updated_at = " NOW " "
-        "WHERE session_token = " P"1 "
+        "WHERE id = " P"1 "
         "AND is_closed = " BOOL_FALSE " "
         "AND mfa_completed = " BOOL_FALSE " "
         "RETURNING id";
@@ -436,7 +428,7 @@ int oauth_session_set_mfa_completed(db_handle_t *db, const char *session_token) 
         return -1;
     }
 
-    db_bind_text(stmt, 1, token_hash, -1);
+    db_bind_blob(stmt, 1, session_id, 16);
 
     int rc = db_step(stmt);
 

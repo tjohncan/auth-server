@@ -58,38 +58,39 @@ static HttpResponse *response_html_error(int status_code, const char *message) {
  * Auth Helper
  * ========================================================================== */
 
-/*
- * require_authenticated_session - Validate session cookie and MFA completion
- *
- * Returns NULL on success (session populated), or error response on failure.
- */
-static HttpResponse *require_authenticated_session(const HttpRequest *req,
-                                                    db_handle_t *db,
-                                                    oauth_session_info_t *out_session) {
+/* Declared in handlers.h, with the policies */
+int session_authenticate(const HttpRequest *req, db_handle_t *db,
+                         session_mfa_policy_t policy, oauth_session_info_t *out_session) {
     const char *cookie_header = http_request_get_header(req, "Cookie");
-    char *session_token = NULL;
-    if (cookie_header) {
-        session_token = http_cookie_get_value(cookie_header, SESSION_COOKIE_NAME);
-    }
-
+    char *session_token = cookie_header
+        ? http_cookie_get_value(cookie_header, SESSION_COOKIE_NAME) : NULL;
     if (!session_token) {
-        return response_json_error(401, "Authentication required");
+        return 1;
     }
 
-    if (oauth_session_get_by_token(db, session_token, out_session) != 0) {
-        cleanse_free(session_token);
-        return response_json_error(401, "Invalid or expired session");
-    }
-
+    int found = oauth_session_get_by_token(db, session_token, out_session) == 0;
     cleanse_free(session_token);
-
-    /* The preference rule, not the enrollment rule used for factor management;
-       see oauth_session_mfa_pending in db/queries/oauth.h for why there are two. */
-    if (out_session->user_requires_mfa && !out_session->mfa_completed) {
-        return response_json_error(403, "MFA verification required");
+    if (!found) {
+        return 2;
     }
 
-    return NULL;
+    int owes_factor = 0;
+    switch (policy) {
+        case SESSION_MFA_IF_ENROLLED: owes_factor = out_session->user_has_mfa; break;
+        case SESSION_MFA_IF_REQUIRED: owes_factor = out_session->user_requires_mfa; break;
+        case SESSION_MFA_NONE: break;
+    }
+    return owes_factor && !out_session->mfa_completed ? 3 : 0;
+}
+
+HttpResponse *session_require(const HttpRequest *req, db_handle_t *db,
+                              session_mfa_policy_t policy, oauth_session_info_t *out_session) {
+    switch (session_authenticate(req, db, policy, out_session)) {
+        case 0:  return NULL;
+        case 1:  return response_json_error(401, "Authentication required");
+        case 2:  return response_json_error(401, "Invalid or expired session");
+        default: return response_json_error(403, "MFA verification required");
+    }
 }
 
 /* ============================================================================
@@ -288,7 +289,7 @@ HttpResponse *management_setups_handler(const HttpRequest *req) {
      * has only passed the password gets 403 here, not their org/client topology.
      * The console's picker sends that 403 to the MFA step. */
     oauth_session_info_t session;
-    HttpResponse *auth_err = require_authenticated_session(req, db, &session);
+    HttpResponse *auth_err = session_require(req, db, SESSION_MFA_IF_REQUIRED, &session);
     if (auth_err) return auth_err;
 
     /* Get management UI setups */
@@ -341,7 +342,7 @@ HttpResponse *profile_handler(const HttpRequest *req) {
     }
 
     oauth_session_info_t session;
-    HttpResponse *auth_err = require_authenticated_session(req, db, &session);
+    HttpResponse *auth_err = session_require(req, db, SESSION_MFA_IF_REQUIRED, &session);
     if (auth_err) return auth_err;
 
     /* Get user profile */
@@ -382,7 +383,7 @@ HttpResponse *emails_handler(const HttpRequest *req) {
     }
 
     oauth_session_info_t session;
-    HttpResponse *auth_err = require_authenticated_session(req, db, &session);
+    HttpResponse *auth_err = session_require(req, db, SESSION_MFA_IF_REQUIRED, &session);
     if (auth_err) return auth_err;
 
     int limit = parse_query_int(req->query_string, "limit", 20, 1, 100);
@@ -433,7 +434,7 @@ HttpResponse *change_password_handler(const HttpRequest *req) {
     }
 
     oauth_session_info_t session;
-    HttpResponse *auth_err = require_authenticated_session(req, db, &session);
+    HttpResponse *auth_err = session_require(req, db, SESSION_MFA_IF_REQUIRED, &session);
     if (auth_err) return auth_err;
 
     /* Parse JSON body */
@@ -495,7 +496,7 @@ HttpResponse *change_username_handler(const HttpRequest *req) {
     }
 
     oauth_session_info_t session;
-    HttpResponse *auth_err = require_authenticated_session(req, db, &session);
+    HttpResponse *auth_err = session_require(req, db, SESSION_MFA_IF_REQUIRED, &session);
     if (auth_err) return auth_err;
 
     /* Parse JSON body */
@@ -546,7 +547,7 @@ HttpResponse *add_email_handler(const HttpRequest *req) {
     }
 
     oauth_session_info_t session;
-    HttpResponse *auth_err = require_authenticated_session(req, db, &session);
+    HttpResponse *auth_err = session_require(req, db, SESSION_MFA_IF_REQUIRED, &session);
     if (auth_err) return auth_err;
 
     if (!req->body) {
@@ -602,7 +603,7 @@ HttpResponse *delete_email_handler(const HttpRequest *req) {
     }
 
     oauth_session_info_t session;
-    HttpResponse *auth_err = require_authenticated_session(req, db, &session);
+    HttpResponse *auth_err = session_require(req, db, SESSION_MFA_IF_REQUIRED, &session);
     if (auth_err) return auth_err;
 
     if (!req->body) {
@@ -640,7 +641,7 @@ HttpResponse *set_primary_email_handler(const HttpRequest *req) {
     }
 
     oauth_session_info_t session;
-    HttpResponse *auth_err = require_authenticated_session(req, db, &session);
+    HttpResponse *auth_err = session_require(req, db, SESSION_MFA_IF_REQUIRED, &session);
     if (auth_err) return auth_err;
 
     if (!req->body) {
@@ -729,7 +730,7 @@ HttpResponse *create_email_verification_token_handler(const HttpRequest *req) {
     }
 
     oauth_session_info_t session;
-    HttpResponse *auth_err = require_authenticated_session(req, db, &session);
+    HttpResponse *auth_err = session_require(req, db, SESSION_MFA_IF_REQUIRED, &session);
     if (auth_err) return auth_err;
 
     if (!req->body) {
@@ -1519,7 +1520,7 @@ HttpResponse *passwordless_login_toggle_handler(const HttpRequest *req) {
     }
 
     oauth_session_info_t session;
-    HttpResponse *auth_err = require_authenticated_session(req, db, &session);
+    HttpResponse *auth_err = session_require(req, db, SESSION_MFA_IF_REQUIRED, &session);
     if (auth_err) return auth_err;
 
     if (!req->body) {

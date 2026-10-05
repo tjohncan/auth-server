@@ -115,46 +115,8 @@ typedef struct {
     time_t started_at;              /* Session creation time (Unix epoch) */
 } oauth_session_info_t;
 
-/*
- * Must this session prove a factor before it may manage factors?
- *
- * Gates TOTP setup/confirm, method deletion, recovery-code regeneration and the
- * require toggle. Keyed on ENROLLMENT, not on the require_mfa preference: several
- * of those endpoints end in a factor the session can then present (fresh recovery
- * codes, a newly enrolled authenticator), so gating them on the preference would
- * let a password-only session satisfy a client's require_mfa for any user who has
- * enrolled but not opted in. require_mfa implies has_mfa (schema CHECK), so this
- * covers both.
- *
- * A user with no factor yet is not gated: first enrollment is open to whoever
- * holds the password, by necessity — see "Deliberate Tradeoffs" in README.md.
- *
- * This is one of TWO MFA rules in the handlers:
- *   - Managing factors (this function, used in mfa_http.c): gated on
- *     ENROLLMENT. Anyone who has a factor proves it before touching factors.
- *   - The user's own /api/user endpoints (session_http.c
- *     require_authenticated_session): gated on the require_mfa PREFERENCE.
- *     MFA is optional until the user, or a client at /authorize, requires it,
- *     and enrolling must not lock a user out of their own profile.
- * Those two differ deliberately; unifying them either way changes behavior.
- *
- * The cookie leg of the /api/admin endpoints (admin_org_http.c
- * get_authenticated_user_pin) applies the preference rule as well, and that is
- * policy: MFA guards admin work for an admin who has turned on require, and
- * having a factor does not by itself demand it. For such an admin, /login asks
- * for the factor before the console loads, and a session that skipped that step
- * gets 403 "MFA verification required" from the admin API, as from /api/user,
- * which the console turns into the MFA step.
- *
- * The management UI client's own require_mfa stays off, for a separate reason:
- * the console is where a first factor gets enrolled, and a client that requires
- * MFA turns away users who have none. A require_mfa set on that client anyway is
- * enforced by /authorize when the console signs in, not by the admin API, which
- * authenticates by cookie and never learns which client the console came through.
- */
-static inline int oauth_session_mfa_pending(const oauth_session_info_t *session) {
-    return session->user_has_mfa && !session->mfa_completed;
-}
+/* Which MFA a session-authenticated endpoint asks for is the handlers' policy:
+ * see session_mfa_policy_t in handlers.h. */
 
 /*
  * Look up browser session by session token
@@ -192,12 +154,12 @@ int oauth_session_close(db_handle_t *db, const char *session_token);
  * Sets mfa_completed = TRUE after successful MFA verification.
  *
  * Parameters:
- *   db            - Database handle
- *   session_token - Session token from cookie
+ *   db         - Database handle
+ *   session_id - The session's id, as oauth_session_get_by_token returned it
  *
  * Returns: 0 on success, -1 on error or not found
  */
-int oauth_session_set_mfa_completed(db_handle_t *db, const char *session_token);
+int oauth_session_set_mfa_completed(db_handle_t *db, const unsigned char *session_id);
 
 /*
  * Create authorization code
