@@ -52,6 +52,11 @@ All endpoints reject connections from non-localhost IPs with `403 Forbidden`.
   or ::1 and carries neither `X-Real-IP` nor `X-Forwarded-For`. A proxy on the same machine
   must add one of those to everything it forwards (the shipped nginx config sets `X-Real-IP`),
   or every request it passes on looks local.
+- **Not from a browser**: a request whose `Host` isn't `localhost`, `127.0.0.1` or `[::1]`
+  (any port), or that carries `Origin` or any `Sec-Fetch-*` header, is refused. A web page in
+  a browser that can reach the port over loopback (one on the server, or behind an `ssh -L`
+  tunnel) could otherwise use these endpoints, by DNS rebinding even reading the answers.
+  curl, wget and `docker exec` send none of those headers.
 - **Use Case**: Shell access to server host = trusted admin
 - **Transport**: HTTP acceptable (localhost loopback)
 - **Audience**: Server administrators via curl/scripts

@@ -17,6 +17,7 @@
 #include "util/validation.h"
 #include "util/json.h"
 #include <string.h>
+#include <strings.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <openssl/crypto.h>
@@ -25,11 +26,31 @@
  * Authentication Helpers
  * ========================================================================== */
 
+/* Host names the loopback interface: localhost, 127.0.0.1 or [::1], with any port */
+static int host_is_loopback(const char *host) {
+    static const char *const names[] = {"localhost", "127.0.0.1", "[::1]"};
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        size_t n = strlen(names[i]);
+        if (strncasecmp(host, names[i], n) != 0) continue;
+        if (host[n] == '\0') return 1;
+        if (host[n] == ':' && strspn(host + n + 1, "0123456789") == strlen(host + n + 1)) return 1;
+    }
+    return 0;
+}
+
 /*
  * is_localhost - Check if request is from direct localhost connection
  *
  * Security policy: Localhost-only endpoints MUST be accessed via direct
  * connection (not through reverse proxy). This prevents header spoofing.
+ *
+ * Nor from a browser. A web page the operator's browser loads can reach a
+ * loopback port too: a browser on the server itself, or one using an
+ * `ssh -L` tunnel. A page that rebinds its own DNS name to 127.0.0.1 even
+ * makes same-origin requests, which need no CORS preflight and whose
+ * responses it can read. Such a request still names the page's host in Host,
+ * and browsers mark their requests with Origin or Sec-Fetch-* headers. curl,
+ * wget and docker exec send Host: localhost (or the address) and neither.
  *
  * Returns: 1 if localhost, 0 if not
  */
@@ -42,6 +63,17 @@ static int is_localhost(const HttpRequest *req) {
     if ((real_ip && real_ip[0] != '\0') || (forwarded && forwarded[0] != '\0')) {
         /* Request came through proxy - reject for localhost-only endpoints */
         return 0;
+    }
+
+    /* Browser-made: a Host other than loopback, an Origin, or any Sec-Fetch-* */
+    const char *host = http_request_get_header(req, "Host");
+    if ((host && !host_is_loopback(host)) || http_request_get_header(req, "Origin")) {
+        return 0;
+    }
+    for (int i = 0; i < req->header_count; i++) {
+        if (req->headers[i].name && strncasecmp(req->headers[i].name, "Sec-Fetch-", 10) == 0) {
+            return 0;
+        }
     }
 
     /* Direct connection - check socket IP */

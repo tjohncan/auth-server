@@ -605,6 +605,58 @@ static int test_mfa_gates(void) {
 }
 
 /* ============================================================================
+ * Localhost only
+ * ============================================================================ */
+
+static int list_orgs_status(const char *headers) {
+    Reply r = request("GET", "/api/admin/list-all-organizations", NULL, headers, NULL, NULL);
+    int status = r.status;
+    reply_free(&r);
+    return status;
+}
+
+/*
+ * A browser that can reach the port over loopback is not the operator: a web
+ * page rebinding its own name to 127.0.0.1 sends its name as Host, and Origin
+ * and Sec-Fetch-* besides. Any one of them is refused; curl's requests pass.
+ */
+static int test_localhost_only(void) {
+    printf("\n=== Localhost only ===\n");
+
+    static const char *const browser[] = {
+        "Host: rebind.attacker.example:8080\r\n"
+        "Origin: http://rebind.attacker.example:8080\r\n"
+        "Sec-Fetch-Site: same-origin\r\nSec-Fetch-Mode: cors\r\n",
+        "Host: rebind.attacker.example:8080\r\n",
+        "Host: localhost:8080\r\nOrigin: http://localhost:3000\r\n",
+        "Host: localhost:8080\r\nSec-Fetch-Mode: navigate\r\n",
+    };
+    for (size_t i = 0; i < sizeof(browser) / sizeof(browser[0]); i++) {
+        int status = list_orgs_status(browser[i]);
+        if (status != 403) FAIL("a browser-made request (case %zu) answered %d", i + 1, status);
+    }
+    Reply r = request("POST", "/api/admin/users/set-password", NULL, browser[0],
+                      "application/json", "{\"user_id\":\"ffffffffffffffffffffffffffffffff\","
+                      "\"password\":\"attacker chose this\"}");
+    int status = r.status;
+    reply_free(&r);
+    if (status != 403) FAIL("a rebound set-password answered %d", status);
+    printf("✓ a foreign Host, an Origin or a Sec-Fetch-* header is refused (403)\n");
+
+    static const char *const local[] = {
+        NULL, "Host: localhost:8080\r\n", "Host: LOCALHOST\r\n",
+        "Host: 127.0.0.1:8080\r\n", "Host: [::1]:8080\r\n",
+    };
+    for (size_t i = 0; i < sizeof(local) / sizeof(local[0]); i++) {
+        status = list_orgs_status(local[i]);
+        if (status != 200) FAIL("a local request (case %zu) answered %d", i + 1, status);
+    }
+    printf("✓ no Host, or a loopback one with any port, is local\n");
+
+    return 0;
+}
+
+/* ============================================================================
  * Account recovery
  * ============================================================================ */
 
@@ -876,8 +928,8 @@ int main(void) {
     register_routes(g_router);
 
     int failed = setup() || test_authorization_code_flow() || test_issuer() ||
-                 test_client_credentials() || test_mfa_gates() || test_account_recovery() ||
-                 test_provisioning();
+                 test_client_credentials() || test_mfa_gates() || test_localhost_only() ||
+                 test_account_recovery() || test_provisioning();
 
     router_destroy(g_router);
     db_pool_shutdown();
