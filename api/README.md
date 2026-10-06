@@ -365,7 +365,21 @@ reset link can be requested or used, and nobody can sign in. The operator can, w
    sign-in links if they turned that on. If one looks suspicious (the user doesn't recognize
    it, or it was added or verified during the compromise), remove it
    (`DELETE /api/admin/users/emails`). Nothing needs removing if everything checks out.
-5. Reactivate.
+5. If the user administers an organization, check what their session could have left there,
+   which none of the steps above touches. The most dangerous is a redirect URI on a host
+   nobody recognizes. There's no consent screen, so any signed-in user of that client who
+   follows a crafted `/authorize` link sends their code there. Also look for:
+   - resource-server and client keys (their listings show when each was generated);
+   - clients and resource servers nobody asked for, and links between them;
+   - a client's `require_mfa` turned off;
+   - a resource server's `allow_user_provisioning` turned on.
+
+   Remove or revert what was added or changed during the compromise, with another admin's
+   session or an organization key (`POST /api/admin/organization-keys`). The listings don't
+   show dates. In the database, each of those tables records when a row was created and last
+   changed (`created_at`, `updated_at`). With history tables on, earlier versions of changed
+   rows are kept there.
+6. Reactivate.
 
 The old password works at no point in between.
 
