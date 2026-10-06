@@ -448,6 +448,43 @@ static int test_authorization_code_flow(void) {
     }
     printf("✓ with no refresh tokens, replaying a code still revokes its access token\n");
 
+    /* 7. A client that needs a user link: unlinked while the code is outstanding,
+          the exchange is refused. Linked again, the same code exchanges, so the
+          refusal was the link's and it didn't spend the code */
+    db_handle_t *db = db_pool_get_connection();
+    const char *link =
+        "INSERT INTO client_user (client_pin, user_account_pin) "
+        "SELECT C.pin, A.user_account_pin FROM client C, organization_admin A "
+        "WHERE C.code_name = 'management_ui'";
+    const char *unlink =
+        "DELETE FROM client_user WHERE client_pin = "
+        "(SELECT pin FROM client WHERE code_name = 'management_ui')";
+    if (db_execute_direct(db, "UPDATE client SET is_universal = 0 "
+                              "WHERE code_name = 'management_ui'") != 0 ||
+        db_execute_direct(db, link) != 0) {
+        FAIL("could not make the client need a link");
+    }
+    int authorized = authorize(code, sizeof(code)) == 0;
+    db_execute_direct(db, unlink);
+    r = exchange(code, PKCE_VERIFIER);
+    int unlinked = r.status;
+    reply_free(&r);
+    db_execute_direct(db, link);
+    r = exchange(code, PKCE_VERIFIER);
+    int relinked = r.status;
+    reply_free(&r);
+    if (db_execute_direct(db, unlink) != 0 ||
+        db_execute_direct(db, "UPDATE client SET is_universal = 1 "
+                              "WHERE code_name = 'management_ui'") != 0) {
+        FAIL("could not make the client universal again");
+    }
+    if (!authorized) FAIL("/authorize refused a linked user");
+    if (unlinked != 400 || relinked != 200) {
+        FAIL("a code exchanged after its user was unlinked answered %d (linked again, %d)",
+             unlinked, relinked);
+    }
+    printf("✓ a code doesn't exchange once its user is unlinked from the client\n");
+
     return 0;
 }
 

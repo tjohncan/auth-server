@@ -608,6 +608,27 @@ int oauth_exchange_authorization_code(db_handle_t *db,
         return -1;
     }
 
+    /* Step 9b: Verify user is still linked to this client (skipped for universal
+     * clients). /authorize checked when it issued the code, but an unlink in the
+     * code's lifetime revokes what the pair holds, and a grant made after it
+     * mustn't follow; refresh checks the same at every use. */
+    if (!client.is_universal) {
+        int link_rc = oauth_client_user_check(db, client.pin, user_account_pin);
+        if (link_rc < 0) {
+            signing_key_free(signing_key);
+            db_execute_trusted(db, "ROLLBACK");
+            log_error("Failed to check client_user link");
+            return -1;
+        }
+        if (link_rc == 0) {
+            signing_key_free(signing_key);
+            db_execute_trusted(db, "ROLLBACK");
+            log_info("User not linked to client: client=%s, user_pin=%lld",
+                     client.code_name, user_account_pin);
+            return -1;
+        }
+    }
+
     /* Use JWT claims for token creation (cryptographically verified) */
 
     /* Step 10: Resolve resource server (RFC 8707) */

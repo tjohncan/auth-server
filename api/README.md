@@ -3147,7 +3147,8 @@ curl -X POST http://localhost:8080/api/rs/client-users \
 Unlink a user from a client. Idempotent — succeeds even if not currently linked.
 
 Unlinking also revokes the user's refresh and access tokens for that client, so linking them again
-brings none of them back; the user's sign-in sessions stay. A universal client signs in any user
+brings none of them back, and an authorization code issued before the unlink no longer exchanges;
+the user's sign-in sessions stay. A universal client signs in any user
 without a link, so unlinking a user from one revokes nothing. An access token validated locally
 against `/.well-known/jwks.json` keeps working until its `exp`; `POST /introspect` reports it
 inactive at once.
