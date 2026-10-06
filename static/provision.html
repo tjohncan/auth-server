@@ -49,7 +49,7 @@
     <!-- Panel 1: Provision User -->
     <div id="panel-provision" class="panel active">
         <p class="desc">Find or create a user by username and/or email. If the user exists, their info is returned. If not, a new account is created with an invitation token for setting up a password.</p>
-        <div class="note">At least one of username or email is required. If both match different existing users, an ambiguous-match error is returned.</div>
+        <div class="note">At least one of username or email is required. If both match different existing users, an ambiguous-match error is returned. On a server that can't send email, a new account needs a username.</div>
         <div class="field">
             <label>Username</label>
             <input type="text" id="prov-username" placeholder="Unique username">

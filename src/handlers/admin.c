@@ -840,21 +840,19 @@ int admin_create_user(db_handle_t *db,
         return -1;
     }
 
-    /* At least one of username or email must be provided */
-    if (!username && !email) {
-        log_error("Must provide either username or email");
+    /* A username is what the account signs in with: an address goes on unverified */
+    if (!username) {
+        log_error("A username is required");
         return -1;
     }
 
     /* Check if username already exists */
-    if (username) {
-        int exists = user_username_exists(db, username);
-        if (exists < 0) {
-            return -1;
-        } else if (exists == 1) {
-            log_error("Username already exists");
-            return -1;
-        }
+    int username_taken = user_username_exists(db, username);
+    if (username_taken < 0) {
+        return -1;
+    } else if (username_taken == 1) {
+        log_error("Username already exists");
+        return -1;
     }
 
     /* Check if email already exists */

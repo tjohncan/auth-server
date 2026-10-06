@@ -1050,8 +1050,18 @@ static int test_operator_addresses(void) {
     printf("\n=== The operator and a user's addresses ===\n");
 
     char user_id[33], cookie[256], json[256], sql[256];
+
+    /* An address alone makes no account: it would go on unverified, so nothing
+       could sign in to it */
     Reply r = post_json("/api/admin/users", NULL,
-                        "{\"username\":\"checked\",\"password\":\"checked password\"}");
+                        "{\"email\":\"nameless@example.com\",\"password\":\"nameless password\"}");
+    int refused = r.status == 400 && strstr(r.body, "username");
+    reply_free(&r);
+    if (!refused) FAIL("the operator made an account from an address alone");
+    printf("✓ the operator makes no account from an address alone\n");
+
+    r = post_json("/api/admin/users", NULL,
+                  "{\"username\":\"checked\",\"password\":\"checked password\"}");
     int created = r.status == 200 && field(&r, "user_id", user_id, sizeof(user_id)) == 0;
     reply_free(&r);
     if (!created || login("checked", "checked password", cookie, sizeof(cookie)) != 0) {

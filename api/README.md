@@ -215,11 +215,13 @@ Create a user account (not attached to any organization or client).
 
 | Field    | Type   | Required  | Description                          |
 |----------|--------|-----------|--------------------------------------|
-| username | string | No*       | Unique username                      |
-| email    | string | No*       | Email address                        |
+| username | string | Yes       | Unique username                      |
+| email    | string | No        | Email address                        |
 | password | string | Yes       | Password (plaintext, will be hashed) |
 
-*At least one of username or email must be provided.
+The user signs in with the username. An address given here goes on the account unverified, and
+nothing is sent to it, so it can't be signed in with, or take reset links, until the user verifies
+it from their account (in a build with email support).
 
 **Success Response** (200 OK):
 ```json
@@ -232,6 +234,10 @@ Create a user account (not attached to any organization or client).
 
 **Error Responses**:
 
+- **400 Bad Request** (no username or no password):
+```json
+{"error": "username and password are required"}
+```
 - **403 Forbidden** (not from localhost)
 - **409 Conflict** (username or email exists):
 ```json

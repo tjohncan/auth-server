@@ -307,21 +307,18 @@ HttpResponse *admin_create_user_handler(const HttpRequest *req) {
     char *email = json_get_string(req->body, "email");
     char *password = json_get_string(req->body, "password");
 
-    /* Validate required fields */
-    if (!password) {
-        resp = response_json_error(400, "password is required");
-        goto cleanup;
-    }
-
-    if (!username && !email) {
-        resp = response_json_error(400, "At least one of username or email is required");
+    /* Validate required fields. A username is one: an address given here goes on
+       the account unverified, and nothing sends it a link, so it can't be signed
+       in with until the user verifies it from their account. */
+    if (!username || !password) {
+        resp = response_json_error(400, "username and password are required");
         goto cleanup;
     }
 
     /* Validate input formats */
     char validation_error[256];
 
-    if (username && validate_username(username, validation_error, sizeof(validation_error)) != 0) {
+    if (validate_username(username, validation_error, sizeof(validation_error)) != 0) {
         resp = response_json_error(400, validation_error);
         goto cleanup;
     }
@@ -341,13 +338,9 @@ HttpResponse *admin_create_user_handler(const HttpRequest *req) {
         bytes_to_hex(user_id, 16, user_id_hex, sizeof(user_id_hex));
 
         JsonBuf *jb = jsonbuf_new(2048);
-        jsonbuf_appendf(jb, "{\"user_id\":\"%s\"", user_id_hex);
-
-        if (username) {
-            jsonbuf_appendf(jb, ",\"username\":\"");
-            jsonbuf_append_escaped(jb, username);
-            jsonbuf_appendf(jb, "\"");
-        }
+        jsonbuf_appendf(jb, "{\"user_id\":\"%s\",\"username\":\"", user_id_hex);
+        jsonbuf_append_escaped(jb, username);
+        jsonbuf_appendf(jb, "\"");
         if (email) {
             jsonbuf_appendf(jb, ",\"email\":\"");
             jsonbuf_append_escaped(jb, email);
