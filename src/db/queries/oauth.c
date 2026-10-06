@@ -1445,8 +1445,7 @@ int oauth_introspect_token(db_handle_t *db,
     }
 
     /* Extract UUIDs (16-byte blobs; lengths validated above). The checks stay at
-     * each copy so none of them depends on code above it. Blob then bytes, on the
-     * same column: on PostgreSQL, db_column_bytes reports the last decoded blob. */
+     * each copy so none of them depends on code above it. */
     if (out_client_id) {
         const void *blob = db_column_blob(stmt, 1);
         if (blob && db_column_bytes(stmt, 1) == 16) memcpy(out_client_id, blob, 16);

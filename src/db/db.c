@@ -59,6 +59,7 @@ struct db_stmt_t {
     int pg_executed;            /* Has step() been called? */
     unsigned char *pg_blob_buf; /* Decoded blob buffer (reused per column_blob call) */
     size_t pg_blob_len;         /* Length of last decoded blob */
+    int pg_blob_col;            /* The column it was decoded from, this row (-1: none) */
 #endif
 };
 
@@ -893,6 +894,7 @@ static int pg_prepare(db_handle_t *db, db_stmt_t **stmt_out, const char *sql) {
     stmt->pg_result = NULL;
     stmt->pg_blob_buf = NULL;
     stmt->pg_blob_len = 0;
+    stmt->pg_blob_col = -1;
 
     /* Duplicate SQL string */
     stmt->pg_query = str_dup(sql);
@@ -1151,6 +1153,7 @@ static int pg_step(db_stmt_t *stmt) {
     free(stmt->pg_blob_buf);
     stmt->pg_blob_buf = NULL;
     stmt->pg_blob_len = 0;
+    stmt->pg_blob_col = -1;
 
     stmt->pg_current_row++;
     if (stmt->pg_current_row < stmt->pg_total_rows) {
@@ -1172,6 +1175,7 @@ static int pg_reset(db_stmt_t *stmt) {
     free(stmt->pg_blob_buf);
     stmt->pg_blob_buf = NULL;
     stmt->pg_blob_len = 0;
+    stmt->pg_blob_col = -1;
 
     pg_clear_params(stmt);
 
@@ -1253,10 +1257,12 @@ static const void *pg_column_blob(db_stmt_t *stmt, int col) {
     if (!stmt->pg_result || stmt->pg_current_row < 0) return NULL;
     if (PQgetisnull(stmt->pg_result, stmt->pg_current_row, col)) return NULL;
 
-    /* Free previous decode */
+    /* Free previous decode; what this one gives is this column's (a failed one
+       leaves its length 0) */
     free(stmt->pg_blob_buf);
     stmt->pg_blob_buf = NULL;
     stmt->pg_blob_len = 0;
+    stmt->pg_blob_col = col;
 
     Oid col_type = PQftype(stmt->pg_result, col);
     const char *val = PQgetvalue(stmt->pg_result, stmt->pg_current_row, col);
@@ -1301,19 +1307,33 @@ static const void *pg_column_blob(db_stmt_t *stmt, int col) {
 }
 
 /*
- * Get blob column byte length (from last column_blob decode)
+ * Get a column's length in bytes, as SQLite's does: the column asked for, read
+ * before or after its blob or any other column's. PostgreSQL sends a uuid or
+ * bytea as text, so its length in bytes is worked out from that text, leaving
+ * the decoded blob alone: a uuid is 16, hex bytea ("\x", two digits a byte) is
+ * half its digits, and the older escape form is decoded for its length.
+ * Straight after db_column_blob on the same column, it's what that read gave,
+ * 0 if it failed.
  */
 static int pg_column_bytes(db_stmt_t *stmt, int col) {
     if (!stmt->pg_result || stmt->pg_current_row < 0) return 0;
     if (PQgetisnull(stmt->pg_result, stmt->pg_current_row, col)) return 0;
 
-    /* If we have a decoded blob, return its length */
-    if (stmt->pg_blob_buf) {
-        return (int)stmt->pg_blob_len;
-    }
+    if (stmt->pg_blob_col == col) return (int)stmt->pg_blob_len;
 
-    /* Fallback: raw value length */
-    return PQgetlength(stmt->pg_result, stmt->pg_current_row, col);
+    int len = PQgetlength(stmt->pg_result, stmt->pg_current_row, col);
+    Oid col_type = PQftype(stmt->pg_result, col);
+    if (col_type == PG_UUID_OID) return 16;
+    if (col_type == PG_BYTEA_OID) {
+        const char *val = PQgetvalue(stmt->pg_result, stmt->pg_current_row, col);
+        if (len >= 2 && val[0] == '\\' && val[1] == 'x') return (len - 2) / 2;
+        size_t decoded_len = 0;
+        unsigned char *decoded = PQunescapeBytea((const unsigned char *)val, &decoded_len);
+        if (!decoded) return 0;
+        PQfreemem(decoded);
+        return (int)decoded_len;
+    }
+    return len;
 }
 
 /*

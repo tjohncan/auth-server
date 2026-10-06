@@ -234,7 +234,8 @@ long long db_column_int64(db_stmt_t *stmt, int col);
 const void *db_column_blob(db_stmt_t *stmt, int col);
 
 /*
- * Get column size in bytes
+ * Get column size in bytes: a blob's length (16 for a PostgreSQL uuid), a text's
+ * in bytes, 0 for NULL. In any order with db_column_blob, on either backend.
  */
 int db_column_bytes(db_stmt_t *stmt, int col);
 
