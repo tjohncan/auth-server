@@ -453,7 +453,8 @@ and it works whether or not the account is active; it doesn't reactivate one. An
 password-reset link or invitation still outstanding is voided, since either could set another
 password over this one.
 
-Sessions and tokens are left alone; deactivation is what evicts those, so after a compromise
+Sessions and tokens are left alone, apart from sessions still waiting on MFA for a user who
+requires it, which close; deactivation is what evicts the rest, so after a compromise
 follow the order under `POST /api/admin/users/deactivate`. The password has the same minimum
 length as any other. Nothing makes the user change it at their next sign-in: give it to them by
 a channel you trust, and they can change it themselves once signed in.
@@ -1866,7 +1867,9 @@ curl -X POST http://localhost:8080/api/user/emails/set-primary \
 
 ### POST /api/user/password
 
-Change current user's password.
+Change current user's password. Other sessions stay signed in (see the README's Deliberate
+Tradeoffs), except, for a user who requires MFA, sessions that never completed it: opened with the
+old password, they could only submit codes, and they close.
 
 **Authentication**: Session cookie required
 
@@ -2385,7 +2388,9 @@ with a link to the login page.
 - Validates the token (must be valid, unexpired, unused, unrevoked, user active)
 - Marks the token as used
 - Hashes the new password and updates the user account
-- Both steps in a single transaction
+- For a user who requires MFA, closes their sessions that never completed it (opened with the
+  old password, they could only submit codes); other sessions stay
+- All in a single transaction
 
 **Error Response** (400 Bad Request):
 

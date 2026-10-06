@@ -319,6 +319,12 @@ int user_set_primary_email(db_handle_t *db, long long user_account_pin,
  * their password *and nothing else*, the attacker survives until that session
  * expires (see session_ttl_seconds).
  *
+ * One exception, which costs the user nothing: for a user who requires MFA, the
+ * sessions still waiting on it are closed. Opened with the old password, they
+ * are only half signed in, and all they can do is submit codes, which count
+ * against the user's daily MFA cap. Someone who had only the old password keeps
+ * nothing. A reset and the operator's set-password do the same.
+ *
  * Revisit if: account-takeover recovery becomes a first-class goal. The shape is
  * then not "close everything" but "close everything except the caller's own
  * session" — the requesting cookie identifies the session to spare, evicting the
@@ -335,9 +341,10 @@ int user_change_password(db_handle_t *db, long long user_account_pin,
  * No current password, and the account may be inactive: after a compromise, the
  * recovery order is deactivate, set the password, reactivate, and the old
  * password works at no point in between. It doesn't reactivate, and like
- * user_change_password it leaves sessions and tokens alone; deactivating is what
- * evicts. Outstanding reset links and invitations are voided in the same
- * transaction, since either could set another password over this one.
+ * user_change_password it leaves sessions and tokens alone, apart from sessions
+ * waiting on MFA; deactivating is what evicts. Outstanding reset links and
+ * invitations are voided in the same transaction, since either could set
+ * another password over this one.
  *
  * Returns: 0 on success, 1 if no such user, -1 on error,
  *          -2 if password below minimum length
@@ -465,7 +472,7 @@ int user_lookup_password_reset_token(db_handle_t *db, const char *token);
  * one transaction marks the token used and sets the password. Both statements
  * re-check (the token, then the account), so a token used, revoked or expired
  * since the first check, or an account deactivated since, is refused and nothing
- * is written.
+ * is written. Sessions waiting on MFA close with it, as for user_change_password.
  *
  * Returns: 0 on success, 1 if token invalid/expired/used/revoked or the account
  *          inactive, -1 on error, -2 if password below minimum length

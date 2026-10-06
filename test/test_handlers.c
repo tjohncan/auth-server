@@ -733,9 +733,12 @@ static int test_mfa_gates(void) {
     printf("\n=== MFA gates ===\n");
 
     /* A second user, an org admin, so the admin API can be checked too */
+    char user_id[33];
     Reply r = post_json("/api/admin/users", NULL,
                         "{\"username\":\"mfa-user\",\"password\":\"mfa user password\"}");
-    if (r.status != 200) FAIL("creating the MFA user answered %d", r.status);
+    if (r.status != 200 || field(&r, "user_id", user_id, sizeof(user_id)) != 0) {
+        FAIL("creating the MFA user answered %d", r.status);
+    }
     reply_free(&r);
     r = post_json("/api/admin/org-admins", NULL,
                   "{\"username\":\"mfa-user\",\"org_code_name\":\"system\"}");
@@ -815,6 +818,58 @@ static int test_mfa_gates(void) {
         FAIL("with require on, a password-only session got profile %d, admin %d", profile, admin);
     }
     printf("✓ with require on, a password-only session is refused (403)\n");
+
+    /* 4. A new password closes the session left waiting on MFA, which could
+          still submit codes against the daily cap, and not the signed-in one:
+          changed by the user, by a reset link, or by the operator */
+    char sql[512], reset_hash[SHA256_HEX_LENGTH], set_json[160], pending_cookie[256];
+    if (crypto_sha256_hex("mfa-reset", 9, reset_hash, sizeof(reset_hash)) != 0) FAIL("sha256");
+    snprintf(sql, sizeof(sql),
+             "INSERT INTO password_reset_token (id, user_account_pin, token, issued_at, "
+             "expected_expiry) SELECT randomblob(16), pin, '%s', datetime('now'), "
+             "datetime('now', '+1 hour') FROM user_account WHERE id = x'%s'", reset_hash, user_id);
+    snprintf(set_json, sizeof(set_json),
+             "{\"user_id\":\"%s\",\"password\":\"mfa user password 4\"}", user_id);
+    static const char *ways[3] = { "a change", "a reset", "set-password" };
+    static const char *passwords[3] = {
+        "mfa user password", "mfa user password 2", "mfa user password 3" };
+    for (int i = 0; i < 3; i++) {
+        /* The session waiting on MFA: step 3's, then one opened with the current password */
+        if (i == 0) {
+            snprintf(pending_cookie, sizeof(pending_cookie), "%s", third);
+        } else if (login("mfa-user", passwords[i], pending_cookie, sizeof(pending_cookie)) != 0) {
+            FAIL("could not open a session waiting on MFA");
+        }
+        int changed;
+        if (i == 0) {
+            r = post_json("/api/user/password", second,
+                          "{\"current_password\":\"mfa user password\","
+                          "\"new_password\":\"mfa user password 2\"}");
+        } else if (i == 1) {
+            changed = db_execute_direct(db_pool_get_connection(), sql) == 0 &&
+                      user_consume_password_reset_token(db_pool_get_connection(), "mfa-reset",
+                                                        "mfa user password 3") == 0;
+        } else {
+            r = post_json("/api/admin/users/set-password", NULL, set_json);
+        }
+        if (i != 1) {
+            changed = r.status == 200;
+            reply_free(&r);
+        }
+        if (!changed) FAIL("the password wasn't set by %s", ways[i]);
+        r = post_json("/api/user/mfa/verify", pending_cookie, json);
+        int pending = r.status;
+        reply_free(&r);
+        r = request("GET", "/api/user/profile", second, NULL, NULL, NULL);
+        int signed_in = r.status;
+        reply_free(&r);
+        if (pending != 401 || signed_in != 200) {
+            FAIL("after %s, the pending session's verify got %d, the signed-in session's "
+                 "profile %d", ways[i], pending, signed_in);
+        }
+    }
+    printf("✓ a new password, however set, closes the session waiting on MFA; the signed-in "
+           "one stays\n");
 
     return 0;
 }
@@ -975,8 +1030,10 @@ static int test_account_recovery(void) {
     if (!created) FAIL("creating the user answered %d", status);
 
     /* 1. Active, with an invitation and a reset link outstanding: the new password
-          signs in, the old one doesn't, and neither link can set another */
-    char reset_hash[SHA256_HEX_LENGTH], insert[512];
+          signs in, the old one doesn't, and neither link can set another. The
+          session the old one opened stays: deactivation is what evicts */
+    char reset_hash[SHA256_HEX_LENGTH], insert[512], before[256];
+    if (login("recovered", "the old password", before, sizeof(before)) != 0) FAIL("could not sign in");
     snprintf(sql, sizeof(sql), "SELECT pin FROM user_account WHERE id = x'%s'", user_id);
     if (query_text(sql, pin, sizeof(pin)) != 0 ||
         user_create_invitation_token(db_pool_get_connection(), atoll(pin), 0, 3600, NULL,
@@ -1004,7 +1061,11 @@ static int test_account_recovery(void) {
                                           "a reset password") != 1) {
         FAIL("a reset link outstanding when the password was set can still set another");
     }
-    printf("✓ the operator sets a password, and no outstanding link can override it\n");
+    r = request("GET", "/api/user/profile", before, NULL, NULL, NULL);
+    status = r.status;
+    reply_free(&r);
+    if (status != 200) FAIL("set-password closed a session of a user without MFA (%d)", status);
+    printf("✓ the operator sets a password, no outstanding link can override it, and sessions stay\n");
 
     /* 2. The recovery order: deactivate, set, reactivate. Nothing signs in until
           reactivation, and then only the password set */

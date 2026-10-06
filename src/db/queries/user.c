@@ -1125,6 +1125,43 @@ int user_set_primary_email(db_handle_t *db, long long user_account_pin,
     return 0;
 }
 
+/*
+ * A new password, by whichever path, closes the user's sessions still waiting
+ * on MFA, if the user requires it. Such a session was opened with a password
+ * now gone and is only half signed in: all it can do is submit codes, which
+ * count against the user's daily cap. Closing it costs the user nothing.
+ * Fully signed-in sessions stay (see user_change_password in
+ * include/db/queries/user.h). Runs inside the caller's transaction.
+ *
+ * Returns: 0, or -1 on error
+ */
+static int close_mfa_pending_sessions(db_handle_t *db, long long user_account_pin) {
+    const char *sql =
+        "UPDATE " TBL_BROWSER " "
+        "SET is_closed = " BOOL_TRUE ", closed_at = " NOW ", updated_at = " NOW " "
+        "WHERE user_account_pin = " P"1 "
+        "AND is_closed = " BOOL_FALSE " "
+        "AND mfa_completed = " BOOL_FALSE " "
+        "AND EXISTS (SELECT 1 FROM " TBL_USER_ACCOUNT " "
+        "WHERE pin = " P"1 AND require_mfa = " BOOL_TRUE ")";
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        log_error("Failed to prepare the MFA-pending session close");
+        return -1;
+    }
+
+    db_bind_int64(stmt, 1, user_account_pin);
+    int rc = db_step(stmt);
+    db_finalize(stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Failed to close the sessions waiting on MFA");
+        return -1;
+    }
+    return 0;
+}
+
 /* DESIGN DECISION: this deliberately does NOT invalidate existing sessions or
  * refresh tokens. Password change is credential hygiene here, not incident
  * response — see the rationale above user_change_password() in
@@ -1202,7 +1239,15 @@ int user_change_password(db_handle_t *db, long long user_account_pin,
         return (hash_rc == -2) ? -2 : -1;
     }
 
-    /* Step 4: Update password in database */
+    /* Step 4: Update password in database, and close the sessions the old one
+       left waiting on MFA, together */
+    if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
+        log_error("Failed to begin password change transaction");
+        OPENSSL_cleanse(new_salt, sizeof(new_salt));
+        OPENSSL_cleanse(new_hash, sizeof(new_hash));
+        return -1;
+    }
+
     const char *update_sql =
         "UPDATE " TBL_USER_ACCOUNT " "
         "SET salt = " P"1, "
@@ -1214,6 +1259,7 @@ int user_change_password(db_handle_t *db, long long user_account_pin,
     db_stmt_t *update_stmt = NULL;
     if (db_prepare(db, &update_stmt, update_sql) != 0) {
         log_error("Failed to prepare password update statement");
+        db_execute_trusted(db, "ROLLBACK");
         OPENSSL_cleanse(new_salt, sizeof(new_salt));
         OPENSSL_cleanse(new_hash, sizeof(new_hash));
         return -1;
@@ -1232,6 +1278,18 @@ int user_change_password(db_handle_t *db, long long user_account_pin,
 
     if (rc != DB_DONE) {
         log_error("Failed to update password");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    if (close_mfa_pending_sessions(db, user_account_pin) != 0) {
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    if (db_execute_trusted(db, "COMMIT") != 0) {
+        log_error("Failed to commit the password change");
+        db_execute_trusted(db, "ROLLBACK");
         return -1;
     }
 
@@ -1339,6 +1397,11 @@ int user_set_password(db_handle_t *db, const unsigned char *user_id,
             db_execute_trusted(db, "ROLLBACK");
             return -1;
         }
+    }
+
+    if (close_mfa_pending_sessions(db, user_account_pin) != 0) {
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
     }
 
     if (db_execute_trusted(db, "COMMIT") != 0) {
@@ -2109,7 +2172,8 @@ int user_consume_password_reset_token(db_handle_t *db, const char *token,
         return (hash_rc == -2) ? -2 : -1;
     }
 
-    /* Step 3: Transaction — mark token used + update password.
+    /* Step 3: Transaction — mark token used + update password (and close the
+     * sessions the old password left waiting on MFA).
      *
      * The lookup above is a fast path: a dead link costs no hash and gets the
      * right page. These two statements are the authority, each for what it
@@ -2186,6 +2250,11 @@ int user_consume_password_reset_token(db_handle_t *db, const char *token,
         db_execute_trusted(db, "ROLLBACK");
         if (rc == DB_DONE) return 1;  /* Deactivated since the link was marked used */
         log_error("Failed to update password");
+        return -1;
+    }
+
+    if (close_mfa_pending_sessions(db, user_account_pin) != 0) {
+        db_execute_trusted(db, "ROLLBACK");
         return -1;
     }
 

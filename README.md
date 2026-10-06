@@ -649,7 +649,10 @@ survive it. Compromise recovery has stronger, explicit paths here — account de
 (localhost-only), which closes every session and revokes every token and emailed link, and
 token revocation — and password change isn't asked to carry that weight.
 Mass invalidation is a cost paid by every user on every routine rotation, in order to evict an
-attacker who, in the case that actually matters, already knows the new password. Deactivation
+attacker who, in the case that actually matters, already knows the new password. One kind of
+session does close, since that costs the user nothing: for a user who requires MFA, a session
+opened with the old password that never completed the factor. It's only half signed in, and all it
+could do is submit codes against the user's daily cap. Deactivation
 evicts but leaves the password as it was. The operator sets a new one while the account is
 still deactivated (`POST /api/admin/users/set-password`, localhost-only), and the API reference
 gives the order for handing the account back.
