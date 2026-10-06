@@ -1,6 +1,7 @@
 #include "util/str.h"
 #include "util/json.h"
 #include "util/log.h"
+#include "util/validation.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -476,6 +477,106 @@ void test_json_utf8_valid(void) {
     printf("Well-formed UTF-8 accepted; overlong, surrogate, out-of-range and truncated refused OK\n");
 }
 
+/* Usernames, addresses and code names: the fixed rules every arrival passes, and
+ * the patterns only new values meet, with their defaults */
+void test_validation_patterns(void) {
+    printf("\n=== Testing validation patterns ===\n\n");
+    char err[256];
+
+    /* Before validation_init, a new value is refused rather than let through */
+    assert(validate_new_username("alice", err, sizeof(err)) == -1);
+
+    validation_patterns_t defaults = {0};
+    assert(validation_init(&defaults) == 0);
+
+    static const char *const good_names[] = { "alice", "Alice.Smith", "a_b+c-d", "x1" };
+    static const char *const bad_names[] = {
+        "a!b", ".alice", "alice.", "al..ice", "o'brien", "jos\xc3\xa9",
+        "admin\xc2\xa0", "ad\xe2\x80\x8bmin", "\xd0\xb0" "dmin",
+    };
+    for (size_t i = 0; i < sizeof(good_names) / sizeof(good_names[0]); i++) {
+        assert(validate_new_username(good_names[i], err, sizeof(err)) == 0);
+        assert(validate_new_code_name(good_names[i], err, sizeof(err)) == 0);
+    }
+    for (size_t i = 0; i < sizeof(bad_names) / sizeof(bad_names[0]); i++) {
+        assert(validate_new_username(bad_names[i], err, sizeof(err)) == -1);
+        assert(validate_new_code_name(bad_names[i], err, sizeof(err)) == -1);
+    }
+    /* The fixed rules still take what was stored before a pattern was set: an
+       accent, an apostrophe, NBSP, a zero-width space, a Cyrillic a */
+    for (size_t i = 3; i < sizeof(bad_names) / sizeof(bad_names[0]); i++) {
+        assert(validate_username(bad_names[i], err, sizeof(err)) == 0);
+    }
+    printf("Default name rule: letters, digits, . _ + -; NBSP, zero-width and homoglyphs refused OK\n");
+
+    static const char *const good_emails[] = {
+        "alice@example.com", "a.b+tag@mail.example.co.uk", "x_y@sub-domain.example.org",
+        "user@xn--bcher-kva.example", "u@example.xn--p1ai",
+    };
+    static const char *const bad_emails[] = {
+        "o'brien@example.com", "x@localhost", "a..b@example.com", ".a@example.com",
+        "a@-example.com", "a@example-.com", "a@example.c", "a@example.123",
+        "jos\xc3\xa9@example.com", "a@ex\xc2\xa0mple.com",
+    };
+    for (size_t i = 0; i < sizeof(good_emails) / sizeof(good_emails[0]); i++) {
+        assert(validate_new_email(good_emails[i], err, sizeof(err)) == 0);
+    }
+    for (size_t i = 0; i < sizeof(bad_emails) / sizeof(bad_emails[0]); i++) {
+        assert(validate_new_email(bad_emails[i], err, sizeof(err)) == -1);
+        assert(validate_email(bad_emails[i], err, sizeof(err)) == 0);  /* found, if stored */
+    }
+    char long_local[80];
+    memset(long_local, 'a', 65);
+    strcpy(long_local + 65, "@example.com");
+    assert(validate_new_email(long_local, err, sizeof(err)) == -1);
+    assert(strstr(err, "64") != NULL);
+    long_local[64] = '\0';
+    strcat(long_local, "@example.com");
+    assert(validate_new_email(long_local, err, sizeof(err)) == 0);
+    printf("Default address rule: one real-world shape, 64 bytes before the @; stored ones still found OK\n");
+
+    /* Fixed rules, for every arrival: invalid UTF-8 and C0 controls are refused;
+       C1 controls only in a new value */
+    assert(validate_username("bad\xff", err, sizeof(err)) == -1);
+    assert(validate_email("a\xc3@example.com", err, sizeof(err)) == -1);
+    assert(validate_code_name("x\xed\xa0\x80", err, sizeof(err)) == -1);
+    assert(validate_display_name("Caf\xc3", err, sizeof(err)) == -1);
+    assert(validate_note("ok\nfine", err, sizeof(err)) == 0);
+    assert(validate_note("bad\xc0\xaf", err, sizeof(err)) == -1);
+    assert(validate_username("c1\xc2\x85", err, sizeof(err)) == 0);
+    printf("Invalid UTF-8 refused for every value; display names and notes too OK\n");
+
+    /* Configured patterns, matched against the whole value; none for secrets by
+       default; an empty one means none */
+    validation_patterns_t custom = {
+        .username = "[a-z]+", .email = "", .code_name = "[A-Z]{3}",
+        .password = "^.{12,}$", .machine_secret = ".{32,}",
+    };
+    assert(validation_init(&custom) == 0);
+    assert(validate_new_username("alice", err, sizeof(err)) == 0);
+    assert(validate_new_username("alice9", err, sizeof(err)) == -1);   /* whole value */
+    assert(strstr(err, "username_pattern") != NULL);
+    assert(validate_new_email("x@localhost", err, sizeof(err)) == 0);  /* no pattern */
+    assert(validate_new_code_name("ABC", err, sizeof(err)) == 0);
+    assert(validate_new_code_name("ABCD", err, sizeof(err)) == -1);
+    assert(validate_new_password("twelve chars", err, sizeof(err)) == 0);
+    assert(validate_new_password("eleven char", err, sizeof(err)) == -1);
+    assert(validate_new_machine_secret("short", err, sizeof(err)) == -1);
+    assert(validate_new_email("x\xc2\x85y@example.com", err, sizeof(err)) == -1);  /* C1, even here */
+    assert(validate_email("x\xc2\x85y@example.com", err, sizeof(err)) == 0);      /* stored, found */
+    printf("Configured patterns match whole values; empty means none OK\n");
+
+    /* A pattern that won't compile is refused, naming the setting */
+    validation_patterns_t broken = { .email = "[a-" };
+    assert(validation_init(&broken) == -1);
+    assert(validate_new_email("alice@example.com", err, sizeof(err)) == -1);   /* not ready */
+    assert(validation_init(&defaults) == 0);
+    assert(validate_new_password("x", err, sizeof(err)) == 0);
+    assert(validate_new_machine_secret("x", err, sizeof(err)) == 0);
+    validation_cleanup();
+    printf("A bad pattern is refused; secrets have no default pattern OK\n");
+}
+
 int main(void) {
     log_init(LOG_INFO);
     log_info("TESTING - String Utilities");
@@ -491,6 +592,7 @@ int main(void) {
     test_json_escaped_len();
     test_json_unescape();
     test_json_utf8_valid();
+    test_validation_patterns();
 
     printf("\n=== All tests complete ===\n");
 

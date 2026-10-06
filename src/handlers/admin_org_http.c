@@ -565,7 +565,7 @@ HttpResponse *admin_create_resource_server_handler(const HttpRequest *req) {
     /* Validate input formats */
     char validation_error[256];
 
-    if (validate_code_name(code_name, validation_error, sizeof(validation_error)) != 0) {
+    if (validate_new_code_name(code_name, validation_error, sizeof(validation_error)) != 0) {
         resp = response_json_error(400, validation_error);
         goto cleanup;
     }
@@ -894,7 +894,7 @@ HttpResponse *admin_create_client_handler(const HttpRequest *req) {
     /* Validate input formats */
     char validation_error[256];
 
-    if (validate_code_name(code_name, validation_error, sizeof(validation_error)) != 0) {
+    if (validate_new_code_name(code_name, validation_error, sizeof(validation_error)) != 0) {
         resp = response_json_error(400, validation_error);
         goto cleanup;
     }
@@ -1534,7 +1534,13 @@ HttpResponse *admin_create_resource_server_key_handler(const HttpRequest *req) {
     int is_generated = 0;
 
     if (user_secret && strlen(user_secret) > 0) {
-        /* Bring-your-own mode */
+        /* Bring-your-own mode, which machine_secret_pattern governs */
+        if (validate_new_machine_secret(user_secret, validation_error, sizeof(validation_error)) != 0) {
+            free(rs_id_str); free(note);
+            OPENSSL_cleanse(user_secret, strlen(user_secret));
+            free(user_secret);
+            return response_json_error(400, validation_error);
+        }
         secret_to_use = user_secret;
         is_generated = 0;
     } else {
@@ -1789,7 +1795,11 @@ HttpResponse *admin_create_client_key_handler(const HttpRequest *req) {
     int is_generated = 0;
 
     if (user_secret && strlen(user_secret) > 0) {
-        /* Bring-your-own mode */
+        /* Bring-your-own mode, which machine_secret_pattern governs */
+        if (validate_new_machine_secret(user_secret, validation_error, sizeof(validation_error)) != 0) {
+            resp = response_json_error(400, validation_error);
+            goto cleanup;
+        }
         secret_to_use = user_secret;
     } else {
         /* Generate mode */

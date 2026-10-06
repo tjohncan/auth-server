@@ -477,6 +477,15 @@ HttpResponse *change_password_handler(const HttpRequest *req) {
         return response_json_error(400, "current_password and new_password required");
     }
 
+    char validation_error[256];
+    if (validate_new_password(new_password, validation_error, sizeof(validation_error)) != 0) {
+        OPENSSL_cleanse(current_password, strlen(current_password));
+        OPENSSL_cleanse(new_password, strlen(new_password));
+        free(current_password);
+        free(new_password);
+        return response_json_error(400, validation_error);
+    }
+
     /* Change password */
     int result = user_change_password(db, session.user_account_pin, session.user_account_id,
                                       current_password, new_password);
@@ -534,7 +543,7 @@ HttpResponse *change_username_handler(const HttpRequest *req) {
     }
 
     char validation_error[256];
-    if (validate_username(new_username, validation_error, sizeof(validation_error)) != 0) {
+    if (validate_new_username(new_username, validation_error, sizeof(validation_error)) != 0) {
         free(new_username);
         return response_json_error(400, validation_error);
     }
@@ -585,7 +594,7 @@ HttpResponse *add_email_handler(const HttpRequest *req) {
     }
 
     char validation_error[256];
-    if (validate_email(email, validation_error, sizeof(validation_error)) != 0) {
+    if (validate_new_email(email, validation_error, sizeof(validation_error)) != 0) {
         resp = response_json_error(400, validation_error);
         goto cleanup;
     }
@@ -1086,6 +1095,16 @@ HttpResponse *reset_password_handler(const HttpRequest *req) {
                              : response_html_error(400, "Invalid request");
     }
 
+    /* Checked before the link is spent, so a refused password can be retried */
+    char validation_error[256];
+    if (validate_new_password(password, validation_error, sizeof(validation_error)) != 0) {
+        cleanse_free(password);
+        cleanse_free(token);
+        HttpResponse *resp = response_template(400, "pages/reset-password-error.html",
+            "MESSAGE", validation_error, NULL);
+        return resp ? resp : response_json_error(400, validation_error);
+    }
+
     int rc = user_consume_password_reset_token(db, token, password);
     cleanse_free(password);
     cleanse_free(token);
@@ -1234,6 +1253,16 @@ HttpResponse *accept_invitation_handler(const HttpRequest *req) {
         }
         return decoded == -2 ? response_html_error(500, "Internal server error")
                              : response_html_error(400, "Invalid request");
+    }
+
+    /* Checked before the invitation is spent, so a refused password can be retried */
+    char validation_error[256];
+    if (validate_new_password(password, validation_error, sizeof(validation_error)) != 0) {
+        cleanse_free(password);
+        cleanse_free(token);
+        HttpResponse *resp = response_template(400, "pages/accept-invitation-error.html",
+            "MESSAGE", validation_error, NULL);
+        return resp ? resp : response_json_error(400, validation_error);
     }
 
     int rc = user_consume_invitation_token(db, token, password);

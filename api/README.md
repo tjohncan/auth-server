@@ -9,6 +9,20 @@ UTF-16 surrogate, a malformed or unknown escape) is refused with
 well-formed UTF-8, as JSON has to be, is refused the same way, with
 `400 {"error": "Request body is not valid UTF-8"}`.
 
+A new username, email address or code name must match the server's pattern for it, set in
+auth.conf (`username_pattern`, `email_pattern`, `code_name_pattern`). By default:
+- Usernames and code names are letters, digits and `. _ + -`, with no dot first, last or doubled.
+- Addresses take one conservative real-world shape, like `name@example.com`.
+
+A password, or a secret supplied for a key, must match `password_pattern` or
+`machine_secret_pattern`. Those have no default pattern, though `auth.conf.example` asks 32
+characters of a supplied secret. A value that doesn't match answers `400`, naming the rule.
+
+Patterns apply only when a value is created or set. A username or address stored before a
+pattern was set or changed still signs in, is still found by provisioning, and still gets reset
+and passwordless links. Every value is also checked for length, control characters and
+well-formed UTF-8.
+
 ## Table of Contents
 
 1. [Admin API (Localhost-Only)](#admin-api-localhost-only)

@@ -166,6 +166,13 @@ HttpResponse *rs_provision_user_handler(const HttpRequest *req) {
         return response_json_error(400, validation_error);
     }
 
+    /* The patterns apply only to an account this creates: values stored before
+       a pattern was set still find theirs */
+    char create_error[256] = "";
+    int creatable =
+        (!username || validate_new_username(username, create_error, sizeof(create_error)) == 0) &&
+        (!email || validate_new_email(email, create_error, sizeof(create_error)) == 0);
+
     /* Accepting an invitation verifies the address it was sent to, as proof
      * of control. So when the server can email the link, only the mailbox
      * gets it: a resource server holding it could verify an address it
@@ -180,12 +187,13 @@ HttpResponse *rs_provision_user_handler(const HttpRequest *req) {
     int rc = rs_handler_provision_user(auth.db, auth.rs_pin, username, email,
                                         g_config->invitation_token_ttl_seconds,
                                         http_request_get_client_ip(req, NULL),
-                                        by_email, &info);
+                                        by_email, creatable, &info);
 
     if (rc != 0) {
         free(username);
         free(email);
         rs_user_info_free(&info);
+        if (rc == 5) return response_json_error(400, create_error);
         return rs_error_response(rc, "provision_user");
     }
 

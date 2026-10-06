@@ -32,6 +32,7 @@
 #include <strings.h>
 #include <time.h>
 #include "util/template.h"
+#include "util/validation.h"
 #ifdef EMAIL_SUPPORT
 #include <dirent.h>
 #include <signal.h>
@@ -1608,6 +1609,59 @@ static int test_provisioning(void) {
     reply_free(&r);
     printf("✓ a deactivated pending account is found, and not invited\n");
 
+    /* Patterns apply to new values only. An address stored before the default
+       existed, which it refuses, still finds its account: by provisioning, and
+       with email support for a reset link. A new value like it is refused. */
+    char legacy[33], legacy_cookie[256], legacy_sql[256];
+    validation_patterns_t before = { .email = "" };
+    validation_patterns_t configured = {
+        .username = g_config->username_pattern, .email = g_config->email_pattern,
+        .code_name = g_config->code_name_pattern, .password = g_config->password_pattern,
+        .machine_secret = g_config->machine_secret_pattern,
+    };
+    if (validation_init(&before) != 0) FAIL("could not set the patterns aside");
+    r = admin_port("POST", "/api/admin/users", NULL,
+                   "{\"username\":\"legacy\",\"email\":\"o'brien@example.com\","
+                   "\"password\":\"legacy password\"}");
+    int made = r.status == 200 && field(&r, "user_id", legacy, sizeof(legacy)) == 0;
+    reply_free(&r);
+    if (validation_init(&configured) != 0) FAIL("could not restore the patterns");
+    if (!made) FAIL("could not store an address the default refuses");
+    snprintf(legacy_sql, sizeof(legacy_sql),
+             "UPDATE user_email SET is_verified = 1, verified_at = datetime('now') "
+             "WHERE user_account_pin = (SELECT pin FROM user_account WHERE id = x'%s')", legacy);
+    if (db_execute_direct(db_pool_get_connection(), legacy_sql) != 0) FAIL("could not verify it");
+
+    r = provision(NULL, "o'brien@example.com");
+    if (!provisioned(&r, legacy, 0)) {
+        FAIL("provisioning by a stored address the default refuses answered %d: %s",
+             r.status, r.body);
+    }
+    reply_free(&r);
+#ifdef EMAIL_SUPPORT
+    r = post_json("/request-password-reset", NULL, "{\"email\":\"o'brien@example.com\"}");
+    int asked = r.status;
+    reply_free(&r);
+    char reset[128];
+    if (asked != 200 || mail_token("o'brien@example.com", reset, sizeof(reset)) != 0) {
+        FAIL("a stored address the default refuses got no reset link (%d)", asked);
+    }
+#endif
+    r = provision("oconnor", "o'connor@example.com");
+    int new_refused = r.status == 400 && strstr(r.body, "Email must look like");
+    reply_free(&r);
+    if (login("legacy", "legacy password", legacy_cookie, sizeof(legacy_cookie)) != 0) {
+        FAIL("legacy sign-in");
+    }
+    r = post_json("/api/user/emails", legacy_cookie, "{\"email\":\"o'hara@example.com\"}");
+    int add_refused = r.status == 400;
+    reply_free(&r);
+    if (!new_refused || !add_refused) {
+        FAIL("a new address the default refuses was taken (provisioning %d, adding %d)",
+             new_refused, add_refused);
+    }
+    printf("✓ an address stored before the pattern still finds its account; new ones must match\n");
+
     return 0;
 }
 
@@ -1661,7 +1715,13 @@ int main(void) {
 #endif
 
     /* One in-memory database, bound to this thread as a worker's would be */
-    if (encrypt_init(config->encryption_key) != 0 || crypto_password_init(config) != 0 ||
+    validation_patterns_t patterns = {
+        .username = config->username_pattern, .email = config->email_pattern,
+        .code_name = config->code_name_pattern, .password = config->password_pattern,
+        .machine_secret = config->machine_secret_pattern,
+    };
+    if (validation_init(&patterns) != 0 ||
+        encrypt_init(config->encryption_key) != 0 || crypto_password_init(config) != 0 ||
         db_pool_init(1, DB_TYPE_SQLITE, ":memory:") != 0) {
         printf("✗ setup failed\n");
         return 1;
@@ -1699,6 +1759,7 @@ int main(void) {
     rmdir(g_outbox);
 #endif
     template_cleanup();
+    validation_cleanup();
 
     printf(failed ? "\n=== Handler tests FAILED ===\n" : "\n=== All Handler Tests Passed! ===\n");
     return failed;

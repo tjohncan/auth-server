@@ -139,8 +139,8 @@ HttpResponse *admin_bootstrap_handler(const HttpRequest *req) {
         goto cleanup;
     }
 
-    /* Validate input formats */
-    if (validate_code_name(org_code_name, validation_error, sizeof(validation_error)) != 0) {
+    /* Validate input formats: all three are created here */
+    if (validate_new_code_name(org_code_name, validation_error, sizeof(validation_error)) != 0) {
         resp = response_json_error(400, validation_error);
         goto cleanup;
     }
@@ -150,7 +150,8 @@ HttpResponse *admin_bootstrap_handler(const HttpRequest *req) {
         goto cleanup;
     }
 
-    if (validate_username(username, validation_error, sizeof(validation_error)) != 0) {
+    if (validate_new_username(username, validation_error, sizeof(validation_error)) != 0 ||
+        validate_new_password(password, validation_error, sizeof(validation_error)) != 0) {
         resp = response_json_error(400, validation_error);
         goto cleanup;
     }
@@ -245,7 +246,7 @@ HttpResponse *admin_create_organization_handler(const HttpRequest *req) {
     /* Validate input formats */
     char validation_error[256];
 
-    if (validate_code_name(code_name, validation_error, sizeof(validation_error)) != 0) {
+    if (validate_new_code_name(code_name, validation_error, sizeof(validation_error)) != 0) {
         resp = response_json_error(400, validation_error);
         goto cleanup;
     }
@@ -327,12 +328,13 @@ HttpResponse *admin_create_user_handler(const HttpRequest *req) {
     /* Validate input formats */
     char validation_error[256];
 
-    if (validate_username(username, validation_error, sizeof(validation_error)) != 0) {
+    if (validate_new_username(username, validation_error, sizeof(validation_error)) != 0 ||
+        validate_new_password(password, validation_error, sizeof(validation_error)) != 0) {
         resp = response_json_error(400, validation_error);
         goto cleanup;
     }
 
-    if (email && validate_email(email, validation_error, sizeof(validation_error)) != 0) {
+    if (email && validate_new_email(email, validation_error, sizeof(validation_error)) != 0) {
         resp = response_json_error(400, validation_error);
         goto cleanup;
     }
@@ -562,7 +564,11 @@ HttpResponse *admin_create_organization_key_handler(const HttpRequest *req) {
     int is_generated = 0;
 
     if (user_secret && strlen(user_secret) > 0) {
-        /* User provided their own secret (BYOS) */
+        /* User provided their own secret (BYOS), which machine_secret_pattern governs */
+        if (validate_new_machine_secret(user_secret, validation_error, sizeof(validation_error)) != 0) {
+            resp = response_json_error(400, validation_error);
+            goto cleanup;
+        }
         secret_to_use = user_secret;
     } else {
         /* Generate secure 32-byte base64url token */
@@ -893,6 +899,13 @@ HttpResponse *server_set_user_password_handler(const HttpRequest *req) {
 
     char *password = json_get_string(req->body ? req->body : "", "password");
     if (!password) return response_json_error(400, "password required");
+
+    char validation_error[256];
+    if (validate_new_password(password, validation_error, sizeof(validation_error)) != 0) {
+        OPENSSL_cleanse(password, strlen(password));
+        free(password);
+        return response_json_error(400, validation_error);
+    }
 
     int rc = user_set_password(db, user_id, password);
     OPENSSL_cleanse(password, strlen(password));

@@ -237,6 +237,23 @@ static void set_config_value(config_t *config, const char *key, const char *valu
         } else {
             log_error("Failed to allocate memory for client_ip_header");
         }
+    } else if (strcmp(key, "username_pattern") == 0 || strcmp(key, "email_pattern") == 0 ||
+               strcmp(key, "code_name_pattern") == 0 || strcmp(key, "password_pattern") == 0 ||
+               strcmp(key, "machine_secret_pattern") == 0) {
+        /* Compiled at startup by validation_init, which refuses one that won't;
+           an empty value means none */
+        char **slot = key[0] == 'u' ? &config->username_pattern
+                    : key[0] == 'e' ? &config->email_pattern
+                    : key[0] == 'c' ? &config->code_name_pattern
+                    : key[0] == 'p' ? &config->password_pattern
+                    : &config->machine_secret_pattern;
+        new_value = str_dup(value);
+        if (new_value) {
+            free(*slot);
+            *slot = new_value;
+        } else {
+            log_error("Failed to allocate memory for %s", key);
+        }
     }
     /* Database settings */
     else if (strcmp(key, "db_type") == 0) {
@@ -1349,6 +1366,11 @@ void config_free(config_t *config) {
     free(config->mothership_url_env);
     free(config->mothership_url);
     free(config->client_ip_header);
+    free(config->username_pattern);
+    free(config->email_pattern);
+    free(config->code_name_pattern);
+    free(config->password_pattern);
+    free(config->machine_secret_pattern);
 
     free(config->encryption_key);
 

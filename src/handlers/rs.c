@@ -33,7 +33,7 @@ static int populate_user_info(db_handle_t *db, const user_identity_t *match,
 int rs_handler_provision_user(db_handle_t *db, long long rs_pin,
                                const char *username, const char *email,
                                int invitation_ttl, const char *source_ip,
-                               int by_email, rs_user_info_t *out_info) {
+                               int by_email, int creatable, rs_user_info_t *out_info) {
     if (!db || (!username && !email) || !out_info) {
         log_error("Invalid arguments to rs_handler_provision_user");
         return -1;
@@ -103,7 +103,10 @@ int rs_handler_provision_user(db_handle_t *db, long long rs_pin,
         return 0;
     }
 
-    /* User not found — create without password */
+    /* User not found — create without password, from values that pass the
+       patterns for new ones */
+    if (!creatable) return 5;
+
     long long user_pin = 0;
     unsigned char user_id[16];
     long long email_pin = 0;

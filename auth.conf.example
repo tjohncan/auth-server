@@ -76,6 +76,29 @@ secret_hash_max_iterations = 4
 # Minimum password length (default 1, minimum 1)
 # password_min_length = 8
 
+# Patterns a value must match when it's created or set (POSIX extended, matched
+# against the whole value). They never apply to what's already stored, so an
+# existing user keeps signing in and getting links. Whatever the pattern, values
+# also have length limits, no control characters, and well-formed UTF-8.
+#
+# Unset, usernames and code names take the shape of an email address's local
+# part: letters, digits and . _ + -, with no dot first, last or doubled. Unset,
+# addresses take one conservative real-world shape: that local part (at most 64
+# characters), an @, and dotted labels of letters, digits and inner hyphens
+# ending in an alphabetic or xn-- domain. Passwords and machine secrets have none.
+# An empty value means no pattern. A pattern that lets non-ASCII through takes it
+# as typed: there's no Unicode normalization or case folding, so an é typed two
+# ways is two different names, and only ASCII letters match regardless of case.
+# To allow, say, an apostrophe in addresses:
+# email_pattern = [A-Za-z0-9_+'-]+(\.[A-Za-z0-9_+'-]+)*@[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*\.([A-Za-z]{2,}|xn--[A-Za-z0-9-]+)
+# username_pattern =
+# code_name_pattern =
+# password_pattern =
+# A secret supplied for a client, resource-server or organization key, instead of
+# one the server generates. A generated one is 256 random bits; ask as much of
+# one someone chooses.
+machine_secret_pattern = ^.{32,}$
+
 # Browser session lifetime (in seconds)
 # How long a login session remains valid. Clients can enforce stricter limits
 # via maximum_session_seconds. Default: 604800 (7 days)

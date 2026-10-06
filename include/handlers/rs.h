@@ -56,16 +56,22 @@ void rs_user_info_free(rs_user_info_t *info);
  *   source_ip      - Client IP for audit trail
  *   by_email       - 1 if an invitation will be emailed to `email` rather than
  *                    returned to the resource server
+ *   creatable      - 1 if the username and email pass the patterns for new
+ *                    values (validate_new_*). Patterns never apply to stored
+ *                    rows, so with 0 an existing account is still found; only
+ *                    a new one isn't made.
  *   out_info       - Output: user info (caller must call rs_user_info_free)
  *
  * Returns: 0 success, 1 provisioning not allowed, 2 ambiguous match,
  *          4 an address alone, on a server that can't email, that no verified
- *          account holds (a username is needed to create the account), -1 error
+ *          account holds (a username is needed to create the account),
+ *          5 no account found, and the values fail the patterns for a new one,
+ *          -1 error
  */
 int rs_handler_provision_user(db_handle_t *db, long long rs_pin,
                                const char *username, const char *email,
                                int invitation_ttl, const char *source_ip,
-                               int by_email, rs_user_info_t *out_info);
+                               int by_email, int creatable, rs_user_info_t *out_info);
 
 /*
  * Look up user without creating

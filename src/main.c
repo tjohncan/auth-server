@@ -19,6 +19,7 @@
 #include "handlers.h"
 #include "util/str.h"
 #include "util/template.h"
+#include "util/validation.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -225,6 +226,20 @@ int main(void) {
     }
     log_info("  Client address from: %s",
              config->client_ip_header ? config->client_ip_header : "x-real-ip");
+
+    /* The patterns new usernames, addresses, code names and secrets must match.
+       One that won't compile refuses to start, naming the setting. */
+    validation_patterns_t patterns = {
+        .username = config->username_pattern,
+        .email = config->email_pattern,
+        .code_name = config->code_name_pattern,
+        .password = config->password_pattern,
+        .machine_secret = config->machine_secret_pattern,
+    };
+    if (validation_init(&patterns) != 0) {
+        config_free(config);
+        return 1;
+    }
 
     /* Initialize password hashing module */
     log_info("Initializing password hashing...");
@@ -455,6 +470,7 @@ int main(void) {
 
     static_files_cleanup();
     template_cleanup();
+    validation_cleanup();
     db_pool_shutdown();
     encrypt_cleanup();
     crypto_hmac_cleanup();

@@ -666,6 +666,11 @@ the project; taxing every newcomer to protect a deployer who ignored both a star
 *and* a documented config line is the wrong trade. Field encryption's threat model is bounded
 and stated: keep PII out of plain view of whoever is reading the database — not defeat an
 attacker who holds the database *and* the configuration.
+One default is strict on purpose. New usernames, code names and email addresses take a
+conservative ASCII shape (letters, digits, `. _ + -`; an address like `name@example.com`). A name
+with a Cyrillic а or an invisible space looks identical to the real one in every list an admin
+reads, and nothing downstream can tell them apart. Patterns in auth.conf widen it, and they
+apply only to new values, so nothing already stored stops working (`auth.conf.example`).
 
 **PKCE (S256) is mandatory for every `authorization_code` client, including confidential ones.**
 RFC 6749 makes PKCE optional, and RFC 7636 permits the weaker `plain` method. We require it,

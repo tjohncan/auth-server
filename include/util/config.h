@@ -65,6 +65,14 @@ typedef struct {
     /* Password policy */
     int password_min_length;  /* Minimum password length (default 1, minimum 1) */
 
+    /* Patterns a value created or set must match (util/validation.h): NULL for
+       the default, "" for none */
+    char *username_pattern;
+    char *email_pattern;
+    char *code_name_pattern;
+    char *password_pattern;
+    char *machine_secret_pattern;
+
     /* OAuth2 token limits */
     int max_access_token_ttl_seconds;  /* Maximum TTL for client access tokens (default 59 days) */
 
