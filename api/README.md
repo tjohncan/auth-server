@@ -1541,6 +1541,8 @@ OpenID Connect UserInfo endpoint (OIDC Core Section 5.3). Returns claims about t
 
 Signature and expiry are verified from the JWT itself, but a self-contained token cannot carry revocation state — so the token record is also consulted. A token revoked via `POST /revoke`, auto-revoked by replay-chain revocation, whose user, client, resource server or client's organization has since been deactivated, or whose client or user has since been unlinked, is rejected here immediately rather than remaining usable until `exp`. This applies the same liveness predicate as `POST /introspect`.
 
+**Who can call it**: any holder of a live access token for the user, whatever the token's resource server or scopes. That's the client it was issued to, and any resource server the client sends it to. This is a first-party identity provider (README.md, "Deliberate Tradeoffs"): every resource server is registered by an org admin of this deployment, so one that receives a user's token is trusted with that user's identity. Looking users up through `/api/rs/users` still needs `allow_user_provisioning`; reading the identity of a user whose token it holds doesn't.
+
 **Request**:
 ```http
 GET /userinfo HTTP/1.1
