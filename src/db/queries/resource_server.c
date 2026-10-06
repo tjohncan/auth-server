@@ -751,10 +751,10 @@ int resource_server_key_create(db_handle_t *db,
 
     /* Hash secret with configured algorithm */
     char salt_hex[PASSWORD_SALT_HEX_MAX_LENGTH];
-    char hash_hex[PASSWORD_HASH_HEX_MAX_LENGTH];
+    char hash_hex[PASSWORD_HASH_MAX_LENGTH];
     int iterations;
 
-    int hash_rc = crypto_password_hash(secret, strlen(secret),
+    int hash_rc = crypto_password_hash(SECRET_MACHINE, secret, strlen(secret),
                             salt_hex, sizeof(salt_hex),
                             &iterations,
                             hash_hex, sizeof(hash_hex));

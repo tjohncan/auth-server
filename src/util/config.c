@@ -439,6 +439,28 @@ static void set_config_value(config_t *config, const char *key, const char *valu
         } else {
             config->secret_hash_max_iterations = iterations;
         }
+    } else if (strcmp(key, "machine_secret_hashing_algorithm") == 0) {
+        if (strcmp(value, "argon2id") == 0) {
+            config->machine_secret_hashing_algorithm = PASSWORD_HASH_ARGON2ID;
+        } else if (strcmp(value, "pbkdf2-sha256") == 0) {
+            config->machine_secret_hashing_algorithm = PASSWORD_HASH_PBKDF2_SHA256;
+        } else {
+            log_warn("Unknown machine_secret_hashing_algorithm '%s', keeping current value", value);
+        }
+    } else if (strcmp(key, "machine_secret_hash_min_iterations") == 0) {
+        int iterations = 0;
+        if (parse_int(value, &iterations) != 0 || iterations < 1) {
+            log_warn("Invalid machine_secret_hash_min_iterations '%s', must be >= 1", value);
+        } else {
+            config->machine_secret_hash_min_iterations = iterations;
+        }
+    } else if (strcmp(key, "machine_secret_hash_max_iterations") == 0) {
+        int iterations = 0;
+        if (parse_int(value, &iterations) != 0 || iterations < 1) {
+            log_warn("Invalid machine_secret_hash_max_iterations '%s', must be >= 1", value);
+        } else {
+            config->machine_secret_hash_max_iterations = iterations;
+        }
     }
 
     /* Password policy */
@@ -1168,6 +1190,9 @@ config_t *config_load(const char *config_file) {
     config->secret_hashing_algorithm = PASSWORD_HASH_ARGON2ID;  /* Default to Argon2id */
     config->secret_hash_min_iterations = 4;                     /* Default constant iterations */
     config->secret_hash_max_iterations = 4;
+    config->machine_secret_hashing_algorithm = PASSWORD_HASH_UNSET;  /* the above, unless set */
+    config->machine_secret_hash_min_iterations = 0;
+    config->machine_secret_hash_max_iterations = 0;
     config->password_min_length = 1;
 
     /* OAuth2 token limits */
@@ -1287,23 +1312,45 @@ config_t *config_load(const char *config_file) {
         return NULL;
     }
 
-    /* Validate password hashing iterations */
-    if (config->secret_hash_max_iterations < config->secret_hash_min_iterations) {
-        log_warn("secret_hash_max_iterations (%d) < secret_hash_min_iterations (%d). "
-                "Setting max = min.",
-                config->secret_hash_max_iterations, config->secret_hash_min_iterations);
-        config->secret_hash_max_iterations = config->secret_hash_min_iterations;
+    /* Machine secrets: each setting left out takes the password setting's value,
+       so an auth.conf without them hashes every secret as before */
+    if (config->machine_secret_hashing_algorithm == PASSWORD_HASH_UNSET) {
+        config->machine_secret_hashing_algorithm = config->secret_hashing_algorithm;
+    }
+    if (config->machine_secret_hash_min_iterations == 0) {
+        config->machine_secret_hash_min_iterations = config->secret_hash_min_iterations;
+    }
+    if (config->machine_secret_hash_max_iterations == 0) {
+        config->machine_secret_hash_max_iterations = config->secret_hash_max_iterations;
     }
 
-    /* Algorithm-specific iteration limits */
-    int algo_max = (config->secret_hashing_algorithm == PASSWORD_HASH_ARGON2ID) ? 20 : 10000000;
-    if (config->secret_hash_max_iterations > algo_max) {
-        log_error("secret_hash_max_iterations (%d) exceeds maximum for %s (%d)",
-                config->secret_hash_max_iterations,
-                config->secret_hashing_algorithm == PASSWORD_HASH_ARGON2ID ? "argon2id" : "pbkdf2-sha256",
-                algo_max);
-        config_free(config);
-        return NULL;
+    /* Validate each kind's iterations: max at least min, and within the
+       algorithm's limit */
+    struct {
+        const char *prefix;
+        password_hash_algorithm_t algorithm;
+        int *min, *max;
+    } kinds[] = {
+        { "secret", config->secret_hashing_algorithm,
+          &config->secret_hash_min_iterations, &config->secret_hash_max_iterations },
+        { "machine_secret", config->machine_secret_hashing_algorithm,
+          &config->machine_secret_hash_min_iterations, &config->machine_secret_hash_max_iterations },
+    };
+    for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+        if (*kinds[i].max < *kinds[i].min) {
+            log_warn("%s_hash_max_iterations (%d) < %s_hash_min_iterations (%d). Setting max = min.",
+                     kinds[i].prefix, *kinds[i].max, kinds[i].prefix, *kinds[i].min);
+            *kinds[i].max = *kinds[i].min;
+        }
+        int argon2 = kinds[i].algorithm == PASSWORD_HASH_ARGON2ID;
+        int algo_max = argon2 ? 20 : 10000000;
+        if (*kinds[i].max > algo_max) {
+            log_error("%s_hash_max_iterations (%d) exceeds maximum for %s (%d)",
+                      kinds[i].prefix, *kinds[i].max, argon2 ? "argon2id" : "pbkdf2-sha256",
+                      algo_max);
+            config_free(config);
+            return NULL;
+        }
     }
 
     log_info("Configuration loaded successfully");

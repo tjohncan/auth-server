@@ -538,7 +538,10 @@ int recovery_code_set_create(db_handle_t *db,
     bytes_to_hex(salt_bytes, sizeof(salt_bytes), salt_hex, sizeof(salt_hex));
     OPENSSL_cleanse(salt_bytes, sizeof(salt_bytes));
 
-    int hash_iterations = crypto_password_min_iterations();
+    /* Machine secrets, one method, salt and iteration count for the whole set:
+       a code is found by hashing what's submitted as the set's codes were */
+    const char *method = crypto_password_method(SECRET_MACHINE);
+    int hash_iterations = crypto_password_min_iterations(SECRET_MACHINE);
 
     if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
         log_error("Failed to begin transaction");
@@ -632,8 +635,8 @@ int recovery_code_set_create(db_handle_t *db,
             return -1;
         }
 
-        char hash_hex[PASSWORD_HASH_HEX_MAX_LENGTH];
-        if (crypto_password_hash_with_salt(plaintext, plaintext_len,
+        char hash_hex[PASSWORD_HASH_MAX_LENGTH];
+        if (crypto_password_hash_with_salt(method, plaintext, plaintext_len,
                                          salt_hex, hash_iterations,
                                          hash_hex, sizeof(hash_hex)) != 0) {
             log_error("Failed to hash recovery code");
@@ -686,10 +689,13 @@ int recovery_code_set_get_active(db_handle_t *db,
         return -1;
     }
 
+    /* The set's method is its codes' label: they all carry the same one */
     const char *sql =
-        "SELECT id, user_account_pin, salt, hash_iterations, is_active, generated_at "
-        "FROM " TBL_RECOVERY_CODE_SET " "
-        "WHERE user_account_pin = " P"1 AND is_active = " BOOL_TRUE " "
+        "SELECT S.id, S.user_account_pin, S.salt, S.hash_iterations, S.is_active, S.generated_at, "
+        "(SELECT C.secret_hash FROM " TBL_RECOVERY_CODE " C "
+        " WHERE C.recovery_code_set_pin = S.pin LIMIT 1) "
+        "FROM " TBL_RECOVERY_CODE_SET " S "
+        "WHERE S.user_account_pin = " P"1 AND S.is_active = " BOOL_TRUE " "
         "LIMIT 1";
 
     db_stmt_t *stmt = NULL;
@@ -721,6 +727,12 @@ int recovery_code_set_get_active(db_handle_t *db,
 
         const char *generated_at = db_column_text(stmt, 5);
         str_copy(out_set->generated_at, sizeof(out_set->generated_at), generated_at);
+
+        const char *code_hash = db_column_text(stmt, 6);
+        if (crypto_password_hash_method(code_hash, out_set->method,
+                                        sizeof(out_set->method)) != 0) {
+            out_set->method[0] = '\0';
+        }
 
         db_finalize(stmt);
         return 0;
@@ -755,9 +767,17 @@ int recovery_code_verify(db_handle_t *db,
         return 0;  /* Invalid - no active set */
     }
 
-    /* Hash the provided code with the set's salt */
-    char hash_hex[PASSWORD_HASH_HEX_MAX_LENGTH];
-    if (crypto_password_hash_with_salt(code, strlen(code),
+    /* Hash the provided code as the set's codes were: its method, salt and
+       iterations */
+    if (!set.method[0]) {
+        log_error("Recovery codes whose hashes don't name their method (argon2id$ or "
+                  "pbkdf2-sha256$) need the labeling UPDATEs in sql/README.md, run once with "
+                  "every instance stopped.");
+        OPENSSL_cleanse(&set, sizeof(set));
+        return -1;
+    }
+    char hash_hex[PASSWORD_HASH_MAX_LENGTH];
+    if (crypto_password_hash_with_salt(set.method, code, strlen(code),
                                      set.salt, set.hash_iterations,
                                      hash_hex, sizeof(hash_hex)) != 0) {
         log_error("Failed to hash recovery code for verification");

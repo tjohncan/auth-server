@@ -1691,6 +1691,8 @@ int main(void) {
        parameters aren't what's under test here */
     config->secret_hash_min_iterations = 1;
     config->secret_hash_max_iterations = 1;
+    config->machine_secret_hash_min_iterations = 1;
+    config->machine_secret_hash_max_iterations = 1;
     g_config = config;
 
     /* The pages and mails the handlers render, loaded as main.c loads them */

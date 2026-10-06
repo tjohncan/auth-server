@@ -77,6 +77,7 @@ typedef struct {
     int hash_iterations;
     int is_active;
     char generated_at[32];
+    char method[16];                /* its codes' hashing method; "" if they name none */
 } recovery_code_set_t;
 
 /* Create recovery code set with hashed codes

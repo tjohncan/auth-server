@@ -121,7 +121,10 @@ Cryptographic primitives for OAuth2 security.
     Random integer generation for password hashing iterations.
 - **Argon2** (`argon2.c`, `include/crypto/argon2.h`) - Argon2id password hashing (memory-hard, GPU-resistant)
 - **PBKDF2** (`pbkdf2.c`, `include/crypto/pbkdf2.h`) - PBKDF2-SHA256 password hashing (alternative to Argon2)
-- **Password** (`password.c`, `include/crypto/password.h`) - Config-driven wrapper with random iteration selection
+- **Password** (`password.c`, `include/crypto/password.h`) - Config-driven wrapper with random iteration selection.
+    Two kinds of secret, each with its configured method: passwords, and machine secrets (key secrets and
+    recovery codes). A stored hash names its method (`argon2id$...`), and one made otherwise is hashed
+    again when next verified.
 - **SHA-256** (`sha256.c`, `include/crypto/sha256.h`) - SHA-256 hashing for token storage (sessions, auth codes, refresh/access tokens)
 - **HMAC** (`hmac.c`, `include/crypto/hmac.h`) - HMAC-SHA256 for JWT signatures and token validation. Timing-safe comparison.
 - **JWT** (`jwt.c`, `include/crypto/jwt.h`) - HS256/ES256 JWT encoding/decoding for OAuth2 tokens with expiration checking
@@ -622,8 +625,14 @@ There is no in-server throttling or account lockout on `/login`. Brute-force def
 to the reverse proxy or WAF in front of us (see `deployment/nginx/`), which sees the whole
 traffic picture and can shed load before it ever reaches a worker. Duplicating it here would
 spend a database write per failed guess and still be the weaker of the two.
-MFA attempts and email-token issuance *are* throttled in-server,
+TOTP attempts and email-token issuance *are* throttled in-server,
 because those are bounded per-account actions rather than an open front door.
+Recovery codes aren't, on purpose. A code is 80 random bits, ten to a set, so no rate this
+server could answer makes guessing one plausible. A per-user limit would let whoever holds the
+password keep the user's own recovery at 429, and with the daily TOTP cap already theirs to
+spend, the user would be locked out until the operator stepped in. Each attempt costs one hash
+under the machine-secret method, and the shipped nginx config puts `/api/user/mfa/recover`
+under the same strict per-IP limit as `/login`.
 If you delegate a job to the edge, the edge has to actually do it: the shipped nginx config
 enforces a strict per-IP limit on `/login` specifically (10r/m, burst 10), separate from the
 generous limit on ordinary traffic. Per-IP limiting does not stop a distributed or
@@ -721,7 +730,11 @@ laptop core, and for that long the worker's `epoll` loop is stopped: other login
 files and `/health` on that worker wait behind it. Login throughput is therefore a few per
 second per core, growing with cores rather than connections, and transient memory peaks at
 **64 MiB × worker count**. That cost is what makes a stolen database expensive to crack, so
-the answer to login load is more cores, not cheaper hashing. Anything else that waits
+the answer to login load is more cores, not cheaper hashing. Machine secrets are another
+matter: a client's or resource server's key is checked on every `/token` and `/introspect`,
+and its randomness, not the hash, is what protects it. So they have a method of their own
+(`machine_secret_hashing_algorithm`), which `auth.conf.example` sets to PBKDF2 at 777
+iterations, well under a millisecond. Left unset, it's the password method. Anything else that waits
 behaves the same way, in smaller measure: a write that meets another's SQLite write lock
 waits for it (up to the 2.2 s busy timeout, then fails), and on PostgreSQL every query is a
 round trip the worker spends waiting.

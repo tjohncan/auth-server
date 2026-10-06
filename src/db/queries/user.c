@@ -4,6 +4,7 @@
 #include "db/db_sql.h"
 #include "crypto/random.h"
 #include "crypto/password.h"
+#include "db/queries/secret.h"
 #include "crypto/encrypt.h"
 #include "crypto/hmac.h"
 #include "crypto/sha256.h"
@@ -218,9 +219,9 @@ int user_create(db_handle_t *db, const char *username,
     /* Hash password */
     char salt[PASSWORD_SALT_HEX_MAX_LENGTH];
     int iterations;
-    char hash[PASSWORD_HASH_HEX_MAX_LENGTH];
+    char hash[PASSWORD_HASH_MAX_LENGTH];
 
-    int hash_rc = crypto_password_hash(password, strlen(password),
+    int hash_rc = crypto_password_hash(SECRET_USER, password, strlen(password),
                             salt, sizeof(salt),
                             &iterations,
                             hash, sizeof(hash));
@@ -408,7 +409,7 @@ int user_verify_password(db_handle_t *db, const char *username,
     if (rc != DB_ROW) {
         db_finalize(stmt);
         /* Perform dummy verification to equalize timing (prevents user enumeration) */
-        crypto_password_verify_dummy(password, strlen(password));
+        crypto_password_verify_dummy(SECRET_USER, password, strlen(password));
         return 0;  /* User not found = invalid password */
     }
 
@@ -435,8 +436,13 @@ int user_verify_password(db_handle_t *db, const char *username,
     db_finalize(stmt);
 
     /* Verify password using crypto module */
-    int valid = crypto_password_verify(password, strlen(password),
-                                       salt, iterations, hash);
+    int rehash = 0;
+    int valid = crypto_password_verify(SECRET_USER, password, strlen(password),
+                                       salt, iterations, hash, &rehash);
+    if (valid == 1 && rehash) {
+        /* Hashed under another method or iteration count than today's settings */
+        secret_rehash(db, TBL_USER_ACCOUNT, pin, SECRET_USER, password, hash);
+    }
     OPENSSL_cleanse(salt, sizeof(salt));
     OPENSSL_cleanse(hash, sizeof(hash));
 
@@ -492,7 +498,7 @@ int user_verify_password_by_email(db_handle_t *db, const char *email,
     if (rc != DB_ROW) {
         db_finalize(stmt);
         /* Dummy verification to equalize timing */
-        crypto_password_verify_dummy(password, strlen(password));
+        crypto_password_verify_dummy(SECRET_USER, password, strlen(password));
         return 0;
     }
 
@@ -518,8 +524,13 @@ int user_verify_password_by_email(db_handle_t *db, const char *email,
 
     db_finalize(stmt);
 
-    int valid = crypto_password_verify(password, strlen(password),
-                                       salt, iterations, hash);
+    int rehash = 0;
+    int valid = crypto_password_verify(SECRET_USER, password, strlen(password),
+                                       salt, iterations, hash, &rehash);
+    if (valid == 1 && rehash) {
+        /* Hashed under another method or iteration count than today's settings */
+        secret_rehash(db, TBL_USER_ACCOUNT, pin, SECRET_USER, password, hash);
+    }
     OPENSSL_cleanse(salt, sizeof(salt));
     OPENSSL_cleanse(hash, sizeof(hash));
 
@@ -1214,8 +1225,8 @@ int user_change_password(db_handle_t *db, long long user_account_pin,
     db_finalize(verify_stmt);
 
     /* Step 2: Verify current password */
-    int valid = crypto_password_verify(current_password, strlen(current_password),
-                                       salt, iterations, hash);
+    int valid = crypto_password_verify(SECRET_USER, current_password, strlen(current_password),
+                                       salt, iterations, hash, NULL);
     OPENSSL_cleanse(salt, sizeof(salt));
     OPENSSL_cleanse(hash, sizeof(hash));
 
@@ -1227,9 +1238,9 @@ int user_change_password(db_handle_t *db, long long user_account_pin,
     /* Step 3: Generate new password hash */
     char new_salt[PASSWORD_SALT_HEX_MAX_LENGTH];
     int new_iterations;
-    char new_hash[PASSWORD_HASH_HEX_MAX_LENGTH];
+    char new_hash[PASSWORD_HASH_MAX_LENGTH];
 
-    int hash_rc = crypto_password_hash(new_password, strlen(new_password),
+    int hash_rc = crypto_password_hash(SECRET_USER, new_password, strlen(new_password),
                             new_salt, sizeof(new_salt),
                             &new_iterations,
                             new_hash, sizeof(new_hash));
@@ -1309,9 +1320,9 @@ int user_set_password(db_handle_t *db, const unsigned char *user_id,
     /* Hashed before the transaction, which on SQLite holds the write lock */
     char salt[PASSWORD_SALT_HEX_MAX_LENGTH];
     int iterations;
-    char hash[PASSWORD_HASH_HEX_MAX_LENGTH];
+    char hash[PASSWORD_HASH_MAX_LENGTH];
 
-    int hash_rc = crypto_password_hash(new_password, strlen(new_password),
+    int hash_rc = crypto_password_hash(SECRET_USER, new_password, strlen(new_password),
                             salt, sizeof(salt),
                             &iterations,
                             hash, sizeof(hash));
@@ -2160,9 +2171,9 @@ int user_consume_password_reset_token(db_handle_t *db, const char *token,
     /* Step 2: Hash new password */
     char salt[PASSWORD_SALT_HEX_MAX_LENGTH];
     int iterations;
-    char hash[PASSWORD_HASH_HEX_MAX_LENGTH];
+    char hash[PASSWORD_HASH_MAX_LENGTH];
 
-    int hash_rc = crypto_password_hash(new_password, strlen(new_password),
+    int hash_rc = crypto_password_hash(SECRET_USER, new_password, strlen(new_password),
                             salt, sizeof(salt),
                             &iterations,
                             hash, sizeof(hash));
@@ -2915,9 +2926,9 @@ int user_consume_invitation_token(db_handle_t *db, const char *token,
     /* Step 2: Hash new password */
     char salt[PASSWORD_SALT_HEX_MAX_LENGTH];
     int iterations;
-    char hash[PASSWORD_HASH_HEX_MAX_LENGTH];
+    char hash[PASSWORD_HASH_MAX_LENGTH];
 
-    int hash_rc = crypto_password_hash(new_password, strlen(new_password),
+    int hash_rc = crypto_password_hash(SECRET_USER, new_password, strlen(new_password),
                             salt, sizeof(salt),
                             &iterations,
                             hash, sizeof(hash));

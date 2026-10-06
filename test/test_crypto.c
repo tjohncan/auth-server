@@ -121,6 +121,14 @@ int main(void) {
         return 1;
     }
 
+    /* Hashing fixed here, whatever auth.conf says: passwords argon2id at one or
+       two passes (a range), machine secrets PBKDF2 at 777, as auth.conf.example */
+    config->secret_hashing_algorithm = PASSWORD_HASH_ARGON2ID;
+    config->secret_hash_min_iterations = 1;
+    config->secret_hash_max_iterations = 2;
+    config->machine_secret_hashing_algorithm = PASSWORD_HASH_PBKDF2_SHA256;
+    config->machine_secret_hash_min_iterations = config->machine_secret_hash_max_iterations = 777;
+
     /* Initialize password hashing module */
     if (crypto_password_init(config) != 0) {
         log_error("Failed to initialize password hashing");
@@ -133,9 +141,9 @@ int main(void) {
     const char *test_password = "MySecurePassword123!";
     char salt1[PASSWORD_SALT_HEX_MAX_LENGTH];
     int iterations1;
-    char hash1[PASSWORD_HASH_HEX_MAX_LENGTH];
+    char hash1[PASSWORD_HASH_MAX_LENGTH];
 
-    if (crypto_password_hash(test_password, strlen(test_password),
+    if (crypto_password_hash(SECRET_USER, test_password, strlen(test_password),
                             salt1, sizeof(salt1), &iterations1,
                             hash1, sizeof(hash1)) != 0) {
         log_error("Failed to hash password");
@@ -150,8 +158,8 @@ int main(void) {
 
     /* Verify correct password */
     log_info("Test: Verify correct password");
-    int ver_valid = crypto_password_verify(test_password, strlen(test_password),
-                                          salt1, iterations1, hash1);
+    int ver_valid = crypto_password_verify(SECRET_USER, test_password, strlen(test_password),
+                                          salt1, iterations1, hash1, NULL);
     if (ver_valid == 1) {
         log_info("Password verification: PASS\n");
     } else {
@@ -163,8 +171,8 @@ int main(void) {
     /* Verify wrong password */
     log_info("Test: Verify wrong password (should fail)");
     const char *wrong_password = "WrongPassword456!";
-    ver_valid = crypto_password_verify(wrong_password, strlen(wrong_password),
-                                      salt1, iterations1, hash1);
+    ver_valid = crypto_password_verify(SECRET_USER, wrong_password, strlen(wrong_password),
+                                      salt1, iterations1, hash1, NULL);
     if (ver_valid == 0) {
         log_info("Wrong password correctly rejected: PASS\n");
     } else {
@@ -177,9 +185,9 @@ int main(void) {
     log_info("Test: Verify random salt makes hashes unique");
     char salt2[PASSWORD_SALT_HEX_MAX_LENGTH];
     int iterations2;
-    char hash2[PASSWORD_HASH_HEX_MAX_LENGTH];
+    char hash2[PASSWORD_HASH_MAX_LENGTH];
 
-    if (crypto_password_hash(test_password, strlen(test_password),
+    if (crypto_password_hash(SECRET_USER, test_password, strlen(test_password),
                             salt2, sizeof(salt2), &iterations2,
                             hash2, sizeof(hash2)) != 0) {
         log_error("Failed to hash password");
@@ -199,10 +207,10 @@ int main(void) {
 
     /* Both hashes should verify with their own salt */
     log_info("Test: Both hashes verify independently");
-    int valid1 = crypto_password_verify(test_password, strlen(test_password),
-                                       salt1, iterations1, hash1);
-    int valid2 = crypto_password_verify(test_password, strlen(test_password),
-                                       salt2, iterations2, hash2);
+    int valid1 = crypto_password_verify(SECRET_USER, test_password, strlen(test_password),
+                                       salt1, iterations1, hash1, NULL);
+    int valid2 = crypto_password_verify(SECRET_USER, test_password, strlen(test_password),
+                                       salt2, iterations2, hash2, NULL);
 
     if (valid1 == 1 && valid2 == 1) {
         log_info("Both hashes verify correctly: PASS\n");
@@ -211,6 +219,97 @@ int main(void) {
         config_free(config);
         return 1;
     }
+
+    /* A stored hash names its method, and each kind hashes with its own */
+    log_info("Test: Hashes name their method, per kind of secret");
+    const char *machine_secret = "a machine secret of the usual length, 43 chars";
+    char msalt[PASSWORD_SALT_HEX_MAX_LENGTH], mhash[PASSWORD_HASH_MAX_LENGTH], method[16];
+    int miterations = 0;
+    if (strncmp(hash1, "argon2id$", 9) != 0 ||
+        crypto_password_hash(SECRET_MACHINE, machine_secret, strlen(machine_secret),
+                             msalt, sizeof(msalt), &miterations, mhash, sizeof(mhash)) != 0 ||
+        strncmp(mhash, "pbkdf2-sha256$", 14) != 0 || miterations != 777 ||
+        crypto_password_hash_method(mhash, method, sizeof(method)) != 0 ||
+        strcmp(method, "pbkdf2-sha256") != 0 ||
+        crypto_password_hash_method(mhash + 14, method, sizeof(method)) != -1) {
+        log_error("Hashes don't name the right method: %.20s, %.20s", hash1, mhash);
+        config_free(config);
+        return 1;
+    }
+    log_info("Passwords argon2id$, machine secrets pbkdf2-sha256$: PASS\n");
+
+    /* Re-hash on use: a match under another method than the kind's, or iterations
+       outside its range, says so; within both it doesn't */
+    log_info("Test: Verification says when a secret should be hashed again");
+    char hash3[PASSWORD_HASH_MAX_LENGTH];
+    int rehash_user = -1, rehash_machine = -1, rehash_range = -1, rehash_wrong = -1;
+    int v_user = crypto_password_verify(SECRET_USER, test_password, strlen(test_password),
+                                        salt1, iterations1, hash1, &rehash_user);
+    int v_machine = crypto_password_verify(SECRET_MACHINE, test_password, strlen(test_password),
+                                           salt1, iterations1, hash1, &rehash_machine);
+    int v_range = crypto_password_hash_with_salt("argon2id", test_password, strlen(test_password),
+                                                 salt1, 3, hash3, sizeof(hash3)) == 0
+        ? crypto_password_verify(SECRET_USER, test_password, strlen(test_password),
+                                 salt1, 3, hash3, &rehash_range) : -2;
+    int v_wrong = crypto_password_verify(SECRET_MACHINE, wrong_password, strlen(wrong_password),
+                                         salt1, iterations1, hash1, &rehash_wrong);
+    /* Another method alone, at an iteration count within the password range */
+    char hash4[PASSWORD_HASH_MAX_LENGTH];
+    int rehash_method = -1;
+    int v_method = crypto_password_hash_with_salt("pbkdf2-sha256", test_password,
+                                                  strlen(test_password), salt1, 2,
+                                                  hash4, sizeof(hash4)) == 0
+        ? crypto_password_verify(SECRET_USER, test_password, strlen(test_password),
+                                 salt1, 2, hash4, &rehash_method) : -2;
+    if (v_user != 1 || rehash_user != 0 || v_machine != 1 || rehash_machine != 1 ||
+        v_range != 1 || rehash_range != 1 || v_wrong != 0 || rehash_wrong != 0 ||
+        v_method != 1 || rehash_method != 1) {
+        log_error("Re-hash flags wrong: user %d/%d, machine %d/%d, range %d/%d, wrong %d/%d, "
+                  "method %d/%d", v_user, rehash_user, v_machine, rehash_machine, v_range,
+                  rehash_range, v_wrong, rehash_wrong, v_method, rehash_method);
+        config_free(config);
+        return 1;
+    }
+    log_info("Within the kind's method and range: no; other method or range: yes: PASS\n");
+
+    /* A hash with no label, or an unknown one, is an error, not a mismatch */
+    log_info("Test: A hash with no label, or an unknown one, fails");
+    char unknown[PASSWORD_HASH_MAX_LENGTH];
+    snprintf(unknown, sizeof(unknown), "md5$%s", hash1 + 9);
+    if (crypto_password_verify(SECRET_USER, test_password, strlen(test_password),
+                               salt1, iterations1, hash1 + 9, NULL) != -1 ||
+        crypto_password_verify(SECRET_USER, test_password, strlen(test_password),
+                               salt1, iterations1, unknown, NULL) != -1) {
+        log_error("A hash with no label, or an unknown one, didn't fail");
+        config_free(config);
+        return 1;
+    }
+    log_info("Both refused: PASS\n");
+
+    /* yh3g: a machine secret verifies well under a millisecond under the example
+       config's method. The best of 20, so a busy machine doesn't fail it. */
+    log_info("Test: A machine secret verifies in well under a millisecond");
+    double best_ms = 1e9;
+    for (int i = 0; i < 20; i++) {
+        struct timespec t0, t1;
+        timespec_get(&t0, TIME_UTC);
+        int ok = crypto_password_verify(SECRET_MACHINE, machine_secret, strlen(machine_secret),
+                                        msalt, miterations, mhash, NULL);
+        timespec_get(&t1, TIME_UTC);
+        double ms = (double)(t1.tv_sec - t0.tv_sec) * 1e3 + (double)(t1.tv_nsec - t0.tv_nsec) / 1e6;
+        if (ok != 1) {
+            log_error("The machine secret didn't verify");
+            config_free(config);
+            return 1;
+        }
+        if (ms < best_ms) best_ms = ms;
+    }
+    if (best_ms >= 1.0) {
+        log_error("A machine secret took %.3f ms at best", best_ms);
+        config_free(config);
+        return 1;
+    }
+    log_info("Best of 20: %.3f ms: PASS\n", best_ms);
 
     config_free(config);
 

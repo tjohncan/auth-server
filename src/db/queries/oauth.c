@@ -3,6 +3,7 @@
 #include "crypto/random.h"
 #include "crypto/sha256.h"
 #include "crypto/password.h"
+#include "db/queries/secret.h"
 #include "util/log.h"
 #include "util/data.h"
 #include "util/str.h"
@@ -1037,6 +1038,8 @@ int oauth_client_authenticate(db_handle_t *db,
     if (rc != DB_ROW) {
         db_finalize(stmt);
         log_debug("Client key not found or inactive");
+        /* As long as a wrong secret takes, so key ids aren't told apart by time */
+        crypto_password_verify_dummy(SECRET_MACHINE, secret, strlen(secret));
         return 0;  /* Not found = invalid credentials */
     }
 
@@ -1064,8 +1067,13 @@ int oauth_client_authenticate(db_handle_t *db,
     db_finalize(stmt);
 
     /* Verify secret against hash */
-    int valid = crypto_password_verify(secret, strlen(secret),
-                                        salt, iterations, hash);
+    int rehash = 0;
+    int valid = crypto_password_verify(SECRET_MACHINE, secret, strlen(secret),
+                                        salt, iterations, hash, &rehash);
+    if (valid == 1 && rehash) {
+        /* Hashed under another method or iteration count than today's settings */
+        secret_rehash(db, TBL_CLIENT_KEY, client_key_pin, SECRET_MACHINE, secret, hash);
+    }
     OPENSSL_cleanse(salt, sizeof(salt));
     OPENSSL_cleanse(hash, sizeof(hash));
 
@@ -1249,6 +1257,8 @@ int oauth_resource_server_authenticate(db_handle_t *db,
     if (rc != DB_ROW) {
         db_finalize(stmt);
         log_debug("Resource server key not found or inactive");
+        /* As long as a wrong secret takes, so key ids aren't told apart by time */
+        crypto_password_verify_dummy(SECRET_MACHINE, secret, strlen(secret));
         return 0;  /* Not found = invalid credentials */
     }
 
@@ -1273,8 +1283,13 @@ int oauth_resource_server_authenticate(db_handle_t *db,
     db_finalize(stmt);
 
     /* Verify secret against hash */
-    int valid = crypto_password_verify(secret, strlen(secret),
-                                        salt, iterations, hash);
+    int rehash = 0;
+    int valid = crypto_password_verify(SECRET_MACHINE, secret, strlen(secret),
+                                        salt, iterations, hash, &rehash);
+    if (valid == 1 && rehash) {
+        /* Hashed under another method or iteration count than today's settings */
+        secret_rehash(db, TBL_RESOURCE_SERVER_KEY, resource_server_key_pin, SECRET_MACHINE, secret, hash);
+    }
     OPENSSL_cleanse(salt, sizeof(salt));
     OPENSSL_cleanse(hash, sizeof(hash));
 

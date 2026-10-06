@@ -20,6 +20,7 @@
 #include "crypto/encrypt.h"
 #include "crypto/sha256.h"
 #include "db/queries/user.h"
+#include "db/queries/secret.h"
 #include "util/data.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -906,6 +907,308 @@ done:
     db_disconnect(sdb);
     if (!failed) {
         log_info("Encryption key check tests passed!");
+    }
+    return failed;
+}
+
+/* config_load on these lines, from a file of the test's own; NULL if refused */
+static config_t *config_from(const char *lines) {
+    char path[] = "/tmp/test-db-config.XXXXXX";
+    int fd = mkstemp(path);
+    if (fd < 0) return NULL;
+    FILE *f = fdopen(fd, "w");
+    if (!f) {
+        close(fd);
+        unlink(path);
+        return NULL;
+    }
+    fputs(lines, f);
+    fclose(f);
+    config_t *config = config_load(path);
+    unlink(path);
+    return config;
+}
+
+/*
+ * The machine-secret hashing settings: each one left out takes the password
+ * setting's value, so an auth.conf from before they existed hashes every secret
+ * as it did. Set, they're the machine secrets' alone, held to the method's
+ * iteration limit like the password ones.
+ *
+ * Returns 0 on success.
+ */
+static int test_hashing_config(void) {
+    log_info("\nHashing config tests");
+
+    const char *user = "secret_hashing_algorithm = pbkdf2-sha256\n"
+                       "secret_hash_min_iterations = 1000\n"
+                       "secret_hash_max_iterations = 2000\n";
+    char both[512];
+    snprintf(both, sizeof(both), "%smachine_secret_hashing_algorithm = argon2id\n"
+                                 "machine_secret_hash_min_iterations = 2\n"
+                                 "machine_secret_hash_max_iterations = 3\n", user);
+    char over[512];
+    snprintf(over, sizeof(over), "%smachine_secret_hashing_algorithm = argon2id\n", user);
+
+    config_t *a = config_from(user), *b = config_from(both), *c = config_from(over);
+    int ok = a && b && !c &&
+        a->machine_secret_hashing_algorithm == PASSWORD_HASH_PBKDF2_SHA256 &&
+        a->machine_secret_hash_min_iterations == 1000 &&
+        a->machine_secret_hash_max_iterations == 2000 &&
+        b->machine_secret_hashing_algorithm == PASSWORD_HASH_ARGON2ID &&
+        b->machine_secret_hash_min_iterations == 2 && b->machine_secret_hash_max_iterations == 3 &&
+        b->secret_hashing_algorithm == PASSWORD_HASH_PBKDF2_SHA256 &&
+        b->secret_hash_min_iterations == 1000;
+    config_free(a);
+    config_free(b);
+    config_free(c);
+    if (!ok) {
+        log_error("Hashing config: machine settings weren't filled in from the password ones, "
+                  "kept apart, or held to the method's limit");
+        return 1;
+    }
+    log_info("  left out, the password settings; set, their own; argon2id above 20 "
+             "iterations refused (OK)");
+    log_info("Hashing config tests passed!");
+    return 0;
+}
+
+/* Store secret in table's row pin as method makes it at iterations, with a fixed
+   salt. Returns 0, or -1. */
+static int plant_hash(db_handle_t *db, const char *table, long long pin, const char *method,
+                      int iterations, const char *secret) {
+    const char *salt = "0123456789abcdef0123456789abcdef";
+    char hash[PASSWORD_HASH_MAX_LENGTH], sql[160];
+    if (crypto_password_hash_with_salt(method, secret, strlen(secret), salt, iterations,
+                                       hash, sizeof(hash)) != 0) {
+        return -1;
+    }
+    snprintf(sql, sizeof(sql), "UPDATE %s SET salt = ?1, hash_iterations = ?2, "
+                               "secret_hash = ?3 WHERE pin = ?4", table);
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) return -1;
+    db_bind_text(stmt, 1, salt, -1);
+    db_bind_int(stmt, 2, iterations);
+    db_bind_text(stmt, 3, hash, -1);
+    db_bind_int64(stmt, 4, pin);
+    int rc = db_step(stmt);
+    db_finalize(stmt);
+    return rc == DB_DONE ? 0 : -1;
+}
+
+/* table's row pin, as "<the method its hash names>/<iterations>" */
+static int stored_method(db_handle_t *db, const char *table, long long pin,
+                         char *out, size_t size) {
+    char sql[200];
+    snprintf(sql, sizeof(sql), "SELECT substr(secret_hash, 1, instr(secret_hash, '$') - 1) "
+                               "|| '/' || hash_iterations FROM %s WHERE pin = %lld", table, pin);
+    return read_stored_value(db, sql, out, size);
+}
+
+/*
+ * Stored hashes name their method, and a secret is hashed with its kind's method
+ * (main sets passwords to argon2id, one pass; machine secrets to PBKDF2, 777).
+ * One that verifies under another method, or an iteration count outside its
+ * kind's range, is hashed again under today's settings and stored: passwords at
+ * sign-in, and client, resource-server and organization key secrets when they
+ * authenticate. Within the settings, or on a wrong secret, nothing is stored. A
+ * hash with no label fails, changing nothing. Recovery codes are hashed as their
+ * set was, whatever the settings say now.
+ *
+ * Returns 0 on success.
+ */
+static int test_rehash(const config_t *config) {
+    log_info("\nRe-hash tests");
+
+    db_handle_t *sdb = open_test_db(config);
+    if (!sdb) {
+        log_error("Re-hash: could not open a test database");
+        return 1;
+    }
+
+    int failed = 1;
+    char seen[64], before[128], after[128], salt[64];
+    unsigned char user_id[16], set_id[16];
+    long long pin = 0, key_pin = 0;
+    const char *hash_sql = "SELECT secret_hash FROM user_account WHERE pin = 1";
+    static const unsigned char rs_id[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x02};
+    static const unsigned char key_id[3][16] = {
+        {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x04},
+        {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x05},
+        {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x06},
+    };
+
+    if (user_create(sdb, "rehash", NULL, "a password", user_id) != 0 ||
+        db_execute_direct(sdb, FIXTURE_ORG_RS_CLIENT
+            "INSERT INTO client_key (id, client_pin, salt, hash_iterations, secret_hash) "
+            "  VALUES (x'00000000000000000000000000000004', 1, 's', 1, 'h');"
+            "INSERT INTO resource_server_key (id, resource_server_pin, salt, hash_iterations, "
+            "                                 secret_hash) "
+            "  VALUES (x'00000000000000000000000000000005', 1, 's', 1, 'h');"
+            "INSERT INTO organization_key (id, organization_pin, salt, hash_iterations, secret_hash) "
+            "  VALUES (x'00000000000000000000000000000006', 1, 's', 1, 'h');") != 0) {
+        log_error("Re-hash: could not insert fixtures");
+        goto done;
+    }
+
+    /* 1. What's made is hashed with its kind's method: a new password with the
+          password method; new org, client and resource-server keys (made with the
+          org key, pin 2) with the machine method */
+    unsigned char new_id[16];
+    if (stored_method(sdb, "user_account", 1, seen, sizeof(seen)) != 0 ||
+        strcmp(seen, "argon2id/1") != 0) {
+        log_error("Re-hash: a new password is stored as '%s', not argon2id/1", seen);
+        goto done;
+    }
+    if (organization_key_create(sdb, "org", "a new machine secret", NULL, new_id) != 0 ||
+        client_key_create(sdb, -1, 2, FIXTURE_CLIENT_ID, "a new machine secret", NULL,
+                          new_id) != 0 ||
+        resource_server_key_create(sdb, -1, 2, rs_id, "a new machine secret", NULL,
+                                   new_id) != 0) {
+        log_error("Re-hash: could not make new keys");
+        goto done;
+    }
+    static const char *machine_tables[] = { "client_key", "resource_server_key",
+                                            "organization_key" };
+    for (int i = 0; i < 3; i++) {
+        if (stored_method(sdb, machine_tables[i], 2, seen, sizeof(seen)) != 0 ||
+            strcmp(seen, "pbkdf2-sha256/777") != 0) {
+            log_error("Re-hash: a new %s is stored as '%s', not pbkdf2-sha256/777",
+                      machine_tables[i], seen);
+            goto done;
+        }
+    }
+    log_info("  new passwords and keys are hashed with their kind's method (OK)");
+
+    /* 2. Under another method, at an iteration count within the range: signs in,
+          and is stored under today's method; signing in again stores nothing */
+    if (plant_hash(sdb, "user_account", 1, "pbkdf2-sha256", 1, "a password") != 0 ||
+        user_verify_password(sdb, "rehash", "a password", NULL, NULL) != 1 ||
+        stored_method(sdb, "user_account", 1, seen, sizeof(seen)) != 0 ||
+        strcmp(seen, "argon2id/1") != 0) {
+        log_error("Re-hash: a password under another method wasn't stored again (%s)", seen);
+        goto done;
+    }
+    if (read_stored_value(sdb, hash_sql, before, sizeof(before)) != 0 ||
+        user_verify_password(sdb, "rehash", "a password", NULL, NULL) != 1 ||
+        read_stored_value(sdb, hash_sql, after, sizeof(after)) != 0 || strcmp(before, after) != 0) {
+        log_error("Re-hash: a password within today's settings was stored again");
+        goto done;
+    }
+    /* The write lands only on the hash that verified: one changed meanwhile stays */
+    if (secret_rehash(sdb, TBL_USER_ACCOUNT, 1, SECRET_USER, "a password",
+                      "argon2id$not-the-stored-hash") != 1 ||
+        read_stored_value(sdb, hash_sql, after, sizeof(after)) != 0 || strcmp(before, after) != 0) {
+        log_error("Re-hash: a re-hash overwrote a hash other than the one that verified");
+        goto done;
+    }
+    log_info("  password: under another method, stored again at sign-in; within the "
+             "settings, left alone (OK)");
+
+    /* 3. The same method at an iteration count outside the range: stored again */
+    if (plant_hash(sdb, "user_account", 1, "argon2id", 2, "a password") != 0 ||
+        user_verify_password(sdb, "rehash", "a password", NULL, NULL) != 1 ||
+        stored_method(sdb, "user_account", 1, seen, sizeof(seen)) != 0 ||
+        strcmp(seen, "argon2id/1") != 0) {
+        log_error("Re-hash: a password at iterations outside the range wasn't stored again (%s)",
+                  seen);
+        goto done;
+    }
+    log_info("  password: iterations outside the range, stored again (OK)");
+
+    /* 4. A wrong password under another method stores nothing; and a hash with no
+          label fails, changing nothing */
+    if (plant_hash(sdb, "user_account", 1, "pbkdf2-sha256", 1000, "a password") != 0 ||
+        read_stored_value(sdb, hash_sql, before, sizeof(before)) != 0 ||
+        user_verify_password(sdb, "rehash", "not the password", NULL, NULL) != 0 ||
+        read_stored_value(sdb, hash_sql, after, sizeof(after)) != 0 || strcmp(before, after) != 0) {
+        log_error("Re-hash: a wrong password stored something");
+        goto done;
+    }
+    if (plant_hash(sdb, "user_account", 1, "argon2id", 1, "a password") != 0 ||
+        db_execute_direct(sdb, "UPDATE user_account SET secret_hash = "
+                               "substr(secret_hash, instr(secret_hash, '$') + 1) WHERE pin = 1") != 0 ||
+        read_stored_value(sdb, hash_sql, before, sizeof(before)) != 0 ||
+        user_verify_password(sdb, "rehash", "a password", NULL, NULL) != -1 ||
+        read_stored_value(sdb, hash_sql, after, sizeof(after)) != 0 || strcmp(before, after) != 0) {
+        log_error("Re-hash: a hash with no label didn't fail, or changed");
+        goto done;
+    }
+    log_info("  a wrong password stores nothing; a hash with no label fails (OK)");
+
+    /* 5. Machine secrets under the password method: each authenticates, and is
+          stored under the machine method */
+    for (int i = 0; i < 3; i++) {
+        if (plant_hash(sdb, machine_tables[i], 1, "argon2id", 1, "a machine secret") != 0) {
+            log_error("Re-hash: could not plant a %s hash", machine_tables[i]);
+            goto done;
+        }
+    }
+    if (oauth_client_authenticate(sdb, FIXTURE_CLIENT_ID, key_id[0], "a machine secret",
+                                  &pin, &key_pin) != 1 ||
+        oauth_resource_server_authenticate(sdb, rs_id, key_id[1], "a machine secret",
+                                           &pin, &key_pin) != 1 ||
+        organization_key_verify(sdb, key_id[2], "a machine secret", &pin, &key_pin) != 0) {
+        log_error("Re-hash: a machine secret under the password method didn't authenticate");
+        goto done;
+    }
+    for (int i = 0; i < 3; i++) {
+        if (stored_method(sdb, machine_tables[i], 1, seen, sizeof(seen)) != 0 ||
+            strcmp(seen, "pbkdf2-sha256/777") != 0) {
+            log_error("Re-hash: %s is stored as '%s', not pbkdf2-sha256/777",
+                      machine_tables[i], seen);
+            goto done;
+        }
+    }
+    log_info("  client, resource-server and org key secrets: stored again under the machine "
+             "method (OK)");
+
+    /* 6. Recovery codes: a set under the machine method; the same set made under
+          another method still verifies, by its codes' label; with no label, fails */
+    const char *codes[] = { "AAAA-BBBB-CCCC-DDDD", "EEEE-FFFF-GGGG-HHHH", "JJJJ-KKKK-LLLL-MMMM" };
+    if (recovery_code_set_create(sdb, 1, codes, 3, set_id) != 0 ||
+        read_stored_value(sdb, "SELECT group_concat(DISTINCT substr(secret_hash, 1, "
+                               "instr(secret_hash, '$') - 1)) FROM recovery_code",
+                          seen, sizeof(seen)) != 0 || strcmp(seen, "pbkdf2-sha256") != 0 ||
+        recovery_code_verify(sdb, 1, codes[0]) != 1) {
+        log_error("Re-hash: a new recovery code set isn't under the machine method (%s), "
+                  "or its code didn't verify", seen);
+        goto done;
+    }
+    if (read_stored_value(sdb, "SELECT salt FROM recovery_code_set", salt, sizeof(salt)) != 0 ||
+        db_execute_direct(sdb, "UPDATE recovery_code_set SET hash_iterations = 1") != 0) {
+        log_error("Re-hash: could not remake the set");
+        goto done;
+    }
+    for (int i = 0; i < 3; i++) {
+        char hash[PASSWORD_HASH_MAX_LENGTH], sql[300];
+        if (crypto_password_hash_with_salt("argon2id", codes[i], strlen(codes[i]), salt, 1,
+                                           hash, sizeof(hash)) != 0) {
+            goto done;
+        }
+        snprintf(sql, sizeof(sql), "UPDATE recovery_code SET secret_hash = '%s' "
+                                   "WHERE plaintext_last4 = '%s'", hash, codes[i] + 15);
+        if (db_execute_direct(sdb, sql) != 0) goto done;
+    }
+    if (recovery_code_verify(sdb, 1, codes[1]) != 1) {
+        log_error("Re-hash: a code of a set made under another method didn't verify");
+        goto done;
+    }
+    if (db_execute_direct(sdb, "UPDATE recovery_code SET secret_hash = "
+                               "substr(secret_hash, instr(secret_hash, '$') + 1)") != 0 ||
+        recovery_code_verify(sdb, 1, codes[2]) != -1 ||
+        read_count(sdb, "SELECT count(*) FROM recovery_code WHERE is_used = 1") != 2) {
+        log_error("Re-hash: a code with no label didn't fail, or was used");
+        goto done;
+    }
+    log_info("  recovery codes: hashed and verified as their set was; no label fails (OK)");
+
+    failed = 0;
+
+done:
+    db_disconnect(sdb);
+    if (!failed) {
+        log_info("Re-hash tests passed!");
     }
     return failed;
 }
@@ -2528,7 +2831,13 @@ int main(void) {
 
     /* Field encryption and password hashing, set up as main.c does: usernames and
        signing keys are sealed with the one, passwords and API keys hashed with
-       the other */
+       the other. Hashing is fixed here, whatever auth.conf says, as
+       auth.conf.example has it but with one pass of Argon2: passwords argon2id,
+       machine secrets PBKDF2 at 777 (test_rehash relies on both). */
+    config->secret_hashing_algorithm = PASSWORD_HASH_ARGON2ID;
+    config->secret_hash_min_iterations = config->secret_hash_max_iterations = 1;
+    config->machine_secret_hashing_algorithm = PASSWORD_HASH_PBKDF2_SHA256;
+    config->machine_secret_hash_min_iterations = config->machine_secret_hash_max_iterations = 777;
     if (encrypt_init(config->encryption_key) != 0 || crypto_password_init(config) != 0) {
         log_error("Failed to initialize field encryption or password hashing");
         config_free(config);
@@ -2582,7 +2891,9 @@ int main(void) {
 
     if (test_encryption_key_check(config) != 0 ||
         test_encryption_params(config) != 0 ||
-        test_rekey(config) != 0) {
+        test_rekey(config) != 0 ||
+        test_hashing_config() != 0 ||
+        test_rehash(config) != 0) {
         config_free(config);
         return 1;
     }

@@ -334,9 +334,43 @@ The `client.is_universal` flag enables special public clients (like system manag
 **Recovery Code Verification:**
 - Recovery codes use a shared-salt design for efficient verification
 - `salt` and `hash_iterations` are stored in `recovery_code_set` (not per-code)
-- All codes in a set share the same salt and iteration count
-- Verification: hash user input once with set parameters, compare against all code hashes
+- All codes in a set share the same salt, iteration count and method
+- Verification: hash user input once as the set's codes were (their method label, the set's salt
+  and iterations), compare against all code hashes
 - Secure because codes are high-entropy random strings (not user-chosen passwords)
+
+**Hash methods:**
+- Every `secret_hash` names the method that made it: `argon2id$<hex>` or `pbkdf2-sha256$<hex>`.
+  `salt` and `hash_iterations` keep their columns.
+- Passwords are hashed with `secret_hashing_algorithm`, machine secrets (client, resource-server
+  and organization key secrets, and recovery codes) with `machine_secret_hashing_algorithm`, each
+  at an iteration count drawn from its range.
+- A password or key secret that verifies under another method, or an iteration count outside its
+  range, is hashed again with today's settings and stored, at its next use, only while the row
+  still holds the hash that verified. With history on, the replaced hash goes to history like any
+  update, so retiring a method is finished when history is purged (retention, or `--drophistory`).
+- Recovery codes aren't hashed again: a code is used once, and its siblings' plaintexts are
+  unknown. A new method reaches them when the user regenerates the set.
+
+**Hashes made before method labels.** They have no label, and fail verification with an error
+naming this fix, so the labeling must not be missed. Label them once, with the method the server
+was configured with (`secret_hashing_algorithm`, `argon2id` by default), by hand like any schema
+change. Today's binary rejects a labeled hash, and the new one an unlabeled hash, so whichever
+goes first, every sign-in and key authentication fails until the other is done. The order is:
+stop every instance, run the UPDATEs, start the new binary everywhere. A rolling deploy fails
+authentication for the whole roll. With history on, each labeled row gets a history copy dated
+now.
+```sql
+-- SQLite; on PostgreSQL the same, with the tables in the security schema
+-- (security.user_account and so on) and || as written. Replace argon2id if
+-- secret_hashing_algorithm was pbkdf2-sha256.
+UPDATE user_account SET secret_hash = 'argon2id$' || secret_hash
+  WHERE secret_hash IS NOT NULL AND secret_hash NOT LIKE '%$%';
+UPDATE client_key SET secret_hash = 'argon2id$' || secret_hash WHERE secret_hash NOT LIKE '%$%';
+UPDATE resource_server_key SET secret_hash = 'argon2id$' || secret_hash WHERE secret_hash NOT LIKE '%$%';
+UPDATE organization_key SET secret_hash = 'argon2id$' || secret_hash WHERE secret_hash NOT LIKE '%$%';
+UPDATE recovery_code SET secret_hash = 'argon2id$' || secret_hash WHERE secret_hash NOT LIKE '%$%';
+```
 
 ### Log Tables
 

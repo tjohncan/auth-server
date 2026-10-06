@@ -20,6 +20,7 @@ typedef enum {
 
 /* Password hashing algorithm enumeration */
 typedef enum {
+    PASSWORD_HASH_UNSET = -1,  /* machine_secret_hashing_algorithm left out: the user one's */
     PASSWORD_HASH_ARGON2ID,
     PASSWORD_HASH_PBKDF2_SHA256
 } password_hash_algorithm_t;
@@ -61,6 +62,12 @@ typedef struct {
     password_hash_algorithm_t secret_hashing_algorithm;
     int secret_hash_min_iterations;
     int secret_hash_max_iterations;
+
+    /* Machine secrets (crypto/password.h): each one left out takes the password
+       setting's value, which config_load fills in */
+    password_hash_algorithm_t machine_secret_hashing_algorithm;
+    int machine_secret_hash_min_iterations;
+    int machine_secret_hash_max_iterations;
 
     /* Password policy */
     int password_min_length;  /* Minimum password length (default 1, minimum 1) */

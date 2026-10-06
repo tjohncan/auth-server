@@ -74,10 +74,23 @@ encryption_key = customize_me
 # encryption_key_previous =
 # encryption_key_previous_env = MY_PREVIOUS_ENCRYPTION_KEY
 
-# Password hashing (argon2id or pbkdf2-sha256) — do NOT change after users exist
+# Password hashing (argon2id or pbkdf2-sha256). Each stored hash names its method,
+# so these can change: a password hashed otherwise, or at an iteration count
+# outside [min, max], is hashed again with these at its next sign-in.
 secret_hashing_algorithm = argon2id
 secret_hash_min_iterations = 4
 secret_hash_max_iterations = 4
+
+# Machine secrets: the secrets of client, resource-server and organization keys,
+# and recovery codes. They're checked on every /token, /introspect and org-key
+# call, so a slow hash stalls a worker each time. Their randomness protects them:
+# a generated one is 256 bits, a recovery code 80, and a supplied one must match
+# machine_secret_pattern. Each setting left out takes the password one's value.
+# Key secrets hashed otherwise are hashed again with these when next used; a
+# recovery code set keeps the method it was made with until it's regenerated.
+machine_secret_hashing_algorithm = pbkdf2-sha256
+machine_secret_hash_min_iterations = 777
+machine_secret_hash_max_iterations = 777
 
 # Password policy
 # Minimum password length (default 1, minimum 1)
