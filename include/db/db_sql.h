@@ -127,6 +127,7 @@
 /* KEYS schema */
 #define TBL_AUTH_REQUEST_SIGNING      KEYS_ "auth_request_signing"
 #define TBL_ACCESS_TOKEN_SIGNING      KEYS_ "access_token_signing"
+#define TBL_ENCRYPTION_PARAMS         KEYS_ "encryption_params"
 
 /* SECURITY schema */
 #define TBL_ORGANIZATION              SECURITY_ "organization"

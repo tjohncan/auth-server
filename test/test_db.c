@@ -9,6 +9,7 @@
 #include "db/init/db_history.h"
 #include "db/instance_lock.h"
 #include "db/maintenance.h"
+#include "db/encryption_params.h"
 #include "crypto/signing_keys.h"
 #include "db/queries/oauth.h"
 #include "db/queries/client.h"
@@ -19,6 +20,7 @@
 #include "crypto/encrypt.h"
 #include "crypto/sha256.h"
 #include "db/queries/user.h"
+#include "util/data.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -904,6 +906,323 @@ done:
     db_disconnect(sdb);
     if (!failed) {
         log_info("Encryption key check tests passed!");
+    }
+    return failed;
+}
+
+/*
+ * The stretch a server derives its field keys by (encryption_params_get_or_make):
+ * a database with nothing sealed yet gets a row at its first start, and keeps it
+ * whatever the configuration says later. One with values sealed and no row, or
+ * without the table, derives by HKDF alone, since those values were sealed
+ * that way.
+ *
+ * Returns 0 on success.
+ */
+static int test_encryption_params(const config_t *config) {
+    log_info("\nEncryption params tests");
+
+    db_handle_t *sdb = open_test_db(config);
+    if (!sdb) {
+        log_error("Params: could not open a test database");
+        return 1;
+    }
+
+    int failed = 1;
+    encrypt_params_t first, again;
+    unsigned char user_id[16];
+
+    /* 1. Nothing sealed: a row is made, then kept over other settings */
+    if (encryption_params_get_or_make(sdb, "pbkdf2-sha256", 1000, &first) != 0 ||
+        strcmp(first.method, "pbkdf2-sha256") != 0 || first.iterations != 1000 ||
+        strlen(first.salt) != 32 ||
+        encryption_params_get_or_make(sdb, "argon2id", 2, &again) != 0 ||
+        strcmp(again.method, first.method) != 0 || again.iterations != first.iterations ||
+        strcmp(again.salt, first.salt) != 0) {
+        log_error("Params: a new database didn't get its row, or a later start changed it");
+        goto done;
+    }
+    log_info("  nothing sealed: a row is made, and later settings don't change it (OK)");
+
+    /* 2. Values sealed and no row: HKDF alone, and no row made */
+    if (db_execute_direct(sdb, "DELETE FROM encryption_params") != 0 ||
+        user_create(sdb, "sealed-before", NULL, "a password", user_id) != 0 ||
+        encryption_params_get_or_make(sdb, "pbkdf2-sha256", 1000, &again) != 1 ||
+        read_count(sdb, "SELECT count(*) FROM encryption_params") != 0) {
+        log_error("Params: a row was made for values sealed without one");
+        goto done;
+    }
+
+    /* 3. No table: HKDF alone */
+    if (db_execute_direct(sdb, "DROP TABLE encryption_params") != 0 ||
+        encryption_params_get_or_make(sdb, "pbkdf2-sha256", 1000, &again) != 1) {
+        log_error("Params: a database without the table didn't derive by HKDF alone");
+        goto done;
+    }
+    log_info("  values sealed without a row, or no table: HKDF alone, nothing made (OK)");
+
+    failed = 0;
+
+done:
+    db_disconnect(sdb);
+    if (!failed) {
+        log_info("Encryption params tests passed!");
+    }
+    return failed;
+}
+
+/* How many of the database's sealed values open under keys; *total, how many
+   there are */
+static int sealed_opening(db_handle_t *db, const encrypt_keys_t *keys, int *total) {
+    const char *sql =
+        "SELECT username FROM user_account WHERE username IS NOT NULL "
+        "UNION ALL SELECT email_address FROM user_email "
+        "UNION ALL SELECT email_address FROM passwordless_login_token "
+        "UNION ALL SELECT secret FROM user_mfa "
+        "UNION ALL SELECT substr(v, 4) FROM ("
+        "  SELECT current_secret AS v FROM auth_request_signing "
+        "  UNION ALL SELECT prior_secret FROM auth_request_signing "
+        "  UNION ALL SELECT current_private_key FROM access_token_signing "
+        "  UNION ALL SELECT prior_private_key FROM access_token_signing) WHERE v IS NOT NULL";
+    *total = 0;
+    int opening = 0;
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) return -1;
+    while (db_step(stmt) == DB_ROW) {
+        const char *v = db_column_text(stmt, 0);
+        char plain[ENCRYPT_FIELD_MAX_LENGTH + 1];
+        opening += v && decrypt_field_with(keys, v, plain, sizeof(plain)) == 0;
+        OPENSSL_cleanse(plain, sizeof(plain));
+        (*total)++;
+    }
+    db_finalize(stmt);
+    return opening;
+}
+
+/*
+ * --rekey (maintenance_rekey): everything sealed under one key is sealed again
+ * under another, in one transaction. Afterwards each value opens under the new
+ * keys and none under the old. Usernames and addresses are still found whatever
+ * their case, so the blind indexes were made again. The signing keys load,
+ * current and prior, and the encryption_params row is the new one. History
+ * holds what it held, with no copy of the re-key's own changes, and keeps the
+ * next change. A value the old key won't open rolls the whole run back, history
+ * triggers included.
+ *
+ * Returns 0 on success.
+ */
+static int test_rekey(const config_t *config) {
+    log_info("\nRe-key tests");
+
+    db_handle_t *sdb = open_test_db(config);
+    if (!sdb) {
+        log_error("Re-key: could not open a test database");
+        return 1;
+    }
+
+    int failed = 1, total = 0;
+    encrypt_keys_t a, b, b_again, b_salt, b_bare, c;
+    encrypt_params_t params, params_salt, params_c, stored;
+    signing_key_t *es = NULL, *hmac = NULL, *es_after = NULL, *hmac_after = NULL;
+    unsigned char user_id[16], method_id[16];
+    char token[64], sealed_totp[256], before[512], after[512];
+    rekey_report_t report;
+    const char *totp = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
+    const char *history_sql = "SELECT (SELECT count(*) FROM history__user_account) + "
+                              "(SELECT count(*) FROM history__user_email) + "
+                              "(SELECT count(*) FROM history__user_mfa)";
+    const char *triggers_sql = "SELECT count(*) FROM sqlite_master WHERE type = 'trigger'";
+    const char *username_sql = "SELECT username FROM user_account WHERE pin = 1";
+
+    /* 1. Derivation: the same parameters give the same keys again; another salt,
+          another method, or no stretch at all gives others */
+    if (encrypt_derive_keys(config->encryption_key, NULL, &a) != 0 ||
+        encrypt_params_new("pbkdf2-sha256", 1000, &params) != 0 ||
+        encrypt_params_new("pbkdf2-sha256", 1000, &params_salt) != 0 ||
+        encrypt_params_new("argon2id", 1, &params_c) != 0 ||
+        encrypt_derive_keys("the new passphrase", &params, &b) != 0 ||
+        encrypt_derive_keys("the new passphrase", &params, &b_again) != 0 ||
+        encrypt_derive_keys("the new passphrase", &params_salt, &b_salt) != 0 ||
+        encrypt_derive_keys("the new passphrase", NULL, &b_bare) != 0 ||
+        encrypt_derive_keys("the new passphrase", &params_c, &c) != 0) {
+        log_error("Re-key: could not derive keys");
+        goto done;
+    }
+    if (memcmp(&b, &b_again, sizeof(b)) != 0 || memcmp(&b, &b_salt, sizeof(b)) == 0 ||
+        memcmp(&b, &b_bare, sizeof(b)) == 0 || memcmp(&b, &c, sizeof(b)) == 0 ||
+        memcmp(&c, &b_bare, sizeof(c)) == 0) {
+        log_error("Re-key: stretched keys don't depend on exactly the passphrase and parameters");
+        goto done;
+    }
+    log_info("  a stretch derives the same keys again, and other keys than another salt, "
+             "method or none (OK)");
+
+    /* Known answers, worked out apart from this code (HKDF and PBKDF2 with
+       Python's standard library, Argon2id with libargon2 alone): a change to the
+       derivation would leave every deployment unable to open what it sealed */
+    static const struct { encrypt_params_t params; int stretched; const char *aes, *hmac; } kat[] = {
+        { { "", 0, "" }, 0,
+          "0a31bafa9c0d112843de0debc9ed20468b0e7501b785befcb1259fd8e275920d",
+          "28d630fb9d38d4fcc9c14421ff45c61fb487a326f3606b039d194d47cef640ab" },
+        { { "pbkdf2-sha256", 1000, "000102030405060708090a0b0c0d0e0f" }, 1,
+          "945b0aaa532a4d59a61489e2bbfbd5e0706fc5f2846670fc28d6d0a46bc5ebe8",
+          "37140403b6cef1bba10f80bcc05bc92d64032519e5cf6e4d56187db8df2cf264" },
+        { { "argon2id", 1, "000102030405060708090a0b0c0d0e0f" }, 1,
+          "ccd3c21e4279f03f4b89cb7ffdac897bf924751deea6e80c146754485f5b9ca1",
+          "e88441f431285fbe36dd93b2b7d3dfb97cfbe8018588806769a11da6f55a66a1" },
+    };
+    for (size_t i = 0; i < sizeof(kat) / sizeof(kat[0]); i++) {
+        encrypt_keys_t k;
+        char aes_hex[65], hmac_hex[65];
+        if (encrypt_derive_keys("correct horse battery staple",
+                                kat[i].stretched ? &kat[i].params : NULL, &k) != 0 ||
+            bytes_to_hex(k.aes, sizeof(k.aes), aes_hex, sizeof(aes_hex)) != 0 ||
+            bytes_to_hex(k.hmac, sizeof(k.hmac), hmac_hex, sizeof(hmac_hex)) != 0 ||
+            strcmp(aes_hex, kat[i].aes) != 0 || strcmp(hmac_hex, kat[i].hmac) != 0) {
+            log_error("Re-key: the keys derived %s aren't the known ones",
+                      kat[i].stretched ? kat[i].params.method : "without a stretch");
+            goto done;
+        }
+    }
+    log_info("  the derivation gives the known keys, unstretched, and under PBKDF2 and "
+             "Argon2id (OK)");
+
+    /* 2. Sealed under a, HKDF alone, as a database without encryption_params:
+          two users (one with no username), a passwordless link, a TOTP secret, and
+          both signing keys, current and prior */
+    encrypt_init_keys(&a);
+    signing_key_thread_cleanup();
+    if (db_init_history_tables(sdb, DB_TYPE_SQLITE, 1) != 0 ||
+        user_create(sdb, "Alice", "Alice@Example.com", "a password", user_id) != 0 ||
+        user_create(sdb, NULL, "bob@example.com", "a password", user_id) != 0 ||
+        db_execute_direct(sdb, "UPDATE user_email SET is_verified = 1, "
+                               "verified_at = datetime('now')") != 0 ||
+        user_update_allow_passwordless_login(sdb, 2, 1) != 0 ||
+        user_create_passwordless_login_token(sdb, "bob@example.com", 600, NULL, NULL,
+                                             token) != 0 ||
+        encrypt_field(totp, sealed_totp, sizeof(sealed_totp)) != 0 ||
+        mfa_method_create(sdb, 1, "TOTP", "phone", sealed_totp, method_id) != 0 ||
+        signing_key_get_or_rotate(sdb, SIGNING_KEY_ACCESS_TOKEN, &es) != 0 ||
+        signing_key_get_or_rotate(sdb, SIGNING_KEY_AUTH_REQUEST, &hmac) != 0 ||
+        db_execute_direct(sdb,
+            "UPDATE access_token_signing SET current_generated_at = datetime('now', '-61 days');"
+            "UPDATE auth_request_signing SET current_generated_at = datetime('now', '-2 days');") != 0) {
+        log_error("Re-key: could not set up sealed values");
+        goto done;
+    }
+    signing_key_free(es);
+    signing_key_free(hmac);
+    es = hmac = NULL;
+    if (signing_key_get_or_rotate(sdb, SIGNING_KEY_ACCESS_TOKEN, &es) != 0 || !es->prior_private_key ||
+        signing_key_get_or_rotate(sdb, SIGNING_KEY_AUTH_REQUEST, &hmac) != 0 || !hmac->prior_secret ||
+        sealed_opening(sdb, &a, &total) != 9 || total != 9) {
+        log_error("Re-key: the values to re-seal aren't all there under the old key");
+        goto done;
+    }
+    long long history = read_count(sdb, history_sql);
+    long long triggers = read_count(sdb, triggers_sql);
+
+    /* 3. Re-keyed to b: every value opens under b, none under a */
+    if (maintenance_rekey(sdb, DB_TYPE_SQLITE, &a, &b, &params, &report) != 0 ||
+        report.usernames != 1 || report.addresses != 2 || report.passwordless != 1 ||
+        report.mfa_secrets != 1 || report.signing_keys != 4 || report.history_tables < 3) {
+        log_error("Re-key: the run failed or miscounted (%d usernames, %d addresses, %d links, "
+                  "%d TOTP, %d signing keys)", report.usernames, report.addresses,
+                  report.passwordless, report.mfa_secrets, report.signing_keys);
+        goto done;
+    }
+    if (sealed_opening(sdb, &b, &total) != 9 || total != 9 || sealed_opening(sdb, &a, &total) != 0) {
+        log_error("Re-key: not every value opens under the new key, or some still under the old");
+        goto done;
+    }
+    log_info("  every sealed value opens under the new key and none under the old (OK)");
+
+    /* 4. Under b: lookups by username and address match whatever the case, the
+          link and the TOTP secret open as they were, and so do the signing keys */
+    encrypt_init_keys(&b);
+    signing_key_thread_cleanup();
+    passwordless_login_lookup_t link;
+    mfa_method_t method;
+    char opened[64];
+    if (user_verify_password(sdb, "ALICE", "a password", NULL, NULL) != 1 ||
+        user_verify_password_by_email(sdb, "alice@EXAMPLE.com", "a password", NULL, NULL) != 1 ||
+        user_verify_password_by_email(sdb, "BOB@example.com", "a password", NULL, NULL) != 1) {
+        log_error("Re-key: a username or address isn't found under the new key");
+        goto done;
+    }
+    if (user_lookup_passwordless_login_token(sdb, token, &link) != 0 ||
+        strcmp(link.email_address, "bob@example.com") != 0 ||
+        mfa_method_get_by_id(sdb, method_id, &method) != 0 ||
+        decrypt_field(method.secret, opened, sizeof(opened)) != 0 || strcmp(opened, totp) != 0) {
+        log_error("Re-key: the passwordless link or the TOTP secret didn't open as it was");
+        goto done;
+    }
+    if (signing_key_get_or_rotate(sdb, SIGNING_KEY_ACCESS_TOKEN, &es_after) != 0 ||
+        signing_key_get_or_rotate(sdb, SIGNING_KEY_AUTH_REQUEST, &hmac_after) != 0 ||
+        strcmp(es_after->current_private_key, es->current_private_key) != 0 ||
+        !es_after->prior_private_key ||
+        strcmp(es_after->prior_private_key, es->prior_private_key) != 0 ||
+        strcmp(hmac_after->current_secret, hmac->current_secret) != 0 ||
+        !hmac_after->prior_secret || strcmp(hmac_after->prior_secret, hmac->prior_secret) != 0 ||
+        signing_key_check_encryption_key(sdb) != 0) {
+        log_error("Re-key: the signing keys aren't the same keys under the new key");
+        goto done;
+    }
+    if (encryption_params_load(sdb, &stored) != 0 || strcmp(stored.method, params.method) != 0 ||
+        stored.iterations != params.iterations || strcmp(stored.salt, params.salt) != 0) {
+        log_error("Re-key: encryption_params doesn't hold the new stretch");
+        goto done;
+    }
+    log_info("  lookups match whatever the case; links, TOTP and signing keys open as they "
+             "were; the new stretch is recorded (OK)");
+
+    /* 5. History: no copy of the re-key's changes, and the next change is kept */
+    if (read_count(sdb, history_sql) != history || read_count(sdb, triggers_sql) != triggers ||
+        db_execute_direct(sdb, "UPDATE user_mfa SET display_name = 'laptop' WHERE pin = 1") != 0 ||
+        read_count(sdb, history_sql) != history + 1) {
+        log_error("Re-key: history copied the re-key's changes, or stopped keeping new ones");
+        goto done;
+    }
+    log_info("  history holds no copy of the re-key's changes and keeps the next one (OK)");
+
+    /* 6. A value b won't open, in the last table re-sealed, so the tables before it
+          are already done when it fails: the whole run rolls back */
+    history = read_count(sdb, history_sql);
+    if (mfa_method_create(sdb, 1, "TOTP", "tablet", "sealed-under-no-key", method_id) != 0 ||
+        read_stored_value(sdb, username_sql, before, sizeof(before)) != 0) {
+        log_error("Re-key: could not plant a value that won't open");
+        goto done;
+    }
+    if (maintenance_rekey(sdb, DB_TYPE_SQLITE, &b, &c, &params_c, &report) != -1) {
+        log_error("Re-key: a value the old key won't open didn't fail the run");
+        goto done;
+    }
+    if (read_stored_value(sdb, username_sql, after, sizeof(after)) != 0 ||
+        strcmp(before, after) != 0 || sealed_opening(sdb, &b, &total) != 9 || total != 10 ||
+        read_count(sdb, history_sql) != history || read_count(sdb, triggers_sql) != triggers ||
+        encryption_params_load(sdb, &stored) != 0 || strcmp(stored.salt, params.salt) != 0 ||
+        db_execute_direct(sdb, "UPDATE user_mfa SET display_name = 'desk' WHERE pin = 1") != 0 ||
+        read_count(sdb, history_sql) != history + 1) {
+        log_error("Re-key: the failed run changed something");
+        goto done;
+    }
+    log_info("  a value the old key won't open rolls the whole run back (OK)");
+
+    failed = 0;
+
+done:
+    signing_key_free(es);
+    signing_key_free(hmac);
+    signing_key_free(es_after);
+    signing_key_free(hmac_after);
+    signing_key_thread_cleanup();
+    OPENSSL_cleanse(&a, sizeof(a));
+    OPENSSL_cleanse(&b, sizeof(b));
+    OPENSSL_cleanse(&c, sizeof(c));
+    encrypt_init(config->encryption_key);
+    db_disconnect(sdb);
+    if (!failed) {
+        log_info("Re-key tests passed!");
     }
     return failed;
 }
@@ -2261,7 +2580,9 @@ int main(void) {
         return 1;
     }
 
-    if (test_encryption_key_check(config) != 0) {
+    if (test_encryption_key_check(config) != 0 ||
+        test_encryption_params(config) != 0 ||
+        test_rekey(config) != 0) {
         config_free(config);
         return 1;
     }

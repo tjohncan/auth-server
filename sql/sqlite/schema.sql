@@ -43,6 +43,22 @@ create table access_token_signing (
 , constraint uix_access_token_signing_singleton unique(singleton)
 );
 
+-- How encryption_key is stretched before the field keys are derived from it:
+-- the method, its iterations and a salt of this deployment's own. Written at
+-- the first start and by --rekey; a database without the row derives the keys
+-- by HKDF alone. No pin, so no history.
+create table encryption_params (
+  singleton integer not null default 1
+, method text not null
+, iterations integer not null
+, salt text not null
+, created_at text not null default (datetime('now'))
+
+, constraint ck_encryption_params_singleton check(singleton = 1)
+, constraint uix_encryption_params_singleton unique(singleton)
+, constraint ck_encryption_params_method check(method in ('argon2id', 'pbkdf2-sha256'))
+);
+
 -- ============================================================================
 -- SECURITY - Organizations, clients, resource servers, and users
 -- ============================================================================

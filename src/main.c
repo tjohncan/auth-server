@@ -22,6 +22,7 @@
 #include "util/validation.h"
 #include "db/instance_lock.h"
 #include "db/maintenance.h"
+#include "db/encryption_params.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -127,12 +128,13 @@ static void instance_lock_release_all(void) {
  * ============================================================================ */
 
 /*
- * ./auth-server --drophistory (db/maintenance.h): with every instance stopped,
- * which the exclusive instance lock makes sure of.
+ * A maintenance run's connection, with every instance stopped, which the
+ * exclusive instance lock makes sure of. Returns 0, or 1 (logged).
  */
-static int run_drophistory(const config_t *config, const char *connection_string) {
-    db_handle_t *db = NULL;
-    int lock_fd = -1;
+static int open_for_maintenance(const config_t *config, const char *connection_string,
+                                db_handle_t **db, int *lock_fd) {
+    *db = NULL;
+    *lock_fd = -1;
 
     if (config->db_type == DB_TYPE_SQLITE) {
         char path[1100];
@@ -141,7 +143,7 @@ static int run_drophistory(const config_t *config, const char *connection_string
             log_error("No database at %s", config->db_path);
             return 1;
         }
-        int rc = instance_lock_file(path, 1, &lock_fd);
+        int rc = instance_lock_file(path, 1, lock_fd);
         if (rc != 0) {
             if (rc == 1) {
                 log_error("An instance is running on this database, or another maintenance "
@@ -151,23 +153,38 @@ static int run_drophistory(const config_t *config, const char *connection_string
         }
     }
 
-    if (db_connect(&db, config->db_type, connection_string) != 0) {
+    if (db_connect(db, config->db_type, connection_string) != 0) {
         log_error("Can't connect to the database");
-        instance_lock_file_release(lock_fd);
+        instance_lock_file_release(*lock_fd);
+        *lock_fd = -1;
         return 1;
     }
 
     if (config->db_type != DB_TYPE_SQLITE) {
-        int rc = instance_lock_pg(db, 1);
+        int rc = instance_lock_pg(*db, 1);
         if (rc != 0) {
             if (rc == 1) {
                 log_error("An instance is running on this database, or another maintenance "
                           "run is: stop every instance first");
             }
-            db_disconnect(db);
+            db_disconnect(*db);
+            *db = NULL;
             return 1;
         }
     }
+    return 0;
+}
+
+static void close_after_maintenance(db_handle_t *db, int lock_fd) {
+    db_disconnect(db);
+    instance_lock_file_release(lock_fd);
+}
+
+/* ./auth-server --drophistory (db/maintenance.h) */
+static int run_drophistory(const config_t *config, const char *connection_string) {
+    db_handle_t *db;
+    int lock_fd;
+    if (open_for_maintenance(config, connection_string, &db, &lock_fd) != 0) return 1;
 
     drophistory_report_t report;
     int rc = maintenance_drop_history(db, config->db_type, config->enable_history_tables, &report);
@@ -182,9 +199,100 @@ static int run_drophistory(const config_t *config, const char *connection_string
         printf("WAL archives, replicas and backups still hold what history held.\n");
     }
 
-    db_disconnect(db);
-    instance_lock_file_release(lock_fd);
+    close_after_maintenance(db, lock_fd);
     return rc == 0 ? 0 : 1;
+}
+
+/* The method new stretching parameters use: the one user secrets are hashed with */
+static const char *stretch_method(const config_t *config) {
+    return config->secret_hashing_algorithm == PASSWORD_HASH_PBKDF2_SHA256
+           ? "pbkdf2-sha256" : "argon2id";
+}
+
+/*
+ * ./auth-server --rekey (db/maintenance.h): everything sealed under
+ * encryption_key_previous, as the database stretches it now, is sealed again
+ * under encryption_key, stretched with the configured method and a fresh salt.
+ * The same passphrase in both re-keys too: that's how a database made before
+ * stretching gets it, or a new method or iteration count takes effect.
+ */
+static int run_rekey(const config_t *config, const char *connection_string) {
+    if (!config->encryption_key_previous || !*config->encryption_key_previous) {
+        log_error("--rekey needs the passphrase the data is sealed under now, in "
+                  "encryption_key_previous (or AUTH_ENCRYPTION_KEY_PREVIOUS), and the new one in "
+                  "encryption_key. To keep the passphrase and change only how it's stretched, "
+                  "give the same one in both.");
+        return 1;
+    }
+    if (strcmp(config->encryption_key, "customize_me") == 0) {
+        log_warn("encryption_key is the shipped default: this re-seals everything under a "
+                 "published key");
+    }
+
+    db_handle_t *db;
+    int lock_fd;
+    if (open_for_maintenance(config, connection_string, &db, &lock_fd) != 0) return 1;
+
+    int status = 1;
+    encrypt_params_t old_params, new_params;
+    encrypt_keys_t old_keys, new_keys;
+    memset(&old_keys, 0, sizeof(old_keys));
+    memset(&new_keys, 0, sizeof(new_keys));
+
+    /* The new stretch is recorded in the database, so its table must be there */
+    int exists = encryption_params_table_exists(db);
+    if (exists != 1) {
+        if (exists == 0) {
+            log_error("No encryption_params table: add it first, as sql/README.md shows under "
+                      "--rekey");
+        }
+        goto done;
+    }
+
+    /* The keys the data is sealed under: the previous passphrase, as the database
+       stretches it (HKDF alone without a row) */
+    int have = encryption_params_load(db, &old_params);
+    if (have == -1 ||
+        encrypt_derive_keys(config->encryption_key_previous, have == 0 ? &old_params : NULL,
+                            &old_keys) != 0) {
+        goto done;
+    }
+
+    if (encrypt_params_new(stretch_method(config), config->secret_hash_max_iterations,
+                           &new_params) != 0 ||
+        encrypt_derive_keys(config->encryption_key, &new_params, &new_keys) != 0) {
+        goto done;
+    }
+
+    rekey_report_t report;
+    int rc = maintenance_rekey(db, config->db_type, &old_keys, &new_keys, &new_params, &report);
+    if (rc != -1) {
+        printf("Re-sealed under encryption_key, stretched with %s (%d iteration%s):\n",
+               new_params.method, new_params.iterations, new_params.iterations == 1 ? "" : "s");
+        printf("  %d username%s, %d address%s, %d passwordless sign-in link%s, "
+               "%d TOTP secret%s, %d signing key%s\n",
+               report.usernames, report.usernames == 1 ? "" : "s",
+               report.addresses, report.addresses == 1 ? "" : "es",
+               report.passwordless, report.passwordless == 1 ? "" : "s",
+               report.mfa_secrets, report.mfa_secrets == 1 ? "" : "s",
+               report.signing_keys, report.signing_keys == 1 ? "" : "s");
+        if (report.history_tables > 0) {
+            printf("History made before the re-key is still sealed under the old key, in %d "
+                   "table%s: run ./auth-server --drophistory next to remove it.\n",
+                   report.history_tables, report.history_tables == 1 ? "" : "s");
+        }
+        printf("Backups, WAL archives and replicas made before this still hold the old-key "
+               "values.\n");
+        printf("Start every instance with the new encryption_key, and remove "
+               "encryption_key_previous.\n");
+    }
+    status = rc == 0 ? 0 : 1;
+
+done:
+    OPENSSL_cleanse(&old_keys, sizeof(old_keys));
+    OPENSSL_cleanse(&new_keys, sizeof(new_keys));
+    close_after_maintenance(db, lock_fd);
+    return status;
 }
 
 /* Global context for HTTP handlers */
@@ -314,6 +422,38 @@ static int router_request_handler(Connection *conn,
 }
 
 /*
+ * The process's field keys: encryption_key stretched as the database's
+ * encryption_params row says, then HKDF. A database with nothing sealed yet gets
+ * its row now, with the method user secrets are hashed with and their most
+ * iterations, so it's stretched from the start. One whose values were sealed
+ * before the row existed keeps HKDF alone until --rekey adds the stretch.
+ * Returns 0, or -1 (logged).
+ */
+static int init_field_keys(db_handle_t *db, const config_t *config) {
+    encrypt_params_t params;
+    int have = encryption_params_get_or_make(db, stretch_method(config),
+                                             config->secret_hash_max_iterations, &params);
+    if (have == -1) return -1;
+
+    encrypt_keys_t keys;
+    if (encrypt_derive_keys(config->encryption_key, have == 0 ? &params : NULL, &keys) != 0) {
+        log_error("Failed to derive the field keys from encryption_key");
+        return -1;
+    }
+    encrypt_init_keys(&keys);
+    OPENSSL_cleanse(&keys, sizeof(keys));
+
+    if (have == 0) {
+        log_info("Field encryption initialized (encryption_key stretched with %s, %d iterations)",
+                 params.method, params.iterations);
+    } else {
+        log_warn("encryption_key is used without stretching (no encryption_params row): with "
+                 "every instance stopped, ./auth-server --rekey adds it (sql/README.md)");
+    }
+    return 0;
+}
+
+/*
  * The connection string db_connect takes: the SQLite path, or one built for
  * PostgreSQL in pg_buf. Returns 0, or -1 (logged).
  */
@@ -337,19 +477,24 @@ static int connection_string_for(const config_t *config, char *pg_buf, size_t pg
 
 int main(int argc, char **argv) {
     /* No arguments serves. One maintenance mode runs once and exits. */
-    bool drophistory = argc == 2 && strcmp(argv[1], "--drophistory") == 0;
-    if (argc > 1 && !drophistory) {
-        fprintf(stderr, "Usage: %s [--drophistory]\n"
+    const char *mode = argc == 2 ? argv[1] : NULL;
+    bool drophistory = mode && strcmp(mode, "--drophistory") == 0;
+    bool rekey = mode && strcmp(mode, "--rekey") == 0;
+    if (argc > 1 && !drophistory && !rekey) {
+        fprintf(stderr, "Usage: %s [--drophistory | --rekey]\n"
                         "  (no argument)    serve, configured by ./auth.conf\n"
                         "  --drophistory    remove every history table and its triggers, making\n"
-                        "                   them again if enable_history_tables is on; every\n"
-                        "                   instance must be stopped first\n",
+                        "                   them again if enable_history_tables is on\n"
+                        "  --rekey          seal everything sealed under encryption_key_previous\n"
+                        "                   again under encryption_key\n"
+                        "  Every instance must be stopped before either.\n",
                 argv[0]);
         return 2;
     }
 
     log_init(LOG_INFO);
-    log_info(drophistory ? "=== Auth Server: --drophistory ===" : "=== Auth Server Starting ===");
+    log_info(drophistory ? "=== Auth Server: --drophistory ===" :
+             rekey ? "=== Auth Server: --rekey ===" : "=== Auth Server Starting ===");
 
     /* Install signal handlers */
     setup_signal_handlers();
@@ -366,14 +511,22 @@ int main(int argc, char **argv) {
     /* Apply configured log level (parsed from config file / env var) */
     log_init(config->log_level);
 
-    if (drophistory) {
+    if (drophistory || rekey) {
         char pg_buf[512];
         const char *connection_string;
-        int rc = connection_string_for(config, pg_buf, sizeof(pg_buf), &connection_string) == 0
-                 ? run_drophistory(config, connection_string) : 1;
+        int rc = connection_string_for(config, pg_buf, sizeof(pg_buf), &connection_string) != 0 ? 1
+                 : drophistory ? run_drophistory(config, connection_string)
+                 : run_rekey(config, connection_string);
         OPENSSL_cleanse(pg_buf, sizeof(pg_buf));
         config_free(config);
         return rc;
+    }
+
+    /* Only --rekey reads it: a server has no use for the old passphrase */
+    if (config->encryption_key_previous) {
+        log_warn("encryption_key_previous is set, and only --rekey reads it: remove it once "
+                 "the re-key is done");
+        OPENSSL_cleanse(config->encryption_key_previous, strlen(config->encryption_key_previous));
     }
 
     /* An access token must stay verifiable for its whole life. Signing keeps the
@@ -459,12 +612,8 @@ int main(int argc, char **argv) {
     if (strcmp(config->encryption_key, "customize_me") == 0) {
         log_warn("Using default encryption key — set encryption_key in auth.conf or AUTH_ENCRYPTION_KEY env");
     }
-    if (encrypt_init(config->encryption_key) != 0) {
-        log_error("Failed to initialize MFA encryption");
-        config_free(config);
-        return 1;
-    }
-    OPENSSL_cleanse(config->encryption_key, strlen(config->encryption_key));
+    /* The field keys themselves are derived once the database is open: how the
+       key is stretched is recorded there (init_field_keys) */
 
     /* Determine number of workers (auto-detect if config specifies 0) */
     int num_workers = config->workers;
@@ -524,6 +673,15 @@ int main(int argc, char **argv) {
         log_error("Failed to initialize schema");
         db_pool_shutdown();
         encrypt_cleanup();
+        config_free(config);
+        return 1;
+    }
+
+    /* The field keys, from encryption_key as the database stretches it */
+    int keys_rc = init_field_keys(setup_db, config);
+    OPENSSL_cleanse(config->encryption_key, strlen(config->encryption_key));
+    if (keys_rc != 0) {
+        db_pool_shutdown();
         config_free(config);
         return 1;
     }

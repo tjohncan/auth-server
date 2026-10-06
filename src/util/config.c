@@ -591,6 +591,25 @@ static void set_config_value(config_t *config, const char *key, const char *valu
         } else {
             log_error("Failed to allocate memory for encryption_key_env");
         }
+    } else if (strcmp(key, "encryption_key_previous") == 0) {
+        new_value = str_dup(value);
+        if (new_value) {
+            if (config->encryption_key_previous) {
+                OPENSSL_cleanse(config->encryption_key_previous, strlen(config->encryption_key_previous));
+            }
+            free(config->encryption_key_previous);
+            config->encryption_key_previous = new_value;
+        } else {
+            log_error("Failed to allocate memory for encryption_key_previous");
+        }
+    } else if (strcmp(key, "encryption_key_previous_env") == 0) {
+        new_value = str_dup(value);
+        if (new_value) {
+            free(config->encryption_key_previous_env);
+            config->encryption_key_previous_env = new_value;
+        } else {
+            log_error("Failed to allocate memory for encryption_key_previous_env");
+        }
     }
 
     /* Logging settings */
@@ -847,6 +866,24 @@ static void apply_env_overrides(config_t *config) {
             if (config->encryption_key) OPENSSL_cleanse(config->encryption_key, strlen(config->encryption_key));
             free(config->encryption_key);
             config->encryption_key = new_value;
+            log_info("Config override from %s: [REDACTED]", env_var_name);
+        } else {
+            log_error("Failed to allocate memory for %s override", env_var_name);
+        }
+    }
+
+    /* ENCRYPTION_KEY_PREVIOUS */
+    env_var_name = config->encryption_key_previous_env ? config->encryption_key_previous_env
+                                                       : "AUTH_ENCRYPTION_KEY_PREVIOUS";
+    env_value = getenv(env_var_name);
+    if (env_value) {
+        char *new_value = str_dup(env_value);
+        if (new_value) {
+            if (config->encryption_key_previous) {
+                OPENSSL_cleanse(config->encryption_key_previous, strlen(config->encryption_key_previous));
+            }
+            free(config->encryption_key_previous);
+            config->encryption_key_previous = new_value;
             log_info("Config override from %s: [REDACTED]", env_var_name);
         } else {
             log_error("Failed to allocate memory for %s override", env_var_name);
@@ -1111,6 +1148,8 @@ config_t *config_load(const char *config_file) {
     config->db_password_env = NULL;
     config->db_owner_role_env = NULL;
     config->encryption_key_env = NULL;
+    config->encryption_key_previous_env = NULL;
+    config->encryption_key_previous = NULL;
     config->server_host_env = NULL;
     config->server_port_env = NULL;
     config->admin_port_env = NULL;
@@ -1346,6 +1385,9 @@ void config_free(config_t *config) {
     if (config->encryption_key) {
         OPENSSL_cleanse(config->encryption_key, strlen(config->encryption_key));
     }
+    if (config->encryption_key_previous) {
+        OPENSSL_cleanse(config->encryption_key_previous, strlen(config->encryption_key_previous));
+    }
 
     free(config->db_password);
     free(config->schema_dir);
@@ -1359,6 +1401,7 @@ void config_free(config_t *config) {
     free(config->db_password_env);
     free(config->db_owner_role_env);
     free(config->encryption_key_env);
+    free(config->encryption_key_previous_env);
     free(config->log_level_env);
     free(config->server_host_env);
     free(config->server_port_env);
@@ -1373,6 +1416,7 @@ void config_free(config_t *config) {
     free(config->machine_secret_pattern);
 
     free(config->encryption_key);
+    free(config->encryption_key_previous);
 
 #ifdef EMAIL_SUPPORT
     free(config->email_command);

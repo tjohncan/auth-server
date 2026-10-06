@@ -48,7 +48,8 @@ This server focuses on authentication logic.
 - JSON injection protection in error responses
 - SHA-256 hashed token storage (sessions, auth codes, refresh/access tokens)
 - AES-256-GCM encryption of sensitive information at rest (usernames, emails, MFA secrets,
-    JWT signing secrets and private keys) with HMAC-SHA256 blind indexes for lookups
+    JWT signing secrets and private keys) with HMAC-SHA256 blind indexes for lookups, under keys
+    stretched from a passphrase (Argon2id or PBKDF2) that `--rekey` can change
 
 **System Dependencies**
 - POSIX + pthreads
@@ -97,7 +98,9 @@ Database abstraction supporting SQLite and PostgreSQL.
     instance, and exclusively by a maintenance run, so a run happens with every instance stopped: a lock
     file beside an SQLite database, an advisory lock in PostgreSQL.
 - **Maintenance** (`maintenance.c`, `include/db/maintenance.h`) - One-shot runs of the same binary:
-    `./auth-server --drophistory` removes every history table and its triggers (sql/README.md).
+    `./auth-server --drophistory` removes every history table and its triggers, and
+    `./auth-server --rekey` seals everything sealed under one `encryption_key` again under another
+    (sql/README.md).
 
 ### Utilities (`src/util/`)
 Common helper functions.
@@ -125,7 +128,8 @@ Cryptographic primitives for OAuth2 security.
 - **Signing Keys** (`signing_keys.c`, `include/crypto/signing_keys.h`) - Automatic key rotation management for JWTs. 
     HMAC secrets for auth requests, ES256 keypairs for access tokens.
 - **Encrypt** (`encrypt.c`, `include/crypto/encrypt.h`) - AES-256-GCM field encryption and HMAC-SHA256 blind indexing 
-    for PII and security info at rest. HKDF-derived keys from config passphrase.
+    for PII and security info at rest. Keys from the config passphrase: stretched with Argon2id or PBKDF2
+    as the database's `encryption_params` row says, then HKDF.
 - **TOTP** (`totp.c`, `include/crypto/totp.h`) - RFC 6238 TOTP implementation for multi-factor authentication
 
 ### Handlers (`src/handlers/`)
@@ -298,7 +302,8 @@ Manages cryptographic signing keys for JWTs with automatic rotation.
     - A username or address that won't open means `encryption_key` isn't the key that sealed
       the data. The fix is to start with that one. A key lost for good loses everything sealed
       under it (every username, address and TOTP secret), and no one can sign in, so keep a
-      copy of `encryption_key` wherever the database is backed up.
+      copy of `encryption_key` wherever the database is backed up. To change it, `--rekey`
+      seals everything again under the new one (sql/README.md).
     - A signing key that won't open while the users do was sealed under another key: rows
       copied in from another deployment, say. The error names both tables. Deleting the rows
       in both regenerates the keys on next use, and refresh tokens and sessions survive that.

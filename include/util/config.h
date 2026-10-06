@@ -98,6 +98,7 @@ typedef struct {
 
     /* Encryption */
     char *encryption_key;          /* Passphrase for encrypting sensitive data at rest (AES-256-GCM) */
+    char *encryption_key_previous; /* --rekey only: the passphrase the data is sealed under now (NULL: unset) */
 
     /* Logging settings */
     LogLevel log_level;    /* Parsed log level enum (stored directly, no string) */
@@ -112,6 +113,7 @@ typedef struct {
     char *db_password_env; /* ENV var name for db_password */
     char *db_owner_role_env; /* ENV var name for db_owner_role */
     char *encryption_key_env;       /* ENV var name for encryption_key */
+    char *encryption_key_previous_env; /* ENV var name for encryption_key_previous */
     char *server_host_env;  /* ENV var name for server_host */
     char *server_port_env;  /* ENV var name for server_port */
     char *admin_port_env;   /* ENV var name for admin_port */

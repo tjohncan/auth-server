@@ -63,11 +63,16 @@ enable_history_tables = true
 # Passphrase used to derive keys for encrypting sensitive data at rest
 # Protects usernames, emails, MFA secrets and signing keys against database compromise
 # IMPORTANT: Customize this in production! Use encryption_key_env to load from environment
-# Set it before the first start and then leave it: re-keying isn't supported yet, so after
-# a change nothing sealed under the old value can be read, and nobody can sign in. The
-# server refuses to start with a key that doesn't open what the database already holds.
+# Set it before the first start. The server refuses to start with a key that doesn't open
+# what the database already holds. To change it, stop every instance and run
+# ./auth-server --rekey, with the key in use now as encryption_key_previous and the new one
+# as encryption_key; then remove encryption_key_previous (sql/README.md, --rekey).
+# The passphrase is stretched with the password hashing settings below, as they are at the
+# first start; the database records that, and a later change reaches it at the next --rekey.
 encryption_key = customize_me
 # encryption_key_env = MY_ENCRYPTION_KEY
+# encryption_key_previous =
+# encryption_key_previous_env = MY_PREVIOUS_ENCRYPTION_KEY
 
 # Password hashing (argon2id or pbkdf2-sha256) — do NOT change after users exist
 secret_hashing_algorithm = argon2id

@@ -100,6 +100,8 @@ Cryptographic signing keys for JWTs with automatic rotation.
 **Tables:**
 - `auth_request_signing` - HMAC secrets for stateless authorization code JWTs
 - `access_token_signing` - ES256 (ECDSA P-256) keypairs for access token JWTs
+- `encryption_params` - How `encryption_key` is stretched before the field keys are derived from
+  it: method, iterations and salt, in one row (`--rekey`, below)
 
 **Design:**
 - Singleton tables (single row enforced via CHECK constraint)
@@ -475,6 +477,99 @@ DROP FUNCTION S_history."tg_fn_T_before_update"() CASCADE;
 DROP FUNCTION S_history."tg_fn_T_before_delete"() CASCADE;
 DROP TABLE S_history."T";
 ```
+
+### Changing the Encryption Key: `--rekey`
+
+Usernames, email addresses, TOTP secrets and the signing keys are sealed under keys derived from
+`encryption_key`. `--rekey` seals them all again under keys from a new one. With every instance
+stopped (the instance lock enforces it, as for `--drophistory`):
+
+```bash
+AUTH_ENCRYPTION_KEY_PREVIOUS='the passphrase in use now' \
+AUTH_ENCRYPTION_KEY='the new passphrase' ./auth-server --rekey
+```
+
+`encryption_key_previous` (or `AUTH_ENCRYPTION_KEY_PREVIOUS`) is the passphrase the data is sealed
+under now, and `encryption_key` the new one. Then start every instance with the new
+`encryption_key`, and remove `encryption_key_previous`: only `--rekey` reads it.
+
+**How a passphrase becomes keys.** It's stretched with the method user passwords are hashed with
+(`secret_hashing_algorithm`, at `secret_hash_max_iterations`) and a random salt of the
+deployment's own; HKDF then derives the AES key and the blind indexes' HMAC key. The method,
+iterations and salt are kept in `encryption_params`, so the stretch belongs to the database, not
+to the configuration: changing the hashing settings changes nothing until the next `--rekey`. A
+new database gets its row at the first start. Someone holding only the database then pays one
+hash under that method for each guess at the passphrase, which matters for a passphrase a person
+chose; a long random one needs no stretch. A database without the row derives its keys by HKDF
+alone, as before `encryption_params` existed, and the server warns about it at every start.
+
+In one transaction, `--rekey`:
+- opens every sealed value with the old keys and seals it again with the new ones, stretched with
+  the configured method and a fresh salt: `user_account.username`, `user_email.email_address`,
+  `passwordless_login_token.email_address`, `user_mfa.secret`, and both signing tables' current
+  and prior keys. A signing key in the older plaintext format is left as it is.
+- makes the blind indexes again from the opened values (`username_hash`, `email_hash`).
+- records the new stretch in `encryption_params`.
+- writes no history. A history trigger keeps the row as it was, so each change would copy the
+  old-key value into history again, dated now. SQLite: the re-sealed tables' history triggers
+  are dropped for the run and made again from their saved SQL. PostgreSQL: their update
+  functions return without writing until they're put back from their saved definitions.
+
+A value the old key won't open rolls everything back, naming its table and row. After COMMIT
+the replaced ciphertext and the old blind indexes are still in the files, so the run scrubs them:
+on SQLite it rewrites the file (`VACUUM`) and empties the `-wal` file; on PostgreSQL it runs
+`VACUUM FULL` on the re-sealed tables, which rewrites them and their indexes. It prints what it
+re-sealed, per kind.
+
+- **Keeping the passphrase.** Give the same passphrase as both: everything is sealed again under
+  keys from a fresh salt and the configured stretch. That's how a database made before
+  `encryption_params` gets its stretch, and how a new hashing method or iteration count takes
+  effect.
+- **History** made before the re-key stays sealed under the old key. After a leak, run
+  `--drophistory` next; `--rekey` says how many history tables hold some.
+- **Backups, WAL archives and replicas** made before the scrub hold the old-key values, as they
+  did before the re-key, and so does any copy of the old database. A leaked passphrase still
+  opens those.
+- **PostgreSQL hardened per `setup_reference.sql`.** Grant the owner role for the run, as for
+  `--drophistory`. Setting the history functions aside replaces them, which takes CREATE on
+  the history schemas, and `VACUUM FULL` takes the tables' owner. Without the grant, with history
+  on, the run fails at the start and changes nothing. With history off it re-keys, then fails to
+  scrub: it says so and exits non-zero, and `VACUUM FULL` on the re-sealed tables, as the owner,
+  finishes it.
+  ```sql
+  grant auth_dbo to auth_service;
+  -- ./auth-server --rekey
+  revoke auth_dbo from auth_service;
+  ```
+- **Databases made before `encryption_params` existed** need the table, added by hand like any
+  schema change, before `--rekey` will run. The server runs without it as before.
+  ```sql
+  -- SQLite
+  create table encryption_params (
+    singleton integer not null default 1
+  , method text not null
+  , iterations integer not null
+  , salt text not null
+  , created_at text not null default (datetime('now'))
+  , constraint ck_encryption_params_singleton check(singleton = 1)
+  , constraint uix_encryption_params_singleton unique(singleton)
+  , constraint ck_encryption_params_method check(method in ('argon2id', 'pbkdf2-sha256'))
+  );
+
+  -- PostgreSQL, as the owner role (set role auth_dbo)
+  create table keys.encryption_params (
+    singleton boolean not null default true
+  , method text not null
+  , iterations integer not null
+  , salt text not null
+  , created_at timestamp not null default current_timestamp
+  , constraint ck_encryption_params_singleton check(singleton = true)
+  , constraint uix_encryption_params_singleton unique(singleton)
+  , constraint ck_encryption_params_method check(method in ('argon2id', 'pbkdf2-sha256'))
+  );
+  -- hardened per setup_reference.sql: the login role's grant on it
+  grant select, insert, update, delete on keys.encryption_params to auth_service;
+  ```
 
 ### SQLite-Specific: Incremental Vacuum
 

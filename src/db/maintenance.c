@@ -1,9 +1,13 @@
 #include "db/maintenance.h"
 #include "db/db_sql.h"
+#include "db/encryption_params.h"
 #include "db/init/db_history.h"
 #include "util/log.h"
+#include "util/str.h"
 
+#include <openssl/crypto.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* A catalog name as an SQL identifier: in double quotes, any inside doubled */
@@ -16,6 +20,21 @@ static void quote_ident(char *out, size_t size, const char *name) {
     }
     out[n++] = '"';
     out[n] = '\0';
+}
+
+/* SQLite, after a run: VACUUM rewrites the file without the old contents of
+   freed pages, and a truncating checkpoint empties the -wal file, which must find
+   no other connection busy. Returns 0, or -1. */
+static int sqlite_scrub(db_handle_t *db) {
+    db_result_t *checkpoint = NULL;
+    if (db_execute_direct(db, "VACUUM") != 0 ||
+        db_query(db, &checkpoint, "%s", "PRAGMA wal_checkpoint(TRUNCATE)") != 0) {
+        return -1;
+    }
+    const char *busy = db_result_row_count(checkpoint) == 1 ? db_result_get(checkpoint, 0, 0) : NULL;
+    int scrubbed = busy && strcmp(busy, "0") == 0;
+    db_result_free(checkpoint);
+    return scrubbed ? 0 : -1;
 }
 
 /* Run one DROP of a catalog object (schema may be NULL), logging what went */
@@ -116,21 +135,330 @@ int maintenance_drop_history(db_handle_t *db, db_type_t type, int rebuild,
     if (type != DB_TYPE_SQLITE) return 0;
 
     /* The dropped rows' pages are free but still in the file, and their page
-       images may be in the -wal file: VACUUM rewrites the one, a truncating
-       checkpoint empties the other */
-    db_result_t *checkpoint = NULL;
-    if (db_execute_direct(db, "VACUUM") != 0 ||
-        db_query(db, &checkpoint, "%s", "PRAGMA wal_checkpoint(TRUNCATE)") != 0) {
-        log_error("History is gone, but the file couldn't be scrubbed: run VACUUM, then "
-                  "PRAGMA wal_checkpoint(TRUNCATE), with every instance stopped");
+       images may be in the -wal file */
+    if (sqlite_scrub(db) != 0) {
+        log_error("History is gone, but the file may still hold its pages (VACUUM failed, or "
+                  "another connection held the -wal file): with every instance stopped, run "
+                  "VACUUM, then PRAGMA wal_checkpoint(TRUNCATE)");
         return -2;
     }
-    const char *busy = db_result_row_count(checkpoint) == 1 ? db_result_get(checkpoint, 0, 0) : NULL;
-    int scrubbed = busy && strcmp(busy, "0") == 0;
-    db_result_free(checkpoint);
-    if (!scrubbed) {
-        log_error("History is gone, but another connection held the -wal file, which may still "
-                  "hold its pages: with every instance stopped, run PRAGMA wal_checkpoint(TRUNCATE)");
+    return 0;
+}
+
+/* ============================================================================
+ * --rekey
+ * ========================================================================== */
+
+/* A row to re-seal: its key (a pin, or a 16-byte id) and its sealed value */
+typedef struct {
+    long long pin;
+    unsigned char id[16];
+    char *sealed;
+} reseal_row_t;
+
+static void free_rows(reseal_row_t *rows, int count) {
+    for (int i = 0; i < count; i++) {
+        if (rows[i].sealed) OPENSSL_cleanse(rows[i].sealed, strlen(rows[i].sealed));
+        free(rows[i].sealed);
+    }
+    free(rows);
+}
+
+/* Every (key, sealed value) a statement reads, read in full before anything is
+   written. Returns 0, or -1. */
+static int load_rows(db_handle_t *db, const char *sql, int by_id,
+                     reseal_row_t **out, int *count) {
+    *out = NULL;
+    *count = 0;
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) return -1;
+
+    int capacity = 0, rc;
+    while ((rc = db_step(stmt)) == DB_ROW) {
+        if (*count == capacity) {
+            capacity = capacity ? capacity * 2 : 64;
+            reseal_row_t *grown = realloc(*out, (size_t)capacity * sizeof(**out));
+            if (!grown) break;
+            *out = grown;
+        }
+        reseal_row_t *row = &(*out)[*count];
+        memset(row, 0, sizeof(*row));
+        if (by_id) {
+            const unsigned char *id = db_column_blob(stmt, 0);
+            if (!id || db_column_bytes(stmt, 0) != 16) break;
+            memcpy(row->id, id, 16);
+        } else {
+            row->pin = db_column_int64(stmt, 0);
+        }
+        const char *value = db_column_text(stmt, 1);
+        row->sealed = value ? str_dup(value) : NULL;
+        if (value && !row->sealed) break;
+        (*count)++;
+    }
+    db_finalize(stmt);
+    if (rc != DB_DONE) {
+        free_rows(*out, *count);
+        *out = NULL;
+        *count = 0;
+        return -1;
+    }
+    return 0;
+}
+
+/* The tables with sealed values, keyed by pin or id; those with a blind index
+   also have it written (P2), and their key binds third rather than second */
+static const struct {
+    const char *table;
+    const char *select;
+    const char *update;
+    int by_id;
+    int indexed;
+} RESEALED[] = {
+    { "user_account", "SELECT pin, username FROM " TBL_USER_ACCOUNT " WHERE username IS NOT NULL",
+      "UPDATE " TBL_USER_ACCOUNT " SET username = " P"1, username_hash = " P"2 WHERE pin = " P"3",
+      0, 1 },
+    { "user_email", "SELECT pin, email_address FROM " TBL_USER_EMAIL,
+      "UPDATE " TBL_USER_EMAIL " SET email_address = " P"1, email_hash = " P"2 WHERE pin = " P"3",
+      0, 1 },
+    { "passwordless_login_token", "SELECT id, email_address FROM " TBL_PASSWORDLESS_LOGIN_TOKEN,
+      "UPDATE " TBL_PASSWORDLESS_LOGIN_TOKEN " SET email_address = " P"1 WHERE id = " P"2",
+      1, 0 },
+    { "user_mfa", "SELECT pin, secret FROM " TBL_USER_MFA,
+      "UPDATE " TBL_USER_MFA " SET secret = " P"1 WHERE pin = " P"2",
+      0, 0 },
+};
+#define RESEALED_COUNT (sizeof(RESEALED) / sizeof(RESEALED[0]))
+
+/* Re-seal one table's values, and its blind index. Returns the rows done, or -1. */
+static int reseal_table(db_handle_t *db, size_t t, const encrypt_keys_t *old_keys,
+                        const encrypt_keys_t *new_keys) {
+    reseal_row_t *rows = NULL;
+    int count = 0;
+    if (load_rows(db, RESEALED[t].select, RESEALED[t].by_id, &rows, &count) != 0) {
+        log_error("Failed to read %s", RESEALED[t].table);
+        return -1;
+    }
+
+    int done = 0;
+    for (int i = 0; i < count; i++) {
+        /* lower is the size every lookup lowercases into, so the index matches theirs */
+        char plaintext[ENCRYPT_FIELD_MAX_LENGTH + 1], sealed[512], lower[256];
+        char index[65];
+        int ok = rows[i].sealed &&
+                 decrypt_field_with(old_keys, rows[i].sealed, plaintext, sizeof(plaintext)) == 0;
+        if (!ok) {
+            if (RESEALED[t].by_id) {
+                char id_hex[33];
+                for (int b = 0; b < 16; b++) snprintf(id_hex + 2 * b, 3, "%02x", rows[i].id[b]);
+                log_error("encryption_key_previous doesn't open %s id %s", RESEALED[t].table, id_hex);
+            } else {
+                log_error("encryption_key_previous doesn't open %s pin %lld",
+                          RESEALED[t].table, rows[i].pin);
+            }
+            break;
+        }
+        str_to_lower(lower, sizeof(lower), plaintext);
+        ok = encrypt_field_with(new_keys, plaintext, sealed, sizeof(sealed)) == 0 &&
+             (!RESEALED[t].indexed || hash_field_with(new_keys, lower, index, sizeof(index)) == 0);
+        OPENSSL_cleanse(plaintext, sizeof(plaintext));
+        OPENSSL_cleanse(lower, sizeof(lower));
+        if (!ok) break;
+
+        db_stmt_t *stmt = NULL;
+        if (db_prepare(db, &stmt, RESEALED[t].update) != 0) break;
+        int key_at = 2;
+        db_bind_text(stmt, 1, sealed, -1);
+        if (RESEALED[t].indexed) db_bind_text(stmt, key_at++, index, -1);
+        if (RESEALED[t].by_id) db_bind_blob(stmt, key_at, rows[i].id, 16);
+        else db_bind_int64(stmt, key_at, rows[i].pin);
+        int rc = db_step(stmt);
+        db_finalize(stmt);
+        if (rc != DB_DONE) {
+            log_error("Failed to write %s", RESEALED[t].table);
+            break;
+        }
+        done++;
+    }
+
+    int all = done == count;
+    free_rows(rows, count);
+    return all ? done : -1;
+}
+
+/* The signing keys: e1: values, current and prior, re-sealed in both tables.
+   One in the older plaintext format is left as it is. Returns the values done,
+   or -1. */
+static int reseal_signing_keys(db_handle_t *db, const encrypt_keys_t *old_keys,
+                               const encrypt_keys_t *new_keys) {
+    static const struct { const char *table, *select, *update; } TABLES[] = {
+        { TBL_AUTH_REQUEST_SIGNING,
+          "SELECT current_secret, prior_secret FROM " TBL_AUTH_REQUEST_SIGNING,
+          "UPDATE " TBL_AUTH_REQUEST_SIGNING " SET current_secret = " P"1, prior_secret = " P"2 "
+          "WHERE singleton = " BOOL_TRUE },
+        { TBL_ACCESS_TOKEN_SIGNING,
+          "SELECT current_private_key, prior_private_key FROM " TBL_ACCESS_TOKEN_SIGNING,
+          "UPDATE " TBL_ACCESS_TOKEN_SIGNING " SET current_private_key = " P"1, "
+          "prior_private_key = " P"2 WHERE singleton = " BOOL_TRUE },
+    };
+
+    int done = 0;
+    for (size_t t = 0; t < sizeof(TABLES) / sizeof(TABLES[0]); t++) {
+        db_result_t *row = NULL;
+        if (db_query(db, &row, "%s", TABLES[t].select) != 0) {
+            log_error("Failed to read %s", TABLES[t].table);
+            return -1;
+        }
+        if (db_result_row_count(row) != 1) {  /* no keys made yet */
+            db_result_free(row);
+            continue;
+        }
+
+        char resealed[2][520];
+        const char *values[2];
+        int failed = 0;
+        for (int c = 0; c < 2 && !failed; c++) {
+            const char *stored = db_result_get(row, 0, c);
+            values[c] = stored;
+            if (!stored || strncmp(stored, "e1:", 3) != 0) continue;
+
+            char plaintext[ENCRYPT_FIELD_MAX_LENGTH + 1];
+            memcpy(resealed[c], "e1:", 3);
+            failed = decrypt_field_with(old_keys, stored + 3, plaintext, sizeof(plaintext)) != 0 ||
+                     encrypt_field_with(new_keys, plaintext, resealed[c] + 3,
+                                        sizeof(resealed[c]) - 3) != 0;
+            OPENSSL_cleanse(plaintext, sizeof(plaintext));
+            if (failed) {
+                log_error("encryption_key_previous doesn't open %s's %s key",
+                          TABLES[t].table, c == 0 ? "current" : "prior");
+            } else {
+                values[c] = resealed[c];
+                done++;
+            }
+        }
+
+        db_stmt_t *stmt = NULL;
+        if (!failed && db_prepare(db, &stmt, TABLES[t].update) == 0) {
+            db_bind_text_or_null(stmt, 1, values[0]);
+            db_bind_text_or_null(stmt, 2, values[1]);
+            failed = db_step(stmt) != DB_DONE;
+            db_finalize(stmt);
+        } else {
+            failed = 1;
+        }
+        OPENSSL_cleanse(resealed, sizeof(resealed));
+        db_result_free(row);
+        if (failed) return -1;
+    }
+    return done;
+}
+
+int maintenance_rekey(db_handle_t *db, db_type_t type, const encrypt_keys_t *old_keys,
+                      const encrypt_keys_t *new_keys, const encrypt_params_t *new_params,
+                      rekey_report_t *out) {
+    if (!db || !old_keys || !new_keys || !new_params || !out) return -1;
+    memset(out, 0, sizeof(*out));
+
+    /* What writes history for the re-sealed tables, saved to be put back exactly:
+       SQLite, the history triggers' SQL; PostgreSQL, the before-update functions'
+       definitions (the re-key only updates) */
+    db_result_t *saved = NULL;
+    const char *saved_sql = type == DB_TYPE_SQLITE
+        ? "SELECT NULL, name, sql FROM sqlite_master WHERE type = 'trigger' "
+          "AND tbl_name IN ('user_account', 'user_email', 'passwordless_login_token', 'user_mfa') "
+          "AND sql LIKE '%INSERT INTO \"history\\_\\_%' ESCAPE '\\'"
+        : "SELECT n.nspname, p.proname, pg_get_functiondef(p.oid) FROM pg_proc p "
+          "JOIN pg_namespace n ON n.oid = p.pronamespace "
+          "WHERE n.nspname IN ('security_history', 'session_history', 'logging_history', "
+          "'lookup_history') AND p.proname IN ('tg_fn_user_account_before_update', "
+          "'tg_fn_user_email_before_update', 'tg_fn_passwordless_login_token_before_update', "
+          "'tg_fn_user_mfa_before_update')";
+    if (db_query(db, &saved, "%s", saved_sql) != 0) {
+        log_error("Failed to read the history triggers of the re-sealed tables");
+        return -1;
+    }
+
+    if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
+        log_error("Failed to begin the re-key");
+        db_result_free(saved);
+        return -1;
+    }
+
+    int failed = 0;
+    for (int i = 0; i < db_result_row_count(saved) && !failed; i++) {
+        if (type == DB_TYPE_SQLITE) {
+            failed = drop(db, "DROP TRIGGER %s", NULL, db_result_get(saved, i, 1)) != 0;
+        } else {
+            char quoted_schema[160], quoted_name[160], sql[512];
+            quote_ident(quoted_schema, sizeof(quoted_schema), db_result_get(saved, i, 0));
+            quote_ident(quoted_name, sizeof(quoted_name), db_result_get(saved, i, 1));
+            snprintf(sql, sizeof(sql),
+                     "CREATE OR REPLACE FUNCTION %s.%s() RETURNS trigger LANGUAGE plpgsql "
+                     "AS $$ BEGIN RETURN NEW; END $$", quoted_schema, quoted_name);
+            failed = db_execute_direct(db, sql) != 0;
+            if (failed) {
+                log_error("Failed to set history aside for the run. On a PostgreSQL hardened per "
+                          "setup_reference.sql, grant the owner role to the login role for the "
+                          "run (grant auth_dbo to auth_service), and revoke it after.");
+            }
+        }
+    }
+
+    int *counts[] = { &out->usernames, &out->addresses, &out->passwordless, &out->mfa_secrets };
+    for (size_t t = 0; t < RESEALED_COUNT && !failed; t++) {
+        int done = reseal_table(db, t, old_keys, new_keys);
+        failed = done < 0;
+        if (!failed) *counts[t] = done;
+    }
+    if (!failed) {
+        out->signing_keys = reseal_signing_keys(db, old_keys, new_keys);
+        failed = out->signing_keys < 0;
+    }
+    if (!failed) {
+        failed = encryption_params_store(db, new_params) != 0;
+    }
+
+    /* History written as before, from here on */
+    for (int i = 0; i < db_result_row_count(saved) && !failed; i++) {
+        failed = db_execute_direct(db, db_result_get(saved, i, 2)) != 0;
+        if (failed) log_error("Failed to put back %s", db_result_get(saved, i, 1));
+    }
+    db_result_free(saved);
+
+    if (failed || db_execute_trusted(db, "COMMIT") != 0) {
+        db_execute_trusted(db, "ROLLBACK");
+        log_error("The re-key was rolled back: nothing changed");
+        memset(out, 0, sizeof(*out));
+        return -1;
+    }
+
+    /* History made before still holds old-key values */
+    db_result_t *history = NULL;
+    const char *history_sql = type == DB_TYPE_SQLITE
+        ? "SELECT count(*) FROM sqlite_master WHERE type = 'table' "
+          "AND name LIKE 'history\\_\\_%' ESCAPE '\\'"
+        : "SELECT count(*) FROM pg_tables WHERE schemaname IN ('security_history', "
+          "'session_history', 'logging_history', 'lookup_history')";
+    if (db_query(db, &history, "%s", history_sql) == 0 && db_result_row_count(history) == 1) {
+        out->history_tables = atoi(db_result_get(history, 0, 0));
+    }
+    db_result_free(history);
+
+    /* The replaced old-key ciphertext is still in the files, and so are the old
+       blind indexes in the old index entries */
+    if (type == DB_TYPE_SQLITE) {
+        if (sqlite_scrub(db) != 0) {
+            log_error("Re-keyed, but the file may still hold old-key values (VACUUM failed, or "
+                      "another connection held the -wal file): with every instance stopped, run "
+                      "VACUUM, then PRAGMA wal_checkpoint(TRUNCATE)");
+            return -2;
+        }
+    } else if (db_execute_direct(db, "VACUUM FULL " TBL_USER_ACCOUNT ", " TBL_USER_EMAIL ", "
+                                     TBL_PASSWORDLESS_LOGIN_TOKEN ", " TBL_USER_MFA ", "
+                                     TBL_AUTH_REQUEST_SIGNING ", " TBL_ACCESS_TOKEN_SIGNING) != 0) {
+        log_error("Re-keyed, but the old values are still in dead tuples: as the tables' owner "
+                  "(on a hardened deployment, grant auth_dbo to auth_service for it), run "
+                  "VACUUM FULL on user_account, user_email, passwordless_login_token, user_mfa "
+                  "and both signing tables");
         return -2;
     }
     return 0;

@@ -114,10 +114,17 @@ docker compose up -d --build
 docker compose run --rm certbot renew
 docker compose exec nginx nginx -s reload
 
-# A maintenance run (--drophistory, sql/README.md) needs every instance stopped; it
-# refuses to run otherwise, and an instance won't start while it runs
+# A maintenance run (--drophistory, --rekey; sql/README.md) needs every instance stopped;
+# it refuses to run otherwise, and an instance won't start while it runs
 docker compose stop auth-server
 docker compose run --rm auth-server --drophistory
+docker compose start auth-server
+
+# Changing the encryption key: export the key in use now as AUTH_ENCRYPTION_KEY_PREVIOUS
+# and the new one as AUTH_ENCRYPTION_KEY in this shell; after the run, put the new one in
+# auth.conf, then start
+docker compose stop auth-server
+docker compose run --rm -e AUTH_ENCRYPTION_KEY_PREVIOUS -e AUTH_ENCRYPTION_KEY auth-server --rekey
 docker compose start auth-server
 ```
 
@@ -196,6 +203,7 @@ overridden by environment variables (useful for Docker and secrets management).
 | `AUTH_DB_PASSWORD`    | `db_password`    | PostgreSQL password      | —              |
 | `AUTH_DB_OWNER_ROLE`  | `db_owner_role`  | Schema owner role        | (db_user)      |
 | `AUTH_ENCRYPTION_KEY` | `encryption_key` | Field encryption key     | `customize_me` |
+| `AUTH_ENCRYPTION_KEY_PREVIOUS` | `encryption_key_previous` | The key data is sealed under now, for `--rekey` only | — |
 | `AUTH_LOG_LEVEL`      | `log_level`      | `debug/info/warn/error`  | `info`         |
 | `AUTH_EMAIL_COMMAND`  | `email_command`  | Email delivery script    | —              |
 | `AUTH_EMAIL_FROM`     | `email_from`     | Sender address           | —              |
