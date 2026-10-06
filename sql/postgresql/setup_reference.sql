@@ -56,6 +56,9 @@ alter database auth set search_path = security, session, lookup;
 -- Remove DDL capability from service role
 revoke auth_dbo from auth_service;
 
+-- Connecting came with that membership too (step 4 revoked it from public)
+grant connect on database auth to auth_service;
+
 -- Grant runtime DML privileges explicitly
 grant usage on schema security, session, lookup, logging, keys to auth_service;
 
