@@ -1634,6 +1634,45 @@ static int test_single_use(const config_t *config) {
     }
     log_info("  verification link: works once; used, revoked or expired, refused (OK)");
 
+    /* 2c. Overlapping re-invitations: each voids only what was issued before it,
+           whichever order the voiding runs in, so the later link still works.
+           Two from the same second both do. */
+    char early[64], late[64], tie_a[64], tie_b[64];
+    invitation_token_lookup_t looked;
+    char *invites[4] = { early, late, tie_a, tie_b };
+    const char *issued[4] = { "-1 hour", "-0 seconds", "-2 hours", "-2 hours" };
+    for (int i = 0; i < 4; i++) {
+        char invite_hash[SHA256_HEX_LENGTH];
+        if (user_create_invitation_token(sdb, 1, 0, 3600, NULL, invites[i]) != 0 ||
+            crypto_sha256_hex(invites[i], strlen(invites[i]), invite_hash, sizeof(invite_hash)) != 0) {
+            log_error("Single-use: could not create an invitation");
+            goto done;
+        }
+        snprintf(sql, sizeof(sql), "UPDATE invitation_token SET issued_at = "
+                 "datetime('now', '%s') WHERE token = '%s'", issued[i], invite_hash);
+        if (db_execute_direct(sdb, sql) != 0) {
+            log_error("Single-use: could not date an invitation");
+            goto done;
+        }
+    }
+    if (user_void_earlier_invitations(sdb, early) != 0 ||
+        user_void_earlier_invitations(sdb, late) != 0 ||
+        user_lookup_invitation_token(sdb, late, &looked) != 0 ||
+        user_lookup_invitation_token(sdb, early, &looked) != 1) {
+        log_error("Single-use: overlapping invitations voided the later one, or kept the earlier");
+        goto done;
+    }
+    if (db_execute_direct(sdb, "UPDATE invitation_token SET is_used = 0 "
+                               "WHERE issued_at < datetime('now', '-90 minutes')") != 0 ||
+        user_void_earlier_invitations(sdb, tie_a) != 0 ||
+        user_void_earlier_invitations(sdb, tie_b) != 0 ||
+        user_lookup_invitation_token(sdb, tie_a, &looked) != 0 ||
+        user_lookup_invitation_token(sdb, tie_b, &looked) != 0) {
+        log_error("Single-use: two invitations issued together voided each other");
+        goto done;
+    }
+    log_info("  overlapping invitations: the later is kept; two at once both are (OK)");
+
     /* 3. A live link for an account that is inactive, flagged directly, so no
           sweep has voided the link: refused, and the password stays */
     char inactive_invite[64];

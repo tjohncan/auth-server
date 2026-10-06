@@ -1327,6 +1327,12 @@ static int test_provisioning(void) {
     printf("✓ a pending address finds its account, and without email isn't invited again\n");
 #else
     for (int i = 1; i < 5; i++) {
+        /* Earlier links issued earlier: SQLite dates to the second, and two from
+           the same second both stay valid */
+        if (db_execute_direct(db_pool_get_connection(), "UPDATE invitation_token SET "
+                              "issued_at = datetime(issued_at, '-2 seconds')") != 0) {
+            FAIL("could not date the earlier invitations");
+        }
         r = provision("pending@example.com");
         if (!provisioned(&r, user, 0) ||
             invited(&r, "pending@example.com", tokens[i], sizeof(tokens[i])) != 0) {

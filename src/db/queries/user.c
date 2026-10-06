@@ -2635,9 +2635,9 @@ int user_create_invitation_token(db_handle_t *db,
     return 0;
 }
 
-int user_void_other_invitations(db_handle_t *db, const char *token) {
+int user_void_earlier_invitations(db_handle_t *db, const char *token) {
     if (!db || !token) {
-        log_error("Invalid arguments to user_void_other_invitations");
+        log_error("Invalid arguments to user_void_earlier_invitations");
         return -1;
     }
 
@@ -2647,13 +2647,18 @@ int user_void_other_invitations(db_handle_t *db, const char *token) {
         return -1;
     }
 
-    /* Voided as used, which is what refuses them */
+    /* Voided as used, which is what refuses them. Only those issued before this
+     * one: two re-invitations that overlap each void the other's link otherwise,
+     * and neither works. This way the later keeps its link, and two issued in the
+     * same second (SQLite's resolution) both keep theirs. */
     const char *sql =
         "UPDATE " TBL_INVITATION_TOKEN " "
         "SET is_used = " BOOL_TRUE ", used_at = " NOW ", updated_at = " NOW " "
         "WHERE user_account_pin = ("
             "SELECT user_account_pin FROM " TBL_INVITATION_TOKEN " WHERE token = " P"1"
-        ") AND token != " P"1 AND is_used = " BOOL_FALSE;
+        ") AND issued_at < ("
+            "SELECT issued_at FROM " TBL_INVITATION_TOKEN " WHERE token = " P"1"
+        ") AND is_used = " BOOL_FALSE;
 
     db_stmt_t *stmt = NULL;
     if (db_prepare(db, &stmt, sql) != 0) {

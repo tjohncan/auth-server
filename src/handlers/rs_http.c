@@ -211,7 +211,7 @@ HttpResponse *rs_provision_user_handler(const HttpRequest *req) {
             int sent = body_text && body_html &&
                        email_send(g_config, email, "Set up your account",
                                   body_text, body_html) == 0;
-            if (sent && user_void_other_invitations(auth.db, info.invitation_token) != 0) {
+            if (sent && user_void_earlier_invitations(auth.db, info.invitation_token) != 0) {
                 log_error("Invitation emailed, but the account's earlier ones are still valid");
             }
             jsonbuf_appendf(jb, ",\"invitation\":{\"emailed\":%s}", sent ? "true" : "false");
