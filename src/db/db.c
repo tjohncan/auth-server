@@ -605,13 +605,31 @@ static int sqlite_finalize(db_stmt_t *stmt) {
 #define PG_UUID_OID    2950
 
 /*
+ * Why a statement or connection failed, for the log line, as sqlite3_errmsg
+ * gives SQLite's. A statement's primary message only: its DETAIL can quote key
+ * values. Else the connection's message, which spans lines; it's folded onto one.
+ */
+static void pg_reason(const PGresult *result, const PGconn *conn, char *out, size_t size) {
+    const char *msg = result ? PQresultErrorField(result, PG_DIAG_MESSAGE_PRIMARY) : NULL;
+    if (!msg) msg = conn ? PQerrorMessage(conn) : "";
+    size_t n = 0;
+    for (const char *c = msg; *c && n + 1 < size; c++) {
+        out[n++] = (*c == '\n' || *c == '\r') ? ' ' : *c;
+    }
+    while (n > 0 && out[n - 1] == ' ') n--;
+    out[n] = '\0';
+}
+
+/*
  * Connect to PostgreSQL database
  */
 static int pg_connect(db_handle_t *db, const char *connection_string) {
     PGconn *conn = PQconnectdb(connection_string);
     if (PQstatus(conn) != CONNECTION_OK) {
-        str_copy(db->error_msg, sizeof(db->error_msg),
-                 "PostgreSQL connection failed");
+        char reason[384];
+        pg_reason(NULL, conn, reason, sizeof(reason));
+        snprintf(db->error_msg, sizeof(db->error_msg),
+                 "PostgreSQL connection failed: %s", reason);
         log_error("%s", db->error_msg);
         PQfinish(conn);
         return -1;
@@ -663,8 +681,10 @@ static int pg_reconnect(db_handle_t *db) {
     PQreset(conn);
 
     if (PQstatus(conn) != CONNECTION_OK) {
-        str_copy(db->error_msg, sizeof(db->error_msg),
-                 "PostgreSQL reconnect failed");
+        char reason[384];
+        pg_reason(NULL, conn, reason, sizeof(reason));
+        snprintf(db->error_msg, sizeof(db->error_msg),
+                 "PostgreSQL reconnect failed: %s", reason);
         log_error("%s", db->error_msg);
         return -1;
     }
@@ -690,8 +710,10 @@ static int pg_execute(db_handle_t *db, const char *sql) {
     ExecStatusType status = PQresultStatus(result);
 
     if (status != PGRES_COMMAND_OK && status != PGRES_TUPLES_OK) {
-        str_copy(db->error_msg, sizeof(db->error_msg),
-                 "PostgreSQL execute failed");
+        char reason[384];
+        pg_reason(result, conn, reason, sizeof(reason));
+        snprintf(db->error_msg, sizeof(db->error_msg),
+                 "PostgreSQL execute failed: %s", reason);
         log_error("%s", db->error_msg);
         PQclear(result);
         if (PQstatus(conn) == CONNECTION_BAD)
@@ -712,8 +734,10 @@ static int pg_query(db_handle_t *db, const char *sql, db_result_t **out) {
     ExecStatusType status = PQresultStatus(pg_result);
 
     if (status != PGRES_TUPLES_OK) {
-        str_copy(db->error_msg, sizeof(db->error_msg),
-                 "PostgreSQL query failed");
+        char reason[384];
+        pg_reason(pg_result, conn, reason, sizeof(reason));
+        snprintf(db->error_msg, sizeof(db->error_msg),
+                 "PostgreSQL query failed: %s", reason);
         log_error("%s", db->error_msg);
         PQclear(pg_result);
         if (PQstatus(conn) == CONNECTION_BAD)
@@ -1092,8 +1116,10 @@ static int pg_step(db_stmt_t *stmt) {
         ExecStatusType status = PQresultStatus(stmt->pg_result);
 
         if (status != PGRES_TUPLES_OK && status != PGRES_COMMAND_OK) {
-            str_copy(stmt->error_msg, sizeof(stmt->error_msg),
-                     "PostgreSQL step failed");
+            char reason[384];
+            pg_reason(stmt->pg_result, conn, reason, sizeof(reason));
+            snprintf(stmt->error_msg, sizeof(stmt->error_msg),
+                     "PostgreSQL step failed: %s", reason);
             log_error("%s", stmt->error_msg);
             PQclear(stmt->pg_result);
             stmt->pg_result = NULL;
