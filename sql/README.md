@@ -428,6 +428,54 @@ CREATE INDEX idx_recovery_code_set_cleanup ON recovery_code_set(is_active, revok
 - Automatically created when history tables are generated
 - Index on `history_created_at` for efficient purging of old audit records
 
+### Removing History: `--drophistory`
+
+History keeps the old values of changed and deleted rows: a username or address someone replaced, a
+display name, a hash. After a key leak, or when history is no longer wanted, lowering
+`retention_history_days` only purges it gradually. With every instance stopped, run:
+
+```bash
+./auth-server --drophistory
+```
+
+It removes every history table and every trigger that fills one, in one transaction, then makes
+empty ones again if `enable_history_tables` is on. A failure rolls back and changes nothing. On
+SQLite it then rewrites the file (`VACUUM`) and empties the `-wal` file (a truncating checkpoint),
+so no page of the old rows stays behind. WAL archives, replicas and backups keep what they had.
+
+- **Every instance stopped.** An instance lock enforces it: a `<db_path>.lock` file beside an
+  SQLite database, or an advisory lock in PostgreSQL. The run refuses while an instance holds it,
+  and an instance won't start while a run does. If PostgreSQL drops the lock's connection, the
+  instance takes the lock again, and stops if a run holds it by then. Point the server and the
+  run at PostgreSQL directly, not through a transaction-pooling proxy, whose sessions can't hold
+  the lock.
+- **Turning `enable_history_tables` off** doesn't remove the existing tables or triggers, so history
+  keeps being written. Run `--drophistory` after turning it off.
+- **PostgreSQL hardened per `setup_reference.sql`.** Dropping needs only what the login role owns:
+  the server made the history tables and their trigger functions. Making them again needs the
+  owner role for the run. Without it the run fails and changes nothing:
+  ```sql
+  grant auth_dbo to auth_service;
+  -- ./auth-server --drophistory
+  revoke auth_dbo from auth_service;
+  ```
+- Only history is touched: sessions, tokens, keys and every main table stay as they were.
+
+For reference, what it runs for each table `T` with history, in one transaction. Dropping a
+history table alone would leave its triggers failing every update and delete on `T`.
+
+```sql
+-- SQLite (then, after COMMIT: VACUUM; PRAGMA wal_checkpoint(TRUNCATE);)
+DROP TRIGGER "tg_T_before_update";
+DROP TRIGGER "tg_T_before_delete";
+DROP TABLE "history__T";
+
+-- PostgreSQL, for T in schema S (CASCADE takes each function's trigger on S.T)
+DROP FUNCTION S_history."tg_fn_T_before_update"() CASCADE;
+DROP FUNCTION S_history."tg_fn_T_before_delete"() CASCADE;
+DROP TABLE S_history."T";
+```
+
 ### SQLite-Specific: Incremental Vacuum
 
 **Pragma set at initialization:**

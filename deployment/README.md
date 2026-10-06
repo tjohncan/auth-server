@@ -113,6 +113,12 @@ docker compose up -d --build
 # To force a manual renewal:
 docker compose run --rm certbot renew
 docker compose exec nginx nginx -s reload
+
+# A maintenance run (--drophistory, sql/README.md) needs every instance stopped; it
+# refuses to run otherwise, and an instance won't start while it runs
+docker compose stop auth-server
+docker compose run --rm auth-server --drophistory
+docker compose start auth-server
 ```
 
 ## Cloud Deployment (ALB / Load Balancer)

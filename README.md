@@ -93,6 +93,11 @@ Database abstraction supporting SQLite and PostgreSQL.
     Uses dedicated connection (not from pool). Randomized table rotation prevents thundering herd in horizontal deployments.
     Keeps purging a table while its batches come back full, for up to two seconds a visit, and warns when one
     still has a backlog after that.
+- **Instance Lock** (`instance_lock.c`, `include/db/instance_lock.h`) - Held shared by every running
+    instance, and exclusively by a maintenance run, so a run happens with every instance stopped: a lock
+    file beside an SQLite database, an advisory lock in PostgreSQL.
+- **Maintenance** (`maintenance.c`, `include/db/maintenance.h`) - One-shot runs of the same binary:
+    `./auth-server --drophistory` removes every history table and its triggers (sql/README.md).
 
 ### Utilities (`src/util/`)
 Common helper functions.

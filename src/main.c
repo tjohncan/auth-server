@@ -20,12 +20,15 @@
 #include "util/str.h"
 #include "util/template.h"
 #include "util/validation.h"
+#include "db/instance_lock.h"
+#include "db/maintenance.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <signal.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <sys/types.h>
 #include <openssl/crypto.h>
 
@@ -37,6 +40,152 @@ static void worker_thread_cleanup(void) {
 static EventLoopPool * volatile global_pool = NULL;
 static pthread_t cleaner_thread;
 static bool cleaner_started = false;
+
+/* ============================================================================
+ * The instance lock (db/instance_lock.h): held shared while the server runs
+ * ============================================================================ */
+
+static int g_lock_fd = -1;               /* SQLite: the lock file */
+static db_handle_t *g_lock_db = NULL;    /* PostgreSQL: the connection holding it */
+static pthread_t g_lock_keeper;
+static bool g_lock_keeper_started = false;
+static atomic_bool g_lock_keeper_stop = false;
+static atomic_bool g_lock_lost = false;  /* a maintenance run took it: exit 1 */
+
+/*
+ * PostgreSQL drops a session's advisory lock with the session, as when it
+ * restarts. So every few seconds this checks the lock is still held, taking it
+ * again if not. If a maintenance run holds it by then, this instance stops: it
+ * would be serving with keys or history the run is replacing.
+ */
+static void *lock_keeper(void *arg) {
+    (void)arg;
+    while (!atomic_load(&g_lock_keeper_stop)) {
+        for (int i = 0; i < 5 && !atomic_load(&g_lock_keeper_stop); i++) sleep(1);
+        if (atomic_load(&g_lock_keeper_stop)) break;
+
+        int held = instance_lock_pg_held(g_lock_db);
+        if (held == -1) held = instance_lock_pg_held(g_lock_db);  /* reconnected by the first */
+        if (held != 0) continue;  /* held, or PostgreSQL still unreachable */
+
+        int rc = instance_lock_pg(g_lock_db, 0);
+        if (rc == 0) {
+            log_warn("Took the instance lock again: the connection holding it had dropped");
+        } else if (rc == 1) {
+            log_error("A maintenance run holds the database: this instance stops, since "
+                      "what it serves with is being replaced. Start it after the run.");
+            atomic_store(&g_lock_lost, true);
+            if (global_pool) event_loop_pool_stop((EventLoopPool *)global_pool);
+            break;
+        }
+    }
+    return NULL;
+}
+
+/*
+ * Take the shared lock before the database is touched. Returns 0; 1 if a
+ * maintenance run holds it (logged); -1 on error.
+ */
+static int instance_lock_take_shared(const config_t *config, const char *connection_string) {
+    if (config->db_type == DB_TYPE_SQLITE) {
+        char path[1100];
+        if (instance_lock_path(config->db_path, path, sizeof(path)) != 0) return 0;  /* in memory */
+        int rc = instance_lock_file(path, 0, &g_lock_fd);
+        if (rc == 1) {
+            log_error("A maintenance run holds %s: start after it finishes", path);
+        }
+        return rc;
+    }
+
+    if (db_connect(&g_lock_db, config->db_type, connection_string) != 0) {
+        log_error("Can't connect to take the instance lock");
+        return -1;
+    }
+    int rc = instance_lock_pg(g_lock_db, 0);
+    if (rc == 1) {
+        log_error("A maintenance run holds the database: start after it finishes");
+    }
+    return rc;
+}
+
+static void instance_lock_release_all(void) {
+    if (g_lock_keeper_started) {
+        atomic_store(&g_lock_keeper_stop, true);
+        pthread_join(g_lock_keeper, NULL);
+        g_lock_keeper_started = false;
+    }
+    if (g_lock_db) {
+        db_disconnect(g_lock_db);
+        g_lock_db = NULL;
+    }
+    instance_lock_file_release(g_lock_fd);
+    g_lock_fd = -1;
+}
+
+/* ============================================================================
+ * Maintenance modes
+ * ============================================================================ */
+
+/*
+ * ./auth-server --drophistory (db/maintenance.h): with every instance stopped,
+ * which the exclusive instance lock makes sure of.
+ */
+static int run_drophistory(const config_t *config, const char *connection_string) {
+    db_handle_t *db = NULL;
+    int lock_fd = -1;
+
+    if (config->db_type == DB_TYPE_SQLITE) {
+        char path[1100];
+        if (instance_lock_path(config->db_path, path, sizeof(path)) != 0 ||
+            access(config->db_path, F_OK) != 0) {
+            log_error("No database at %s", config->db_path);
+            return 1;
+        }
+        int rc = instance_lock_file(path, 1, &lock_fd);
+        if (rc != 0) {
+            if (rc == 1) {
+                log_error("An instance is running on this database, or another maintenance "
+                          "run is: stop every instance first");
+            }
+            return 1;
+        }
+    }
+
+    if (db_connect(&db, config->db_type, connection_string) != 0) {
+        log_error("Can't connect to the database");
+        instance_lock_file_release(lock_fd);
+        return 1;
+    }
+
+    if (config->db_type != DB_TYPE_SQLITE) {
+        int rc = instance_lock_pg(db, 1);
+        if (rc != 0) {
+            if (rc == 1) {
+                log_error("An instance is running on this database, or another maintenance "
+                          "run is: stop every instance first");
+            }
+            db_disconnect(db);
+            return 1;
+        }
+    }
+
+    drophistory_report_t report;
+    int rc = maintenance_drop_history(db, config->db_type, config->enable_history_tables, &report);
+    if (rc != -1) {
+        printf("Dropped %d history table%s and %d %s that filled them.\n",
+               report.tables_dropped, report.tables_dropped == 1 ? "" : "s",
+               report.triggers_dropped,
+               config->db_type == DB_TYPE_SQLITE ? "triggers" : "trigger functions");
+        printf(report.rebuilt
+               ? "enable_history_tables is on: empty history tables and triggers were made again.\n"
+               : "enable_history_tables is off: no history was made again.\n");
+        printf("WAL archives, replicas and backups still hold what history held.\n");
+    }
+
+    db_disconnect(db);
+    instance_lock_file_release(lock_fd);
+    return rc == 0 ? 0 : 1;
+}
 
 /* Global context for HTTP handlers */
 const config_t *g_config = NULL;
@@ -164,9 +313,43 @@ static int router_request_handler(Connection *conn,
     return 0;
 }
 
-int main(void) {
+/*
+ * The connection string db_connect takes: the SQLite path, or one built for
+ * PostgreSQL in pg_buf. Returns 0, or -1 (logged).
+ */
+static int connection_string_for(const config_t *config, char *pg_buf, size_t pg_size,
+                                 const char **out) {
+    if (config->db_type == DB_TYPE_SQLITE) {
+        *out = config->db_path;
+        return 0;
+    }
+    if (!config->db_host || !config->db_name || !config->db_user || !config->db_password) {
+        log_error("PostgreSQL requires db_host, db_name, db_user, and db_password");
+        return -1;
+    }
+    if (config_build_pg_connection_string(config, pg_buf, pg_size) != 0) {
+        log_error("PostgreSQL connection string too long");
+        return -1;
+    }
+    *out = pg_buf;
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    /* No arguments serves. One maintenance mode runs once and exits. */
+    bool drophistory = argc == 2 && strcmp(argv[1], "--drophistory") == 0;
+    if (argc > 1 && !drophistory) {
+        fprintf(stderr, "Usage: %s [--drophistory]\n"
+                        "  (no argument)    serve, configured by ./auth.conf\n"
+                        "  --drophistory    remove every history table and its triggers, making\n"
+                        "                   them again if enable_history_tables is on; every\n"
+                        "                   instance must be stopped first\n",
+                argv[0]);
+        return 2;
+    }
+
     log_init(LOG_INFO);
-    log_info("=== Auth Server Starting ===");
+    log_info(drophistory ? "=== Auth Server: --drophistory ===" : "=== Auth Server Starting ===");
 
     /* Install signal handlers */
     setup_signal_handlers();
@@ -182,6 +365,16 @@ int main(void) {
 
     /* Apply configured log level (parsed from config file / env var) */
     log_init(config->log_level);
+
+    if (drophistory) {
+        char pg_buf[512];
+        const char *connection_string;
+        int rc = connection_string_for(config, pg_buf, sizeof(pg_buf), &connection_string) == 0
+                 ? run_drophistory(config, connection_string) : 1;
+        OPENSSL_cleanse(pg_buf, sizeof(pg_buf));
+        config_free(config);
+        return rc;
+    }
 
     /* An access token must stay verifiable for its whole life. Signing keeps the
      * current and prior ES256 keys; after a rotation the old key still signs for
@@ -289,22 +482,19 @@ int main(void) {
     log_info("Initializing database pool...");
     char pg_conn_str[512];
     const char *connection_string;
-    if (config->db_type == DB_TYPE_SQLITE) {
-        connection_string = config->db_path;
-    } else {
-        if (!config->db_host || !config->db_name || !config->db_user || !config->db_password) {
-            log_error("PostgreSQL requires db_host, db_name, db_user, and db_password");
-            encrypt_cleanup();
-            config_free(config);
-            return 1;
-        }
-        if (config_build_pg_connection_string(config, pg_conn_str, sizeof(pg_conn_str)) != 0) {
-            log_error("PostgreSQL connection string too long");
-            encrypt_cleanup();
-            config_free(config);
-            return 1;
-        }
-        connection_string = pg_conn_str;
+    if (connection_string_for(config, pg_conn_str, sizeof(pg_conn_str), &connection_string) != 0) {
+        encrypt_cleanup();
+        config_free(config);
+        return 1;
+    }
+
+    /* The instance lock, held shared until exit, before anything touches the
+       database: a maintenance run in progress refuses this start */
+    if (instance_lock_take_shared(config, connection_string) != 0) {
+        instance_lock_release_all();
+        encrypt_cleanup();
+        config_free(config);
+        return 1;
     }
 
     if (db_pool_init(num_workers, config->db_type, connection_string) != 0) {
@@ -452,6 +642,16 @@ int main(void) {
     /* Set global pool for signal handler */
     global_pool = pool;
 
+    /* PostgreSQL: keep the instance lock held through reconnects */
+    if (g_lock_db) {
+        if (pthread_create(&g_lock_keeper, NULL, lock_keeper, NULL) == 0) {
+            g_lock_keeper_started = true;
+        } else {
+            log_warn("Failed to start the instance lock keeper: the lock holds until "
+                     "PostgreSQL drops its connection");
+        }
+    }
+
     /* Start event loop (blocks until shutdown signal) */
     event_loop_pool_start(pool);
 
@@ -472,10 +672,11 @@ int main(void) {
     template_cleanup();
     validation_cleanup();
     db_pool_shutdown();
+    instance_lock_release_all();
     encrypt_cleanup();
     crypto_hmac_cleanup();
     config_free(config);
 
     log_info("=== Auth Server Stopped ===");
-    return 0;
+    return atomic_load(&g_lock_lost) ? 1 : 0;
 }

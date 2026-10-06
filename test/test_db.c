@@ -1,9 +1,14 @@
+/* mkstemp */
+#define _POSIX_C_SOURCE 200809L
+
 #include "util/config.h"
 #include "util/log.h"
 #include "db/db.h"
 #include "db/db_sql.h"
 #include "db/init/db_init.h"
 #include "db/init/db_history.h"
+#include "db/instance_lock.h"
+#include "db/maintenance.h"
 #include "crypto/signing_keys.h"
 #include "db/queries/oauth.h"
 #include "db/queries/client.h"
@@ -17,6 +22,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <openssl/crypto.h>
 
 /*
@@ -391,6 +397,153 @@ done:
     if (!failed) {
         log_info("History table tests passed!");
     }
+    return failed;
+}
+
+/* One integer a query returns, or -1 */
+static long long read_count(db_handle_t *db, const char *sql) {
+    char value[32];
+    return read_stored_value(db, sql, value, sizeof(value)) == 0 ? atoll(value) : -1;
+}
+
+/*
+ * --drophistory (maintenance_drop_history): every history table and every
+ * trigger that fills one go in one run, a trigger left behind by hand included.
+ * With history on, empty ones are made again, and keep the next change; with it
+ * off, none are, and updates still work.
+ *
+ * Returns 0 on success.
+ */
+static int test_drop_history(const config_t *config) {
+    log_info("\nHistory drop tests");
+
+    const char *tables_sql = "SELECT count(*) FROM sqlite_master WHERE type = 'table' "
+                             "AND name LIKE 'history\\_\\_%' ESCAPE '\\'";
+    const char *triggers_sql = "SELECT count(*) FROM sqlite_master WHERE type = 'trigger'";
+
+    for (int rebuild = 1; rebuild >= 0; rebuild--) {
+        db_handle_t *sdb = open_test_db(config);
+        if (!sdb) {
+            log_error("History drop: could not open a test database");
+            return 1;
+        }
+        int failed = 1;
+        char value[256];
+        drophistory_report_t report;
+
+        if (db_init_history_tables(sdb, DB_TYPE_SQLITE, 1) != 0 ||
+            db_execute_direct(sdb,
+                "INSERT INTO organization (id, code_name, display_name) "
+                "  VALUES (x'00000000000000000000000000000001', 'org', 'Before');"
+                "UPDATE organization SET display_name = 'After' WHERE pin = 1;") != 0) {
+            log_error("History drop: could not set up history");
+            goto next;
+        }
+        long long tables = read_count(sdb, tables_sql);
+
+        /* Off: one history table already dropped by hand, its triggers left
+           behind, which fail every update of their table until removed */
+        if (!rebuild &&
+            (db_execute_direct(sdb, "DROP TABLE history__organization") != 0 ||
+             db_execute_direct(sdb, "UPDATE organization SET display_name = 'x' WHERE pin = 1") == 0)) {
+            log_error("History drop: a trigger without its table didn't fail updates");
+            goto next;
+        }
+
+        if (maintenance_drop_history(sdb, DB_TYPE_SQLITE, rebuild, &report) != 0 ||
+            report.triggers_dropped != 2 * tables || report.rebuilt != rebuild ||
+            report.tables_dropped != (rebuild ? tables : tables - 1)) {
+            log_error("History drop: the drop failed or miscounted (%d tables, %d triggers, of %lld)",
+                      report.tables_dropped, report.triggers_dropped, tables);
+            goto next;
+        }
+        if (read_count(sdb, tables_sql) != (rebuild ? tables : 0) ||
+            read_count(sdb, triggers_sql) != (rebuild ? 2 * tables : 0)) {
+            log_error("History drop: %s history tables and triggers left after the run",
+                      rebuild ? "the wrong number of" : "some");
+            goto next;
+        }
+        if (db_execute_direct(sdb, "UPDATE organization SET display_name = 'Again' WHERE pin = 1") != 0) {
+            log_error("History drop: updates fail after the run");
+            goto next;
+        }
+        if (rebuild &&
+            (read_stored_value(sdb,
+                 "SELECT group_concat(history_triggering_action_code || ':' || display_name, ' ') "
+                 "FROM history__organization", value, sizeof(value)) != 0 ||
+             strcmp(value, "U:After") != 0)) {
+            log_error("History drop: the history made again holds '%s', not just the new change",
+                      value);
+            goto next;
+        }
+        log_info(rebuild
+                 ? "  history on: dropped, made again empty, keeping the next change (OK)"
+                 : "  history off: dropped with a trigger left by hand, and updates work (OK)");
+        failed = 0;
+next:
+        db_disconnect(sdb);
+        if (failed) return 1;
+    }
+
+    log_info("History drop tests passed!");
+    return 0;
+}
+
+/*
+ * The instance lock's SQLite form: instances share it, a maintenance run takes
+ * it alone, and each refuses the other. (flock locks belong to the open file,
+ * so two opens in this process stand for two processes.)
+ *
+ * Returns 0 on success.
+ */
+static int test_instance_lock(void) {
+    log_info("\nInstance lock tests");
+
+    char path[] = "/tmp/test-db-instance-lock.XXXXXX";
+    int tmp = mkstemp(path);
+    if (tmp < 0) {
+        log_error("Instance lock: could not make a lock file");
+        return 1;
+    }
+    close(tmp);
+
+    int a = -1, b = -1, m = -1, failed = 1;
+    char lock[64];
+    if (instance_lock_file(path, 0, &a) != 0 || instance_lock_file(path, 0, &b) != 0) {
+        log_error("Instance lock: two instances couldn't share it");
+        goto done;
+    }
+    if (instance_lock_file(path, 1, &m) != 1) {
+        log_error("Instance lock: a maintenance run took it from running instances");
+        goto done;
+    }
+    instance_lock_file_release(a);
+    a = -1;
+    if (instance_lock_file(path, 1, &m) != 1) {
+        log_error("Instance lock: a maintenance run took it while one instance still ran");
+        goto done;
+    }
+    instance_lock_file_release(b);
+    b = -1;
+    if (instance_lock_file(path, 1, &m) != 0 || instance_lock_file(path, 0, &a) != 1) {
+        log_error("Instance lock: a maintenance run couldn't take it alone, or an instance joined it");
+        goto done;
+    }
+    if (instance_lock_path(":memory:", lock, sizeof(lock)) != -1 ||
+        instance_lock_path("./data/auth.db", lock, sizeof(lock)) != 0 ||
+        strcmp(lock, "./data/auth.db.lock") != 0) {
+        log_error("Instance lock: wrong lock path, or one for an in-memory database");
+        goto done;
+    }
+    log_info("  instances share it; a maintenance run takes it alone, and each refuses the other (OK)");
+    failed = 0;
+
+done:
+    instance_lock_file_release(a);
+    instance_lock_file_release(b);
+    instance_lock_file_release(m);
+    unlink(path);
+    if (!failed) log_info("Instance lock tests passed!");
     return failed;
 }
 
@@ -2066,7 +2219,9 @@ int main(void) {
     if (test_storage_at_rest(config) != 0 ||
         test_credential_lifetimes(config) != 0 ||
         test_schema_constraints(config) != 0 ||
-        test_history_tables(config) != 0) {
+        test_history_tables(config) != 0 ||
+        test_drop_history(config) != 0 ||
+        test_instance_lock() != 0) {
         config_free(config);
         return 1;
     }

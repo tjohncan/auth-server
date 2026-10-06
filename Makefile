@@ -86,6 +86,7 @@ HANDLER_SRCS = src/handlers/common.c src/handlers/health.c src/handlers/admin.c 
                src/handlers/mfa.c src/handlers/mfa_http.c \
                src/handlers/rs.c src/handlers/rs_http.c src/handlers/routes.c
 DB_SRCS = src/db/db.c src/db/db_pool.c src/db/cleaner.c src/db/init/db_init.c src/db/init/db_history.c \
+          src/db/instance_lock.c src/db/maintenance.c \
           src/db/queries/org.c src/db/queries/user.c src/db/queries/client.c src/db/queries/resource_server.c src/db/queries/oauth.c \
           src/db/queries/mfa.c
 CRYPTO_SRCS = src/crypto/random.c src/crypto/argon2.c src/crypto/pbkdf2.c src/crypto/password.c src/crypto/hmac.c src/crypto/sha256.c src/crypto/jwt.c src/crypto/signing_keys.c src/crypto/totp.c src/crypto/encrypt.c

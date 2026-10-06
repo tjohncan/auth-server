@@ -55,6 +55,8 @@ schema_dir = ./sql
 
 # Enable history tables for auditing UPDATE/DELETE operations
 # History tables track changes to tables with 'pin' primary keys in lookup/security schemas
+# Turning this off doesn't remove history already made, nor stop its triggers writing: with
+# every instance stopped, run ./auth-server --drophistory (sql/README.md).
 enable_history_tables = true
 
 # Encryption
