@@ -55,6 +55,8 @@ typedef struct {
     size_t body_length;     /* Length of body in bytes */
 
     char remote_ip[46];     /* Client socket IP (INET6_ADDRSTRLEN = 46) for localhost validation */
+    int admin_listener;     /* Arrived on the loopback-only admin listener (admin_port), not
+                               the public one: the only way to the localhost-only endpoints */
 
     /* Internal: points to original buffer (for zero-copy parsing) */
     char *_raw_buffer;      /* DO NOT FREE - this is caller's memory */

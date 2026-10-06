@@ -40,18 +40,17 @@ Returns server status. No authentication required.
 
 ## Admin API (Localhost-Only)
 
-Administrative endpoints for initial setup and tenant management. 
-**Only accessible from localhost** (127.0.0.1 / ::1).
-
-All endpoints reject connections from non-localhost IPs with `403 Forbidden`.
+Administrative endpoints for initial setup and tenant management.
+**Served only on the admin port** (`admin_port`, default 8081), which listens on loopback alone:
+127.0.0.1, and ::1 where the host has it. The public port (`server_port`) refuses them with
+`403 Forbidden`, however local the request. The examples below use `127.0.0.1:8081`.
 
 ### Security Model
 
-- **Access Control**: IP-based (localhost only)
-- **Behind a proxy on the same host**: a request counts as local when it comes from 127.0.0.1
-  or ::1 and carries neither `X-Real-IP` nor `X-Forwarded-For`. A proxy on the same machine
-  must add one of those to everything it forwards (the shipped nginx config sets `X-Real-IP`),
-  or every request it passes on looks local.
+- **Access Control**: a listener of their own, on loopback only. Only the host itself can
+  connect to it, and nothing a proxy forwards to the public port reaches these endpoints.
+- **No proxies**: a request carrying `X-Real-IP` or `X-Forwarded-For` is refused, in case a
+  proxy is ever pointed at the admin port by mistake. Don't publish or forward that port.
 - **Not from a browser**: a request whose `Host` isn't `localhost`, `127.0.0.1` or `[::1]`
   (any port), or that carries `Origin` or any `Sec-Fetch-*` header, is refused. A web page in
   a browser that can reach the port over loopback (one on the server, or behind an `ssh -L`
@@ -99,9 +98,9 @@ Bootstrap the authentication system with initial organization and management UI.
 
 **Error Responses**:
 
-- **403 Forbidden** (not from localhost):
+- **403 Forbidden** (not on the admin port, or not from localhost):
 ```json
-{"error": "Admin endpoints only accessible from localhost"}
+{"error": "Admin endpoints are served only on the admin port, from localhost"}
 ```
 
 - **409 Conflict** (organization exists):
@@ -133,7 +132,7 @@ calls, which authenticate by session cookie.
 
 **Example**:
 ```bash
-curl -X POST http://localhost:8080/api/admin/bootstrap \
+curl -X POST http://127.0.0.1:8081/api/admin/bootstrap \
   -H "Content-Type: application/json" \
   -d '{
     "username": "admin",
@@ -178,7 +177,7 @@ Create a new organization (tenant).
 
 **Error Responses**:
 
-- **403 Forbidden** (not from localhost)
+- **403 Forbidden** (not on the admin port, or not from localhost)
 - **409 Conflict** (code_name exists):
 ```json
 {"error": "Organization already exists or creation failed"}
@@ -186,7 +185,7 @@ Create a new organization (tenant).
 
 **Example**:
 ```bash
-curl -X POST http://localhost:8080/api/admin/organizations \
+curl -X POST http://127.0.0.1:8081/api/admin/organizations \
   -H "Content-Type: application/json" \
   -d '{
     "code_name": "aaacorp",
@@ -238,7 +237,7 @@ it from their account (in a build with email support).
 ```json
 {"error": "username and password are required"}
 ```
-- **403 Forbidden** (not from localhost)
+- **403 Forbidden** (not on the admin port, or not from localhost)
 - **409 Conflict** (username or email exists):
 ```json
 {"error": "User already exists or creation failed"}
@@ -246,7 +245,7 @@ it from their account (in a build with email support).
 
 **Example**:
 ```bash
-curl -X POST http://localhost:8080/api/admin/users \
+curl -X POST http://127.0.0.1:8081/api/admin/users \
   -H "Content-Type: application/json" \
   -d '{
     "username": "tiger",
@@ -288,7 +287,7 @@ Grant organization admin privileges to a user.
 
 **Error Responses**:
 
-- **403 Forbidden** (not from localhost)
+- **403 Forbidden** (not on the admin port, or not from localhost)
 - **404 Not Found** (user or organization doesn't exist):
 ```json
 {"error": "User not found"}
@@ -296,7 +295,7 @@ Grant organization admin privileges to a user.
 
 **Example**:
 ```bash
-curl -X POST http://localhost:8080/api/admin/org-admins \
+curl -X POST http://127.0.0.1:8081/api/admin/org-admins \
   -H "Content-Type: application/json" \
   -d '{
     "username": "tiger",
@@ -334,12 +333,12 @@ deactivation ran, which escaped it: reactivating closes whatever the account hol
 
 **Error Responses**:
 - **400** — missing or invalid user_id
-- **403** — not from localhost
+- **403** — not on the admin port, or not from localhost
 - **404** — user not found
 
 **Example**:
 ```bash
-curl -X POST http://localhost:8080/api/admin/users/activate \
+curl -X POST http://127.0.0.1:8081/api/admin/users/activate \
   -H "Content-Type: application/json" \
   -d '{"user_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"}'
 ```
@@ -403,12 +402,12 @@ The old password works at no point in between.
 
 **Error Responses**:
 - **400** — missing or invalid user_id
-- **403** — not from localhost
+- **403** — not on the admin port, or not from localhost
 - **404** — user not found
 
 **Example**:
 ```bash
-curl -X POST http://localhost:8080/api/admin/users/deactivate \
+curl -X POST http://127.0.0.1:8081/api/admin/users/deactivate \
   -H "Content-Type: application/json" \
   -d '{"user_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"}'
 ```
@@ -447,12 +446,12 @@ the user too, and follow the recovery order under `POST /api/admin/users/deactiv
 
 **Error Responses**:
 - **400** — missing or invalid user_id
-- **403** — not from localhost
+- **403** — not on the admin port, or not from localhost
 - **404** — user not found
 
 **Example**:
 ```bash
-curl -X POST http://localhost:8080/api/admin/users/reset-mfa \
+curl -X POST http://127.0.0.1:8081/api/admin/users/reset-mfa \
   -H "Content-Type: application/json" \
   -d '{"user_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"}'
 ```
@@ -495,12 +494,12 @@ a channel you trust, and they can change it themselves once signed in.
 
 **Error Responses**:
 - **400** — missing or invalid user_id, missing password, or a password below the minimum length
-- **403** — not from localhost
+- **403** — not on the admin port, or not from localhost
 - **404** — user not found
 
 **Example**:
 ```bash
-curl -X POST http://localhost:8080/api/admin/users/set-password \
+curl -X POST http://127.0.0.1:8081/api/admin/users/set-password \
   -H "Content-Type: application/json" \
   -d '{"user_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4", "password": "a temporary password"}'
 ```
@@ -537,12 +536,12 @@ Up to 100; `total` counts them all.
 
 **Error Responses**:
 - **400** — missing or invalid user_id
-- **403** — not from localhost
+- **403** — not on the admin port, or not from localhost
 - **404** — user not found
 
 **Example**:
 ```bash
-curl -X GET http://localhost:8080/api/admin/users/emails \
+curl -X GET http://127.0.0.1:8081/api/admin/users/emails \
   -H "Content-Type: application/json" \
   -d '{"user_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"}'
 ```
@@ -572,12 +571,12 @@ account is handed back. Matching is case-insensitive.
 
 **Error Responses**:
 - **400** — missing or invalid user_id, or missing email
-- **403** — not from localhost
+- **403** — not on the admin port, or not from localhost
 - **404** — user not found, or the user has no such address (so a typo isn't taken for a removal)
 
 **Example**:
 ```bash
-curl -X DELETE http://localhost:8080/api/admin/users/emails \
+curl -X DELETE http://127.0.0.1:8081/api/admin/users/emails \
   -H "Content-Type: application/json" \
   -d '{"user_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4", "email": "someone@elsewhere.example"}'
 ```
@@ -588,7 +587,7 @@ curl -X DELETE http://localhost:8080/api/admin/users/emails \
 
 ```bash
 # 1. Bootstrap system organization + management UI
-curl -X POST http://localhost:8080/api/admin/bootstrap \
+curl -X POST http://127.0.0.1:8081/api/admin/bootstrap \
   -H "Content-Type: application/json" \
   -d '{
     "username": "admin",
@@ -598,7 +597,7 @@ curl -X POST http://localhost:8080/api/admin/bootstrap \
 # System is now ready - admin can log into management UI at http://localhost:8080/
 
 # 2. Create tenant organization
-curl -X POST http://localhost:8080/api/admin/organizations \
+curl -X POST http://127.0.0.1:8081/api/admin/organizations \
   -H "Content-Type: application/json" \
   -d '{
     "code_name": "aaacorp",
@@ -606,7 +605,7 @@ curl -X POST http://localhost:8080/api/admin/organizations \
   }'
 
 # 3. Create user for tenant
-curl -X POST http://localhost:8080/api/admin/users \
+curl -X POST http://127.0.0.1:8081/api/admin/users \
   -H "Content-Type: application/json" \
   -d '{
     "username": "tiger",
@@ -615,7 +614,7 @@ curl -X POST http://localhost:8080/api/admin/users \
   }'
 
 # 4. Make user admin of organization
-curl -X POST http://localhost:8080/api/admin/org-admins \
+curl -X POST http://127.0.0.1:8081/api/admin/org-admins \
   -H "Content-Type: application/json" \
   -d '{
     "username": "tiger",
@@ -878,7 +877,7 @@ Used for programmatic access to org-admin endpoints (alternative to session cook
 **SECURITY**: Organization keys grant FULL admin access, same as being an admin-user of an org.
 Not managed through the web UI — use the API directly.
 
-**POST /api/admin/organization-keys** (Localhost-only)
+**POST /api/admin/organization-keys** (Localhost-only: the admin port)
 Create new organization API key.
 
 Body:
@@ -902,7 +901,7 @@ Response (user-provided secret):
 }
 ```
 
-**GET /api/admin/organization-keys** (Dual-auth)
+**GET /api/admin/organization-keys** (Dual-auth: localhost on the admin port, or an org key)
 List organization API keys.
 
 Query: `organization_code_name` (required), `limit`, `offset`, `is_active`
@@ -922,7 +921,7 @@ Response:
 }
 ```
 
-**DELETE /api/admin/organization-keys** (Dual-auth)
+**DELETE /api/admin/organization-keys** (Dual-auth: localhost on the admin port, or an org key)
 Revoke (soft delete) organization API key.
 
 Query: `id` (required) - Key UUID
@@ -933,10 +932,10 @@ another organization's key, so the endpoint doesn't reveal which keys exist.
 
 ---
 
-**GET /api/admin/list-all-organizations** (Localhost-only)
+**GET /api/admin/list-all-organizations** (Localhost-only: the admin port)
 List all organizations (unscoped - no user authorization filter).
 
-Auth: Localhost-only
+Auth: Localhost-only, on the admin port
 
 Query: `limit`, `offset`, `is_active`
 

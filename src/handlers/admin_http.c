@@ -44,6 +44,11 @@ static int host_is_loopback(const char *host) {
  * Security policy: Localhost-only endpoints MUST be accessed via direct
  * connection (not through reverse proxy). This prevents header spoofing.
  *
+ * And only on the admin listener (admin_port), which listens on loopback
+ * alone: the public port, which every interface reaches and a proxy forwards
+ * to, serves none of these. That holds for any endpoint that calls this, so a
+ * new one can't be left on the public port by mistake.
+ *
  * Nor from a browser. A web page the operator's browser loads can reach a
  * loopback port too: a browser on the server itself, or one using an
  * `ssh -L` tunnel. A page that rebinds its own DNS name to 127.0.0.1 even
@@ -55,6 +60,10 @@ static int host_is_loopback(const char *host) {
  * Returns: 1 if localhost, 0 if not
  */
 static int is_localhost(const HttpRequest *req) {
+    if (!req->admin_listener) {
+        return 0;
+    }
+
     /* Reject any request with proxy headers (X-Real-IP, X-Forwarded-For) */
     /* These indicate the request came through a reverse proxy */
     const char *real_ip = http_request_get_header(req, "X-Real-IP");
@@ -93,7 +102,7 @@ HttpResponse *admin_bootstrap_handler(const HttpRequest *req) {
 
     /* Localhost validation */
     if (!is_localhost(req)) {
-        return response_json_error(403, "Admin endpoints only accessible from localhost");
+        return response_json_error(403, "Admin endpoints are served only on the admin port, from localhost");
     }
 
     /* Get database connection from pool */
@@ -208,7 +217,7 @@ HttpResponse *admin_create_organization_handler(const HttpRequest *req) {
 
     /* Localhost validation */
     if (!is_localhost(req)) {
-        return response_json_error(403, "Admin endpoints only accessible from localhost");
+        return response_json_error(403, "Admin endpoints are served only on the admin port, from localhost");
     }
 
     /* Get database connection from pool */
@@ -288,7 +297,7 @@ HttpResponse *admin_create_user_handler(const HttpRequest *req) {
 
     /* Localhost validation */
     if (!is_localhost(req)) {
-        return response_json_error(403, "Admin endpoints only accessible from localhost");
+        return response_json_error(403, "Admin endpoints are served only on the admin port, from localhost");
     }
 
     /* Get database connection from pool */
@@ -371,7 +380,7 @@ HttpResponse *admin_make_org_admin_handler(const HttpRequest *req) {
 
     /* Localhost validation */
     if (!is_localhost(req)) {
-        return response_json_error(403, "Admin endpoints only accessible from localhost");
+        return response_json_error(403, "Admin endpoints are served only on the admin port, from localhost");
     }
 
     /* Get database connection from pool */
@@ -448,7 +457,7 @@ HttpResponse *admin_list_all_organizations_handler(const HttpRequest *req) {
 
     /* Localhost validation */
     if (!is_localhost(req)) {
-        return response_json_error(403, "Admin endpoints only accessible from localhost");
+        return response_json_error(403, "Admin endpoints are served only on the admin port, from localhost");
     }
 
     /* Get database connection from pool */
@@ -514,7 +523,7 @@ HttpResponse *admin_create_organization_key_handler(const HttpRequest *req) {
 
     /* Localhost validation */
     if (!is_localhost(req)) {
-        return response_json_error(403, "Admin endpoints only accessible from localhost");
+        return response_json_error(403, "Admin endpoints are served only on the admin port, from localhost");
     }
 
     /* Get database connection from pool */
@@ -806,7 +815,7 @@ static HttpResponse *server_user_request(const HttpRequest *req, db_handle_t **o
     if (ct_err) return ct_err;
 
     if (!is_localhost(req))
-        return response_json_error(403, "Server admin endpoints only accessible from localhost");
+        return response_json_error(403, "Admin endpoints are served only on the admin port, from localhost");
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {

@@ -33,6 +33,7 @@ typedef struct {
     /* Server settings */
     char *host;
     int port;
+    int admin_port;        /* The localhost-only admin API's listener, on loopback alone */
     int workers;
     /* Not a setting: derived from host and port by config_load. The address
      * browsers and resource servers reach this server at: http://localhost:PORT
@@ -105,6 +106,7 @@ typedef struct {
     char *encryption_key_env;       /* ENV var name for encryption_key */
     char *server_host_env;  /* ENV var name for server_host */
     char *server_port_env;  /* ENV var name for server_port */
+    char *admin_port_env;   /* ENV var name for admin_port */
     char *mothership_url_env; /* ENV var name for mothership_url */
 
     /* Branding */

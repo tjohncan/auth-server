@@ -109,8 +109,9 @@ static int router_request_handler(Connection *conn,
 
     HttpRequest req = http_request_parse(request_copy, request_len);
 
-    /* Copy remote IP from connection for localhost validation */
+    /* Copy remote IP and listener from connection for localhost validation */
     str_copy(req.remote_ip, sizeof(req.remote_ip), conn->remote_ip);
+    req.admin_listener = conn->admin_listener;
 
     if (req.method == HTTP_UNKNOWN) {
         log_warn("[Connection %lu] Failed to parse HTTP request", conn->connection_id);
@@ -196,6 +197,18 @@ int main(void) {
 
     log_info("Configuration loaded:");
     log_info("  Server: %s:%d (workers=%d)", config->host, config->port, config->workers);
+
+    /* The admin API listens on loopback alone, on a port of its own. Sharing the
+       public one, loopback traffic to the public port (a proxy on the same host,
+       say) would land on the admin listener. */
+    if (config->admin_port == config->port) {
+        log_error("admin_port and server_port are both %d: the admin API needs a port of its own",
+                  config->port);
+        config_free(config);
+        return 1;
+    }
+    log_info("  Admin API: 127.0.0.1:%d (and [::1] where present), loopback only",
+             config->admin_port);
     log_info("  Database: %s", config->db_type == DB_TYPE_SQLITE ? "SQLite" : "PostgreSQL");
     if (config->db_type == DB_TYPE_SQLITE) {
         log_info("  DB Path: %s", config->db_path);
@@ -392,6 +405,7 @@ int main(void) {
     EventLoopConfig event_config = {
         .num_workers = num_workers,
         .port = config->port,
+        .admin_port = config->admin_port,
         .backlog = 128,
         .max_request_size = 1024 * 1024,
         .connection_timeout_ms = 30000,

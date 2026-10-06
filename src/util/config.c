@@ -23,6 +23,7 @@
 /* Default values */
 #define DEFAULT_HOST "localhost"
 #define DEFAULT_PORT 8080
+#define DEFAULT_ADMIN_PORT 8081
 #define DEFAULT_WORKERS 0  /* 0 = auto-detect */
 #define DEFAULT_DB_TYPE DB_TYPE_SQLITE
 #define DEFAULT_DB_PATH "./data/auth.db"
@@ -172,6 +173,14 @@ static void set_config_value(config_t *config, const char *key, const char *valu
         } else {
             config->port = port;
         }
+    } else if (strcmp(key, "admin_port") == 0) {
+        int port = 0;
+        if (parse_int(value, &port) != 0 || port < 1 || port > 65535) {
+            log_warn("Invalid admin_port value '%s', must be 1-65535. Keeping current: %d",
+                     value, config->admin_port);
+        } else {
+            config->admin_port = port;
+        }
     } else if (strcmp(key, "server_workers") == 0) {
         int workers = -1;
         if (parse_int(value, &workers) != 0 || workers < 0) {
@@ -194,6 +203,14 @@ static void set_config_value(config_t *config, const char *key, const char *valu
             config->server_port_env = new_value;
         } else {
             log_error("Failed to allocate memory for server_port_env");
+        }
+    } else if (strcmp(key, "admin_port_env") == 0) {
+        new_value = str_dup(value);
+        if (new_value) {
+            free(config->admin_port_env);
+            config->admin_port_env = new_value;
+        } else {
+            log_error("Failed to allocate memory for admin_port_env");
         }
     } else if (strcmp(key, "mothership_url") == 0) {
         new_value = str_dup(value);
@@ -688,6 +705,20 @@ static void apply_env_overrides(config_t *config) {
         }
     }
 
+    /* ADMIN_PORT */
+    env_var_name = config->admin_port_env ? config->admin_port_env : "AUTH_ADMIN_PORT";
+    env_value = getenv(env_var_name);
+    if (env_value) {
+        int port = 0;
+        parse_int(env_value, &port);
+        if (port > 0 && port <= 65535) {
+            config->admin_port = port;
+            log_info("Config override from %s: %d", env_var_name, port);
+        } else {
+            log_warn("Invalid port in %s: %s", env_var_name, env_value);
+        }
+    }
+
     /* DB_TYPE: Use custom env var name if specified, else default AUTH_DB_TYPE */
     env_var_name = config->db_type_env ? config->db_type_env : "AUTH_DB_TYPE";
     env_value = getenv(env_var_name);
@@ -1036,6 +1067,7 @@ config_t *config_load(const char *config_file) {
     }
 
     config->port = DEFAULT_PORT;
+    config->admin_port = DEFAULT_ADMIN_PORT;
     config->workers = DEFAULT_WORKERS;
     config->db_type = DEFAULT_DB_TYPE;
 
@@ -1064,6 +1096,7 @@ config_t *config_load(const char *config_file) {
     config->encryption_key_env = NULL;
     config->server_host_env = NULL;
     config->server_port_env = NULL;
+    config->admin_port_env = NULL;
     config->mothership_url_env = NULL;
     config->mothership_url = NULL;
 
@@ -1312,6 +1345,7 @@ void config_free(config_t *config) {
     free(config->log_level_env);
     free(config->server_host_env);
     free(config->server_port_env);
+    free(config->admin_port_env);
     free(config->mothership_url_env);
     free(config->mothership_url);
     free(config->client_ip_header);

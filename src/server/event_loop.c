@@ -72,11 +72,20 @@ struct EventLoop {
     Connection *connections_head;
     Connection *connections_tail;
     int active_connections;        /* Current count of active connections */
+};
+
+/*
+ * Listener - One listening socket. Its epoll event carries a pointer to this,
+ * which is how its events are told from a connection's.
+ */
+typedef struct {
+    int fd;
+    int admin;                    /* The loopback admin listener, not the public one */
 
     /* accept4() failed for want of descriptors or memory, with connections maybe
      * still queued: retried on every pass of the loop until it succeeds */
     bool accept_failing;
-};
+} Listener;
 
 /*
  * EventLoopPool - Manages multiple worker threads
@@ -161,6 +170,76 @@ static int create_listen_socket(int port, int backlog) {
     return fd;
 }
 
+/*
+ * create_loopback_listen_socket - One loopback address only, for the admin listener
+ *
+ * Loopback has no dual-stack form: a socket on ::1 doesn't take connections to
+ * 127.0.0.1. So the admin listener is one socket per family: 127.0.0.1 always,
+ * and ::1 where the host has it. A container without IPv6 may have no ::1 at
+ * all (EADDRNOTAVAIL), or no IPv6 sockets (EAFNOSUPPORT); either way the admin
+ * listener goes on without it. SO_REUSEPORT, CLOEXEC and non-blocking, as for
+ * the public socket.
+ *
+ * Returns: the descriptor, -2 for an IPv6 loopback this host doesn't have, -1 on error
+ */
+static int create_loopback_listen_socket(int family, int port, int backlog) {
+    const char *name = family == AF_INET ? "127.0.0.1" : "[::1]";
+
+    int fd = socket(family, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    if (fd < 0) {
+        if (family == AF_INET6 && errno == EAFNOSUPPORT) return -2;
+        log_error("socket() for the admin listener on %s failed: %s", name, strerror(errno));
+        return -1;
+    }
+
+    int opt = 1;
+    if (family == AF_INET6 &&
+        setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &opt, sizeof(opt)) < 0) {
+        log_warn("setsockopt(IPV6_V6ONLY) on the admin listener failed: %s", strerror(errno));
+    }
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+        log_warn("setsockopt(SO_REUSEADDR) failed: %s", strerror(errno));
+    }
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0) {
+        log_error("setsockopt(SO_REUSEPORT) on the admin listener failed: %s", strerror(errno));
+        close(fd);
+        return -1;
+    }
+
+    int rc;
+    if (family == AF_INET) {
+        struct sockaddr_in addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_port = htons(port);
+        rc = bind(fd, (struct sockaddr *)&addr, sizeof(addr));
+    } else {
+        struct sockaddr_in6 addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sin6_family = AF_INET6;
+        addr.sin6_addr = in6addr_loopback;
+        addr.sin6_port = htons(port);
+        rc = bind(fd, (struct sockaddr *)&addr, sizeof(addr));
+    }
+    if (rc < 0) {
+        int err = errno;
+        close(fd);
+        if (family == AF_INET6 && err == EADDRNOTAVAIL) return -2;
+        log_error("bind() failed for the admin listener on %s:%d: %s", name, port, strerror(err));
+        return -1;
+    }
+
+    if (listen(fd, backlog) < 0) {
+        log_error("listen() failed on the admin listener: %s", strerror(errno));
+        close(fd);
+        return -1;
+    }
+
+    log_info("Created admin listen socket on %s:%d (loopback only, fd=%d)", name, port, fd);
+    return fd;
+}
+
 
 /* ============================================================================
  * Connection Management
@@ -169,7 +248,8 @@ static int create_listen_socket(int port, int backlog) {
 /*
  * connection_create - Allocate and initialize a new connection
  */
-static Connection *connection_create(int fd, const char *remote_ip, uint64_t connection_id) {
+static Connection *connection_create(int fd, const char *remote_ip, uint64_t connection_id,
+                                     int admin_listener) {
     Connection *conn = malloc(sizeof(Connection));
     if (!conn) {
         log_error("Failed to allocate connection");
@@ -178,6 +258,7 @@ static Connection *connection_create(int fd, const char *remote_ip, uint64_t con
 
     memset(conn, 0, sizeof(Connection));
     conn->fd = fd;
+    conn->admin_listener = admin_listener;
     conn->state = CONN_STATE_READING_HEADERS;
     conn->connection_id = connection_id;
     clock_gettime(CLOCK_MONOTONIC, &conn->last_activity);
@@ -325,7 +406,7 @@ void event_loop_destroy(EventLoop *loop) {
  *
  * Supports both IPv4 and IPv6 connections (dual-stack).
  */
-static void handle_accept(EventLoop *loop, int listen_fd) {
+static void handle_accept(EventLoop *loop, Listener *listener) {
     /* Loop until no more connections to accept */
     while (1) {
         struct sockaddr_storage client_addr;  /* Large enough for both IPv4 and IPv6 */
@@ -333,7 +414,7 @@ static void handle_accept(EventLoop *loop, int listen_fd) {
 
         /* Accept new connection (non-blocking, may return EAGAIN). The connection
          * itself comes back non-blocking and close-on-exec: see create_listen_socket. */
-        int client_fd = accept4(listen_fd, (struct sockaddr *)&client_addr, &client_len,
+        int client_fd = accept4(listener->fd, (struct sockaddr *)&client_addr, &client_len,
                                 SOCK_NONBLOCK | SOCK_CLOEXEC);
         if (client_fd < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -358,20 +439,22 @@ static void handle_accept(EventLoop *loop, int listen_fd) {
              * be announced again until another arrives: the loop retries on its
              * next pass instead, at least once a second. Logged once until it
              * clears, since every retry fails the same way. */
-            if (!loop->accept_failing) {
+            if (!listener->accept_failing) {
                 log_error("accept4() failed: %s; retrying until it clears", strerror(errno));
             }
-            loop->accept_failing = true;
+            listener->accept_failing = true;
             return;
         }
 
-        if (loop->accept_failing) {
+        if (listener->accept_failing) {
             log_info("accept4() is accepting connections again");
-            loop->accept_failing = false;
+            listener->accept_failing = false;
         }
 
-        /* Reject if at connection limit */
-        if (loop->config.max_connections_per_worker > 0 &&
+        /* Reject if at connection limit. Not on the admin listener: only the host
+         * can reach it, and a flood on the public port mustn't lock the operator
+         * out of the admin API, which is how they'd respond to one. */
+        if (!listener->admin && loop->config.max_connections_per_worker > 0 &&
             loop->active_connections >= loop->config.max_connections_per_worker) {
             close(client_fd);
             log_warn("Connection limit reached (%d), rejecting new connection",
@@ -396,7 +479,8 @@ static void handle_accept(EventLoop *loop, int listen_fd) {
 
         /* Create connection object */
         Connection *conn = connection_create(client_fd, remote_ip,
-                                             atomic_fetch_add(&g_next_connection_id, 1));
+                                             atomic_fetch_add(&g_next_connection_id, 1),
+                                             listener->admin);
         if (!conn) {
             close(client_fd);
             continue;  /* Try next connection */
@@ -416,7 +500,8 @@ static void handle_accept(EventLoop *loop, int listen_fd) {
         /* Add to connection list for timeout tracking */
         list_add_connection(loop, conn);
 
-        log_info("Accepted connection %lu from %s (fd=%d)", conn->connection_id, remote_ip, client_fd);
+        log_info("Accepted connection %lu from %s (fd=%d)%s", conn->connection_id, remote_ip,
+                 client_fd, listener->admin ? " on the admin listener" : "");
     }  /* End of while(1) loop */
 }
 
@@ -730,26 +815,51 @@ int event_loop_run(EventLoop *loop, RequestHandler handler, void *context) {
     loop->config.handler_context = context;
     loop->running = true;
 
-    /* Create listen socket */
-    int listen_fd = create_listen_socket(loop->config.port,
-                                         loop->config.backlog > 0 ? loop->config.backlog : DEFAULT_BACKLOG);
-    if (listen_fd < 0) {
+    /* Listening sockets: the public one on every interface, then the admin
+     * listener's, on loopback only (127.0.0.1, and ::1 where the host has it) */
+    int backlog = loop->config.backlog > 0 ? loop->config.backlog : DEFAULT_BACKLOG;
+    Listener listeners[3];
+    int listener_count = 0;
+
+    int fd = create_listen_socket(loop->config.port, backlog);
+    if (fd < 0) {
         return -1;
     }
+    listeners[listener_count++] = (Listener){ .fd = fd, .admin = 0 };
 
-    /* Add listen socket to epoll (watch for new connections)
-     * Use sentinel pointer to distinguish from Connection pointers */
-    struct epoll_event ev;
-    ev.events = EPOLLIN | EPOLLET;
-    ev.data.ptr = &listen_fd;  /* Sentinel: address of listen_fd variable */
-
-    if (epoll_ctl(loop->epoll_fd, EPOLL_CTL_ADD, listen_fd, &ev) < 0) {
-        log_error("epoll_ctl(ADD listen) failed: %s", strerror(errno));
-        close(listen_fd);
-        return -1;
+    if (loop->config.admin_port > 0) {
+        static const int families[] = { AF_INET, AF_INET6 };
+        for (size_t i = 0; i < sizeof(families) / sizeof(families[0]); i++) {
+            fd = create_loopback_listen_socket(families[i], loop->config.admin_port, backlog);
+            if (fd == -2) {
+                if (loop->worker_index == 0) {
+                    log_info("No IPv6 loopback here: the admin listener is on 127.0.0.1 only");
+                }
+                continue;
+            }
+            if (fd < 0) {
+                for (int j = 0; j < listener_count; j++) close(listeners[j].fd);
+                return -1;
+            }
+            listeners[listener_count++] = (Listener){ .fd = fd, .admin = 1 };
+        }
     }
 
-    log_info("Event loop running on port %d", loop->config.port);
+    /* Each listening socket's events carry a pointer to its Listener */
+    for (int i = 0; i < listener_count; i++) {
+        struct epoll_event ev;
+        ev.events = EPOLLIN | EPOLLET;
+        ev.data.ptr = &listeners[i];
+
+        if (epoll_ctl(loop->epoll_fd, EPOLL_CTL_ADD, listeners[i].fd, &ev) < 0) {
+            log_error("epoll_ctl(ADD listen) failed: %s", strerror(errno));
+            for (int j = 0; j < listener_count; j++) close(listeners[j].fd);
+            return -1;
+        }
+    }
+
+    log_info("Event loop running on port %d, admin port %d", loop->config.port,
+             loop->config.admin_port);
 
     /* Event array for epoll_wait */
     struct epoll_event events[MAX_EPOLL_EVENTS];
@@ -773,9 +883,13 @@ int event_loop_run(EventLoop *loop, RequestHandler handler, void *context) {
 
         /* Process each event */
         for (int i = 0; i < n; i++) {
-            if (events[i].data.ptr == &listen_fd) {
-                /* New connection on listen socket (sentinel pointer) */
-                handle_accept(loop, listen_fd);
+            Listener *listener = NULL;
+            for (int j = 0; j < listener_count && !listener; j++) {
+                if (events[i].data.ptr == &listeners[j]) listener = &listeners[j];
+            }
+            if (listener) {
+                /* New connection on a listening socket */
+                handle_accept(loop, listener);
             } else {
                 /* Event on existing connection */
                 Connection *conn = (Connection *)events[i].data.ptr;
@@ -785,8 +899,10 @@ int event_loop_run(EventLoop *loop, RequestHandler handler, void *context) {
 
         /* Connections left queued by a failed accept: closing others above may
          * have freed what it lacked */
-        if (loop->accept_failing) {
-            handle_accept(loop, listen_fd);
+        for (int j = 0; j < listener_count; j++) {
+            if (listeners[j].accept_failing) {
+                handle_accept(loop, &listeners[j]);
+            }
         }
 
         /* Check for idle connections every 5 seconds (wall-clock time)
@@ -799,7 +915,7 @@ int event_loop_run(EventLoop *loop, RequestHandler handler, void *context) {
     }
 
     log_info("Event loop stopped");
-    close(listen_fd);
+    for (int j = 0; j < listener_count; j++) close(listeners[j].fd);
     return 0;
 }
 

@@ -17,6 +17,12 @@ server_host = localhost
 server_port = 8080
 server_workers = 0
 
+# The localhost-only admin API (bootstrap, users, organizations, org keys) has a port of
+# its own, which listens on loopback alone: 127.0.0.1, and ::1 where the host has it.
+# The public port refuses those endpoints. Don't publish or forward this one: run admin
+# commands on the host, or with docker exec. It must differ from server_port.
+admin_port = 8081
+
 # Which request header carries the client's address, as set by the proxy in front of
 # the server. It's recorded as source_ip on sessions, key-usage logs, MFA attempts and
 # emailed links; nothing grants or refuses access by it. Only the header your proxy

@@ -43,6 +43,10 @@ const config_t *g_config = NULL;
 
 static Router *g_router;
 
+/* Set while a request goes to the admin listener (admin_port), where the
+   localhost-only endpoints are served; otherwise it's the public one */
+static int g_on_admin_port;
+
 /* ============================================================================
  * Requests
  * ============================================================================ */
@@ -72,6 +76,7 @@ static Reply send_raw(const char *raw) {
 
     HttpRequest req = http_request_parse(copy, len);
     str_copy(req.remote_ip, sizeof(req.remote_ip), "127.0.0.1");
+    req.admin_listener = g_on_admin_port;
     HttpResponse *resp = req.method == HTTP_UNKNOWN
         ? response_json_error(400, "Bad Request")
         : router_dispatch(g_router, &req);
@@ -117,6 +122,16 @@ static Reply post_json(const char *path, const char *cookie, const char *json) {
 
 static Reply post_form(const char *path, const char *form) {
     return request("POST", path, NULL, NULL, "application/x-www-form-urlencoded", form);
+}
+
+/* A request on the admin listener, as the operator's curl sends one: no cookie,
+   a JSON body if any */
+static Reply admin_port(const char *method, const char *target, const char *extra_headers,
+                        const char *json) {
+    g_on_admin_port = 1;
+    Reply r = request(method, target, NULL, extra_headers, json ? "application/json" : NULL, json);
+    g_on_admin_port = 0;
+    return r;
 }
 
 /* A string field of a JSON reply, copied into out */
@@ -233,7 +248,7 @@ static int login(const char *username, const char *password, char *cookie, size_
 }
 
 static int setup(void) {
-    Reply r = post_json("/api/admin/bootstrap", NULL,
+    Reply r = admin_port("POST", "/api/admin/bootstrap", NULL,
                         "{\"username\":\"admin\",\"password\":\"correct horse battery\"}");
     int status = r.status;
     reply_free(&r);
@@ -734,13 +749,13 @@ static int test_mfa_gates(void) {
 
     /* A second user, an org admin, so the admin API can be checked too */
     char user_id[33];
-    Reply r = post_json("/api/admin/users", NULL,
+    Reply r = admin_port("POST", "/api/admin/users", NULL,
                         "{\"username\":\"mfa-user\",\"password\":\"mfa user password\"}");
     if (r.status != 200 || field(&r, "user_id", user_id, sizeof(user_id)) != 0) {
         FAIL("creating the MFA user answered %d", r.status);
     }
     reply_free(&r);
-    r = post_json("/api/admin/org-admins", NULL,
+    r = admin_port("POST", "/api/admin/org-admins", NULL,
                   "{\"username\":\"mfa-user\",\"org_code_name\":\"system\"}");
     if (r.status != 200) FAIL("making them an org admin answered %d", r.status);
     reply_free(&r);
@@ -850,7 +865,7 @@ static int test_mfa_gates(void) {
                       user_consume_password_reset_token(db_pool_get_connection(), "mfa-reset",
                                                         "mfa user password 3") == 0;
         } else {
-            r = post_json("/api/admin/users/set-password", NULL, set_json);
+            r = admin_port("POST", "/api/admin/users/set-password", NULL, set_json);
         }
         if (i != 1) {
             changed = r.status == 200;
@@ -883,7 +898,7 @@ static int test_mfa_daily_cap(void) {
     printf("\n=== MFA daily cap ===\n");
 
     char cookie[256], method[33], secret[64], code[16], json[256], sql[256];
-    Reply r = post_json("/api/admin/users", NULL,
+    Reply r = admin_port("POST", "/api/admin/users", NULL,
                         "{\"username\":\"capped\",\"password\":\"capped password\"}");
     int status = r.status;
     reply_free(&r);
@@ -955,19 +970,56 @@ static int test_mfa_daily_cap(void) {
  * ============================================================================ */
 
 static int list_orgs_status(const char *headers) {
-    Reply r = request("GET", "/api/admin/list-all-organizations", NULL, headers, NULL, NULL);
+    Reply r = admin_port("GET", "/api/admin/list-all-organizations", headers, NULL);
     int status = r.status;
     reply_free(&r);
     return status;
 }
 
 /*
- * A browser that can reach the port over loopback is not the operator: a web
- * page rebinding its own name to 127.0.0.1 sends its name as Host, and Origin
- * and Sec-Fetch-* besides. Any one of them is refused; curl's requests pass.
+ * The localhost-only endpoints are served on the admin listener alone: on the
+ * public one they're refused however local the request looks. And a browser
+ * that can reach the admin port over loopback is not the operator: a web page
+ * rebinding its own name to 127.0.0.1 sends its name as Host, and Origin and
+ * Sec-Fetch-* besides. Any one of them is refused; curl's requests pass.
  */
 static int test_localhost_only(void) {
     printf("\n=== Localhost only ===\n");
+
+    /* Every route that serves the operator: refused on the public listener (403,
+       or for org keys, which that one takes, 401), and on the admin listener not.
+       There, made-up ids and empty bodies get the handlers' own 400s and 404s. */
+    static const struct { const char *method, *target; } operator_routes[] = {
+        { "POST", "/api/admin/bootstrap" },
+        { "POST", "/api/admin/organizations" },
+        { "POST", "/api/admin/org-admins" },
+        { "GET", "/api/admin/list-all-organizations" },
+        { "POST", "/api/admin/users" },
+        { "POST", "/api/admin/users/activate" },
+        { "POST", "/api/admin/users/deactivate" },
+        { "POST", "/api/admin/users/reset-mfa" },
+        { "POST", "/api/admin/users/set-password" },
+        { "GET", "/api/admin/users/emails" },
+        { "DELETE", "/api/admin/users/emails" },
+        { "POST", "/api/admin/organization-keys" },
+        { "GET", "/api/admin/organization-keys" },
+        { "DELETE", "/api/admin/organization-keys?id=ffffffffffffffffffffffffffffffff" },
+    };
+    for (size_t i = 0; i < sizeof(operator_routes) / sizeof(operator_routes[0]); i++) {
+        const char *method = operator_routes[i].method, *target = operator_routes[i].target;
+        Reply pub = request(method, target, NULL, NULL, "application/json", "{}");
+        Reply adm = admin_port(method, target, NULL, "{}");
+        int refused = pub.status == 403 || pub.status == 401;
+        int served = adm.status != 401 && adm.status != 403;
+        int pub_status = pub.status, adm_status = adm.status;
+        reply_free(&pub);
+        reply_free(&adm);
+        if (!refused || !served) {
+            FAIL("%s %s answered %d on the public listener and %d on the admin one",
+                 method, target, pub_status, adm_status);
+        }
+    }
+    printf("✓ every operator endpoint is refused on the public listener, served on the admin one\n");
 
     static const char *const browser[] = {
         "Host: rebind.attacker.example:8080\r\n"
@@ -981,9 +1033,9 @@ static int test_localhost_only(void) {
         int status = list_orgs_status(browser[i]);
         if (status != 403) FAIL("a browser-made request (case %zu) answered %d", i + 1, status);
     }
-    Reply r = request("POST", "/api/admin/users/set-password", NULL, browser[0],
-                      "application/json", "{\"user_id\":\"ffffffffffffffffffffffffffffffff\","
-                      "\"password\":\"attacker chose this\"}");
+    Reply r = admin_port("POST", "/api/admin/users/set-password", browser[0],
+                         "{\"user_id\":\"ffffffffffffffffffffffffffffffff\","
+                         "\"password\":\"attacker chose this\"}");
     int status = r.status;
     reply_free(&r);
     if (status != 403) FAIL("a rebound set-password answered %d", status);
@@ -1007,7 +1059,7 @@ static int test_localhost_only(void) {
  * ============================================================================ */
 
 static int post_status(const char *path, const char *json) {
-    Reply r = post_json(path, NULL, json);
+    Reply r = admin_port("POST", path, NULL, json);
     int status = r.status;
     reply_free(&r);
     return status;
@@ -1022,7 +1074,7 @@ static int test_account_recovery(void) {
     printf("\n=== Account recovery ===\n");
 
     char user_id[33], json[256], cookie[256], sql[128], pin[24], invite[64];
-    Reply r = post_json("/api/admin/users", NULL,
+    Reply r = admin_port("POST", "/api/admin/users", NULL,
                         "{\"username\":\"recovered\",\"password\":\"the old password\"}");
     int status = r.status;
     int created = status == 200 && field(&r, "user_id", user_id, sizeof(user_id)) == 0;
@@ -1114,14 +1166,14 @@ static int test_operator_addresses(void) {
 
     /* An address alone makes no account: it would go on unverified, so nothing
        could sign in to it */
-    Reply r = post_json("/api/admin/users", NULL,
+    Reply r = admin_port("POST", "/api/admin/users", NULL,
                         "{\"email\":\"nameless@example.com\",\"password\":\"nameless password\"}");
     int refused = r.status == 400 && strstr(r.body, "username");
     reply_free(&r);
     if (!refused) FAIL("the operator made an account from an address alone");
     printf("✓ the operator makes no account from an address alone\n");
 
-    r = post_json("/api/admin/users", NULL,
+    r = admin_port("POST", "/api/admin/users", NULL,
                   "{\"username\":\"checked\",\"password\":\"checked password\"}");
     int created = r.status == 200 && field(&r, "user_id", user_id, sizeof(user_id)) == 0;
     reply_free(&r);
@@ -1144,7 +1196,7 @@ static int test_operator_addresses(void) {
 
     /* 1. Listed, with verified state and dates */
     snprintf(json, sizeof(json), "{\"user_id\":\"%s\"}", user_id);
-    r = request("GET", "/api/admin/users/emails", NULL, NULL, "application/json", json);
+    r = admin_port("GET", "/api/admin/users/emails", NULL, json);
     if (r.status != 200 || !strstr(r.body, "\"total\":2") ||
         !strstr(r.body, "\"address\":\"theirs@example.com\",\"is_verified\":true") ||
         !strstr(r.body, "\"address\":\"mine@example.com\",\"is_verified\":false") ||
@@ -1166,14 +1218,14 @@ static int test_operator_addresses(void) {
     /* 2. Removed, matched without regard to case; then it's gone, and another
           removal is a 404 */
     snprintf(json, sizeof(json), "{\"user_id\":\"%s\",\"email\":\"THEIRS@example.com\"}", user_id);
-    r = request("DELETE", "/api/admin/users/emails", NULL, NULL, "application/json", json);
+    r = admin_port("DELETE", "/api/admin/users/emails", NULL, json);
     int removed = r.status;
     reply_free(&r);
-    r = request("DELETE", "/api/admin/users/emails", NULL, NULL, "application/json", json);
+    r = admin_port("DELETE", "/api/admin/users/emails", NULL, json);
     int again = r.status;
     reply_free(&r);
     snprintf(json, sizeof(json), "{\"user_id\":\"%s\"}", user_id);
-    r = request("GET", "/api/admin/users/emails", NULL, NULL, "application/json", json);
+    r = admin_port("GET", "/api/admin/users/emails", NULL, json);
     int left = r.status == 200 && strstr(r.body, "\"total\":1") && !strstr(r.body, "theirs");
     reply_free(&r);
     if (removed != 200 || again != 404 || !left) {
@@ -1189,10 +1241,10 @@ static int test_operator_addresses(void) {
 
     /* 3. An unknown user is a 404 both ways */
     const char *unknown = "{\"user_id\":\"ffffffffffffffffffffffffffffffff\",\"email\":\"x@example.com\"}";
-    r = request("GET", "/api/admin/users/emails", NULL, NULL, "application/json", unknown);
+    r = admin_port("GET", "/api/admin/users/emails", NULL, unknown);
     int listed = r.status;
     reply_free(&r);
-    r = request("DELETE", "/api/admin/users/emails", NULL, NULL, "application/json", unknown);
+    r = admin_port("DELETE", "/api/admin/users/emails", NULL, unknown);
     int deleted = r.status;
     reply_free(&r);
     if (listed != 404 || deleted != 404) {
@@ -1216,7 +1268,7 @@ static int test_form_password_length(void) {
     printf("\n=== Form password length ===\n");
 
     char user_id[33], sql[128], pin[24], invite[64], password[1026], form[1200];
-    Reply r = post_json("/api/admin/users", NULL,
+    Reply r = admin_port("POST", "/api/admin/users", NULL,
                         "{\"username\":\"longpass\",\"password\":\"a short password\"}");
     int created = r.status == 200 && field(&r, "user_id", user_id, sizeof(user_id)) == 0;
     reply_free(&r);
@@ -1265,7 +1317,7 @@ static int test_email_links(void) {
     printf("\n=== Emailed links ===\n");
 
     char user_id[33], cookie[256], token[64], form[160], json[96];
-    Reply r = post_json("/api/admin/users", NULL,
+    Reply r = admin_port("POST", "/api/admin/users", NULL,
                         "{\"username\":\"mailer\",\"password\":\"mailer password\"}");
     int created = r.status == 200 && field(&r, "user_id", user_id, sizeof(user_id)) == 0;
     reply_free(&r);

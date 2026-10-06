@@ -45,11 +45,12 @@ docker build -f deployment/Dockerfile -t auth-server .
 docker run -d --name auth-server -p 8080:8080 -v ./data:/app/data auth-server
 curl http://localhost:8080/health
 
-# Bootstrap admin account (localhost only)
+# Bootstrap admin account: the admin API listens on loopback inside the container
+# (admin_port, 8081), so it's reached with docker exec and never published
 docker exec auth-server wget -qO- \
   --header='Content-Type: application/json' \
   --post-data='{"username":"admin","password":"changeme"}' \
-  http://localhost:8080/api/admin/bootstrap
+  http://127.0.0.1:8081/api/admin/bootstrap
 ```
 
 ## Single-Server Production (Docker Compose)

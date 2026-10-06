@@ -65,6 +65,7 @@ typedef struct Connection {
     size_t bytes_written;         /* How much we've written so far */
 
     char remote_ip[INET6_ADDRSTRLEN];  /* Client IP address (IPv4 or IPv6, for logging) */
+    int admin_listener;           /* Accepted on the loopback admin listener, not the public one */
     uint64_t connection_id;       /* Unique across workers, for logging/debugging */
     struct timespec last_activity; /* Last read/write time (for timeout detection) */
     struct timespec opened_at;    /* When accepted: one request per connection, so its deadline */
@@ -105,7 +106,9 @@ typedef int (*RequestHandler)(Connection *conn,
 
 typedef struct {
     int num_workers;              /* Number of worker threads (caller must resolve) */
-    int port;                     /* Port to listen on */
+    int port;                     /* Port to listen on, every interface (IPv4 and IPv6) */
+    int admin_port;               /* Port for the admin listener: 127.0.0.1, and ::1 where the
+                                     host has it, never any other interface (0: none) */
     int backlog;                  /* Listen queue size (default: 128) */
     size_t max_request_size;      /* Max request size in bytes (default: 1MB) */
     int connection_timeout_ms;    /* Close a connection idle this long, or still reading
