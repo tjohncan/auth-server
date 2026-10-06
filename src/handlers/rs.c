@@ -53,6 +53,13 @@ int rs_handler_provision_user(db_handle_t *db, long long rs_pin,
     if (rc == -1) return -1;
     if (rc == 2) return 2;  /* ambiguous */
 
+    /* A server that can't email makes no account from an address alone, and
+     * finds no pending one by it. Such an account has nothing to sign in with
+     * until its invitation is accepted, and once the link expires nothing
+     * re-issues it (see below), so it would be stranded. By an address a
+     * verified account holds, it's still found. */
+    if (!username && !by_email && rc != 0) return 4;
+
     /* An account provisioned for this address that hasn't accepted its
      * invitation holds the address unverified, which the match above doesn't
      * look at. By email alone, that account is the person; with a username,

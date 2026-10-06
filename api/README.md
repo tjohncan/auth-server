@@ -2934,6 +2934,11 @@ above).
 
 At least one of `username` or `email` required. If both are provided and they match two different existing users, returns 409 (ambiguous).
 
+On a server that can't email, a username is required to create an account: an address alone
+only finds an existing account that has verified it, and otherwise answers 400. An account with
+only an address has nothing to sign in with until its invitation is accepted, and there nothing
+issues another once it expires.
+
 **Request Body**:
 ```json
 {
@@ -2985,7 +2990,8 @@ Or, when the server can't email it:
 the account as it is, with `"created": false`, and `"invitation": {"emailed": true}`.
 
 **Error Responses**:
-- `400` — missing username and email
+- `400` — missing username and email; or, on a server that can't email, an address alone that
+  no account has verified
 - `401` — authentication failed
 - `403` — user provisioning not enabled
 - `409` — ambiguous match (username and email resolve to different users)
@@ -3003,9 +3009,15 @@ the account as it is, with `"created": false`, and `"invitation": {"emailed": tr
   comes back for the resource server to deliver, and only for an account this call created. A
   server that can't email still verifies the address when the link is accepted, on the resource
   server's word. Such a deployment trusts every resource server it lets provision with that, so
-  enable provisioning only for ones you trust. A link lost there can't be issued again; the
-  operator can set a password (`POST /api/admin/users/set-password`) for an account with a
-  username.
+  enable provisioning only for ones you trust. A link lost or expired there (they expire after
+  72 hours by default) can't be issued again. The operator sets a password
+  (`POST /api/admin/users/set-password`) and gives it to the user, who signs in with the
+  username; the address stays unverified. To free the address instead, the operator removes it
+  from that account (`DELETE /api/admin/users/emails`).
+- An account created while the server could email, by an address alone, has no username. If the
+  server later runs without email and its link expires, it can't sign in: the operator removes
+  the address (`DELETE /api/admin/users/emails`), and the resource server provisions it again
+  with a username.
 - Invitation tokens expire after `invitation_token_ttl_seconds` (default 72 hours).
 
 **Usernames**: a username is a first-come handle with no proof behind it, and provisioning by

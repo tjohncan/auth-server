@@ -1228,11 +1228,24 @@ static int test_email_links(void) {
 
 static char g_rs_auth[512];  /* a provisioning resource server's credential fields */
 
-static Reply provision(const char *email) {
+static Reply provision(const char *username, const char *email) {
     char json[768];
-    snprintf(json, sizeof(json), "{%s,\"email\":\"%s\"}", g_rs_auth, email);
+    if (username) {
+        snprintf(json, sizeof(json), "{%s,\"username\":\"%s\",\"email\":\"%s\"}",
+                 g_rs_auth, username, email);
+    } else {
+        snprintf(json, sizeof(json), "{%s,\"email\":\"%s\"}", g_rs_auth, email);
+    }
     return post_json("/api/rs/users", NULL, json);
 }
+
+/* The username an account is created with: a server that can't email needs
+   one, and one that can makes accounts from an address alone */
+#ifdef EMAIL_SUPPORT
+#define AS(name) NULL
+#else
+#define AS(name) name
+#endif
 
 /* The token in a reply's invitation, given for the resource server to deliver;
    -1 if the reply has none */
@@ -1308,7 +1321,7 @@ static int test_provisioning(void) {
           whichever resource server asked, so it isn't invited, and the link it
           has still works */
     char user[33], tokens[5][64];
-    r = provision("pending@example.com");
+    r = provision(AS("pending"), "pending@example.com");
     if (r.status != 200 || field(&r, "user_id", user, sizeof(user)) != 0 ||
         !provisioned(&r, user, 1) ||
         invited(&r, "pending@example.com", tokens[0], sizeof(tokens[0])) != 0) {
@@ -1316,7 +1329,7 @@ static int test_provisioning(void) {
     }
     reply_free(&r);
 #ifndef EMAIL_SUPPORT
-    r = provision("pending@example.com");
+    r = provision(AS("pending"), "pending@example.com");
     if (!provisioned(&r, user, 0) || strstr(r.body, "\"invitation\"")) {
         FAIL("without email, a pending address again answered %d: %s", r.status, r.body);
     }
@@ -1325,6 +1338,21 @@ static int test_provisioning(void) {
         FAIL("provisioning a pending address again voided its link");
     }
     printf("✓ a pending address finds its account, and without email isn't invited again\n");
+
+    /* An address alone makes no account here, and finds no pending one: 400 */
+    r = provision("still", "still@example.com");
+    int still_status = r.status;
+    int still = still_status == 200 && strstr(r.body, "\"created\":true");
+    reply_free(&r);
+    if (!still) FAIL("provisioning a username and address answered %d", still_status);
+    const char *alone[] = { "nobody@example.com", "still@example.com" };
+    for (int i = 0; i < 2; i++) {
+        r = provision(NULL, alone[i]);
+        int refused = r.status == 400 && strstr(r.body, "username required");
+        reply_free(&r);
+        if (!refused) FAIL("without email, provisioning %s alone wasn't refused", alone[i]);
+    }
+    printf("✓ without email, an address alone creates no account and finds no pending one\n");
 #else
     for (int i = 1; i < 5; i++) {
         /* Earlier links issued earlier: SQLite dates to the second, and two from
@@ -1333,7 +1361,7 @@ static int test_provisioning(void) {
                               "issued_at = datetime(issued_at, '-2 seconds')") != 0) {
             FAIL("could not date the earlier invitations");
         }
-        r = provision("pending@example.com");
+        r = provision(AS("pending"), "pending@example.com");
         if (!provisioned(&r, user, 0) ||
             invited(&r, "pending@example.com", tokens[i], sizeof(tokens[i])) != 0) {
             FAIL("provisioning a pending address again answered %d: %s", r.status, r.body);
@@ -1348,7 +1376,7 @@ static int test_provisioning(void) {
     printf("✓ a pending address finds its account, invited again, and only the newest link works\n");
 
     /* 2. A sixth in the hour: the account, and no invitation */
-    r = provision("pending@example.com");
+    r = provision(AS("pending"), "pending@example.com");
     if (!provisioned(&r, user, 0) || strstr(r.body, "\"invitation\"")) {
         FAIL("a sixth provisioning in the hour answered %d: %s", r.status, r.body);
     }
@@ -1359,13 +1387,13 @@ static int test_provisioning(void) {
     /* A hand-off that fails (here, mail that can't be rendered) sends nothing,
        says so, and leaves the link the user already has working */
     char first[64];
-    r = provision("unsent@example.com");
+    r = provision(NULL, "unsent@example.com");
     if (invited(&r, "unsent@example.com", first, sizeof(first)) != 0) {
         FAIL("provisioning a new address answered %d", r.status);
     }
     reply_free(&r);
     template_cleanup();
-    r = provision("unsent@example.com");
+    r = provision(NULL, "unsent@example.com");
     template_init("./templates");
     int said = strstr(r.body, "\"invitation\":{\"emailed\":false}") != NULL;
     reply_free(&r);
@@ -1380,7 +1408,7 @@ static int test_provisioning(void) {
           inviting it. The account has no username: it signs in by the address,
           with or without email support */
     char accepted[33], token[64], cookie[256];
-    r = provision("accepted@example.com");
+    r = provision(AS("accepted"), "accepted@example.com");
     if (r.status != 200 || field(&r, "user_id", accepted, sizeof(accepted)) != 0 ||
         invited(&r, "accepted@example.com", token, sizeof(token)) != 0) {
         FAIL("provisioning a new address answered %d", r.status);
@@ -1389,7 +1417,7 @@ static int test_provisioning(void) {
     if (user_consume_invitation_token(db_pool_get_connection(), token, "an accepted password") != 0) {
         FAIL("a fresh invitation was refused");
     }
-    r = provision("accepted@example.com");
+    r = provision(NULL, "accepted@example.com");
     if (!provisioned(&r, accepted, 0) || strstr(r.body, "\"invitation\"") ||
         !strstr(r.body, "\"is_verified\":true")) {
         FAIL("an accepted address answered %d: %s", r.status, r.body);
@@ -1400,11 +1428,11 @@ static int test_provisioning(void) {
         login("accepted@example.com", "a wrong password", cookie, sizeof(cookie)) == 0) {
         FAIL("an account provisioned by address can't sign in by it, or signs in with anything");
     }
-    printf("✓ an account provisioned by address alone signs in with it\n");
+    printf("✓ a verified address signs in, and finds its account alone\n");
 
     /* 4. Deactivated while pending: found, inactive, and not invited */
     char banned[33];
-    r = provision("deactivated@example.com");
+    r = provision(AS("deactivated"), "deactivated@example.com");
     if (r.status != 200 || field(&r, "user_id", banned, sizeof(banned)) != 0 ||
         invited(&r, "deactivated@example.com", token, sizeof(token)) != 0) {
         FAIL("provisioning a new address answered %d", r.status);
@@ -1412,7 +1440,7 @@ static int test_provisioning(void) {
     reply_free(&r);
     snprintf(json, sizeof(json), "{\"user_id\":\"%s\"}", banned);
     if (post_status("/api/admin/users/deactivate", json) != 200) FAIL("could not deactivate");
-    r = provision("deactivated@example.com");
+    r = provision(AS("deactivated"), "deactivated@example.com");
     if (!provisioned(&r, banned, 0) || strstr(r.body, "\"invitation\"") ||
         !strstr(r.body, "\"is_active\":false")) {
         FAIL("a deactivated pending account answered %d: %s", r.status, r.body);

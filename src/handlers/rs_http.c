@@ -127,6 +127,8 @@ static HttpResponse *rs_error_response(int rc, const char *context) {
     case 1: return response_json_error(403, "User provisioning not enabled");
     case 2: return response_json_error(409, "Ambiguous match: username and email resolve to different users");
     case 3: return response_json_error(403, "User provisioning not enabled");
+    case 4: return response_json_error(400, "username required: this server can't email an "
+                                            "invitation, so an account needs a username");
     default:
         log_error("RS handler error: %s", context);
         return response_json_error(500, "Internal error");

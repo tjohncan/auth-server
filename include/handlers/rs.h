@@ -58,7 +58,9 @@ void rs_user_info_free(rs_user_info_t *info);
  *                    returned to the resource server
  *   out_info       - Output: user info (caller must call rs_user_info_free)
  *
- * Returns: 0 success, 1 provisioning not allowed, 2 ambiguous match, -1 error
+ * Returns: 0 success, 1 provisioning not allowed, 2 ambiguous match,
+ *          4 an address alone, on a server that can't email, that no verified
+ *          account holds (a username is needed to create the account), -1 error
  */
 int rs_handler_provision_user(db_handle_t *db, long long rs_pin,
                                const char *username, const char *email,
