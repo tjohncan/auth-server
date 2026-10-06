@@ -636,10 +636,12 @@ static int key_check_is(db_handle_t *db, const config_t *config, int want_right,
 
 /*
  * The server refuses to start with an encryption_key that doesn't open what the
- * database holds. The check opens the first sealed value it finds: a signing
- * key, else a username or email address. A fresh database has nothing to open,
- * and a signing key in the older plaintext format proves nothing, so neither
- * stops a start.
+ * database holds. The check opens a username (else an address) first, since
+ * that's what says which key sealed the database, then every signing key. A
+ * signing key that won't open under the key that opens the users came from
+ * elsewhere, and is told apart (-2) so the error names the right fix. A fresh
+ * database has nothing to open, and a signing key in the older plaintext format
+ * proves nothing, so neither stops a start.
  *
  * Returns 0 on success.
  */
@@ -675,7 +677,7 @@ static int test_encryption_key_check(const config_t *config) {
     log_info("  users only: a username tells the right key from a wrong one (OK)");
 
     /* 3. Signing keys, the auth-request one in the older plaintext format: it's
-          passed over, and the access-token key decides */
+          passed over under the right key; under a wrong one the username decides */
     signing_key_thread_cleanup();
     if (signing_key_get_or_rotate(sdb, SIGNING_KEY_ACCESS_TOKEN, &es) != 0 ||
         signing_key_get_or_rotate(sdb, SIGNING_KEY_AUTH_REQUEST, &hmac) != 0 ||
@@ -685,10 +687,60 @@ static int test_encryption_key_check(const config_t *config) {
         goto done;
     }
     if (!key_check_is(sdb, config, 0, -1)) {
-        log_error("Key check: the access-token key didn't tell the right key from a wrong one");
+        log_error("Key check: a plaintext signing key wasn't passed over");
         goto done;
     }
-    log_info("  a plaintext signing key passed over, the next one decides (OK)");
+    log_info("  a plaintext signing key is passed over (OK)");
+
+    /* 4. Signing keys sealed under another key, as if copied in from another
+          deployment: under the users' key it's the signing rows (-2), under the
+          other the users (-1). Deleting both tables' rows, the fix the error
+          names, starts it */
+    const char *drop_keys[] = { "DELETE FROM auth_request_signing",
+                                "DELETE FROM access_token_signing" };
+    signing_key_free(es);
+    signing_key_free(hmac);
+    es = hmac = NULL;
+    signing_key_thread_cleanup();
+    if (db_execute_direct(sdb, drop_keys[0]) != 0 || db_execute_direct(sdb, drop_keys[1]) != 0 ||
+        encrypt_init("not-the-key-that-sealed-these") != 0 ||
+        signing_key_get_or_rotate(sdb, SIGNING_KEY_ACCESS_TOKEN, &es) != 0 ||
+        signing_key_get_or_rotate(sdb, SIGNING_KEY_AUTH_REQUEST, &hmac) != 0 ||
+        encrypt_init(config->encryption_key) != 0) {
+        log_error("Key check: could not seal signing keys under another key");
+        goto done;
+    }
+    if (!key_check_is(sdb, config, -2, -1)) {
+        log_error("Key check: signing keys from elsewhere weren't told apart from a wrong key");
+        goto done;
+    }
+    signing_key_thread_cleanup();
+    if (db_execute_direct(sdb, drop_keys[0]) != 0 || db_execute_direct(sdb, drop_keys[1]) != 0 ||
+        !key_check_is(sdb, config, 0, -1)) {
+        log_error("Key check: deleting the foreign signing rows didn't clear the check");
+        goto done;
+    }
+    log_info("  signing keys from elsewhere refuse with their own fix, which works (OK)");
+
+    /* 5. Users sealed under another key, signing keys under this one: the users
+          decide, though the signing keys open */
+    signing_key_free(es);
+    signing_key_free(hmac);
+    es = hmac = NULL;
+    if (db_execute_direct(sdb, "DELETE FROM user_account") != 0 ||
+        encrypt_init("not-the-key-that-sealed-these") != 0 ||
+        user_create(sdb, "elsewhere", NULL, "a password", user_id) != 0 ||
+        encrypt_init(config->encryption_key) != 0 ||
+        signing_key_get_or_rotate(sdb, SIGNING_KEY_ACCESS_TOKEN, &es) != 0 ||
+        signing_key_get_or_rotate(sdb, SIGNING_KEY_AUTH_REQUEST, &hmac) != 0) {
+        log_error("Key check: could not seal the users under another key");
+        goto done;
+    }
+    if (!key_check_is(sdb, config, -1, -2)) {
+        log_error("Key check: users from elsewhere passed because the signing keys open");
+        goto done;
+    }
+    log_info("  users sealed under another key refuse, though the signing keys open (OK)");
 
     failed = 0;
 

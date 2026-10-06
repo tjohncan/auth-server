@@ -287,21 +287,23 @@ Manages cryptographic signing keys for JWTs with automatic rotation.
 - Current + prior keys retained for graceful rotation
 - HMAC secrets and ES256 private keys are stored encrypted with the field-encryption key
     (`encryption_key`), as `e1:`-prefixed values; public keys are stored in plaintext
-- At startup the server opens one sealed value already in the database (a signing key, else
-    a username or email address) and refuses to start if `encryption_key` won't open it, so
-    a wrong key fails there rather than at the first sign-in. The fix is to start with the key
-    that sealed the data. Deleting the signing-key rows doesn't get past the check once there
-    are users: it goes on to a username or address sealed under the same key. A key lost for
-    good loses everything sealed under it (every username, address and TOTP secret), and no
-    one can sign in, so keep a copy of `encryption_key` wherever the database is backed up
-- A stored signing key that will not decrypt while the rest of the database does (rows
-    copied in from another deployment, say) stops token issuance, `/userinfo` and the JWKS
-    endpoint, with an error naming both tables; it is never silently regenerated.
-    `/introspect` and `/revoke` don't use the keys and keep working. Deleting the rows in
-    both tables regenerates the keys on next use, and refresh tokens and sessions survive
-    that. Outstanding access tokens stop verifying against the published keys and at
-    `/userinfo`, but `/introspect` reports them active until they expire, so deleting the
-    rows is no way to retire leaked tokens: revoke them, or deactivate the user.
+- At startup the server opens a username or email address already in the database, then
+    every stored signing key, and refuses to start if one won't open, so a wrong key fails
+    there rather than at the first sign-in:
+    - A username or address that won't open means `encryption_key` isn't the key that sealed
+      the data. The fix is to start with that one. A key lost for good loses everything sealed
+      under it (every username, address and TOTP secret), and no one can sign in, so keep a
+      copy of `encryption_key` wherever the database is backed up.
+    - A signing key that won't open while the users do was sealed under another key: rows
+      copied in from another deployment, say. The error names both tables. Deleting the rows
+      in both regenerates the keys on next use, and refresh tokens and sessions survive that.
+      Outstanding access tokens stop verifying against the published keys and at
+      `/userinfo`, but `/introspect` reports them active until they expire, so deleting the
+      rows is no way to retire leaked tokens: revoke them, or deactivate the user.
+    - With no users yet, a signing key that won't open could be either, and the error says so.
+- A signing key is never silently regenerated: one that won't decrypt while the server runs
+    stops token issuance, `/userinfo` and the JWKS endpoint with the same error. `/introspect`
+    and `/revoke` don't use the keys and keep working.
 
 **Rotation:**
 - **Passive mechanism**: Keys checked on every use, rotated if stale

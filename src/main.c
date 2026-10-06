@@ -323,10 +323,14 @@ int main(void) {
         log_info("History tables disabled in configuration");
     }
 
-    /* The wrong encryption_key stops the server here, rather than showing up as
-       failed sign-ins and token issuance once it's serving */
-    if (signing_key_check_encryption_key(setup_db) != 0) {
-        log_error("Refusing to start: encryption_key does not match the database");
+    /* The wrong encryption_key, or signing keys sealed under another, stops the
+       server here, rather than showing up as failed sign-ins and token issuance
+       once it's serving */
+    int key_check = signing_key_check_encryption_key(setup_db);
+    if (key_check != 0) {
+        log_error(key_check == -2
+                  ? "Refusing to start: the stored signing keys don't open under encryption_key"
+                  : "Refusing to start: encryption_key does not match the database");
         db_pool_shutdown();
         encrypt_cleanup();
         config_free(config);
