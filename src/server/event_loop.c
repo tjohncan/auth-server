@@ -499,6 +499,14 @@ static int handle_read(Connection *conn, size_t max_request_size) {
             int cl_result = http_scan_content_length(conn->read_buffer, conn->header_end,
                                                      &content_length);
 
+            if (cl_result == -3) {
+                /* The parser would stop reading header lines at the NUL, short of
+                 * what framed the request here */
+                log_warn("Rejecting request with a NUL in its header block from connection %lu",
+                        conn->connection_id);
+                return -1;
+            }
+
             if (cl_result == -2) {
                 /* Multiple/conflicting Content-Length headers (request smuggling attack) */
                 log_warn("Rejecting request with conflicting Content-Length headers from connection %lu",

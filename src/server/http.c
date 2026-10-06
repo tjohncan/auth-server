@@ -199,6 +199,15 @@ HttpRequest http_request_parse(char *raw, size_t length) {
         return req;
     }
 
+    /* No NUL in the header block (RFC 9110 §5.5 has a recipient reject one). Every
+     * walk below reads lines as C strings and would stop at it, so the headers
+     * after it, a Content-Length among them, would go unseen. The socket layer
+     * refuses the same (http_scan_content_length). */
+    if (memchr(raw, '\0', (size_t)(body_start - raw)) != NULL) {
+        req.method = HTTP_UNKNOWN;
+        return req;
+    }
+
     /* Split the request line off from the header block, BEFORE modifying either.
      * parse_request_line() relies on this terminator to stay inside its own line. */
     char *first_header = strstr(raw, "\r\n");
@@ -473,6 +482,12 @@ int http_scan_content_length(const char *headers, size_t header_len, size_t *out
     }
 
     const char *end = headers + header_len;
+
+    /* The parser reads header lines as C strings and stops at a NUL, so past one
+       it would see none of the lines this reads */
+    if (memchr(headers, '\0', header_len) != NULL) {
+        return -3;
+    }
 
     /* Header lines begin after the request line */
     const char *p = memmem(headers, header_len, "\r\n", 2);

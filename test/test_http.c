@@ -600,6 +600,38 @@ void test_content_length_scan(void) {
         http_request_cleanup(&parsed);
         printf("✓ the parser refuses what the scan refuses, and reads the same length\n");
     }
+
+    /* A NUL in the header block: the parser would stop at it, short of the
+     * Content-Length (and any Origin or forwarding header) after it, so both
+     * layers refuse it. A NUL in the body is the body's business. */
+    {
+        static const char raw[] = "POST /api HTTP/1.0\r\nFoo: a\0\r\nContent-Length: 5\r\n\r\nhello";
+        size_t len = sizeof(raw) - 1;
+        char *exact = malloc(len);
+        assert(exact);
+        memcpy(exact, raw, len);
+        size_t header_end = http_find_header_end(exact, len, 0);
+        assert(header_end == len - 5);
+        size_t length = 0;
+        assert(http_scan_content_length(exact, header_end, &length) == -3);
+        free(exact);
+
+        char copy[sizeof(raw)];
+        memcpy(copy, raw, sizeof(raw));
+        HttpRequest parsed = http_request_parse(copy, len);
+        assert(parsed.method == HTTP_UNKNOWN);
+        http_request_cleanup(&parsed);
+
+        static const char in_body[] = "POST /api HTTP/1.0\r\nContent-Length: 3\r\n\r\na\0b";
+        char body_copy[sizeof(in_body)];
+        memcpy(body_copy, in_body, sizeof(in_body));
+        header_end = http_find_header_end(body_copy, sizeof(in_body) - 1, 0);
+        assert(http_scan_content_length(body_copy, header_end, &length) == 0 && length == 3);
+        parsed = http_request_parse(body_copy, sizeof(in_body) - 1);
+        assert(parsed.method == HTTP_POST && parsed.body_length == 3);
+        http_request_cleanup(&parsed);
+        printf("✓ a NUL in the header block is refused by the scan and the parser; in the body, not\n");
+    }
 }
 
 void test_cross_origin(void) {

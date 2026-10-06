@@ -181,7 +181,9 @@ size_t http_find_header_end(const char *buffer, size_t length, size_t already_sc
  * The socket layer calls this once per request, on its read buffer, to learn how
  * many body bytes to wait for. That buffer is NOT NUL-terminated, so this reads only
  * within header_len. http_request_parse() applies the same value rule, so the two
- * layers can't disagree about where a body ends.
+ * layers can't disagree about where a body ends. Both refuse a header block with a
+ * NUL in it (RFC 9110 §5.5): the parser reads header lines as C strings, and would
+ * stop at it short of headers this reads.
  *
  * A value must be one or more digits, optionally surrounded by spaces or tabs.
  * Several Content-Length lines are accepted only if they agree.
@@ -192,7 +194,7 @@ size_t http_find_header_end(const char *buffer, size_t length, size_t already_sc
  *   out_length - Receives the length on success
  *
  * Returns: 0 found, 1 no Content-Length, -1 an invalid value,
- *          -2 Content-Length lines that disagree
+ *          -2 Content-Length lines that disagree, -3 a NUL in the header block
  */
 int http_scan_content_length(const char *headers, size_t header_len, size_t *out_length);
 

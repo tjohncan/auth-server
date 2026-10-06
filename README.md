@@ -687,7 +687,8 @@ A line in the header block with no colon (including an obsolete `obs-fold` conti
 a 400, rather than being quietly ignored the way a lenient parser would. RFC 7230 §3.2.4
 explicitly sanctions this. Request *framing* — the control that actually stops smuggling — is
 enforced earlier, at the socket layer (`src/server/event_loop.c`): conflicting `Content-Length`
-headers and any `Transfer-Encoding` are rejected outright, and the connection is closed after a
+headers, any `Transfer-Encoding` and a NUL anywhere in the header block are rejected outright
+(the parser refuses that NUL too), and the connection is closed after a
 single request (HTTP/1.0, no keep-alive), so there is no reused connection to smuggle into.
 This rejection is narrower and is header-interpretation hygiene: it removes the divergence
 between a front-end proxy that might fold or tolerate a malformed line and an origin that would
