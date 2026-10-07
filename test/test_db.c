@@ -988,6 +988,26 @@ static int test_hashing_config(void) {
     }
     log_info("  left out, the password settings, with or without a config file; set, their "
              "own; argon2id above 20 iterations refused (OK)");
+
+    /* The admin API's listeners: the socket by default, mode 0600, no TCP port;
+       a mode is octal, and one that isn't keeps the default; empty is none */
+    config_t *dflt = config_from("log_level = warn\n");
+    config_t *mode = config_from("admin_socket_mode = 0660\n");
+    config_t *bad = config_from("admin_socket_mode = 9\n");
+    config_t *off = config_from("admin_socket =\nadmin_port = 8081\n");
+    int ok_admin = dflt && mode && bad && off &&
+        strcmp(dflt->admin_socket, "./data/admin.sock") == 0 && dflt->admin_socket_mode == 0600 &&
+        dflt->admin_port == 0 && mode->admin_socket_mode == 0660 && bad->admin_socket_mode == 0600 &&
+        off->admin_socket[0] == '\0' && off->admin_port == 8081;
+    config_free(dflt);
+    config_free(mode);
+    config_free(bad);
+    config_free(off);
+    if (!ok_admin) {
+        log_error("Hashing config: the admin listener settings didn't default or parse as documented");
+        return 1;
+    }
+    log_info("  admin API: the socket by default (0600), no TCP port; modes octal (OK)");
     log_info("Hashing config tests passed!");
     return 0;
 }

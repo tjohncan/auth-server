@@ -45,12 +45,12 @@ docker build -f deployment/Dockerfile -t auth-server .
 docker run -d --name auth-server -p 8080:8080 -v ./data:/app/data auth-server
 curl http://localhost:8080/health
 
-# Bootstrap admin account: the admin API listens on loopback inside the container
-# (admin_port, 8081), so it's reached with docker exec and never published
-docker exec auth-server wget -qO- \
-  --header='Content-Type: application/json' \
-  --post-data='{"username":"admin","password":"changeme"}' \
-  http://127.0.0.1:8081/api/admin/bootstrap
+# Bootstrap admin account: the admin API listens on a Unix socket in the data
+# directory (admin_socket), so it's reached with docker exec, as the container's user,
+# and never published. The body goes on standard input, out of the process list.
+docker exec -i auth-server /app/auth-server --admin POST /api/admin/bootstrap - <<'EOF'
+{"username":"admin","password":"changeme"}
+EOF
 ```
 
 ## Single-Server Production (Docker Compose)
@@ -204,6 +204,8 @@ overridden by environment variables (useful for Docker and secrets management).
 | `AUTH_DB_OWNER_ROLE`  | `db_owner_role`  | Schema owner role        | (db_user)      |
 | `AUTH_ENCRYPTION_KEY` | `encryption_key` | Field encryption key     | `customize_me` |
 | `AUTH_ENCRYPTION_KEY_PREVIOUS` | `encryption_key_previous` | The key data is sealed under now, for `--rekey` only | — |
+| `AUTH_ADMIN_SOCKET`   | `admin_socket`   | The admin API's Unix socket (empty: none) | `./data/admin.sock` |
+| `AUTH_ADMIN_PORT`     | `admin_port`     | The admin API on loopback TCP too (0: not) | `0` |
 | `AUTH_LOG_LEVEL`      | `log_level`      | `debug/info/warn/error`  | `info`         |
 | `AUTH_EMAIL_COMMAND`  | `email_command`  | Email delivery script    | —              |
 | `AUTH_EMAIL_FROM`     | `email_from`     | Sender address           | —              |

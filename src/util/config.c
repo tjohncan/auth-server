@@ -23,7 +23,8 @@
 /* Default values */
 #define DEFAULT_HOST "localhost"
 #define DEFAULT_PORT 8080
-#define DEFAULT_ADMIN_PORT 8081
+#define DEFAULT_ADMIN_SOCKET "./data/admin.sock"
+#define DEFAULT_ADMIN_SOCKET_MODE 0600
 #define DEFAULT_WORKERS 0  /* 0 = auto-detect */
 #define DEFAULT_DB_TYPE DB_TYPE_SQLITE
 #define DEFAULT_DB_PATH "./data/auth.db"
@@ -175,11 +176,28 @@ static void set_config_value(config_t *config, const char *key, const char *valu
         }
     } else if (strcmp(key, "admin_port") == 0) {
         int port = 0;
-        if (parse_int(value, &port) != 0 || port < 1 || port > 65535) {
-            log_warn("Invalid admin_port value '%s', must be 1-65535. Keeping current: %d",
+        if (parse_int(value, &port) != 0 || port < 0 || port > 65535) {
+            log_warn("Invalid admin_port value '%s', must be 1-65535 (0: none). Keeping current: %d",
                      value, config->admin_port);
         } else {
             config->admin_port = port;
+        }
+    } else if (strcmp(key, "admin_socket") == 0) {
+        new_value = str_dup(value);
+        if (new_value) {
+            free(config->admin_socket);
+            config->admin_socket = new_value;
+        } else {
+            log_error("Failed to allocate memory for admin_socket");
+        }
+    } else if (strcmp(key, "admin_socket_mode") == 0) {
+        char *end = NULL;
+        long mode = strtol(value, &end, 8);
+        if (!*value || *end || mode < 0 || mode > 0777) {
+            log_warn("Invalid admin_socket_mode '%s', must be octal like 0600 or 0660. Keeping "
+                     "current: %04o", value, config->admin_socket_mode);
+        } else {
+            config->admin_socket_mode = (int)mode;
         }
     } else if (strcmp(key, "server_workers") == 0) {
         int workers = -1;
@@ -211,6 +229,14 @@ static void set_config_value(config_t *config, const char *key, const char *valu
             config->admin_port_env = new_value;
         } else {
             log_error("Failed to allocate memory for admin_port_env");
+        }
+    } else if (strcmp(key, "admin_socket_env") == 0) {
+        new_value = str_dup(value);
+        if (new_value) {
+            free(config->admin_socket_env);
+            config->admin_socket_env = new_value;
+        } else {
+            log_error("Failed to allocate memory for admin_socket_env");
         }
     } else if (strcmp(key, "mothership_url") == 0) {
         new_value = str_dup(value);
@@ -767,13 +793,27 @@ static void apply_env_overrides(config_t *config) {
     env_var_name = config->admin_port_env ? config->admin_port_env : "AUTH_ADMIN_PORT";
     env_value = getenv(env_var_name);
     if (env_value) {
-        int port = 0;
+        int port = -1;
         parse_int(env_value, &port);
-        if (port > 0 && port <= 65535) {
+        if (port >= 0 && port <= 65535) {
             config->admin_port = port;
             log_info("Config override from %s: %d", env_var_name, port);
         } else {
             log_warn("Invalid port in %s: %s", env_var_name, env_value);
+        }
+    }
+
+    /* ADMIN_SOCKET */
+    env_var_name = config->admin_socket_env ? config->admin_socket_env : "AUTH_ADMIN_SOCKET";
+    env_value = getenv(env_var_name);
+    if (env_value) {
+        char *new_value = str_dup(env_value);
+        if (new_value) {
+            free(config->admin_socket);
+            config->admin_socket = new_value;
+            log_info("Config override from %s: %s", env_var_name, env_value);
+        } else {
+            log_error("Failed to allocate memory for %s override", env_var_name);
         }
     }
 
@@ -1143,7 +1183,14 @@ config_t *config_load(const char *config_file) {
     }
 
     config->port = DEFAULT_PORT;
-    config->admin_port = DEFAULT_ADMIN_PORT;
+    config->admin_port = 0;  /* the admin API on loopback TCP only when asked */
+    config->admin_socket = str_dup(DEFAULT_ADMIN_SOCKET);
+    config->admin_socket_mode = DEFAULT_ADMIN_SOCKET_MODE;
+    if (!config->admin_socket) {
+        log_error("Failed to allocate default admin_socket");
+        config_free(config);
+        return NULL;
+    }
     config->workers = DEFAULT_WORKERS;
     config->db_type = DEFAULT_DB_TYPE;
 
@@ -1175,6 +1222,7 @@ config_t *config_load(const char *config_file) {
     config->server_host_env = NULL;
     config->server_port_env = NULL;
     config->admin_port_env = NULL;
+    config->admin_socket_env = NULL;
     config->mothership_url_env = NULL;
     config->mothership_url = NULL;
 
@@ -1449,6 +1497,8 @@ void config_free(config_t *config) {
     free(config->server_host_env);
     free(config->server_port_env);
     free(config->admin_port_env);
+    free(config->admin_socket_env);
+    free(config->admin_socket);
     free(config->mothership_url_env);
     free(config->mothership_url);
     free(config->client_ip_header);

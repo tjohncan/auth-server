@@ -17,12 +17,19 @@ server_host = localhost
 server_port = 8080
 server_workers = 0
 
-# The localhost-only admin API (bootstrap, users, organizations, org keys) has a port of
-# its own, which listens on loopback alone: 127.0.0.1, and ::1 where the host has it.
-# The public port refuses those endpoints. Don't publish or forward this one: run admin
-# commands on the host, or with docker exec. It must differ from server_port, and each
-# deployment on a host needs its own: the server refuses to start on a port in use.
-admin_port = 8081
+# The localhost-only admin API (bootstrap, users, organizations, org keys) listens on a
+# Unix socket, and the public port refuses those endpoints. Who may call it is the
+# socket file's mode: 0600 lets in the server's own user (and root), 0660 its group too.
+# Call it with ./auth-server --admin METHOD PATH [JSON | -], or curl --unix-socket; in
+# Docker, through docker exec. Each deployment needs its own socket, which its data
+# directory gives it. Empty turns it off.
+admin_socket = ./data/admin.sock
+admin_socket_mode = 0600
+# The admin API on loopback TCP as well (127.0.0.1, and ::1 where the host has it), off
+# unless set. Any process on the host can reach a port, whichever user runs it: the
+# socket is what knows who's calling. It must differ from server_port and be free;
+# don't publish or forward it.
+# admin_port = 8081
 
 # Which request header carries the client's address, as set by the proxy in front of
 # the server. It's recorded as source_ip on sessions, key-usage logs, MFA attempts and

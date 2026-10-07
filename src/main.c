@@ -30,7 +30,13 @@
 #include <signal.h>
 #include <stdbool.h>
 #include <stdatomic.h>
+#include <errno.h>
 #include <sys/types.h>
+#include <sys/time.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <openssl/crypto.h>
 
 static void worker_thread_cleanup(void) {
@@ -464,21 +470,199 @@ static int connection_string_for(const config_t *config, char *pg_buf, size_t pg
     return 0;
 }
 
+/* The admin socket auth.conf names, or NULL for none */
+static const char *admin_socket_of(const config_t *config) {
+    return config->admin_socket && config->admin_socket[0] ? config->admin_socket : NULL;
+}
+
+/*
+ * ./auth-server --admin METHOD PATH [BODY | -]: one call to this server's admin
+ * API, on the admin socket auth.conf names, else its admin_port, printing the
+ * answer's body. BODY is JSON; "-" reads it from standard input, which keeps a
+ * password out of the process list. Exits 0 for a 2xx answer, 1 for any other
+ * (its status on standard error), 2 if the call couldn't be made.
+ */
+static int run_admin_client(const config_t *config, const char *method, const char *path,
+                            const char *body_arg) {
+    for (const char *c = method; *c; c++) {
+        if (*c < 'A' || *c > 'Z') {
+            fprintf(stderr, "--admin: the method is a word like GET or POST\n");
+            return 2;
+        }
+    }
+    for (const char *c = path; *c; c++) {
+        if ((unsigned char)*c <= ' ' || *c == 0x7f) {
+            fprintf(stderr, "--admin: the path can't hold spaces or control characters\n");
+            return 2;
+        }
+    }
+    if (path[0] != '/') {
+        fprintf(stderr, "--admin: the path starts with /, as in /api/admin/bootstrap\n");
+        return 2;
+    }
+
+    /* The body: the argument, or standard input for "-" */
+    char *body = NULL;
+    size_t body_len = 0;
+    if (body_arg && strcmp(body_arg, "-") == 0) {
+        size_t capacity = 4096;
+        body = malloc(capacity);
+        size_t n;
+        while (body && (n = fread(body + body_len, 1, capacity - body_len, stdin)) > 0) {
+            body_len += n;
+            if (body_len == capacity) {
+                if (capacity >= 1024 * 1024) {
+                    fprintf(stderr, "--admin: the body is over 1 MiB\n");
+                    OPENSSL_cleanse(body, body_len);
+                    free(body);
+                    return 2;
+                }
+                char *grown = realloc(body, capacity * 2);
+                if (!grown) break;
+                body = grown;
+                capacity *= 2;
+            }
+        }
+        if (!body) {
+            fprintf(stderr, "--admin: out of memory\n");
+            return 2;
+        }
+    } else if (body_arg) {
+        body_len = strlen(body_arg);
+        body = malloc(body_len + 1);
+        if (!body) return 2;
+        memcpy(body, body_arg, body_len);
+    }
+
+    /* The admin socket, else loopback TCP on admin_port */
+    const char *socket_path = admin_socket_of(config);
+    int fd = -1;
+    if (socket_path) {
+        struct sockaddr_un addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sun_family = AF_UNIX;
+        if (strlen(socket_path) < sizeof(addr.sun_path)) {
+            memcpy(addr.sun_path, socket_path, strlen(socket_path) + 1);
+            fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+            if (fd >= 0 && connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+                fprintf(stderr, "--admin: can't connect to %s: %s\n", socket_path, strerror(errno));
+                close(fd);
+                fd = -1;
+            }
+        }
+    } else if (config->admin_port > 0) {
+        struct sockaddr_in addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_port = htons((uint16_t)config->admin_port);
+        fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        if (fd >= 0 && connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+            fprintf(stderr, "--admin: can't connect to 127.0.0.1:%d: %s\n", config->admin_port,
+                    strerror(errno));
+            close(fd);
+            fd = -1;
+        }
+    } else {
+        fprintf(stderr, "--admin: auth.conf has no admin_socket and no admin_port\n");
+    }
+    if (fd < 0) {
+        if (body) OPENSSL_cleanse(body, body_len);
+        free(body);
+        return 2;
+    }
+    struct timeval timeout = { .tv_sec = 35, .tv_usec = 0 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+
+    /* One HTTP/1.0 request, as the admin listener takes it */
+    char head[1024];
+    int head_len = body
+        ? snprintf(head, sizeof(head), "%s %s HTTP/1.0\r\nHost: localhost\r\n"
+                   "User-Agent: auth-server --admin\r\nContent-Type: application/json\r\n"
+                   "Content-Length: %zu\r\n\r\n", method, path, body_len)
+        : snprintf(head, sizeof(head), "%s %s HTTP/1.0\r\nHost: localhost\r\n"
+                   "User-Agent: auth-server --admin\r\n\r\n", method, path);
+    int sent = head_len > 0 && (size_t)head_len < sizeof(head) &&
+               send(fd, head, (size_t)head_len, MSG_NOSIGNAL) == head_len;
+    for (size_t off = 0; sent && off < body_len; ) {
+        ssize_t n = send(fd, body + off, body_len - off, MSG_NOSIGNAL);
+        if (n <= 0) sent = 0;
+        else off += (size_t)n;
+    }
+    if (body) OPENSSL_cleanse(body, body_len);
+    free(body);
+    if (!sent) {
+        fprintf(stderr, "--admin: sending the request failed: %s\n", strerror(errno));
+        close(fd);
+        return 2;
+    }
+
+    /* The answer, to the end: the server closes after one */
+    size_t capacity = 16384, len = 0;
+    char *answer = malloc(capacity + 1);
+    ssize_t n;
+    while (answer && (n = recv(fd, answer + len, capacity - len, 0)) > 0) {
+        len += (size_t)n;
+        if (len == capacity) {
+            char *grown = realloc(answer, capacity * 2 + 1);
+            if (!grown) break;
+            answer = grown;
+            capacity *= 2;
+        }
+    }
+    close(fd);
+    if (!answer) return 2;
+    answer[len] = '\0';
+
+    int status = 0;
+    const char *body_start = strstr(answer, "\r\n\r\n");
+    if (sscanf(answer, "HTTP/1.%*d %d", &status) != 1 || !body_start) {
+        fprintf(stderr, "--admin: no answer from the server\n");
+        free(answer);
+        return 2;
+    }
+    body_start += 4;
+    fputs(body_start, stdout);
+    if (*body_start && body_start[strlen(body_start) - 1] != '\n') fputc('\n', stdout);
+    free(answer);
+    if (status < 200 || status > 299) {
+        fprintf(stderr, "HTTP %d\n", status);
+        return 1;
+    }
+    return 0;
+}
+
 int main(int argc, char **argv) {
-    /* No arguments serves. One maintenance mode runs once and exits. */
+    /* No arguments serves. One maintenance mode runs once and exits, and so does
+       one admin call. */
     const char *mode = argc == 2 ? argv[1] : NULL;
     bool drophistory = mode && strcmp(mode, "--drophistory") == 0;
     bool rekey = mode && strcmp(mode, "--rekey") == 0;
-    if (argc > 1 && !drophistory && !rekey) {
-        fprintf(stderr, "Usage: %s [--drophistory | --rekey]\n"
+    bool admin = (argc == 4 || argc == 5) && strcmp(argv[1], "--admin") == 0;
+    if (argc > 1 && !drophistory && !rekey && !admin) {
+        fprintf(stderr, "Usage: %s [--drophistory | --rekey | --admin METHOD PATH [BODY | -]]\n"
                         "  (no argument)    serve, configured by ./auth.conf\n"
                         "  --drophistory    remove every history table and its triggers, making\n"
                         "                   them again if enable_history_tables is on\n"
                         "  --rekey          seal everything sealed under encryption_key_previous\n"
                         "                   again under encryption_key\n"
-                        "  Every instance must be stopped before either.\n",
+                        "  Every instance must be stopped before either.\n"
+                        "  --admin          call this server's admin API (its admin_socket, else\n"
+                        "                   admin_port) and print the answer; BODY is JSON, and\n"
+                        "                   - reads it from standard input\n",
                 argv[0]);
         return 2;
+    }
+
+    /* An admin call prints the answer alone: only warnings and errors are logged */
+    if (admin) {
+        log_init(LOG_WARN);
+        config_t *config = config_load("auth.conf");
+        if (!config) return 2;
+        int rc = run_admin_client(config, argv[2], argv[3], argc == 5 ? argv[4] : NULL);
+        config_free(config);
+        return rc;
     }
 
     log_init(LOG_INFO);
@@ -534,17 +718,26 @@ int main(int argc, char **argv) {
     log_info("Configuration loaded:");
     log_info("  Server: %s:%d (workers=%d)", config->host, config->port, config->workers);
 
-    /* The admin API listens on loopback alone, on a port of its own. Sharing the
-       public one, loopback traffic to the public port (a proxy on the same host,
-       say) would land on the admin listener. */
-    if (config->admin_port == config->port) {
+    /* The admin API: on a Unix socket, which only who its mode lets in can open,
+       and on loopback TCP too where admin_port asks for it. A port of its own:
+       sharing the public one, loopback traffic to the public port (a proxy on
+       the same host, say) would land on the admin listener. */
+    if (config->admin_port > 0 && config->admin_port == config->port) {
         log_error("admin_port and server_port are both %d: the admin API needs a port of its own",
                   config->port);
         config_free(config);
         return 1;
     }
-    log_info("  Admin API: 127.0.0.1:%d (and [::1] where present), loopback only",
-             config->admin_port);
+    if (admin_socket_of(config)) {
+        log_info("  Admin API: %s (mode %04o)", config->admin_socket, config->admin_socket_mode);
+    }
+    if (config->admin_port > 0) {
+        log_info("  Admin API: 127.0.0.1:%d (and [::1] where present), loopback only",
+                 config->admin_port);
+    }
+    if (!admin_socket_of(config) && config->admin_port <= 0) {
+        log_info("  Admin API: off (no admin_socket, no admin_port)");
+    }
     log_info("  Database: %s", config->db_type == DB_TYPE_SQLITE ? "SQLite" : "PostgreSQL");
     if (config->db_type == DB_TYPE_SQLITE) {
         log_info("  DB Path: %s", config->db_path);
@@ -772,6 +965,8 @@ int main(int argc, char **argv) {
         .num_workers = num_workers,
         .port = config->port,
         .admin_port = config->admin_port,
+        .admin_socket = admin_socket_of(config),
+        .admin_socket_mode = config->admin_socket_mode,
         .backlog = 128,
         .max_request_size = 1024 * 1024,
         .connection_timeout_ms = 30000,

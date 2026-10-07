@@ -44,9 +44,13 @@ const config_t *g_config = NULL;
 
 static Router *g_router;
 
-/* Set while a request goes to the admin listener (admin_port), where the
-   localhost-only endpoints are served; otherwise it's the public one */
+/* Set while a request goes to the admin listener (the admin socket or
+   admin_port), where the localhost-only endpoints are served; otherwise it's the
+   public one */
 static int g_on_admin_port;
+
+/* The address a request arrives from: loopback, or the admin socket's "local" */
+static const char *g_remote_ip = "127.0.0.1";
 
 /* ============================================================================
  * Requests
@@ -76,7 +80,7 @@ static Reply send_raw(const char *raw) {
     memcpy(copy, raw, len + 1);
 
     HttpRequest req = http_request_parse(copy, len);
-    str_copy(req.remote_ip, sizeof(req.remote_ip), "127.0.0.1");
+    str_copy(req.remote_ip, sizeof(req.remote_ip), g_remote_ip);
     req.admin_listener = g_on_admin_port;
     HttpResponse *resp = req.method == HTTP_UNKNOWN
         ? response_json_error(400, "Bad Request")
@@ -1002,6 +1006,22 @@ static int list_orgs_status(const char *headers) {
     return status;
 }
 
+/* The admin socket's caller ("local"), on the admin listener and, as can't
+   happen, on the public one: the listener is what decides */
+static int test_admin_socket_caller(void) {
+    printf("\n=== Admin socket caller ===\n");
+    g_remote_ip = "local";
+    int on_admin = list_orgs_status(NULL);
+    Reply r = request("GET", "/api/admin/list-all-organizations", NULL, NULL, NULL, NULL);
+    int on_public = r.status;
+    reply_free(&r);
+    g_remote_ip = "127.0.0.1";
+    if (on_admin != 200) FAIL("the admin socket's caller answered %d on the admin listener", on_admin);
+    if (on_public != 403) FAIL("the admin socket's caller answered %d on the public listener", on_public);
+    printf("✓ the admin socket's caller is let in on the admin listener, refused on the public one\n");
+    return 0;
+}
+
 /*
  * The localhost-only endpoints are served on the admin listener alone: on the
  * public one they're refused however local the request looks. And a browser
@@ -1767,7 +1787,7 @@ int main(void) {
     int failed = setup() || test_authorization_code_flow() || test_redirect_uris() ||
                  test_issuer() ||
                  test_client_credentials() || test_mfa_gates() || test_mfa_daily_cap() ||
-                 test_localhost_only() ||
+                 test_localhost_only() || test_admin_socket_caller() ||
                  test_account_recovery() || test_operator_addresses() ||
                  test_form_password_length() ||
 #ifdef EMAIL_SUPPORT

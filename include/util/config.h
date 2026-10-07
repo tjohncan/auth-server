@@ -34,7 +34,9 @@ typedef struct {
     /* Server settings */
     char *host;
     int port;
-    int admin_port;        /* The localhost-only admin API's listener, on loopback alone */
+    int admin_port;        /* The admin API on loopback TCP too (0: not) */
+    char *admin_socket;    /* The admin API's Unix socket ("" or NULL: none) */
+    int admin_socket_mode; /* Its file mode, which decides who may connect */
     int workers;
     /* Not a setting: derived from host and port by config_load. The address
      * browsers and resource servers reach this server at: http://localhost:PORT
@@ -124,6 +126,7 @@ typedef struct {
     char *server_host_env;  /* ENV var name for server_host */
     char *server_port_env;  /* ENV var name for server_port */
     char *admin_port_env;   /* ENV var name for admin_port */
+    char *admin_socket_env; /* ENV var name for admin_socket */
     char *mothership_url_env; /* ENV var name for mothership_url */
 
     /* Branding */

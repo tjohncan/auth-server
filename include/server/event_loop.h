@@ -109,6 +109,8 @@ typedef struct {
     int port;                     /* Port to listen on, every interface (IPv4 and IPv6) */
     int admin_port;               /* Port for the admin listener: 127.0.0.1, and ::1 where the
                                      host has it, never any other interface (0: none) */
+    const char *admin_socket;     /* Unix socket path for the admin listener (NULL: none) */
+    int admin_socket_mode;        /* Its file mode: who may connect (0600: its owner) */
     int backlog;                  /* Listen queue size (default: 128) */
     size_t max_request_size;      /* Max request size in bytes (default: 1MB) */
     int connection_timeout_ms;    /* Close a connection idle this long, or still reading

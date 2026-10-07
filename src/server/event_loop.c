@@ -17,6 +17,8 @@
 #include <pthread.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <time.h>
@@ -72,7 +74,7 @@ struct EventLoop {
     /* Listening sockets, opened by the pool before any worker starts: this
        worker's public one (-1: none), and the process's admin ones, shared */
     int public_fd;
-    int admin_fds[2];
+    int admin_fds[3];
     int admin_fd_count;
 
     /* Doubly-linked list of all active connections (for timeout enforcement) */
@@ -104,8 +106,10 @@ struct EventLoopPool {
     EventLoop **event_loops;      /* One EventLoop per worker */
     atomic_bool running;          /* Set to false to stop all workers */
     atomic_bool failed;           /* A worker's loop couldn't run */
-    int admin_fds[2];             /* The admin listener's sockets, one per family */
+    int admin_fds[3];             /* The admin listener's sockets: a Unix one, and loopback
+                                     TCP per family */
     int admin_fd_count;
+    char *admin_socket_path;      /* The Unix socket this process made, removed at the end */
 };
 
 /* ============================================================================
@@ -256,6 +260,92 @@ static int create_loopback_listen_socket(int family, int port, int backlog) {
     return fd;
 }
 
+
+/*
+ * create_unix_listen_socket - The admin listener on a Unix socket at path
+ *
+ * Who may connect is the file's mode: 0600 lets only the server's own user (and
+ * root) in, 0660 its group too. It's set before listen(), so no connection is
+ * ever taken under a looser one. A file already at the path is left alone
+ * unless it's a socket nobody answers on, one a server left when it stopped:
+ * a live one is another server's, and anything else isn't ours to remove. The
+ * directory is made (0700) if it's missing, one level, as ./data may be on
+ * PostgreSQL.
+ *
+ * Returns: the descriptor, or -1 (logged)
+ */
+static int create_unix_listen_socket(const char *path, int mode, int backlog) {
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    if (strlen(path) >= sizeof(addr.sun_path)) {
+        log_error("admin_socket %s is too long: a Unix socket path takes at most %zu bytes",
+                  path, sizeof(addr.sun_path) - 1);
+        return -1;
+    }
+    memcpy(addr.sun_path, path, strlen(path) + 1);
+
+    struct stat st;
+    if (lstat(path, &st) == 0) {
+        if (!S_ISSOCK(st.st_mode)) {
+            log_error("admin_socket %s exists and isn't a socket: not replacing it", path);
+            return -1;
+        }
+        int probe = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        int live = probe >= 0 && connect(probe, (struct sockaddr *)&addr, sizeof(addr)) == 0;
+        if (probe >= 0) close(probe);
+        if (live) {
+            log_error("admin_socket %s is in use: another server answers on it. Each deployment "
+                      "needs an admin_socket of its own.", path);
+            return -1;
+        }
+        if (unlink(path) != 0) {
+            log_error("admin_socket %s was left by a server that stopped, and can't be removed: %s",
+                      path, strerror(errno));
+            return -1;
+        }
+    }
+
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    if (fd < 0) {
+        log_error("socket(AF_UNIX) for the admin listener failed: %s", strerror(errno));
+        return -1;
+    }
+    int rc = bind(fd, (struct sockaddr *)&addr, sizeof(addr));
+    if (rc < 0 && errno == ENOENT) {
+        /* The directory isn't there: make it, one level, and try again */
+        char dir[sizeof(addr.sun_path)];
+        snprintf(dir, sizeof(dir), "%s", path);
+        char *slash = strrchr(dir, '/');
+        if (slash && slash != dir) {
+            *slash = '\0';
+            if (mkdir(dir, 0700) == 0) {
+                log_info("Made %s for the admin socket", dir);
+                rc = bind(fd, (struct sockaddr *)&addr, sizeof(addr));
+            }
+        }
+    }
+    if (rc < 0) {
+        log_error("bind() failed for the admin socket %s: %s", path, strerror(errno));
+        close(fd);
+        return -1;
+    }
+    if (chmod(path, (mode_t)mode) != 0) {
+        log_error("chmod(%04o) failed for the admin socket %s: %s", mode, path, strerror(errno));
+        close(fd);
+        unlink(path);
+        return -1;
+    }
+    if (listen(fd, backlog) < 0) {
+        log_error("listen() failed on the admin socket: %s", strerror(errno));
+        close(fd);
+        unlink(path);
+        return -1;
+    }
+
+    log_info("Created admin listen socket at %s (mode %04o, fd=%d)", path, mode, fd);
+    return fd;
+}
 
 /* ============================================================================
  * Connection Management
@@ -492,6 +582,15 @@ static void handle_accept(EventLoop *loop, Listener *listener) {
             /* IPv6 connection (or IPv4-mapped IPv6) */
             struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6 *)&client_addr;
             inet_ntop(AF_INET6, &addr_in6->sin6_addr, remote_ip, sizeof(remote_ip));
+        } else if (client_addr.ss_family == AF_UNIX) {
+            /* The admin socket: no address, but the kernel says who connected */
+            snprintf(remote_ip, sizeof(remote_ip), "local");
+            struct ucred cred;
+            socklen_t cred_len = sizeof(cred);
+            if (getsockopt(client_fd, SOL_SOCKET, SO_PEERCRED, &cred, &cred_len) == 0) {
+                log_info("Admin socket connection from uid %u (pid %d)",
+                         (unsigned)cred.uid, (int)cred.pid);
+            }
         } else {
             /* Unknown address family */
             snprintf(remote_ip, sizeof(remote_ip), "unknown");
@@ -843,7 +942,7 @@ int event_loop_run(EventLoop *loop, RequestHandler handler, void *context) {
         log_error("Event loop %d has no listening socket", loop->worker_index);
         return -1;
     }
-    Listener listeners[3];
+    Listener listeners[4];
     int listener_count = 0;
     listeners[listener_count++] = (Listener){ .fd = loop->public_fd, .admin = 0 };
     for (int i = 0; i < loop->admin_fd_count; i++) {
@@ -1040,7 +1139,18 @@ EventLoopPool *event_loop_pool_create(EventLoopConfig *config) {
        process (127.0.0.1, and ::1 where the host has it), then each worker's
        public one */
     int failed = 0;
-    if (pool->config.admin_port > 0) {
+    if (pool->config.admin_socket) {
+        int fd = create_unix_listen_socket(pool->config.admin_socket,
+                                           pool->config.admin_socket_mode, pool->config.backlog);
+        pool->admin_socket_path = fd >= 0 ? strdup(pool->config.admin_socket) : NULL;
+        if (fd < 0 || !pool->admin_socket_path) {
+            if (fd >= 0) close(fd);
+            failed = 1;
+        } else {
+            pool->admin_fds[pool->admin_fd_count++] = fd;
+        }
+    }
+    if (pool->config.admin_port > 0 && !failed) {
         static const int families[] = { AF_INET, AF_INET6 };
         for (size_t f = 0; f < sizeof(families) / sizeof(families[0]) && !failed; f++) {
             int fd = create_loopback_listen_socket(families[f], pool->config.admin_port,
@@ -1151,6 +1261,10 @@ void event_loop_pool_destroy(EventLoopPool *pool) {
     }
     for (int i = 0; i < pool->admin_fd_count; i++) {
         close(pool->admin_fds[i]);
+    }
+    if (pool->admin_socket_path) {
+        unlink(pool->admin_socket_path);
+        free(pool->admin_socket_path);
     }
 
     free(pool->worker_threads);

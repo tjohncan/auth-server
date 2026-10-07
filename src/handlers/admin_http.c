@@ -85,11 +85,13 @@ static int is_localhost(const HttpRequest *req) {
         }
     }
 
-    /* Direct connection - check socket IP */
+    /* Direct connection - check socket IP: loopback, or the admin socket's
+       "local", whose file mode already decided who could connect */
     const char *socket_ip = req->remote_ip;
     return (strcmp(socket_ip, "127.0.0.1") == 0 ||
             strcmp(socket_ip, "::1") == 0 ||
-            strcmp(socket_ip, "::ffff:127.0.0.1") == 0);
+            strcmp(socket_ip, "::ffff:127.0.0.1") == 0 ||
+            strcmp(socket_ip, "local") == 0);
 }
 
 /* ============================================================================
@@ -102,7 +104,7 @@ HttpResponse *admin_bootstrap_handler(const HttpRequest *req) {
 
     /* Localhost validation */
     if (!is_localhost(req)) {
-        return response_json_error(403, "Admin endpoints are served only on the admin port, from localhost");
+        return response_json_error(403, "Admin endpoints are served only on the admin listener, from this host");
     }
 
     /* Get database connection from pool */
@@ -218,7 +220,7 @@ HttpResponse *admin_create_organization_handler(const HttpRequest *req) {
 
     /* Localhost validation */
     if (!is_localhost(req)) {
-        return response_json_error(403, "Admin endpoints are served only on the admin port, from localhost");
+        return response_json_error(403, "Admin endpoints are served only on the admin listener, from this host");
     }
 
     /* Get database connection from pool */
@@ -298,7 +300,7 @@ HttpResponse *admin_create_user_handler(const HttpRequest *req) {
 
     /* Localhost validation */
     if (!is_localhost(req)) {
-        return response_json_error(403, "Admin endpoints are served only on the admin port, from localhost");
+        return response_json_error(403, "Admin endpoints are served only on the admin listener, from this host");
     }
 
     /* Get database connection from pool */
@@ -382,7 +384,7 @@ HttpResponse *admin_make_org_admin_handler(const HttpRequest *req) {
 
     /* Localhost validation */
     if (!is_localhost(req)) {
-        return response_json_error(403, "Admin endpoints are served only on the admin port, from localhost");
+        return response_json_error(403, "Admin endpoints are served only on the admin listener, from this host");
     }
 
     /* Get database connection from pool */
@@ -459,7 +461,7 @@ HttpResponse *admin_list_all_organizations_handler(const HttpRequest *req) {
 
     /* Localhost validation */
     if (!is_localhost(req)) {
-        return response_json_error(403, "Admin endpoints are served only on the admin port, from localhost");
+        return response_json_error(403, "Admin endpoints are served only on the admin listener, from this host");
     }
 
     /* Get database connection from pool */
@@ -525,7 +527,7 @@ HttpResponse *admin_create_organization_key_handler(const HttpRequest *req) {
 
     /* Localhost validation */
     if (!is_localhost(req)) {
-        return response_json_error(403, "Admin endpoints are served only on the admin port, from localhost");
+        return response_json_error(403, "Admin endpoints are served only on the admin listener, from this host");
     }
 
     /* Get database connection from pool */
@@ -821,7 +823,7 @@ static HttpResponse *server_user_request(const HttpRequest *req, db_handle_t **o
     if (ct_err) return ct_err;
 
     if (!is_localhost(req))
-        return response_json_error(403, "Admin endpoints are served only on the admin port, from localhost");
+        return response_json_error(403, "Admin endpoints are served only on the admin listener, from this host");
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
