@@ -18,10 +18,21 @@ typedef struct {
 
 static kind_settings_t g_kinds[2];
 static int g_password_min_length;
+static int g_machine_dummy;  /* unknown key ids get a dummy verification */
 static int g_initialized = 0;
 
+/* The most PBKDF2 iterations a machine-secret dummy may cost: about a
+   millisecond. An unknown key id costs whoever sends one nothing, so a dummy
+   any dearer would let anyone make a worker spend it. */
+#define MACHINE_DUMMY_MAX_PBKDF2_ITERATIONS 10000
+
+/* The name a method is stored and configured under; NULL for none */
 static const char *method_name(password_hash_algorithm_t algorithm) {
-    return algorithm == PASSWORD_HASH_PBKDF2_SHA256 ? "pbkdf2-sha256" : "argon2id";
+    switch (algorithm) {
+    case PASSWORD_HASH_ARGON2ID:      return "argon2id";
+    case PASSWORD_HASH_PBKDF2_SHA256: return "pbkdf2-sha256";
+    default:                          return NULL;
+    }
 }
 
 /* The method a label names, or PASSWORD_HASH_UNSET */
@@ -52,6 +63,22 @@ int crypto_password_init(const config_t *config) {
         config->machine_secret_hash_min_iterations,
         config->machine_secret_hash_max_iterations,
     };
+
+    /* config_load fills every setting in; one missing here would store hashes
+       under no method, or fail every one, so it stops the start instead */
+    for (int kind = SECRET_USER; kind <= SECRET_MACHINE; kind++) {
+        const kind_settings_t *k = &g_kinds[kind];
+        if (!method_name(k->algorithm) || k->min_iterations < 1 ||
+            k->max_iterations < k->min_iterations) {
+            log_error("No hashing method or iterations for %s",
+                      kind == SECRET_USER ? "passwords" : "machine secrets");
+            return -1;
+        }
+    }
+
+    const kind_settings_t *machine = &g_kinds[SECRET_MACHINE];
+    g_machine_dummy = machine->algorithm == PASSWORD_HASH_PBKDF2_SHA256 &&
+                      machine->max_iterations <= MACHINE_DUMMY_MAX_PBKDF2_ITERATIONS;
     g_password_min_length = config->password_min_length;
     g_initialized = 1;
 
@@ -59,8 +86,14 @@ int crypto_password_init(const config_t *config) {
              "machine secrets %s, iterations=%d-%d",
              method_name(g_kinds[SECRET_USER].algorithm),
              g_kinds[SECRET_USER].min_iterations, g_kinds[SECRET_USER].max_iterations,
-             method_name(g_kinds[SECRET_MACHINE].algorithm),
-             g_kinds[SECRET_MACHINE].min_iterations, g_kinds[SECRET_MACHINE].max_iterations);
+             method_name(machine->algorithm), machine->min_iterations, machine->max_iterations);
+    if (!g_machine_dummy) {
+        log_warn("Machine secrets are hashed with %s at up to %d iterations: every client, "
+                 "resource-server and org key check stalls a worker for a password hash, and "
+                 "unknown key ids answer at once rather than let anyone spend that. "
+                 "auth.conf.example sets machine_secret_hashing_algorithm = pbkdf2-sha256 at 777.",
+                 method_name(machine->algorithm), machine->max_iterations);
+    }
 
     return 0;
 }
@@ -90,7 +123,9 @@ int crypto_password_hash_method(const char *stored_hash, char *out_method, size_
 
 /* The stored form: "<method>$<hex>" */
 static int label(password_hash_algorithm_t algorithm, const char *hex, char *out, size_t size) {
-    int n = snprintf(out, size, "%s$%s", method_name(algorithm), hex);
+    const char *name = method_name(algorithm);
+    if (!name) return -1;
+    int n = snprintf(out, size, "%s$%s", name, hex);
     return (n < 0 || (size_t)n >= size) ? -1 : 0;
 }
 
@@ -100,9 +135,19 @@ static int hash_labeled(password_hash_algorithm_t algorithm, const char *passwor
                         char *out_hash, size_t hash_len) {
     char hex[ARGON2_HASH_HEX_LENGTH > PBKDF2_HASH_HEX_LENGTH
              ? ARGON2_HASH_HEX_LENGTH : PBKDF2_HASH_HEX_LENGTH];
-    int rc = algorithm == PASSWORD_HASH_ARGON2ID
-        ? crypto_argon2_hash_with_salt(password, password_len, salt_hex, iterations, hex, sizeof(hex))
-        : crypto_pbkdf2_hash_with_salt(password, password_len, salt_hex, iterations, hex, sizeof(hex));
+    int rc;
+    switch (algorithm) {
+    case PASSWORD_HASH_ARGON2ID:
+        rc = crypto_argon2_hash_with_salt(password, password_len, salt_hex, iterations,
+                                          hex, sizeof(hex));
+        break;
+    case PASSWORD_HASH_PBKDF2_SHA256:
+        rc = crypto_pbkdf2_hash_with_salt(password, password_len, salt_hex, iterations,
+                                          hex, sizeof(hex));
+        break;
+    default:
+        return -1;
+    }
     if (rc == 0) rc = label(algorithm, hex, out_hash, hash_len);
     OPENSSL_cleanse(hex, sizeof(hex));
     return rc;
@@ -177,6 +222,10 @@ int crypto_password_hash_with_salt(const char *method, const char *password,
 
 void crypto_password_verify_dummy(secret_kind_t kind, const char *password,
                                   size_t password_len) {
+    /* An unknown key id costs nothing to send: its dummy is spent only while the
+     * machine method is cheap (crypto_password_init says when it isn't) */
+    if (kind == SECRET_MACHINE && !g_machine_dummy) return;
+
     /* Drawn like a real hash's, not pinned to the minimum: with a range
      * configured, real hashes average its middle, and a cheaper dummy would
      * tell an existing account from a missing one by time */

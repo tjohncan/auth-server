@@ -1244,7 +1244,9 @@ config_t *config_load(const char *config_file) {
     config->email_from_name_env = NULL;
 #endif
 
-    /* Try to open config file */
+    /* Try to open config file. Without one, the defaults and the environment
+       variables configure the server, and everything after the parse applies
+       to them just the same. */
     FILE *file = fopen(config_file, "r");
     if (!file) {
         /* Check if an example file exists and hint to the user */
@@ -1258,51 +1260,45 @@ config_t *config_load(const char *config_file) {
         } else {
             log_warn("Config file '%s' not found, using defaults", config_file);
         }
-        apply_env_overrides(config);
-        if (set_public_base_url(config) != 0) {
-            config_free(config);
-            return NULL;
+    } else {
+        log_info("Loading config from '%s'", config_file);
+
+        /* Parse config file */
+        char line[MAX_LINE_LENGTH];
+        char key[128], value[MAX_LINE_LENGTH];
+        int line_num = 0;
+
+        while (fgets(line, sizeof(line), file)) {
+            line_num++;
+
+            /* Remove newline */
+            size_t len = strlen(line);
+            if (len > 0 && line[len - 1] == '\n') line[--len] = '\0';
+            if (len > 0 && line[len - 1] == '\r') line[--len] = '\0';
+
+            /* Trim whitespace */
+            trim(line);
+
+            /* Skip empty lines and comments */
+            if (line[0] == '\0' || line[0] == '#' || line[0] == ';') {
+                continue;
+            }
+
+            /* Parse key=value */
+            if (parse_key_value(line, key, sizeof(key), value, sizeof(value)) == 0) {
+                set_config_value(config, key, value);
+            } else {
+                log_warn("Line %d: Invalid line format", line_num);
+            }
         }
-        return config;
+
+        fclose(file);
+
+        /* Cleanse parse buffers (may contain db_password or encryption_key) */
+        OPENSSL_cleanse(line, sizeof(line));
+        OPENSSL_cleanse(value, sizeof(value));
+        OPENSSL_cleanse(key, sizeof(key));
     }
-
-    log_info("Loading config from '%s'", config_file);
-
-    /* Parse config file */
-    char line[MAX_LINE_LENGTH];
-    char key[128], value[MAX_LINE_LENGTH];
-    int line_num = 0;
-
-    while (fgets(line, sizeof(line), file)) {
-        line_num++;
-
-        /* Remove newline */
-        size_t len = strlen(line);
-        if (len > 0 && line[len - 1] == '\n') line[--len] = '\0';
-        if (len > 0 && line[len - 1] == '\r') line[--len] = '\0';
-
-        /* Trim whitespace */
-        trim(line);
-
-        /* Skip empty lines and comments */
-        if (line[0] == '\0' || line[0] == '#' || line[0] == ';') {
-            continue;
-        }
-
-        /* Parse key=value */
-        if (parse_key_value(line, key, sizeof(key), value, sizeof(value)) == 0) {
-            set_config_value(config, key, value);
-        } else {
-            log_warn("Line %d: Invalid line format", line_num);
-        }
-    }
-
-    fclose(file);
-
-    /* Cleanse parse buffers (may contain db_password or encryption_key) */
-    OPENSSL_cleanse(line, sizeof(line));
-    OPENSSL_cleanse(value, sizeof(value));
-    OPENSSL_cleanse(key, sizeof(key));
 
     /* Apply environment variable overrides */
     apply_env_overrides(config);

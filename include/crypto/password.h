@@ -116,6 +116,13 @@ int crypto_password_verify(secret_kind_t kind, const char *password, size_t pass
  * kind's method, at an iteration count drawn the way crypto_password_hash draws
  * one. For an account or key that doesn't exist or can't be used, so its
  * answer takes as long as a wrong secret's would.
+ *
+ * For machine secrets only while that's cheap: PBKDF2 at up to 10,000
+ * iterations, about a millisecond. An unknown key id costs its sender nothing,
+ * so a dearer dummy (Argon2id, the password method an auth.conf without the
+ * machine settings falls back to) would let anyone stall a worker with made-up
+ * ids. Key ids are random 128-bit values, so what the dummy hides is only
+ * whether an id someone already has is still active.
  */
 void crypto_password_verify_dummy(secret_kind_t kind, const char *password,
                                   size_t password_len);

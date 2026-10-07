@@ -950,6 +950,25 @@ static int test_hashing_config(void) {
     char over[512];
     snprintf(over, sizeof(over), "%smachine_secret_hashing_algorithm = argon2id\n", user);
 
+    /* No file at all: the defaults and the environment configure the server,
+       and the machine settings are filled in from them all the same */
+    char missing[] = "/tmp/test-db-no-config.XXXXXX";
+    int fd = mkstemp(missing);
+    if (fd >= 0) {
+        close(fd);
+        unlink(missing);
+    }
+    config_t *none = fd >= 0 ? config_load(missing) : NULL;
+    int ok_none = none && none->machine_secret_hashing_algorithm == none->secret_hashing_algorithm &&
+        none->machine_secret_hash_min_iterations == none->secret_hash_min_iterations &&
+        none->machine_secret_hash_max_iterations == none->secret_hash_max_iterations &&
+        none->machine_secret_hash_min_iterations >= 1;
+    config_free(none);
+    if (!ok_none) {
+        log_error("Hashing config: without a config file, the machine settings weren't filled in");
+        return 1;
+    }
+
     config_t *a = config_from(user), *b = config_from(both), *c = config_from(over);
     int ok = a && b && !c &&
         a->machine_secret_hashing_algorithm == PASSWORD_HASH_PBKDF2_SHA256 &&
@@ -967,8 +986,8 @@ static int test_hashing_config(void) {
                   "kept apart, or held to the method's limit");
         return 1;
     }
-    log_info("  left out, the password settings; set, their own; argon2id above 20 "
-             "iterations refused (OK)");
+    log_info("  left out, the password settings, with or without a config file; set, their "
+             "own; argon2id above 20 iterations refused (OK)");
     log_info("Hashing config tests passed!");
     return 0;
 }

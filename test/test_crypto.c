@@ -129,6 +129,19 @@ int main(void) {
     config->machine_secret_hashing_algorithm = PASSWORD_HASH_PBKDF2_SHA256;
     config->machine_secret_hash_min_iterations = config->machine_secret_hash_max_iterations = 777;
 
+    /* A kind with no method, or no iterations, stops the start: hashes would
+       otherwise be stored under no method, or fail every one */
+    config_t unset = *config;
+    unset.machine_secret_hashing_algorithm = PASSWORD_HASH_UNSET;
+    config_t zero = *config;
+    zero.machine_secret_hash_min_iterations = zero.machine_secret_hash_max_iterations = 0;
+    if (crypto_password_init(&unset) != -1 || crypto_password_init(&zero) != -1) {
+        log_error("Password hashing initialized without a machine method or iterations");
+        config_free(config);
+        return 1;
+    }
+    log_info("No method or no iterations for a kind: refused: PASS\n");
+
     /* Initialize password hashing module */
     if (crypto_password_init(config) != 0) {
         log_error("Failed to initialize password hashing");
