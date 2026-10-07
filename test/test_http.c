@@ -732,6 +732,52 @@ void test_client_ip(void) {
     assert(client_ip_is(both, NULL));  /* still none: a refused name changes nothing */
     assert(http_set_client_ip_header(NULL) == 0);
     printf("✓ an unknown name is refused and changes nothing\n");
+
+    /* Only an address is one: anything else in the header is no address, so
+       nothing a client wrote there gets stored */
+    assert(client_ip_is("X-Real-IP: ::1\r\n", "::1"));
+    assert(client_ip_is("X-Real-IP: not-an-address\r\n", NULL));
+    assert(client_ip_is("X-Real-IP: 1.1.1.1\xff\r\n", NULL));
+    assert(http_set_client_ip_header("x-forwarded-for") == 0);
+    assert(client_ip_is("X-Forwarded-For: 2.2.2.2, evil\r\n", NULL));
+    assert(http_set_client_ip_header(NULL) == 0);
+    printf("✓ a header value that isn't an address gives none\n");
+}
+
+/* The stored User-Agent of a request with this one; NULL value for none */
+static int user_agent_is(const char *value, const char *expected) {
+    char raw[1200];
+    if (value) {
+        snprintf(raw, sizeof(raw), "GET /x HTTP/1.0\r\nUser-Agent: %s\r\n\r\n", value);
+    } else {
+        snprintf(raw, sizeof(raw), "GET /x HTTP/1.0\r\n\r\n");
+    }
+    HttpRequest req = http_request_parse(raw, strlen(raw));
+    assert(req.method == HTTP_GET);
+    const char *ua = http_request_get_user_agent(&req);
+    int same = expected ? (ua && strcmp(ua, expected) == 0) : ua == NULL;
+    http_request_cleanup(&req);
+    return same;
+}
+
+void test_user_agent(void) {
+    printf("\n=== Test: User-Agent, as stored ===\n");
+
+    assert(user_agent_is("Mozilla/5.0", "Mozilla/5.0"));
+    assert(user_agent_is("Mozilla/5.0 \xff", "Mozilla/5.0 ?"));
+    assert(user_agent_is(NULL, NULL));
+
+    char long_ua[700], expected[600];
+    memset(long_ua, 'a', 600);
+    long_ua[600] = '\0';
+    memset(expected, 'a', 512);
+    expected[512] = '\0';
+    assert(user_agent_is(long_ua, expected));
+    memset(long_ua, 'a', 511);
+    memcpy(long_ua + 511, "\xc3\xa9", 3);
+    expected[511] = '\0';
+    assert(user_agent_is(long_ua, expected));
+    printf("✓ well-formed UTF-8, at most 512 bytes, never a character split\n");
 }
 
 int main(void) {
@@ -746,6 +792,7 @@ int main(void) {
     test_content_length_scan();
     test_cross_origin();
     test_client_ip();
+    test_user_agent();
 
     printf("\n=== All Tests Passed! ===\n\n");
 

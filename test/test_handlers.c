@@ -963,6 +963,31 @@ static int test_mfa_daily_cap(void) {
     if (!aged) FAIL("fourteen failures more than a day old still refused a right code");
     printf("✓ failures more than a day old don't count\n");
 
+    /* 4. The limits count recorded attempts, so one that can't be recorded gets
+          no verdict: right code or wrong, the same 503 */
+    db_handle_t *conn = db_pool_get_connection();
+    if (db_execute_direct(conn, "CREATE TRIGGER refuse_mfa_usage BEFORE INSERT ON user_mfa_usage "
+                                "BEGIN SELECT RAISE(FAIL, 'refused'); END") != 0) {
+        FAIL("could not make the attempt log refuse");
+    }
+    r = post_json("/api/user/mfa/verify", cookie, json);
+    int right = r.status;
+    reply_free(&r);
+    snprintf(json, sizeof(json), "{\"method_id\":\"%s\",\"code\":\"%s\"}", method,
+             strcmp(code, "000000") == 0 ? "111111" : "000000");
+    r = post_json("/api/user/mfa/verify", cookie, json);
+    int wrong = r.status;
+    reply_free(&r);
+    if (db_execute_direct(conn, "DROP TRIGGER refuse_mfa_usage") != 0) FAIL("could not drop the trigger");
+    if (right != 503 || wrong != 503) {
+        FAIL("an attempt that couldn't be recorded answered %d (right code), %d (wrong)", right, wrong);
+    }
+    r = post_json("/api/user/mfa/verify", cookie, json);
+    int recorded = r.status == 200 && strstr(r.body, "\"valid\":false") != NULL;
+    reply_free(&r);
+    if (!recorded) FAIL("with the log back, a wrong code wasn't answered as wrong");
+    printf("✓ an attempt that can't be recorded gets no verdict, right code or wrong\n");
+
     return 0;
 }
 

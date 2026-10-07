@@ -57,7 +57,7 @@ int try_org_key_auth(const HttpRequest *req, const char *operation,
 
     log_key_usage(db, KEY_USAGE_ORGANIZATION, key_pin, operation,
                   http_request_get_client_ip(req, NULL),
-                  http_request_get_header(req, "User-Agent"));
+                  http_request_get_user_agent(req));
 
     *out_org_pin = org_pin;
     *out_key_pin = key_pin;

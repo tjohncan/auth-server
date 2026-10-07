@@ -1097,14 +1097,14 @@ int mfa_reset_user(db_handle_t *db, const unsigned char *user_id) {
  * Logging
  * ========================================================================== */
 
-void mfa_log_usage(db_handle_t *db,
-                   long long user_mfa_pin,
-                   int success,
-                   const char *source_ip,
-                   const char *user_agent) {
+int mfa_log_usage(db_handle_t *db,
+                  long long user_mfa_pin,
+                  int success,
+                  const char *source_ip,
+                  const char *user_agent) {
     if (!db) {
         log_warn("mfa_log_usage: no db connection");
-        return;
+        return -1;
     }
 
     const char *sql =
@@ -1115,7 +1115,7 @@ void mfa_log_usage(db_handle_t *db,
     db_stmt_t *stmt = NULL;
     if (db_prepare(db, &stmt, sql) != 0) {
         log_warn("mfa_log_usage: failed to prepare statement");
-        return;
+        return -1;
     }
 
     db_bind_int64(stmt, 1, user_mfa_pin);
@@ -1136,5 +1136,7 @@ void mfa_log_usage(db_handle_t *db,
 
     if (rc != DB_DONE) {
         log_warn("mfa_log_usage: failed to insert");
+        return -1;
     }
+    return 0;
 }

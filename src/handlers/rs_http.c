@@ -91,7 +91,7 @@ static HttpResponse *rs_authenticate(const HttpRequest *req,
 
     log_key_usage(out->db, KEY_USAGE_RESOURCE_SERVER, rs_key_pin, operation,
                   http_request_get_client_ip(req, NULL),
-                  http_request_get_header(req, "User-Agent"));
+                  http_request_get_user_agent(req));
 
     return NULL;
 }

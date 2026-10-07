@@ -250,9 +250,14 @@ int mfa_verify(db_handle_t *db,
     int valid = crypto_totp_verify(decrypted_secret, totp_code, time(NULL));
     OPENSSL_cleanse(decrypted_secret, sizeof(decrypted_secret));
 
-    /* Log the attempt (fire-and-forget) */
-    mfa_log_usage(db, method.pin, valid == 1 ? 1 : 0, source_ip, user_agent);
+    /* The limits count these rows, so an attempt that can't be recorded gets no
+       verdict: valid or not, the answer is the same refusal */
+    int recorded = mfa_log_usage(db, method.pin, valid == 1 ? 1 : 0, source_ip, user_agent);
     OPENSSL_cleanse(&method, sizeof(method));
+    if (recorded != 0) {
+        log_error("MFA attempt not recorded, so not answered");
+        return -3;
+    }
 
     if (valid == 1) {
         log_info("MFA verified");

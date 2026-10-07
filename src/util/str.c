@@ -1,4 +1,5 @@
 #include "util/str.h"
+#include "util/json.h"
 #include <string.h>  /* for strlen */
 #include <stdlib.h>  /* for malloc, free */
 #include <ctype.h>   /* for tolower */
@@ -296,4 +297,31 @@ void *memmem_nocase(const void *haystack, size_t haystack_len,
         if (j == needle_len) return (void *)(h + i);
     }
     return NULL;
+}
+
+size_t str_utf8_sanitize(char *dst, size_t dst_size, const char *src) {
+    if (!dst || dst_size == 0) return 0;
+    const unsigned char *s = (const unsigned char *)(src ? src : "");
+    size_t out = 0;
+
+    while (*s) {
+        /* The length the lead byte claims (a stray one claims one), and whether
+           that many bytes are there and form a character */
+        size_t n = *s < 0xC0 ? 1 : *s < 0xE0 ? 2 : *s < 0xF0 ? 3 : 4;
+        size_t have = 0;
+        while (have < n && s[have]) have++;
+        int whole = have == n && json_utf8_valid((const char *)s, n);
+        size_t take = whole ? n : 1;
+
+        if (out + take > dst_size - 1) break;
+        if (whole) {
+            memcpy(dst + out, s, n);
+        } else {
+            dst[out] = '?';
+        }
+        out += take;
+        s += take;
+    }
+    dst[out] = '\0';
+    return out;
 }

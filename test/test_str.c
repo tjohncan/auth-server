@@ -252,6 +252,35 @@ void test_str_html_escape(void) {
     printf("Empty string: '%s' (%zu bytes)\n", buf, written);
 }
 
+void test_str_utf8_sanitize(void) {
+    printf("\n=== Testing str_utf8_sanitize ===\n\n");
+    char buf[64];
+
+    /* Well-formed text passes as it is, four-byte characters included */
+    const char *fine = "Mozilla/5.0 caf\xc3\xa9 \xf0\x9f\x98\x80";
+    assert(str_utf8_sanitize(buf, sizeof(buf), fine) == strlen(fine) && strcmp(buf, fine) == 0);
+
+    /* Each byte that isn't part of a character becomes '?': a stray byte, an
+       overlong form, a surrogate, a stray continuation, a sequence cut short */
+    str_utf8_sanitize(buf, sizeof(buf), "x\xff" "y");
+    assert(strcmp(buf, "x?y") == 0);
+    str_utf8_sanitize(buf, sizeof(buf), "\xc0\x80");
+    assert(strcmp(buf, "??") == 0);
+    str_utf8_sanitize(buf, sizeof(buf), "\xed\xa0\x80");
+    assert(strcmp(buf, "???") == 0);
+    str_utf8_sanitize(buf, sizeof(buf), "\x80" "a");
+    assert(strcmp(buf, "?a") == 0);
+    str_utf8_sanitize(buf, sizeof(buf), "\xe2" "A" "\xe2\x82");
+    assert(strcmp(buf, "?A??") == 0);
+    printf("✓ ill-formed bytes become '?', well-formed text is kept\n");
+
+    /* The copy ends at the last whole character that fits */
+    assert(str_utf8_sanitize(buf, 4, "ab\xc3\xa9") == 2 && strcmp(buf, "ab") == 0);
+    assert(str_utf8_sanitize(buf, 5, "ab\xc3\xa9") == 4 && strcmp(buf, "ab\xc3\xa9") == 0);
+    assert(str_utf8_sanitize(buf, sizeof(buf), NULL) == 0 && buf[0] == '\0');
+    printf("✓ cut on a character boundary; NULL gives empty\n");
+}
+
 void test_json_escape(void) {
     printf("\n=== Testing json_escape ===\n\n");
 
@@ -588,6 +617,7 @@ int main(void) {
     test_str_url_encode_decode();
     test_memmem_nocase();
     test_str_html_escape();
+    test_str_utf8_sanitize();
     test_json_escape();
     test_json_escaped_len();
     test_json_unescape();

@@ -280,7 +280,7 @@ HttpResponse *mfa_verify_handler(const HttpRequest *req) {
     /* Verify TOTP code */
     int result = mfa_verify(db, session.user_account_pin, method_id, code,
                             http_request_get_client_ip(req, NULL),
-                            http_request_get_header(req, "User-Agent"));
+                            http_request_get_user_agent(req));
     OPENSSL_cleanse(code, strlen(code));
     free(code);
 
@@ -289,6 +289,8 @@ HttpResponse *mfa_verify_handler(const HttpRequest *req) {
         return response_json_ok("{\"valid\":true}");
     } else if (result == -2) {
         return response_json_error(429, "Too many attempts, try again soon!");
+    } else if (result == -3) {
+        return response_json_error(503, "MFA verification is unavailable, try again soon");
     } else if (result == 0) {
         return response_json_ok("{\"valid\":false}");
     } else {

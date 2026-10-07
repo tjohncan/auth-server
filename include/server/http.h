@@ -149,11 +149,19 @@ int http_set_client_ip_header(const char *name);
  *
  * Parameters:
  *   req       - Parsed HTTP request
- *   socket_ip - Returned when the header is absent (every caller passes NULL)
+ *   socket_ip - Returned when the header is absent, or holds something that
+ *               isn't an IPv4 or IPv6 address (every caller passes NULL)
  *
  * Returns: Client IP string (thread-local or header value, don't free)
  */
 const char *http_request_get_client_ip(const HttpRequest *req, const char *socket_ip);
+
+/*
+ * http_request_get_user_agent - The User-Agent header, fit for storing: at most
+ * 512 bytes of well-formed UTF-8 (str_utf8_sanitize), or NULL if absent. The
+ * copy is the calling thread's, good until its next call.
+ */
+const char *http_request_get_user_agent(const HttpRequest *req);
 
 /*
  * http_find_header_end - Find the end of the header block, resumably

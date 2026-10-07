@@ -388,13 +388,28 @@ int http_set_client_ip_header(const char *name) {
     return 0;
 }
 
+/* An address as inet_pton reads one, IPv4 or IPv6: what a proxy's header holds,
+   and nothing a client could put there to be stored instead */
+static bool is_ip_address(const char *text) {
+    unsigned char addr[sizeof(struct in6_addr)];
+    return inet_pton(AF_INET, text, addr) == 1 || inet_pton(AF_INET6, text, addr) == 1;
+}
+
+const char *http_request_get_user_agent(const HttpRequest *req) {
+    const char *user_agent = http_request_get_header(req, "User-Agent");
+    if (!user_agent) return NULL;
+    static __thread char stored[512 + 1];
+    str_utf8_sanitize(stored, sizeof(stored), user_agent);
+    return stored;
+}
+
 const char *http_request_get_client_ip(const HttpRequest *req, const char *socket_ip) {
     /* X-Real-IP, as the shipped nginx sets it: overwritten with the real peer. No
      * falling back to X-Forwarded-For when it's absent, since its first entry is
      * whatever the client sent. */
     if (g_client_ip_header == CLIENT_IP_X_REAL_IP) {
         const char *real_ip = http_request_get_header(req, "X-Real-IP");
-        return (real_ip && real_ip[0] != '\0') ? real_ip : socket_ip;
+        return (real_ip && is_ip_address(real_ip)) ? real_ip : socket_ip;
     }
 
     /* The last X-Forwarded-For entry: the address the nearest proxy appended to
@@ -421,7 +436,7 @@ const char *http_request_get_client_ip(const HttpRequest *req, const char *socke
         if (len >= sizeof(last_ip)) len = sizeof(last_ip) - 1;
         memcpy(last_ip, last, len);
         last_ip[len] = '\0';
-        return last_ip;
+        return is_ip_address(last_ip) ? last_ip : socket_ip;
     }
 
     /* DESIGN DECISION: no proxy header means no client IP, and we do NOT substitute

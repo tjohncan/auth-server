@@ -187,7 +187,7 @@ static HttpResponse *authenticate_token_client(db_handle_t *db,
 
     log_key_usage(db, KEY_USAGE_CLIENT, key_pin, operation,
                   http_request_get_client_ip(req, NULL),
-                  http_request_get_header(req, "User-Agent"));
+                  http_request_get_user_agent(req));
     return NULL;
 }
 
@@ -460,7 +460,7 @@ HttpResponse *token_handler(const HttpRequest *req) {
 
         /* Get source IP and user agent for audit logging */
         const char *source_ip = http_request_get_client_ip(req, NULL);
-        const char *user_agent = http_request_get_header(req, "User-Agent");
+        const char *user_agent = http_request_get_user_agent(req);
 
         oauth_token_response_t token_resp;
         int rc = oauth_client_credentials(db, client_id, client_key_id, client_secret,
@@ -1414,7 +1414,7 @@ HttpResponse *introspect_handler(const HttpRequest *req) {
 
     log_key_usage(db, KEY_USAGE_RESOURCE_SERVER, rs_key_pin, "introspect",
                   http_request_get_client_ip(req, NULL),
-                  http_request_get_header(req, "User-Agent"));
+                  http_request_get_user_agent(req));
 
     /* Introspect the token */
     int active;

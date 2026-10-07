@@ -169,7 +169,7 @@ HttpResponse *login_handler(const HttpRequest *req) {
     int rc = session_authenticate_and_create(
         db, username, password,
         http_request_get_client_ip(req, NULL),  /* source_ip */
-        http_request_get_header(req, "User-Agent"),  /* user_agent */
+        http_request_get_user_agent(req),  /* user_agent */
         g_config->session_ttl_seconds,
         &session_token,
         &user_pin
@@ -1522,7 +1522,7 @@ HttpResponse *passwordless_login_handler(const HttpRequest *req) {
     rc = oauth_session_create(db, user_pin, user_id, session_token,
                               "passwordless",
                               http_request_get_client_ip(req, NULL),
-                              http_request_get_header(req, "User-Agent"),
+                              http_request_get_user_agent(req),
                               g_config->session_ttl_seconds,
                               session_id);
 

@@ -201,4 +201,16 @@ void *memmem_nocase(const void *haystack, size_t haystack_len,
  */
 size_t str_html_escape(char *dst, size_t dst_size, const char *src);
 
+/*
+ * str_utf8_sanitize - Copy text from outside into dst as well-formed UTF-8
+ *
+ * Each byte that isn't part of a well-formed character becomes '?', and the
+ * copy ends at the last whole character that fits in dst_size - 1 bytes, so a
+ * multibyte character is never split. PostgreSQL refuses ill-formed UTF-8 in a
+ * text value, so request headers stored there go through this.
+ *
+ * Returns: Number of bytes written (excluding NUL)
+ */
+size_t str_utf8_sanitize(char *dst, size_t dst_size, const char *src);
+
 #endif /* STR_H */
