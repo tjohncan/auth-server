@@ -1032,6 +1032,26 @@ static int test_hashing_config(void) {
         return 1;
     }
 
+    /* A link to a file that isn't there, as to a secret not mounted yet: refused,
+       not taken for no file */
+    char linked[] = "/tmp/test-db-config-link.XXXXXX";
+    if (!mkdtemp(linked)) {
+        log_error("Hashing config: could not make a directory");
+        return 1;
+    }
+    char link_path[64], target[64];
+    snprintf(link_path, sizeof(link_path), "%s/auth.conf", linked);
+    snprintf(target, sizeof(target), "%s/missing.conf", linked);
+    int linked_ok = symlink(target, link_path) == 0;
+    config_t *dangling = linked_ok ? config_load(link_path) : NULL;
+    unlink(link_path);
+    rmdir(linked);
+    if (!linked_ok || dangling) {
+        config_free(dangling);
+        log_error("Hashing config: a link to a missing file was taken for no config file");
+        return 1;
+    }
+
     /* A file that's there but can't be read: refused, not taken for a missing one
        (as root it can always be read, so there's nothing to check) */
     if (geteuid() != 0) {

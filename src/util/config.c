@@ -1,3 +1,6 @@
+/* lstat */
+#define _POSIX_C_SOURCE 200809L
+
 #include "util/config.h"
 #include "util/log.h"
 #include "util/str.h"
@@ -1308,6 +1311,18 @@ config_t *config_load(const char *config_file) {
         return NULL;
     }
     FILE *file = fopen(config_file, "r");
+    int open_errno = errno;
+    struct stat link_stat;
+    if (!file && open_errno == ENOENT && lstat(config_file, &link_stat) == 0) {
+        /* A link to a file that isn't there (one kept elsewhere, not mounted yet):
+           a config was meant, so the defaults won't do */
+        log_error("Config file '%s' is a link to a file that isn't there. Make it point at a "
+                  "configured auth.conf, or remove it to run on the defaults and the "
+                  "environment.", config_file);
+        config_free(config);
+        return NULL;
+    }
+    errno = open_errno;
     if (!file && errno != ENOENT) {
         /* There but unreadable (another user's, say): running on the defaults
            instead would run on the published encryption_key */

@@ -151,13 +151,13 @@ Bootstrap the authentication system with initial organization and management UI.
 2. Resource Server (code_name: "management_api", address: "<public base URL>/api")
 3. Client (code_name: "management_ui", type: "public", grant: "authorization_code", universal: true)
 4. Redirect URI ("<public base URL>/callback")
+5. Client-Resource-Server link (management_ui can access management_api)
+6. User account with hashed password
+7. Organization admin privilege for user
 
 The public base URL comes from `server_host` and `server_port`: `http://localhost:PORT` while
 `server_host` is `localhost`, `https://HOST` otherwise. Set `server_host` before bootstrapping,
 since bootstrap can't be re-run to change these.
-5. Client-Resource-Server link (management_ui can access management_api)
-6. User account with hashed password
-7. Organization admin privilege for user
 
 The management UI client is created with `require_mfa` off, and should stay that way: the
 console is where users enroll their first MFA method, and `/authorize` turns away a user
