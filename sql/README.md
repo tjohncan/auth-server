@@ -493,7 +493,9 @@ so no page of the old rows stays behind. WAL archives, replicas and backups keep
 
 - **Every instance stopped.** An instance lock enforces it: a `<db_path>.lock` file beside an
   SQLite database, or an advisory lock in PostgreSQL. The run refuses while an instance holds it,
-  and an instance won't start while a run does. On PostgreSQL every connection a server serves
+  and an instance won't start while a run does. The lock file is never stale (the lock goes with
+  the process holding it), so don't remove it: that frees nothing. On SQLite the run also refuses
+  while another process it can see has the database open, and names it. On PostgreSQL every connection a server serves
   with holds the lock: each takes it when it connects, and again after a reconnect (PostgreSQL
   drops it with the session, on a restart, say) before it runs anything else. One that finds a
   run holding it stops its instance without serving. Point the server and the run at PostgreSQL

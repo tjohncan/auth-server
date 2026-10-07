@@ -28,8 +28,11 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <pthread.h>
+#include <signal.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <openssl/crypto.h>
 
 /*
@@ -580,6 +583,40 @@ static int test_instance_lock(void) {
         log_error("Instance lock: a maintenance run couldn't take it alone, or an instance joined it");
         goto done;
     }
+    /* Another process with the file open is seen, and named; once it's gone, not.
+       A run checks the database this way too, in case the lock file was removed
+       while an instance held it. */
+    int ready[2], release[2];
+    if (pipe(ready) != 0 || pipe(release) != 0) {
+        log_error("Instance lock: could not make pipes");
+        goto done;
+    }
+    pid_t child = fork();
+    if (child == 0) {
+        int held = open(path, O_RDONLY);
+        char go = held >= 0 ? 'y' : 'n';
+        if (write(ready[1], &go, 1) != 1 || read(release[0], &go, 1) < 0) _exit(1);
+        _exit(0);
+    }
+    char go = 'n', who[64] = "";
+    int seen = child > 0 && read(ready[0], &go, 1) == 1 && go == 'y' &&
+               instance_lock_file_user(path, who, sizeof(who)) == (int)child &&
+               strstr(who, "process ") == who;
+    if (child > 0) {
+        if (write(release[1], "x", 1) != 1) kill(child, SIGKILL);
+        waitpid(child, NULL, 0);
+    }
+    close(ready[0]);
+    close(ready[1]);
+    close(release[0]);
+    close(release[1]);
+    if (!seen || instance_lock_file_user(path, who, sizeof(who)) != 0) {
+        log_error("Instance lock: another process with the file open wasn't seen, or was "
+                  "after it exited");
+        goto done;
+    }
+    log_info("  another process with the file open is seen and named, and not once it's gone (OK)");
+
     if (instance_lock_path(":memory:", lock, sizeof(lock)) != -1 ||
         instance_lock_path("./data/auth.db", lock, sizeof(lock)) != 0 ||
         strcmp(lock, "./data/auth.db.lock") != 0) {

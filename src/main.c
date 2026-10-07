@@ -164,9 +164,25 @@ static int open_for_maintenance(const config_t *config, const char *connection_s
         int rc = instance_lock_file(path, 1, lock_fd);
         if (rc != 0) {
             if (rc == 1) {
+                char who[64];
+                if (instance_lock_file_user(path, who, sizeof(who)) <= 0) {
+                    snprintf(who, sizeof(who), "a process");
+                }
                 log_error("An instance is running on this database, or another maintenance "
-                          "run is: stop every instance first");
+                          "run is: %s holds %s. Stop every instance first. The lock file is "
+                          "never stale: the lock goes with its holder, so removing the file "
+                          "frees nothing.", who, path);
             }
+            return 1;
+        }
+        /* A lock file removed while an instance held it frees nothing, but this run
+           locked a new one: no other process may have the database open either */
+        char user[64];
+        if (instance_lock_file_user(config->db_path, user, sizeof(user)) > 0) {
+            log_error("%s has %s open: a maintenance run needs the database to itself. Stop it, "
+                      "and every instance, first.", user, config->db_path);
+            instance_lock_file_release(*lock_fd);
+            *lock_fd = -1;
             return 1;
         }
     }

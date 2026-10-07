@@ -4,11 +4,14 @@
 #include "db/instance_lock.h"
 #include "util/log.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 /* The advisory lock's two keys: "AUTH", and which of the server's locks */
@@ -46,6 +49,52 @@ int instance_lock_file(const char *lock_path, int exclusive, int *out_fd) {
 
 void instance_lock_file_release(int fd) {
     if (fd >= 0) close(fd);
+}
+
+int instance_lock_file_user(const char *path, char *who, size_t who_size) {
+    struct stat target;
+    if (stat(path, &target) != 0) return 0;
+    DIR *proc = opendir("/proc");
+    if (!proc) return -1;
+
+    /* Every descriptor of every process this user may look into; each is a link
+       to what it has open, and stat follows it to that file */
+    long self = (long)getpid(), found = 0;
+    struct dirent *entry;
+    while (!found && (entry = readdir(proc))) {
+        char *end;
+        long pid = strtol(entry->d_name, &end, 10);
+        if (*end || pid <= 0 || pid == self) continue;
+        char fd_dir[64];
+        snprintf(fd_dir, sizeof(fd_dir), "/proc/%ld/fd", pid);
+        DIR *fds = opendir(fd_dir);
+        if (!fds) continue;  /* another user's, or gone */
+        struct dirent *fd;
+        while ((fd = readdir(fds))) {
+            char link[sizeof(fd_dir) + 1 + sizeof(fd->d_name)];
+            struct stat st;
+            snprintf(link, sizeof(link), "%s/%s", fd_dir, fd->d_name);
+            if (fd->d_name[0] != '.' && stat(link, &st) == 0 &&
+                st.st_dev == target.st_dev && st.st_ino == target.st_ino) {
+                found = pid;
+                break;
+            }
+        }
+        closedir(fds);
+    }
+    closedir(proc);
+
+    if (found && who && who_size > 0) {
+        char comm_path[64], name[32] = "";
+        snprintf(comm_path, sizeof(comm_path), "/proc/%ld/comm", found);
+        FILE *comm = fopen(comm_path, "r");
+        if (comm) {
+            if (fgets(name, sizeof(name), comm)) name[strcspn(name, "\n")] = '\0';
+            fclose(comm);
+        }
+        snprintf(who, who_size, name[0] ? "process %ld (%s)" : "process %ld", found, name);
+    }
+    return (int)found;
 }
 
 /* One boolean a query returns, as 1 or 0; -1 on error */

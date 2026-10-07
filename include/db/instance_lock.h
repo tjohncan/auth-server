@@ -16,7 +16,11 @@
  * SQLite: flock on a file of its own beside the database, <db_path>.lock.
  *   Not the database file: SQLite's locks on it are POSIX locks, which a
  *   process loses when it closes any descriptor of that file. An in-memory
- *   database has nothing to lock.
+ *   database has nothing to lock. The file is never stale: the kernel drops a
+ *   lock with its holder. Removed while an instance holds it, it frees nothing,
+ *   but a run would lock a new file at the path; so a run also refuses while
+ *   any other process it can see has the database open
+ *   (instance_lock_file_user).
  * PostgreSQL: a session advisory lock in the database, held by every
  *   connection a server serves with (each pool connection and the cleaner's).
  *   Each takes it as it connects, and again after a reconnect before it runs
@@ -50,6 +54,17 @@ int instance_lock_path(const char *db_path, char *out, size_t out_size);
  */
 int instance_lock_file(const char *lock_path, int exclusive, int *out_fd);
 void instance_lock_file_release(int fd);
+
+/*
+ * instance_lock_file_user - A process other than this one with the file at
+ * path open, found through /proc: its pid, with "process <pid> (<name>)" in
+ * who. Only processes this user may look into are seen (every one, as root),
+ * and only in this process's PID namespace (a container sees its own).
+ *
+ * Returns: the pid; 0 if none is seen, or there's no such file; -1 if /proc
+ *          can't be read
+ */
+int instance_lock_file_user(const char *path, char *who, size_t who_size);
 
 /*
  * instance_lock_pg - Take the PostgreSQL lock on this connection, shared for a
