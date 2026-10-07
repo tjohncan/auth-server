@@ -67,6 +67,13 @@ struct EventLoop {
     atomic_bool running;          /* Set to false to stop the loop */
     EventLoopConfig config;       /* Configuration (copied) */
     int worker_index;             /* Index of this worker (for DB connection binding) */
+    struct EventLoopPool *pool;   /* Its pool, stopped if this loop can't run */
+
+    /* Listening sockets, opened by the pool before any worker starts: this
+       worker's public one (-1: none), and the process's admin ones, shared */
+    int public_fd;
+    int admin_fds[2];
+    int admin_fd_count;
 
     /* Doubly-linked list of all active connections (for timeout enforcement) */
     Connection *connections_head;
@@ -96,6 +103,9 @@ struct EventLoopPool {
     pthread_t *worker_threads;    /* Array of worker thread handles */
     EventLoop **event_loops;      /* One EventLoop per worker */
     atomic_bool running;          /* Set to false to stop all workers */
+    atomic_bool failed;           /* A worker's loop couldn't run */
+    int admin_fds[2];             /* The admin listener's sockets, one per family */
+    int admin_fd_count;
 };
 
 /* ============================================================================
@@ -177,8 +187,12 @@ static int create_listen_socket(int port, int backlog) {
  * 127.0.0.1. So the admin listener is one socket per family: 127.0.0.1 always,
  * and ::1 where the host has it. A container without IPv6 may have no ::1 at
  * all (EADDRNOTAVAIL), or no IPv6 sockets (EAFNOSUPPORT); either way the admin
- * listener goes on without it. SO_REUSEPORT, CLOEXEC and non-blocking, as for
- * the public socket.
+ * listener goes on without it. CLOEXEC and non-blocking, as for the public socket.
+ *
+ * Not SO_REUSEPORT: each socket is opened once per process and shared by its
+ * workers, so a port another process holds refuses this one at startup. With
+ * SO_REUSEPORT, two deployments on one host under one user would share the
+ * port, and the kernel would split admin calls between their databases.
  *
  * Returns: the descriptor, -2 for an IPv6 loopback this host doesn't have, -1 on error
  */
@@ -199,11 +213,6 @@ static int create_loopback_listen_socket(int family, int port, int backlog) {
     }
     if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
         log_warn("setsockopt(SO_REUSEADDR) failed: %s", strerror(errno));
-    }
-    if (setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0) {
-        log_error("setsockopt(SO_REUSEPORT) on the admin listener failed: %s", strerror(errno));
-        close(fd);
-        return -1;
     }
 
     int rc;
@@ -226,7 +235,14 @@ static int create_loopback_listen_socket(int family, int port, int backlog) {
         int err = errno;
         close(fd);
         if (family == AF_INET6 && err == EADDRNOTAVAIL) return -2;
-        log_error("bind() failed for the admin listener on %s:%d: %s", name, port, strerror(err));
+        if (err == EADDRINUSE) {
+            log_error("admin_port %d is in use on %s: another program, or another deployment of "
+                      "this server, holds it. Each deployment on a host needs an admin_port of "
+                      "its own (auth.conf, or AUTH_ADMIN_PORT).", port, name);
+        } else {
+            log_error("bind() failed for the admin listener on %s:%d: %s", name, port,
+                      strerror(err));
+        }
         return -1;
     }
 
@@ -372,6 +388,7 @@ EventLoop *event_loop_create(void) {
     loop->running = false;
     loop->connections_head = NULL;
     loop->connections_tail = NULL;
+    loop->public_fd = -1;
 
     log_debug("Created event loop (epoll_fd=%d)", loop->epoll_fd);
     return loop;
@@ -393,6 +410,9 @@ void event_loop_destroy(EventLoop *loop) {
 
     if (loop->epoll_fd >= 0) {
         close(loop->epoll_fd);
+    }
+    if (loop->public_fd >= 0) {
+        close(loop->public_fd);
     }
 
     free(loop);
@@ -815,34 +835,19 @@ int event_loop_run(EventLoop *loop, RequestHandler handler, void *context) {
     loop->config.handler_context = context;
     loop->running = true;
 
-    /* Listening sockets: the public one on every interface, then the admin
-     * listener's, on loopback only (127.0.0.1, and ::1 where the host has it) */
-    int backlog = loop->config.backlog > 0 ? loop->config.backlog : DEFAULT_BACKLOG;
-    Listener listeners[3];
-    int listener_count = 0;
-
-    int fd = create_listen_socket(loop->config.port, backlog);
-    if (fd < 0) {
+    /* Listening sockets, which the pool opened before the server said it was
+     * ready: this worker's public one on every interface, then the admin
+     * listener's on loopback only, which every worker shares (an accept that
+     * loses the race to another worker gets EAGAIN, and waits for the next) */
+    if (loop->public_fd < 0) {
+        log_error("Event loop %d has no listening socket", loop->worker_index);
         return -1;
     }
-    listeners[listener_count++] = (Listener){ .fd = fd, .admin = 0 };
-
-    if (loop->config.admin_port > 0) {
-        static const int families[] = { AF_INET, AF_INET6 };
-        for (size_t i = 0; i < sizeof(families) / sizeof(families[0]); i++) {
-            fd = create_loopback_listen_socket(families[i], loop->config.admin_port, backlog);
-            if (fd == -2) {
-                if (loop->worker_index == 0) {
-                    log_info("No IPv6 loopback here: the admin listener is on 127.0.0.1 only");
-                }
-                continue;
-            }
-            if (fd < 0) {
-                for (int j = 0; j < listener_count; j++) close(listeners[j].fd);
-                return -1;
-            }
-            listeners[listener_count++] = (Listener){ .fd = fd, .admin = 1 };
-        }
+    Listener listeners[3];
+    int listener_count = 0;
+    listeners[listener_count++] = (Listener){ .fd = loop->public_fd, .admin = 0 };
+    for (int i = 0; i < loop->admin_fd_count; i++) {
+        listeners[listener_count++] = (Listener){ .fd = loop->admin_fds[i], .admin = 1 };
     }
 
     /* Each listening socket's events carry a pointer to its Listener */
@@ -853,7 +858,6 @@ int event_loop_run(EventLoop *loop, RequestHandler handler, void *context) {
 
         if (epoll_ctl(loop->epoll_fd, EPOLL_CTL_ADD, listeners[i].fd, &ev) < 0) {
             log_error("epoll_ctl(ADD listen) failed: %s", strerror(errno));
-            for (int j = 0; j < listener_count; j++) close(listeners[j].fd);
             return -1;
         }
     }
@@ -915,7 +919,6 @@ int event_loop_run(EventLoop *loop, RequestHandler handler, void *context) {
     }
 
     log_info("Event loop stopped");
-    for (int j = 0; j < listener_count; j++) close(listeners[j].fd);
     return 0;
 }
 
@@ -949,8 +952,14 @@ static void *worker_thread_func(void *arg) {
         log_warn("Worker %d: No database connection available", loop->worker_index);
     }
 
-    /* Run event loop (blocks until stopped) */
-    event_loop_run(loop, loop->config.handler, loop->config.handler_context);
+    /* Run event loop (blocks until stopped). One that can't run stops every
+       worker, and the server exits failing, rather than serving on fewer */
+    if (event_loop_run(loop, loop->config.handler, loop->config.handler_context) != 0 &&
+        loop->pool) {
+        log_error("Worker %d couldn't run its event loop: stopping the server", loop->worker_index);
+        atomic_store(&loop->pool->failed, true);
+        event_loop_pool_stop_signal_safe(loop->pool);
+    }
 
     if (loop->config.on_worker_exit)
         loop->config.on_worker_exit();
@@ -1023,6 +1032,38 @@ EventLoopPool *event_loop_pool_create(EventLoopConfig *config) {
 
         /* Set worker index for DB connection binding */
         pool->event_loops[i]->worker_index = i;
+        pool->event_loops[i]->pool = pool;
+    }
+
+    /* Every listening socket, before the server says it's ready, so a port
+       that can't be had stops the start: the admin listener's once for the
+       process (127.0.0.1, and ::1 where the host has it), then each worker's
+       public one */
+    int failed = 0;
+    if (pool->config.admin_port > 0) {
+        static const int families[] = { AF_INET, AF_INET6 };
+        for (size_t f = 0; f < sizeof(families) / sizeof(families[0]) && !failed; f++) {
+            int fd = create_loopback_listen_socket(families[f], pool->config.admin_port,
+                                                   pool->config.backlog);
+            if (fd == -2) {
+                log_info("No IPv6 loopback here: the admin listener is on 127.0.0.1 only");
+            } else if (fd < 0) {
+                failed = 1;
+            } else {
+                pool->admin_fds[pool->admin_fd_count++] = fd;
+            }
+        }
+    }
+    for (int i = 0; i < pool->num_workers && !failed; i++) {
+        EventLoop *loop = pool->event_loops[i];
+        loop->public_fd = create_listen_socket(pool->config.port, pool->config.backlog);
+        failed = loop->public_fd < 0;
+        memcpy(loop->admin_fds, pool->admin_fds, sizeof(loop->admin_fds));
+        loop->admin_fd_count = pool->admin_fd_count;
+    }
+    if (failed) {
+        event_loop_pool_destroy(pool);
+        return NULL;
     }
 
     pool->running = false;
@@ -1067,7 +1108,7 @@ int event_loop_pool_start(EventLoopPool *pool) {
     }
 
     log_info("All workers stopped");
-    return 0;
+    return atomic_load(&pool->failed) ? -1 : 0;
 }
 
 /*
@@ -1107,6 +1148,9 @@ void event_loop_pool_destroy(EventLoopPool *pool) {
 
     for (int i = 0; i < pool->num_workers; i++) {
         event_loop_destroy(pool->event_loops[i]);
+    }
+    for (int i = 0; i < pool->admin_fd_count; i++) {
+        close(pool->admin_fds[i]);
     }
 
     free(pool->worker_threads);

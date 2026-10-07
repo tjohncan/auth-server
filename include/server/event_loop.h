@@ -126,10 +126,13 @@ typedef struct {
 /*
  * event_loop_pool_create - Create a pool of worker threads
  *
- * Each worker runs its own epoll event loop.
- * Connections are distributed by the kernel via SO_REUSEPORT.
+ * Each worker runs its own epoll event loop, with a public listening socket of
+ * its own, between which the kernel distributes connections (SO_REUSEPORT).
+ * The admin listener is one socket per process, shared by the workers. Every
+ * socket is opened here, before any worker starts, so a port that can't be had
+ * is a startup failure.
  *
- * Returns: EventLoopPool pointer, or NULL on error
+ * Returns: EventLoopPool pointer, or NULL on error (logged)
  */
 EventLoopPool *event_loop_pool_create(EventLoopConfig *config);
 
@@ -137,9 +140,10 @@ EventLoopPool *event_loop_pool_create(EventLoopConfig *config);
  * event_loop_pool_start - Start all worker threads and begin accepting connections
  *
  * This blocks until the server is shut down (e.g., SIGINT).
- * Workers run in background threads, main thread waits.
+ * Workers run in background threads, main thread waits. A worker whose loop
+ * can't run stops them all.
  *
- * Returns: 0 on clean shutdown, -1 on error
+ * Returns: 0 on clean shutdown, -1 if a worker couldn't run (or couldn't start)
  */
 int event_loop_pool_start(EventLoopPool *pool);
 
@@ -183,7 +187,8 @@ EventLoop *event_loop_create(void);
 /*
  * event_loop_run - Run the event loop (blocks until stopped)
  *
- * Calls epoll_wait in a loop, handling events as they arrive.
+ * Calls epoll_wait in a loop, handling events as they arrive, on the
+ * listening sockets event_loop_pool_create opened for this loop.
  *
  * Parameters:
  *   loop    - Event loop instance

@@ -20,7 +20,8 @@ server_workers = 0
 # The localhost-only admin API (bootstrap, users, organizations, org keys) has a port of
 # its own, which listens on loopback alone: 127.0.0.1, and ::1 where the host has it.
 # The public port refuses those endpoints. Don't publish or forward this one: run admin
-# commands on the host, or with docker exec. It must differ from server_port.
+# commands on the host, or with docker exec. It must differ from server_port, and each
+# deployment on a host needs its own: the server refuses to start on a port in use.
 admin_port = 8081
 
 # Which request header carries the client's address, as set by the proxy in front of

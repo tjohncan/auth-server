@@ -811,7 +811,7 @@ int main(int argc, char **argv) {
     }
 
     /* Start event loop (blocks until shutdown signal) */
-    event_loop_pool_start(pool);
+    int serve_rc = event_loop_pool_start(pool);
 
     /* Cleanup */
     log_info("Shutting down...");
@@ -836,5 +836,5 @@ int main(int argc, char **argv) {
     config_free(config);
 
     log_info("=== Auth Server Stopped ===");
-    return atomic_load(&g_lock_lost) ? 1 : 0;
+    return (serve_rc != 0 || atomic_load(&g_lock_lost)) ? 1 : 0;
 }
