@@ -205,9 +205,9 @@ HTTP endpoint implementations for admin API.
 - TOCTOU protection: specific key re-verified active at query execution time
 
 Examples:
-- `admin_bootstrap_handler(req, params)` - POST /api/admin/bootstrap (localhost-only)
-- `admin_get_organizations_handler(req, params)` - GET /api/admin/organizations (dual-auth)
-- `admin_create_client_handler(req, params)` - POST /api/admin/clients (dual-auth)
+- `admin_bootstrap_handler(req)` - POST /api/admin/bootstrap (localhost-only)
+- `admin_get_organizations_handler(req)` - GET /api/admin/organizations (dual-auth)
+- `admin_create_client_handler(req)` - POST /api/admin/clients (dual-auth)
 
 **Benefits of layered approach:**
 - Query functions reusable across handlers
@@ -238,13 +238,13 @@ HTTP endpoints for user authentication and management.
 - **Security**: Never exposes internal database PINs to browser, only UUIDs
 
 Examples:
-- `login_handler(req, params)` - POST /login
-- `logout_handler(req, params)` - POST /logout
-- `management_setups_handler(req, params)` - GET /api/user/management-setups
-- `profile_handler(req, params)` - GET /api/user/profile
-- `emails_handler(req, params)` - GET /api/user/emails
-- `change_password_handler(req, params)` - POST /api/user/password
-- `change_username_handler(req, params)` - POST /api/user/username
+- `login_handler(req)` - POST /login
+- `logout_handler(req)` - POST /logout
+- `management_setups_handler(req)` - GET /api/user/management-setups
+- `profile_handler(req)` - GET /api/user/profile
+- `emails_handler(req)` - GET /api/user/emails
+- `change_password_handler(req)` - POST /api/user/password
+- `change_username_handler(req)` - POST /api/user/username
 
 ### 6. OAuth2 Handler Layer (`src/handlers/oauth.c`)
 Business logic for OAuth2 token operations.
@@ -268,7 +268,7 @@ HTTP endpoint for OAuth2 token operations.
 - **Design**: Supports grant_type: authorization_code, refresh_token, client_credentials
 
 Examples:
-- `token_handler(req, params)` - POST /token
+- `token_handler(req)` - POST /token
 
 ### 8. RS User Provisioning Layer (`src/handlers/rs.c`, `rs_http.c`)
 User provisioning (invitations, admission to clients) is a power and responsibility of resource servers (via resource server keys).
@@ -280,9 +280,9 @@ User provisioning (invitations, admission to clients) is a power and responsibil
 - **Design**: Shared `rs_authenticate()` helper, `rs_user_info_t` result struct with dynamic emails array
 
 Examples:
-- `rs_provision_user_handler(req, params)` - POST /api/rs/users
-- `rs_lookup_user_handler(req, params)` - GET /api/rs/users
-- `rs_link_client_user_handler(req, params)` - POST /api/rs/client-users
+- `rs_provision_user_handler(req)` - POST /api/rs/users
+- `rs_lookup_user_handler(req)` - GET /api/rs/users
+- `rs_link_client_user_handler(req)` - POST /api/rs/client-users
 
 ## Cryptographic Infrastructure
 

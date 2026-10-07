@@ -355,6 +355,11 @@ The `client.is_universal` flag enables special public clients (like system manag
   update, so retiring a method is finished when history is purged (retention, or `--drophistory`).
 - Recovery codes aren't hashed again: a code is used once, and its siblings' plaintexts are
   unknown. A new method reaches them when the user regenerates the set.
+- Until then, a secret costs what its old settings cost to check, while a missing account (or an
+  unknown key id, while the machine method is cheap enough to spend a dummy on) costs what today's
+  settings cost. So after a change, whether an account or key exists can be told by timing, for
+  those not used since. Passwords catch up as users sign in. For key secrets, rotate them after
+  changing the machine method: that ends it at once, and moves them to the new method right away.
 
 **Hashes made before method labels.** They have no label, and fail verification with an error
 naming this fix, so the labeling must not be missed. Label them once, with the method the server
