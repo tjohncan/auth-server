@@ -342,6 +342,10 @@ The `client.is_universal` flag enables special public clients (like system manag
 **Hash methods:**
 - Every `secret_hash` names the method that made it: `argon2id$<hex>` or `pbkdf2-sha256$<hex>`.
   `salt` and `hash_iterations` keep their columns.
+- A method name stands for fixed parameters, here and in `encryption_params`: `argon2id` is 64 MiB,
+  one lane and 32 bytes out; `pbkdf2-sha256` is HMAC-SHA256 with 32 bytes out. Other parameters
+  would be a method name of their own, which re-hash on use (and `--rekey`, for the key) rolls
+  forward.
 - Passwords are hashed with `secret_hashing_algorithm`, machine secrets (client, resource-server
   and organization key secrets, and recovery codes) with `machine_secret_hashing_algorithm`, each
   at an iteration count drawn from its range.
@@ -587,7 +591,6 @@ re-sealed, per kind.
   , created_at text not null default (datetime('now'))
   , constraint ck_encryption_params_singleton check(singleton = 1)
   , constraint uix_encryption_params_singleton unique(singleton)
-  , constraint ck_encryption_params_method check(method in ('argon2id', 'pbkdf2-sha256'))
   );
 
   -- PostgreSQL, as the owner role (set role auth_dbo)
@@ -599,7 +602,6 @@ re-sealed, per kind.
   , created_at timestamp not null default current_timestamp
   , constraint ck_encryption_params_singleton check(singleton = true)
   , constraint uix_encryption_params_singleton unique(singleton)
-  , constraint ck_encryption_params_method check(method in ('argon2id', 'pbkdf2-sha256'))
   );
   -- hardened per setup_reference.sql: the login role's grant on it
   grant select, insert, update, delete on keys.encryption_params to auth_service;

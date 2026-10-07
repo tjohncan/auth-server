@@ -233,6 +233,27 @@ int main(void) {
         return 1;
     }
 
+    /* Known answers, worked out apart from this code (libargon2 alone; Python's
+       hashlib): a method name stands for fixed parameters, so a change to them
+       would fail every stored hash of the method, and every database stretched
+       with it */
+    log_info("Test: Each method gives its known answer");
+    char kat[PASSWORD_HASH_MAX_LENGTH];
+    const char *kat_salt = "000102030405060708090a0b0c0d0e0f";
+    if (crypto_password_hash_with_salt("argon2id", "correct horse battery staple", 28,
+                                       kat_salt, 1, kat, sizeof(kat)) != 0 ||
+        strcmp(kat, "argon2id$ddb47644b1c7fcedcde4bf9220a884f033e8635be9329cf1c4ee3ad7941e3a62") != 0 ||
+        crypto_password_hash_with_salt("pbkdf2-sha256", "correct horse battery staple", 28,
+                                       kat_salt, 1000, kat, sizeof(kat)) != 0 ||
+        strcmp(kat, "pbkdf2-sha256$a69b179e3add3c1e0aaf227a0eb3aa2aa8645ab86fecf6ca00c17512697c719e") != 0) {
+        log_error("A method no longer gives its known answer: its parameters changed. Every "
+                  "stored hash of it would fail. Restore them (crypto/argon2.h), and give new "
+                  "parameters a method name of their own.");
+        config_free(config);
+        return 1;
+    }
+    log_info("argon2id (64 MiB, one lane) and pbkdf2-sha256 as known: PASS\n");
+
     /* A stored hash names its method, and each kind hashes with its own */
     log_info("Test: Hashes name their method, per kind of secret");
     const char *machine_secret = "a machine secret of the usual length, 43 chars";

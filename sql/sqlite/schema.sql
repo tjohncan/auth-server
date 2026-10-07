@@ -56,7 +56,6 @@ create table encryption_params (
 
 , constraint ck_encryption_params_singleton check(singleton = 1)
 , constraint uix_encryption_params_singleton unique(singleton)
-, constraint ck_encryption_params_method check(method in ('argon2id', 'pbkdf2-sha256'))
 );
 
 -- ============================================================================
