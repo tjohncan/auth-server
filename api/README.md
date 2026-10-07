@@ -148,9 +148,13 @@ Bootstrap the authentication system with initial organization and management UI.
 
 **Creates**:
 1. Organization (with provided/default code_name)
-2. Resource Server (code_name: "management_api", address: "http://localhost:PORT/api")
+2. Resource Server (code_name: "management_api", address: "<public base URL>/api")
 3. Client (code_name: "management_ui", type: "public", grant: "authorization_code", universal: true)
-4. Redirect URI ("http://localhost:PORT/callback")
+4. Redirect URI ("<public base URL>/callback")
+
+The public base URL comes from `server_host` and `server_port`: `http://localhost:PORT` while
+`server_host` is `localhost`, `https://HOST` otherwise. Set `server_host` before bootstrapping,
+since bootstrap can't be re-run to change these.
 5. Client-Resource-Server link (management_ui can access management_api)
 6. User account with hashed password
 7. Organization admin privilege for user

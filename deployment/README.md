@@ -175,7 +175,9 @@ last entry. (Putting nginx between the ALB and the server, with `real_ip` config
 
 1. Install dependencies and build the binary (see [main top-level README](../README.md) for packages)
 2. Create a service user: `useradd -r -s /bin/false authserver`
-3. Place the project in `/opt/auth-server` and configure `auth.conf`
+3. Place the project in `/opt/auth-server` and configure `auth.conf`. Set `server_host` to the
+   public hostname and `encryption_key` before the first start: bootstrap stores the console's
+   URLs from `server_host`, and can't be re-run to change them
 4. Set ownership: `chown -R authserver:authserver /opt/auth-server/data`
 5. Create the systemd unit file at `/etc/systemd/system/auth-server.service`:
 
@@ -240,10 +242,9 @@ rest go in `auth.conf`.
 | `AUTH_EMAIL_FROM`     | `email_from`     | Sender address           | —              |
 | `AUTH_EMAIL_FROM_NAME`| `email_from_name`| Sender display name      | —              |
 
-Where `auth.conf.example` lists a `<key>_env` setting (the server, database, encryption, admin,
-mothership, log and email ones), the variable's name can be changed in `auth.conf` (e.g.,
-`db_password_env = MY_SECRET`) to match your infrastructure's naming conventions; the history,
-cleaner and retention variables keep the names above. See `auth.conf.example` for the full list of
+Each of these except the history, cleaner and retention ones can have its variable renamed by
+a `<key>_env` setting in `auth.conf` (e.g., `db_password_env = MY_SECRET`), to match your
+infrastructure's naming conventions; those three groups keep the names above. See `auth.conf.example` for the full list of
 configuration options including password policy, session TTL, token limits, and cleaner settings.
 
 ## Email Delivery (Optional)
