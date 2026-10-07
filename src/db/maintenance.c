@@ -352,6 +352,62 @@ static int reseal_signing_keys(db_handle_t *db, const encrypt_keys_t *old_keys,
     return done;
 }
 
+/* How many of the re-sealed tables' history tables have rows, made before the
+   re-key and sealed under the old key. Only user_account, user_email and
+   user_mfa have history (the others aren't keyed by pin). */
+static int history_holding_old_values(db_handle_t *db, db_type_t type) {
+    static const char *tables[] = { "user_account", "user_email", "user_mfa" };
+    int holding = 0;
+    for (size_t i = 0; i < sizeof(tables) / sizeof(tables[0]); i++) {
+        char exists_sql[200], rows_sql[200];
+        if (type == DB_TYPE_SQLITE) {
+            snprintf(exists_sql, sizeof(exists_sql), "SELECT count(*) FROM sqlite_master "
+                     "WHERE type = 'table' AND name = 'history__%s'", tables[i]);
+            snprintf(rows_sql, sizeof(rows_sql),
+                     "SELECT EXISTS (SELECT 1 FROM \"history__%s\")", tables[i]);
+        } else {
+            snprintf(exists_sql, sizeof(exists_sql), "SELECT count(*) FROM pg_tables "
+                     "WHERE schemaname = 'security_history' AND tablename = '%s'", tables[i]);
+            snprintf(rows_sql, sizeof(rows_sql),
+                     "SELECT EXISTS (SELECT 1 FROM security_history.\"%s\")", tables[i]);
+        }
+        db_result_t *result = NULL;
+        int exists = db_query(db, &result, "%s", exists_sql) == 0 &&
+                     db_result_row_count(result) == 1 && atoi(db_result_get(result, 0, 0)) > 0;
+        db_result_free(result);
+        result = NULL;
+        if (exists && db_query(db, &result, "%s", rows_sql) == 0 &&
+            db_result_row_count(result) == 1) {
+            const char *v = db_result_get(result, 0, 0);
+            holding += v && (v[0] == '1' || v[0] == 't');
+        }
+        db_result_free(result);
+    }
+    return holding;
+}
+
+/* The tables --rekey re-seals, which on PostgreSQL its VACUUM FULL rewrites */
+static const char *const RESCRUBBED[] = {
+    TBL_USER_ACCOUNT, TBL_USER_EMAIL, TBL_PASSWORDLESS_LOGIN_TOKEN, TBL_USER_MFA,
+    TBL_AUTH_REQUEST_SIGNING, TBL_ACCESS_TOKEN_SIGNING,
+};
+#define RESCRUBBED_COUNT (sizeof(RESCRUBBED) / sizeof(RESCRUBBED[0]))
+
+/* Each re-sealed table's file node, into nodes. Returns 0, or -1. */
+static int pg_filenodes(db_handle_t *db, char nodes[][24]) {
+    for (size_t i = 0; i < RESCRUBBED_COUNT; i++) {
+        db_result_t *result = NULL;
+        if (db_query(db, &result, "SELECT pg_relation_filenode('%s')", RESCRUBBED[i]) != 0 ||
+            db_result_row_count(result) != 1 || !db_result_get(result, 0, 0)) {
+            db_result_free(result);
+            return -1;
+        }
+        snprintf(nodes[i], 24, "%s", db_result_get(result, 0, 0));
+        db_result_free(result);
+    }
+    return 0;
+}
+
 int maintenance_rekey(db_handle_t *db, db_type_t type, const encrypt_keys_t *old_keys,
                       const encrypt_keys_t *new_keys, const encrypt_params_t *new_params,
                       rekey_report_t *out) {
@@ -432,16 +488,7 @@ int maintenance_rekey(db_handle_t *db, db_type_t type, const encrypt_keys_t *old
     }
 
     /* History made before still holds old-key values */
-    db_result_t *history = NULL;
-    const char *history_sql = type == DB_TYPE_SQLITE
-        ? "SELECT count(*) FROM sqlite_master WHERE type = 'table' "
-          "AND name LIKE 'history\\_\\_%' ESCAPE '\\'"
-        : "SELECT count(*) FROM pg_tables WHERE schemaname IN ('security_history', "
-          "'session_history', 'logging_history', 'lookup_history')";
-    if (db_query(db, &history, "%s", history_sql) == 0 && db_result_row_count(history) == 1) {
-        out->history_tables = atoi(db_result_get(history, 0, 0));
-    }
-    db_result_free(history);
+    out->history_tables = history_holding_old_values(db, type);
 
     /* The replaced old-key ciphertext is still in the files, and so are the old
        blind indexes in the old index entries */
@@ -452,14 +499,34 @@ int maintenance_rekey(db_handle_t *db, db_type_t type, const encrypt_keys_t *old
                       "VACUUM, then PRAGMA wal_checkpoint(TRUNCATE)");
             return -2;
         }
-    } else if (db_execute_direct(db, "VACUUM FULL " TBL_USER_ACCOUNT ", " TBL_USER_EMAIL ", "
-                                     TBL_PASSWORDLESS_LOGIN_TOKEN ", " TBL_USER_MFA ", "
-                                     TBL_AUTH_REQUEST_SIGNING ", " TBL_ACCESS_TOKEN_SIGNING) != 0) {
-        log_error("Re-keyed, but the old values are still in dead tuples: as the tables' owner "
-                  "(on a hardened deployment, grant auth_dbo to auth_service for it), run "
-                  "VACUUM FULL on user_account, user_email, passwordless_login_token, user_mfa "
-                  "and both signing tables");
-        return -2;
+    } else {
+        /* VACUUM FULL rewrites each table, and its indexes, into new files: that is
+           the scrub. A role that may not vacuum a table gets only a WARNING and
+           the table skipped, the statement succeeding all the same, so what
+           proves it is each table's file having changed. */
+        char before[RESCRUBBED_COUNT][24], after[RESCRUBBED_COUNT][24];
+        int vacuumed = pg_filenodes(db, before) == 0 &&
+                       db_execute_direct(db, "VACUUM FULL " TBL_USER_ACCOUNT ", " TBL_USER_EMAIL ", "
+                                         TBL_PASSWORDLESS_LOGIN_TOKEN ", " TBL_USER_MFA ", "
+                                         TBL_AUTH_REQUEST_SIGNING ", "
+                                         TBL_ACCESS_TOKEN_SIGNING) == 0 &&
+                       pg_filenodes(db, after) == 0;
+        int kept = 0;
+        for (size_t i = 0; vacuumed && i < RESCRUBBED_COUNT; i++) {
+            if (strcmp(before[i], after[i]) == 0) {
+                log_error("%s wasn't rewritten: its old values are still in its file", RESCRUBBED[i]);
+                kept++;
+            }
+        }
+        if (!vacuumed || kept) {
+            log_error("Re-keyed, but not scrubbed: the replaced values are still in dead tuples, and "
+                      "the old blind indexes in old index entries. The run's role may not VACUUM "
+                      "these tables (on a deployment hardened per setup_reference.sql, grant "
+                      "auth_dbo to auth_service for the run). As the tables' owner, run VACUUM FULL "
+                      "on user_account, user_email, passwordless_login_token, user_mfa and both "
+                      "signing tables.");
+            return -2;
+        }
     }
     return 0;
 }

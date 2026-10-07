@@ -276,6 +276,10 @@ static int run_rekey(const config_t *config, const char *connection_string) {
                    "table%s: run ./auth-server --drophistory next to remove it.\n",
                    report.history_tables, report.history_tables == 1 ? "" : "s");
         }
+        if (rc == -2) {
+            printf("NOT SCRUBBED: the replaced values are still in the database's files (the "
+                   "error above says how to finish it).\n");
+        }
         printf("Backups, WAL archives and replicas made before this still hold the old-key "
                "values.\n");
         printf("Start every instance with the new encryption_key, and remove "

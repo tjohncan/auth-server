@@ -1019,6 +1019,14 @@ static int test_admin_socket_caller(void) {
     if (on_admin != 200) FAIL("the admin socket's caller answered %d on the admin listener", on_admin);
     if (on_public != 403) FAIL("the admin socket's caller answered %d on the public listener", on_public);
     printf("✓ the admin socket's caller is let in on the admin listener, refused on the public one\n");
+
+    /* The public port refuses with 403 whatever the request: a body that isn't
+       JSON doesn't get the 415 first */
+    r = request("POST", "/api/admin/bootstrap", NULL, NULL, "text/plain", "not json");
+    int plain = r.status;
+    reply_free(&r);
+    if (plain != 403) FAIL("a non-JSON request to the public port answered %d", plain);
+    printf("✓ the public port answers 403 before looking at the body\n");
     return 0;
 }
 

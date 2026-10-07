@@ -56,7 +56,7 @@ typedef struct {
     int passwordless;    /* passwordless_login_token */
     int mfa_secrets;     /* user_mfa */
     int signing_keys;    /* both signing tables, current and prior */
-    int history_tables;  /* history tables left, still holding old-key values */
+    int history_tables;  /* the re-sealed tables' history tables with rows: old-key values */
 } rekey_report_t;
 
 /*

@@ -99,13 +99,14 @@ static int is_localhost(const HttpRequest *req) {
  * ========================================================================== */
 
 HttpResponse *admin_bootstrap_handler(const HttpRequest *req) {
-    HttpResponse *ct_err = require_content_type(req, "application/json");
-    if (ct_err) return ct_err;
-
-    /* Localhost validation */
+    /* The admin listener first: the public port refuses these with 403,
+       whatever the request */
     if (!is_localhost(req)) {
         return response_json_error(403, "Admin endpoints are served only on the admin listener, from this host");
     }
+
+    HttpResponse *ct_err = require_content_type(req, "application/json");
+    if (ct_err) return ct_err;
 
     /* Get database connection from pool */
     db_handle_t *db = db_pool_get_connection();
@@ -215,13 +216,14 @@ cleanup:
  * ========================================================================== */
 
 HttpResponse *admin_create_organization_handler(const HttpRequest *req) {
-    HttpResponse *ct_err = require_content_type(req, "application/json");
-    if (ct_err) return ct_err;
-
-    /* Localhost validation */
+    /* The admin listener first: the public port refuses these with 403,
+       whatever the request */
     if (!is_localhost(req)) {
         return response_json_error(403, "Admin endpoints are served only on the admin listener, from this host");
     }
+
+    HttpResponse *ct_err = require_content_type(req, "application/json");
+    if (ct_err) return ct_err;
 
     /* Get database connection from pool */
     db_handle_t *db = db_pool_get_connection();
@@ -295,13 +297,14 @@ cleanup:
  * ========================================================================== */
 
 HttpResponse *admin_create_user_handler(const HttpRequest *req) {
-    HttpResponse *ct_err = require_content_type(req, "application/json");
-    if (ct_err) return ct_err;
-
-    /* Localhost validation */
+    /* The admin listener first: the public port refuses these with 403,
+       whatever the request */
     if (!is_localhost(req)) {
         return response_json_error(403, "Admin endpoints are served only on the admin listener, from this host");
     }
+
+    HttpResponse *ct_err = require_content_type(req, "application/json");
+    if (ct_err) return ct_err;
 
     /* Get database connection from pool */
     db_handle_t *db = db_pool_get_connection();
@@ -379,13 +382,14 @@ cleanup:
  * ========================================================================== */
 
 HttpResponse *admin_make_org_admin_handler(const HttpRequest *req) {
-    HttpResponse *ct_err = require_content_type(req, "application/json");
-    if (ct_err) return ct_err;
-
-    /* Localhost validation */
+    /* The admin listener first: the public port refuses these with 403,
+       whatever the request */
     if (!is_localhost(req)) {
         return response_json_error(403, "Admin endpoints are served only on the admin listener, from this host");
     }
+
+    HttpResponse *ct_err = require_content_type(req, "application/json");
+    if (ct_err) return ct_err;
 
     /* Get database connection from pool */
     db_handle_t *db = db_pool_get_connection();
@@ -522,13 +526,14 @@ HttpResponse *admin_list_all_organizations_handler(const HttpRequest *req) {
  * ========================================================================== */
 
 HttpResponse *admin_create_organization_key_handler(const HttpRequest *req) {
-    HttpResponse *ct_err = require_content_type(req, "application/json");
-    if (ct_err) return ct_err;
-
-    /* Localhost validation */
+    /* The admin listener first: the public port refuses these with 403,
+       whatever the request */
     if (!is_localhost(req)) {
         return response_json_error(403, "Admin endpoints are served only on the admin listener, from this host");
     }
+
+    HttpResponse *ct_err = require_content_type(req, "application/json");
+    if (ct_err) return ct_err;
 
     /* Get database connection from pool */
     db_handle_t *db = db_pool_get_connection();
@@ -819,11 +824,11 @@ HttpResponse *admin_revoke_organization_key_handler(const HttpRequest *req) {
  */
 static HttpResponse *server_user_request(const HttpRequest *req, db_handle_t **out_db,
                                          unsigned char *out_user_id) {
-    HttpResponse *ct_err = require_content_type(req, "application/json");
-    if (ct_err) return ct_err;
-
     if (!is_localhost(req))
         return response_json_error(403, "Admin endpoints are served only on the admin listener, from this host");
+
+    HttpResponse *ct_err = require_content_type(req, "application/json");
+    if (ct_err) return ct_err;
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {

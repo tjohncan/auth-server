@@ -969,6 +969,21 @@ static int test_hashing_config(void) {
         return 1;
     }
 
+    /* A directory where the file should be, as Docker makes for a bind mount whose
+       source is missing: refused, not read as nothing */
+    char dir[] = "/tmp/test-db-config-dir.XXXXXX";
+    if (!mkdtemp(dir)) {
+        log_error("Hashing config: could not make a directory");
+        return 1;
+    }
+    config_t *as_dir = config_load(dir);
+    rmdir(dir);
+    if (as_dir) {
+        config_free(as_dir);
+        log_error("Hashing config: a directory was loaded as a config file");
+        return 1;
+    }
+
     config_t *a = config_from(user), *b = config_from(both), *c = config_from(over);
     int ok = a && b && !c &&
         a->machine_secret_hashing_algorithm == PASSWORD_HASH_PBKDF2_SHA256 &&
@@ -987,7 +1002,7 @@ static int test_hashing_config(void) {
         return 1;
     }
     log_info("  left out, the password settings, with or without a config file; set, their "
-             "own; argon2id above 20 iterations refused (OK)");
+             "own; argon2id above 20 iterations refused; a directory for the file refused (OK)");
 
     /* The admin API's listeners: the socket by default, mode 0600, no TCP port;
        a mode is octal, and one that isn't keeps the default; empty is none */
@@ -1467,10 +1482,13 @@ static int test_rekey(const config_t *config) {
     /* 3. Re-keyed to b: every value opens under b, none under a */
     if (maintenance_rekey(sdb, DB_TYPE_SQLITE, &a, &b, &params, &report) != 0 ||
         report.usernames != 1 || report.addresses != 2 || report.passwordless != 1 ||
-        report.mfa_secrets != 1 || report.signing_keys != 4 || report.history_tables < 3) {
+        report.mfa_secrets != 1 || report.signing_keys != 4 || report.history_tables != 2) {
+        /* History rows of the re-sealed tables: user_account's (the passwordless
+           toggle) and user_email's (verification); user_mfa's has none yet */
         log_error("Re-key: the run failed or miscounted (%d usernames, %d addresses, %d links, "
-                  "%d TOTP, %d signing keys)", report.usernames, report.addresses,
-                  report.passwordless, report.mfa_secrets, report.signing_keys);
+                  "%d TOTP, %d signing keys, %d history tables)", report.usernames,
+                  report.addresses, report.passwordless, report.mfa_secrets,
+                  report.signing_keys, report.history_tables);
         goto done;
     }
     if (sealed_opening(sdb, &b, &total) != 9 || total != 9 || sealed_opening(sdb, &a, &total) != 0) {

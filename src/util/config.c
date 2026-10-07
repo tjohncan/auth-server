@@ -7,6 +7,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
+#include <sys/stat.h>
 #include <openssl/crypto.h>
 
 /* Email defaults */
@@ -1295,6 +1296,17 @@ config_t *config_load(const char *config_file) {
     /* Try to open config file. Without one, the defaults and the environment
        variables configure the server, and everything after the parse applies
        to them just the same. */
+    /* A directory where the file should be reads as nothing, and the server would
+       run on its defaults, the published encryption_key among them: Docker makes
+       one when a bind mount's source is missing */
+    struct stat config_stat;
+    if (stat(config_file, &config_stat) == 0 && S_ISDIR(config_stat.st_mode)) {
+        log_error("Config file '%s' is a directory, not a file. A Docker bind mount whose "
+                  "source was missing makes one: put a configured copy of auth.conf.example "
+                  "there instead, then start again.", config_file);
+        config_free(config);
+        return NULL;
+    }
     FILE *file = fopen(config_file, "r");
     if (!file) {
         /* Check if an example file exists and hint to the user */
@@ -1340,12 +1352,20 @@ config_t *config_load(const char *config_file) {
             }
         }
 
+        int read_failed = ferror(file);
         fclose(file);
 
         /* Cleanse parse buffers (may contain db_password or encryption_key) */
         OPENSSL_cleanse(line, sizeof(line));
         OPENSSL_cleanse(value, sizeof(value));
         OPENSSL_cleanse(key, sizeof(key));
+
+        /* Read only in part: refuse, rather than run on what was read */
+        if (read_failed) {
+            log_error("Failed to read config file '%s'", config_file);
+            config_free(config);
+            return NULL;
+        }
     }
 
     /* Apply environment variable overrides */
