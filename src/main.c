@@ -170,13 +170,15 @@ static int open_for_maintenance(const config_t *config, const char *connection_s
                 }
                 log_error("An instance is running on this database, or another maintenance "
                           "run is: %s holds %s. Stop every instance first. The lock file is "
-                          "never stale: the lock goes with its holder, so removing the file "
-                          "frees nothing.", who, path);
+                          "never stale (the lock goes with its holder), and removing it doesn't "
+                          "help: a run also refuses while anything has the database open.",
+                          who, path);
             }
             return 1;
         }
         /* A lock file removed while an instance held it frees nothing, but this run
-           locked a new one: no other process may have the database open either */
+           locked a new one: no other process may have the database open either. This
+           names one this run can see; SQLite's own lock, below, refuses the rest. */
         char user[64];
         if (instance_lock_file_user(config->db_path, user, sizeof(user)) > 0) {
             log_error("%s has %s open: a maintenance run needs the database to itself. Stop it, "
@@ -189,6 +191,25 @@ static int open_for_maintenance(const config_t *config, const char *connection_s
 
     if (db_connect(db, config->db_type, connection_string) != 0) {
         log_error("Can't connect to the database");
+        instance_lock_file_release(*lock_fd);
+        *lock_fd = -1;
+        return 1;
+    }
+
+    /* SQLite's own lock on the database file, the kernel's, which a connection
+       still open anywhere refuses: one in another container (docker compose run
+       starts one) or under another user, whatever became of the lock file. In
+       exclusive locking mode it's held until the run disconnects, so an instance
+       started mid-run can't use the database before the run is over. */
+    if (config->db_type == DB_TYPE_SQLITE &&
+        (db_execute_trusted(*db, "PRAGMA locking_mode = EXCLUSIVE") != 0 ||
+         db_execute_trusted(*db, "BEGIN EXCLUSIVE") != 0 ||
+         db_execute_trusted(*db, "COMMIT") != 0)) {
+        log_error("%s is open elsewhere: an instance (here, or in another container), or another "
+                  "program. A maintenance run needs the database to itself: stop every instance "
+                  "first.", config->db_path);
+        db_disconnect(*db);
+        *db = NULL;
         instance_lock_file_release(*lock_fd);
         *lock_fd = -1;
         return 1;

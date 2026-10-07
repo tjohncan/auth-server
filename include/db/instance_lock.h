@@ -18,9 +18,11 @@
  *   process loses when it closes any descriptor of that file. An in-memory
  *   database has nothing to lock. The file is never stale: the kernel drops a
  *   lock with its holder. Removed while an instance holds it, it frees nothing,
- *   but a run would lock a new file at the path; so a run also refuses while
- *   any other process it can see has the database open
- *   (instance_lock_file_user).
+ *   but a run would lock a new file at the path. So a run also refuses while
+ *   any other process it can see has the database open, naming it
+ *   (instance_lock_file_user), and then holds SQLite's own exclusive lock on the
+ *   database file to its end, which a connection open anywhere refuses: in
+ *   another container, or under another user (main.c).
  * PostgreSQL: a session advisory lock in the database, held by every
  *   connection a server serves with (each pool connection and the cleaner's).
  *   Each takes it as it connects, and again after a reconnect before it runs
