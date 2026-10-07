@@ -64,6 +64,15 @@ For multi-server deployments, use a load balancer with managed certificates inst
 cd deployment
 cp .env.example .env
 # Edit .env with your domain, database settings, etc.
+
+# The server's own settings, at the project root. The compose file mounts ../auth.conf and
+# ../data; a mount whose source is missing comes up as an empty directory, which the server
+# refuses to start on. Set encryption_key in auth.conf before the first start.
+cp ../auth.conf.example ../auth.conf
+mkdir -p ../data && sudo chown 1000:1000 ../data    # the container runs as uid 1000
+# The compose file mounts an email script too: the no-op one unless the server sends mail
+# (Email Delivery, below)
+cp email/send-email.sh.example-noop email/send-email.sh && chmod +x email/send-email.sh
 ```
 
 ### 2. Generate nginx config
@@ -190,11 +199,14 @@ systemctl status auth-server
 
 ## Configuration
 
-The server loads `auth.conf` from its working directory. All settings can also be
-overridden by environment variables (useful for Docker and secrets management).
+The server loads `auth.conf` from its working directory. These settings can also be set by
+environment variable, which wins over the file (useful for Docker and secrets management); the
+rest go in `auth.conf`.
 
 | Environment Variable  | auth.conf key    | Description              | Default        |
 |-----------------------|------------------|--------------------------|----------------|
+| `AUTH_SERVER_HOST`    | `server_host`    | Public hostname          | `localhost`    |
+| `AUTH_SERVER_PORT`    | `server_port`    | Public port              | `8080`         |
 | `AUTH_DB_TYPE`        | `db_type`        | `sqlite` or `postgresql` | `sqlite`       |
 | `AUTH_DB_HOST`        | `db_host`        | PostgreSQL host          | —              |
 | `AUTH_DB_PORT`        | `db_port`        | PostgreSQL port          | `5432`         |
@@ -207,6 +219,17 @@ overridden by environment variables (useful for Docker and secrets management).
 | `AUTH_ADMIN_SOCKET`   | `admin_socket`   | The admin API's Unix socket (empty: none) | `./data/admin.sock` |
 | `AUTH_ADMIN_PORT`     | `admin_port`     | The admin API on loopback TCP too (0: not) | `0` |
 | `AUTH_LOG_LEVEL`      | `log_level`      | `debug/info/warn/error`  | `info`         |
+| `AUTH_MOTHERSHIP_URL` | `mothership_url` | Parent/brand URL on the index page | —     |
+| `AUTH_ENABLE_HISTORY_TABLES` | `enable_history_tables` | History of changed and deleted rows | `false` |
+| `AUTH_CLEANER_ENABLED` | `cleaner_enabled` | Purge expired rows in the background | `true` |
+| `AUTH_CLEANER_INTERVAL_SECONDS` | `cleaner_interval_seconds` | Pause between table checks | `10` |
+| `AUTH_CLEANER_BATCH_SIZE` | `cleaner_batch_size` | Rows deleted per batch | `1000` |
+| `AUTH_CLEANER_SQLITE_VACUUM_PAGES` | `cleaner_sqlite_vacuum_pages` | SQLite pages freed per pass | `100` |
+| `AUTH_CLEANER_POSTGRES_VACUUM_ENABLED` | `cleaner_postgres_vacuum_enabled` | VACUUM after purging (PostgreSQL) | `true` |
+| `AUTH_RETENTION_USAGE_LOGS_DAYS` | `retention_usage_logs_days` | Usage logs kept | `60` |
+| `AUTH_RETENTION_HISTORY_DAYS` | `retention_history_days` | History kept | `90` |
+| `AUTH_RETENTION_SESSIONS_GRACE_DAYS` | `retention_sessions_grace_days` | Ended sessions kept | `8` |
+| `AUTH_RETENTION_TOKENS_GRACE_DAYS` | `retention_tokens_grace_days` | Expired tokens kept | `8` |
 | `AUTH_EMAIL_COMMAND`  | `email_command`  | Email delivery script    | —              |
 | `AUTH_EMAIL_FROM`     | `email_from`     | Sender address           | —              |
 | `AUTH_EMAIL_FROM_NAME`| `email_from_name`| Sender display name      | —              |

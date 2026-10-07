@@ -310,8 +310,7 @@ Partial unique indexes enforce single-use semantics for authorization codes and 
 
 The `client_redirect_uri` table stores registered OAuth2 callback URLs for each client. Per OAuth2 spec (RFC 6749):
 
-- If a client has **one** registered redirect URI, the `redirect_uri` parameter is **optional** in authorization requests (server uses the registered URI)
-- If a client has **multiple** registered URIs, the `redirect_uri` parameter is **required** (client must specify which one)
+- The `redirect_uri` parameter is **always required** in authorization requests, and must be one of the client's registered URIs: the server never substitutes a registered one, even when the client has only one
 - Validation uses **exact match only** - no prefix matching, no wildcards (prevents authorization code interception attacks)
 
 ### Universal Clients
@@ -360,6 +359,10 @@ The `client.is_universal` flag enables special public clients (like system manag
   settings cost. So after a change, whether an account or key exists can be told by timing, for
   those not used since. Passwords catch up as users sign in. For key secrets, rotate them after
   changing the machine method: that ends it at once, and moves them to the new method right away.
+
+**Upgrading is one-way: take a backup first.** An older binary rejects a labeled hash, and
+can't derive the field keys of a database whose `encryption_key` is stretched, as one is from
+its first start with nothing sealed, or from `--rekey`. Going back means restoring the backup.
 
 **Hashes made before method labels.** They have no label, and fail verification with an error
 naming this fix, so the labeling must not be missed. Label them once, with the method the server
@@ -571,16 +574,20 @@ re-sealed, per kind.
   `encryption_params` gets its stretch, and how a new hashing method or iteration count takes
   effect.
 - **History** made before the re-key stays sealed under the old key. After a leak, run
-  `--drophistory` next; `--rekey` says how many history tables hold some.
+  `--drophistory` next; `--rekey` says how many history tables of the re-sealed tables (those of
+  `user_account`, `user_email` and `user_mfa`) hold some.
 - **Backups, WAL archives and replicas** made before the scrub hold the old-key values, as they
   did before the re-key, and so does any copy of the old database. A leaked passphrase still
   opens those.
 - **PostgreSQL hardened per `setup_reference.sql`.** Grant the owner role for the run, as for
   `--drophistory`. Setting the history functions aside replaces them, which takes CREATE on
-  the history schemas, and `VACUUM FULL` takes the tables' owner. Without the grant, with history
-  on, the run fails at the start and changes nothing. With history off it re-keys, then fails to
-  scrub: it says so and exits non-zero, and `VACUUM FULL` on the re-sealed tables, as the owner,
-  finishes it.
+  the history schemas, and `VACUUM FULL` takes the tables' owner. Without the grant:
+  - while history tables exist (whatever `enable_history_tables` says now), the run fails at
+    the start and changes nothing;
+  - with none (never made, or removed by `--drophistory`), it re-keys, then finds each table
+    `VACUUM FULL` left unwritten (PostgreSQL only warns, and skips a table its role may not
+    vacuum), names them, reports NOT SCRUBBED and exits non-zero. `VACUUM FULL` on the
+    re-sealed tables, as the owner, finishes it.
   ```sql
   grant auth_dbo to auth_service;
   -- ./auth-server --rekey

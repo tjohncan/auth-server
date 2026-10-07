@@ -946,7 +946,7 @@ Response:
     {
       "key_id": "555e5478e10b41c4a554098765432100",
       "is_active": true,
-      "generated_at": "2026-02-04T10:30:00Z",
+      "generated_at": "2026-02-04 10:30:00",
       "note": "CI/CD pipeline key"
     }
   ],
@@ -998,10 +998,9 @@ curl "http://localhost:8080/api/admin/resource-servers?organization_id=555e5478e
   -H "X-Org-Key-Secret: xK9mN2pQ7rS4tV6wY8zA1bC3dE5fG7hJ9kL0mN2pQ4rS"
 ```
 
-Organization keys can be managed via:
-- **API**: The endpoints documented above (for scripts, CLI, programmatic access)
-- **Web UI**: Organization detail page in the management console includes a key management section 
-    (for browser-based admin workflows)
+Organization keys are managed through the API alone: created on the admin listener
+(`./auth-server --admin POST /api/admin/organization-keys`), and listed or revoked there or
+with an org key. The management console has no key section.
 
 ---
 
@@ -1037,7 +1036,7 @@ Or with email:
 
 **Success Response — no MFA** (200 OK):
 ```http
-HTTP/1.1 200 OK
+HTTP/1.0 200 OK
 Set-Cookie: __Host-session=<token>; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=604800
 Content-Type: application/json
 
@@ -1046,7 +1045,7 @@ Content-Type: application/json
 
 **Success Response — user requires MFA** (200 OK):
 ```http
-HTTP/1.1 200 OK
+HTTP/1.0 200 OK
 Set-Cookie: __Host-session=<token>; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=604800
 Content-Type: application/json
 
@@ -1069,8 +1068,8 @@ When `mfa_required` is true, the session cookie is set but the session's `mfa_co
 ```
 
 **Session Cookie**:
-- Name: `session`
-- Attributes: `HttpOnly; Secure; SameSite=Lax`
+- Name: `__Host-session`
+- Attributes: `HttpOnly; Secure; SameSite=Lax; Path=/`
 - Lifetime: 7 days (604800 seconds)
 - Used for subsequent OAuth2 authorization flow
 
@@ -1320,7 +1319,12 @@ Location: /login?mfa_step=1&return=%2Fauthorize%3Fresponse_type%3Dcode%26client_
 Location: https://app.example.com/callback?error=access_denied&error_description=MFA%20required%20but%20no%20methods%20enrolled
 ```
 
-- **400 Bad Request** (invalid client_id, missing redirect_uri, or unregistered redirect_uri — pre-trust, no redirect):
+- **400 Bad Request** (missing response_type, client_id or redirect_uri — pre-trust, no redirect):
+```json
+{"error": "response_type, client_id, and redirect_uri required"}
+```
+
+- **400 Bad Request** (invalid client_id, or a redirect_uri the client hasn't registered — pre-trust, no redirect):
 ```json
 {"error": "Invalid client_id or redirect_uri"}
 ```
@@ -1341,7 +1345,7 @@ Location: https://app.example.com/callback?error=invalid_request&error_descripti
 **Example**:
 ```bash
 # Redirect user to authorization endpoint (after login)
-https://localhost:8080/authorize?response_type=code&client_id=555e5478e10b41c4a554098765432100&redirect_uri=https://app.example.com/callback&scope=read+write&state=xyz789&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256
+http://localhost:8080/authorize?response_type=code&client_id=555e5478e10b41c4a554098765432100&redirect_uri=https://app.example.com/callback&scope=read+write&state=xyz789&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256
 ```
 
 ---
@@ -1776,9 +1780,10 @@ Add an email address to the current user's account.
 ```
 ```json
 {
-  "error": "Invalid email format"
+  "error": "Email must look like name@example.com: letters, digits and . _ + - before the @, and a domain after it"
 }
 ```
+(The default `email_pattern`'s message; the rules are at the top of this document.)
 
 - **401 Unauthorized** (not authenticated):
 ```json
@@ -2013,17 +2018,17 @@ Change current user's username.
 }
 ```
 
-- **400 Bad Request** (invalid username — empty, contains spaces, or contains @):
+- **400 Bad Request** (the username breaks a rule below; the message names which):
 ```json
 {
-  "error": "Invalid username"
+  "error": "Username may contain only letters, digits and . _ + -, with no dot first, last or doubled"
 }
 ```
 
 **Validation Rules**:
-- Cannot be empty
-- Cannot contain spaces
-- Cannot contain `@` symbol
+- Not empty, at most 100 characters, no spaces, no `@`, well-formed UTF-8
+- Matches `username_pattern`: by default letters, digits and `. _ + -`, with no dot first, last
+  or doubled (the rules at the top of this document)
 - Must be unique (case-insensitive)
 
 **Example**:
@@ -2425,7 +2430,7 @@ Consume a password reset token and set a new password.
 | Field    | Type   | Required | Description          |
 |----------|--------|----------|----------------------|
 | token    | string | Yes      | Password reset token |
-| password | string | Yes      | New password         |
+| password | string | Yes      | New password, up to 1024 bytes |
 
 **Success Response** (200 OK):
 
@@ -2788,6 +2793,9 @@ or
   cost that whoever has the password can use up the user's day. A successful code doesn't
   reset the count. A recovery code still works (`POST /api/user/mfa/recover`), and the
   operator's `POST /api/admin/users/reset-mfa` clears it.
+- **503** `{"error": "MFA verification is unavailable, try again soon"}` when the attempt can't
+  be recorded. The limits count recorded attempts, so one that can't be recorded gets no
+  verdict, right code or wrong. Retry it; don't take it for a wrong code.
 
 ---
 
@@ -2982,8 +2990,9 @@ and their info is returned. A user who doesn't exist is created (active, no pass
 invitation to set a password.
 
 An account still pending (provisioned, its invitation not yet accepted) holds its address
-unverified. Provisioning that address again finds it, by the email alone or with its username,
-instead of creating a second account. A server that can email (see **Invitations** below)
+unverified. Provisioning it again finds it instead of creating a second account: on a server
+that can email, by the address alone or with its username; on one that can't, by its username
+(there, an address alone answers 400, as below). A server that can email (see **Invitations** below)
 invites it again: a fresh invitation to the mailbox, which voids the earlier ones once it's
 handed to the email command. One account gets at most five invitations in an hour; past that
 it's returned without one. A server that can't email returns it without an invitation, since
@@ -3337,5 +3346,6 @@ token=<invitation_token>&password=<new_password>
 
 **Notes**:
 - Each invitation token can only be used once
+- The password can be up to 1024 bytes
 - On success, the user can log in with username + password or email + password
 - Email verification and password set happen atomically in the same transaction

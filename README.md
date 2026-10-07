@@ -36,7 +36,10 @@ This server focuses on authentication logic.
 
 **Network layer**
 - Dual-stack IPv4/IPv6 support (single socket handles both)
-- Connection timeout enforcement with efficient linked-list tracking
+- Connection timeouts with efficient linked-list tracking: a request must arrive whole within 30 s
+    of its connection opening, and a connection idle that long closes
+- Control characters in a request target answer 400, and a NUL anywhere in the header block
+    closes the connection unanswered
 - Request smuggling protection (detects conflicting Content-Length headers, rejects Transfer-Encoding)
 - Per-worker connection limit (default 1024) prevents resource exhaustion
 
@@ -97,6 +100,9 @@ Database abstraction supporting SQLite and PostgreSQL.
 - **Instance Lock** (`instance_lock.c`, `include/db/instance_lock.h`) - Held shared by every running
     instance, and exclusively by a maintenance run, so a run happens with every instance stopped: a lock
     file beside an SQLite database, an advisory lock in PostgreSQL.
+- **Encryption params** (`encryption_params.c`, `include/db/encryption_params.h`) - The database's record
+    of how `encryption_key` is stretched (method, iterations, salt): one row, made at the first start with
+    nothing sealed, and by `--rekey`.
 - **Maintenance** (`maintenance.c`, `include/db/maintenance.h`) - One-shot runs of the same binary:
     `./auth-server --drophistory` removes every history table and its triggers, and
     `./auth-server --rekey` seals everything sealed under one `encryption_key` again under another
@@ -161,7 +167,8 @@ Each handler domain (admin, session, OAuth, MFA, user provisioning) follows the 
 ### 1. Database Query Layer (`src/db/queries/`)
 Entity-based query functions for direct database operations.
 
-- **Files**: `org.c`, `user.c`, `client.c`, `resource_server.c`, `oauth.c`, `mfa.c`
+- **Files**: `org.c`, `user.c`, `client.c`, `resource_server.c`, `oauth.c`, `mfa.c`, and `secret.c`
+    (a secret hashed again under today's settings, when it's used)
 - **Responsibility**: Prepared statements, parameter binding, result extraction
 - **Used by**: Admin handlers, OAuth2 handlers
 - **Design**: Natural keys (code_name, username) instead of internal PINs
@@ -170,7 +177,7 @@ Entity-based query functions for direct database operations.
 Examples:
 - `org_exists(db, code_name)` - Check if organization exists
 - `user_create(db, username, email, password, out_id)` - Create user with hashed password
-- `client_link_resource_server(db, org_code_name, client_id, address)` - Link client to API
+- `client_link_resource_server_bootstrap(db, org_code_name, client_id, address)` - Link client to API
 - `oauth_session_create(db, user_pin, token, auth_method, ttl, out_id)` - Create browser session
 - `oauth_auth_code_consume(db, code, out_data)` - Atomically consume auth code with replay detection
 - `oauth_token_rotate_refresh(db, old_token, new_token, ttl, out_data, out_id)` - Refresh token rotation
@@ -394,6 +401,9 @@ src/
 │   ├── db.c
 │   ├── db_pool.c
 │   ├── cleaner.c
+│   ├── instance_lock.c
+│   ├── maintenance.c
+│   ├── encryption_params.c
 │   ├── init/
 │   │   ├── db_init.c
 │   │   └── db_history.c
@@ -403,7 +413,8 @@ src/
 │       ├── client.c
 │       ├── resource_server.c
 │       ├── oauth.c
-│       └── mfa.c
+│       ├── mfa.c
+│       └── secret.c
 ├── crypto/             # Cryptographic primitives
 │   ├── random.c
 │   ├── argon2.c
@@ -452,6 +463,9 @@ include/
 │   ├── db_pool.h
 │   ├── db_sql.h
 │   ├── cleaner.h
+│   ├── instance_lock.h
+│   ├── maintenance.h
+│   ├── encryption_params.h
 │   ├── init/
 │   │   ├── db_init.h
 │   │   └── db_history.h
@@ -461,7 +475,8 @@ include/
 │       ├── client.h
 │       ├── resource_server.h
 │       ├── oauth.h
-│       └── mfa.h
+│       ├── mfa.h
+│       └── secret.h
 ├── crypto/
 │   ├── random.h
 │   ├── argon2.h
