@@ -57,6 +57,14 @@ else
     $(error Invalid DB_BACKEND: $(DB_BACKEND). Must be 'sqlite' or 'postgresql')
 endif
 
+# test-postgresql runs the database suites as PostgreSQL builds; refused before
+# anything is compiled for SQLite instead
+ifneq ($(filter test-postgresql,$(MAKECMDGOALS)),)
+    ifneq ($(DB_BACKEND),postgresql)
+        $(error test-postgresql runs the PostgreSQL build: make DB_BACKEND=postgresql test-postgresql)
+    endif
+endif
+
 # Configure email support
 ifeq ($(EMAIL_SUPPORT),1)
     CFLAGS += -DEMAIL_SUPPORT
@@ -161,6 +169,10 @@ clean:
 	@echo "Cleaned build artifacts (crash seeds in test/fuzz/crashes/ are kept — they are tests)"
 
 # Test programs
+
+# Where the database suites get databases of their own (test/scratch_db.h)
+SCRATCH_DB_SRCS = test/scratch_db.c
+
 test-str:
 	$(CC) $(CFLAGS) $(SECURITY_FLAGS) test/test_str.c src/util/str.c src/util/json.c src/util/log.c src/util/validation.c -o test-str $(SECURITY_LDFLAGS)
 	@echo "Test built! Run with: ./test-str"
@@ -174,7 +186,7 @@ test-router:
 	@echo "Router test built! Run with: ./test-router"
 
 test-db: $(DB_VENDOR_OBJS)
-	$(CC) $(CFLAGS) $(SECURITY_FLAGS) test/test_db.c $(UTIL_SRCS) $(DB_SRCS) $(CRYPTO_SRCS) $(DB_VENDOR_OBJS) -o test-db $(LDFLAGS) $(SECURITY_LDFLAGS)
+	$(CC) $(CFLAGS) $(SECURITY_FLAGS) test/test_db.c $(SCRATCH_DB_SRCS) $(UTIL_SRCS) $(DB_SRCS) $(CRYPTO_SRCS) $(DB_VENDOR_OBJS) -o test-db $(LDFLAGS) $(SECURITY_LDFLAGS)
 	@echo "Database test built! Run with: ./test-db"
 
 test-crypto: $(DB_VENDOR_OBJS)
@@ -182,7 +194,7 @@ test-crypto: $(DB_VENDOR_OBJS)
 	@echo "Crypto test built! Run with: ./test-crypto"
 
 test-handlers: $(DB_VENDOR_OBJS)
-	$(CC) $(CFLAGS) $(SECURITY_FLAGS) test/test_handlers.c src/server/router.c src/server/http.c $(HANDLER_SRCS) $(UTIL_SRCS) $(DB_SRCS) $(CRYPTO_SRCS) $(DB_VENDOR_OBJS) -o test-handlers $(LDFLAGS) $(SECURITY_LDFLAGS)
+	$(CC) $(CFLAGS) $(SECURITY_FLAGS) test/test_handlers.c $(SCRATCH_DB_SRCS) src/server/router.c src/server/http.c $(HANDLER_SRCS) $(UTIL_SRCS) $(DB_SRCS) $(CRYPTO_SRCS) $(DB_VENDOR_OBJS) -o test-handlers $(LDFLAGS) $(SECURITY_LDFLAGS)
 	@echo "Handler test built! Run with: ./test-handlers"
 
 # The handler suite again with email support compiled in, whatever EMAIL_SUPPORT says,
@@ -191,7 +203,7 @@ test-handlers: $(DB_VENDOR_OBJS)
 # been sent. Compiled from source like test-handlers, so the flag reaches every file;
 # the SQLite object it shares includes no project header.
 test-handlers-email: $(DB_VENDOR_OBJS)
-	$(CC) $(CFLAGS) -DEMAIL_SUPPORT $(SECURITY_FLAGS) test/test_handlers.c src/server/router.c src/server/http.c $(HANDLER_SRCS) $(filter-out src/util/email.c,$(UTIL_SRCS)) src/util/email.c $(DB_SRCS) $(CRYPTO_SRCS) $(DB_VENDOR_OBJS) -o test-handlers-email $(LDFLAGS) $(SECURITY_LDFLAGS)
+	$(CC) $(CFLAGS) -DEMAIL_SUPPORT $(SECURITY_FLAGS) test/test_handlers.c $(SCRATCH_DB_SRCS) src/server/router.c src/server/http.c $(HANDLER_SRCS) $(filter-out src/util/email.c,$(UTIL_SRCS)) src/util/email.c $(DB_SRCS) $(CRYPTO_SRCS) $(DB_VENDOR_OBJS) -o test-handlers-email $(LDFLAGS) $(SECURITY_LDFLAGS)
 	@echo "Handler test with email support built! Run with: ./test-handlers-email"
 
 test-email:
@@ -206,6 +218,13 @@ test: test-str test-http test-router test-db test-crypto test-handlers test-hand
 	@echo "All tests built! Running..."
 	./test-str && ./test-http && ./test-router && ./test-db && ./test-crypto && ./test-handlers && ./test-handlers-email
 	@$(MAKE) --no-print-directory fuzz-regress
+
+# The database suites on PostgreSQL: test-db and both handler suites, built for it
+# and run against a throwaway cluster that test/pg-cluster.sh starts and removes.
+# That needs PostgreSQL's server programs (initdb, pg_ctl); against a server of
+# your own instead, set AUTH_TEST_PG and run the three binaries.
+test-postgresql: test-db test-handlers test-handlers-email
+	sh test/pg-cluster.sh run sh -c './test-db && ./test-handlers && ./test-handlers-email'
 
 
 # Three of the six suites, rebuilt under ASan+UBSan.
@@ -313,6 +332,7 @@ help:
 	@echo "  make test-handlers-email - The same, with email support compiled in"
 	@echo "  make test-email     - Build email delivery test (requires EMAIL_SUPPORT=1)"
 	@echo "  make test           - Build and run all tests (excludes test-email)"
+	@echo "  make DB_BACKEND=postgresql test-postgresql - The database suites on a throwaway PostgreSQL"
 	@echo "  make clean          - Remove build artifacts"
 	@echo "  make help           - Show this help"
 	@echo ""
@@ -322,4 +342,4 @@ help:
 	@echo "  make sanitize       - Build the whole server with ASan+UBSan to drive by hand"
 
 .PHONY: all debug release clean help test test-str test-http test-router test-db test-crypto test-handlers test-handlers-email test-email \
-        test-sanitized fuzz fuzz-regress sanitize
+        test-postgresql test-sanitized fuzz fuzz-regress sanitize

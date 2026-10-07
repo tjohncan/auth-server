@@ -85,7 +85,7 @@ jobs:
   #
   # Three, not six: none of these links the database, so there is no amalgamation to
   # vendor and no config to provide. See the test-sanitized target for why the other
-  # three are left out. Runs in parallel with the other two jobs.
+  # three are left out. Runs in parallel with the other jobs.
   sanitized-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -116,10 +116,9 @@ jobs:
           echo "No warnings in project code."
 
   # The backend is a compile-time choice, so half the #ifdefs in src/db/ are invisible
-  # to the job above. This one compiles the other half. It deliberately does not run
-  # tests: those need a live PostgreSQL server, and the risk this guards is a build
-  # break in backend-conditional code, which a compile catches on its own.
-  # Runs in parallel with build-and-test, and is the lighter of the two — no
+  # to the job above. This one compiles the other half: the server, with and without
+  # email support. The database suites run against PostgreSQL in test-postgresql,
+  # below. Runs in parallel with build-and-test, and is the lighter of the two — no
   # amalgamation to download or compile, no ASan replay.
   build-postgresql:
     runs-on: ubuntu-latest
@@ -158,6 +157,49 @@ jobs:
         run: |
           if grep -E -A4 ':[0-9]+:[0-9]+: warning:' /tmp/pg.log; then
             echo "::error::compiler emitted warnings in the PostgreSQL build"
+            exit 1
+          fi
+          echo "No warnings in project code."
+
+  # The database suites against a real PostgreSQL: test-db (the tests written for
+  # either backend, and PostgreSQL's own: the instance lock and the session hook
+  # that keeps it across a reconnect, the encryption_params race, a re-key that
+  # can't scrub) and both handler suites, built for PostgreSQL. make runs them
+  # against a throwaway cluster that test/pg-cluster.sh starts in a temporary
+  # directory, reachable only through its Unix socket, and removes.
+  # Runs in parallel with the other jobs.
+  test-postgresql:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      # libpq-dev for the build, as in build-postgresql. The cluster needs the
+      # server's own programs (initdb, pg_ctl), which the runner image carries
+      # with its service off; the distribution's package is the fallback for an
+      # image that doesn't.
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libssl-dev libargon2-dev libpq-dev
+          ls /usr/lib/postgresql/*/bin/initdb 2> /dev/null || sudo apt-get install -y postgresql
+          ls /usr/lib/postgresql/*/bin/initdb
+
+      # As in build-and-test: the suites read auth.conf for the schema directory
+      # and the encryption key. Each uses a database of its own on the cluster.
+      - name: Provide a test configuration
+        run: cp auth.conf.example auth.conf
+
+      - name: Build and run the database suites against PostgreSQL
+        run: |
+          set -o pipefail
+          make DB_BACKEND=postgresql test-postgresql 2>&1 | tee /tmp/pgtest.log
+
+      # Same gate as build-postgresql: nothing third-party is compiled here.
+      - name: Fail on compiler warnings in project code
+        run: |
+          if grep -E -A4 ':[0-9]+:[0-9]+: warning:' /tmp/pgtest.log; then
+            echo "::error::compiler emitted warnings in the PostgreSQL test build"
             exit 1
           fi
           echo "No warnings in project code."

@@ -513,6 +513,8 @@ test/
 ├── test_crypto.c       # Crypto test (random, password hashing, hmac, jwt)
 ├── test_handlers.c     # Request flows through the real route table and handlers
 ├── test_email.c   # Infrastructure/deployment convenience check; not in standard "make test" battery 
+├── scratch_db.c        # A database of each test's own, on either backend
+├── pg-cluster.sh       # A throwaway PostgreSQL cluster, for make test-postgresql
 ├── sanitize.sh         # Build the whole server with ASan+UBSan, to drive by hand
 └── fuzz/               # Coverage-guided fuzzing (see fuzz/README.md)
     ├── fuzz_http.c     # Harness: HTTP request parser
@@ -576,7 +578,18 @@ vendor/
 - `make test-handlers-email` - The same flows with email support compiled in, plus the ones
     only it has; the email command is a capture the tests read the links back from
 - `make test` - All of the above, plus `fuzz-regress`
+- `make DB_BACKEND=postgresql test-postgresql` - test-db and both handler suites against
+    PostgreSQL, on a throwaway cluster that `test/pg-cluster.sh` starts and removes. It needs
+    PostgreSQL's server programs (initdb, pg_ctl): from `PG_BIN`, `PATH`, or Debian's and
+    Ubuntu's `/usr/lib/postgresql/<version>/bin`. On PostgreSQL, test-db runs the tests written
+    for either backend and PostgreSQL's own; the rest are SQLite's.
 - `make test-email` - Deliver a test email through the deployed "send script" (optional infrastructure)
+
+The database suites use a database of their own for each test: on SQLite one in memory, on
+PostgreSQL a new database on the server `AUTH_TEST_PG` names (a libpq connection string, in
+key=value form, for a role that may create databases and roles), dropped when the suite ends.
+A PostgreSQL build without `AUTH_TEST_PG` skips them, so its `make test` still passes; set it
+to run the three binaries against a server of your own.
 
 **Memory Safety:**
 

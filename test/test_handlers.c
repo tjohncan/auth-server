@@ -3,7 +3,9 @@
 
 /*
  * Handler-level tests: raw requests through the server's own route table,
- * router and handlers, against an in-memory SQLite database, one flow per test.
+ * router and handlers, against a database of the suite's own (scratch_db.h), one
+ * flow per test. Its raw SQL is written for both backends, with db_sql.h's
+ * macros and scratch_db.h's.
  *
  * test-db pins the query functions underneath; this pins what the handlers add
  * on top -- authentication, the MFA gates, status codes -- along the flows the
@@ -19,7 +21,9 @@
 #include "util/json.h"
 #include "db/db.h"
 #include "db/db_pool.h"
+#include "db/db_sql.h"
 #include "db/init/db_init.h"
+#include "db/init/db_history.h"
 #include "db/queries/user.h"
 #include "crypto/encrypt.h"
 #include "crypto/password.h"
@@ -33,6 +37,7 @@
 #include <time.h>
 #include "util/template.h"
 #include "util/validation.h"
+#include "scratch_db.h"
 #ifdef EMAIL_SUPPORT
 #include <dirent.h>
 #include <signal.h>
@@ -261,7 +266,7 @@ static int setup(void) {
     if (login("admin", "correct horse battery", g_admin_cookie, sizeof(g_admin_cookie)) != 0) {
         FAIL("the bootstrap admin can't sign in");
     }
-    if (query_text("SELECT lower(hex(id)) FROM organization WHERE code_name = 'system'",
+    if (query_text("SELECT " ID_HEX("id") " FROM " TBL_ORGANIZATION " WHERE code_name = 'system'",
                    g_org_id, sizeof(g_org_id)) != 0) {
         FAIL("no bootstrap organization");
     }
@@ -279,14 +284,19 @@ static int setup(void) {
 static char g_ui_client[33];
 static char g_redirect_enc[128];
 
-/* /authorize as the admin, through the console's client; the code from the redirect */
-static int authorize(char *code, size_t size) {
+/* /authorize as the admin, through the console's client, with this challenge */
+static Reply authorize_with(const char *challenge) {
     char target[512];
     snprintf(target, sizeof(target),
              "/authorize?response_type=code&client_id=%s&redirect_uri=%s&state=st8"
-             "&code_challenge=" PKCE_CHALLENGE "&code_challenge_method=S256",
-             g_ui_client, g_redirect_enc);
-    Reply r = request("GET", target, g_admin_cookie, NULL, NULL, NULL);
+             "&code_challenge=%s&code_challenge_method=S256",
+             g_ui_client, g_redirect_enc, challenge);
+    return request("GET", target, g_admin_cookie, NULL, NULL, NULL);
+}
+
+/* The same with the verifier's challenge; the code from the redirect */
+static int authorize(char *code, size_t size) {
+    Reply r = authorize_with(PKCE_CHALLENGE);
     const char *q = r.location ? strchr(r.location, '?') : NULL;
     char *c = q ? http_query_get_param(q + 1, "code") : NULL;
     char *state = q ? http_query_get_param(q + 1, "state") : NULL;
@@ -330,7 +340,7 @@ static int userinfo_status(const char *access_token) {
 static int test_authorization_code_flow(void) {
     printf("\n=== Authorization code, PKCE and refresh rotation ===\n");
 
-    if (query_text("SELECT lower(hex(id)) FROM client WHERE code_name = 'management_ui'",
+    if (query_text("SELECT " ID_HEX("id") " FROM " TBL_CLIENT " WHERE code_name = 'management_ui'",
                    g_ui_client, sizeof(g_ui_client)) != 0) {
         FAIL("no management UI client");
     }
@@ -339,6 +349,19 @@ static int test_authorization_code_flow(void) {
     str_url_encode(g_redirect_enc, sizeof(g_redirect_enc), redirect);
 
     char code[2048], access[2048], rt[256], rt2[256];
+
+    /* 0. A challenge that can't be an S256 one is refused, no code made: a byte
+          short, and bytes that aren't UTF-8 (which PostgreSQL won't store) */
+    static const char *not_s256[] = {
+        "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-c", "%FF%FE" };
+    for (size_t i = 0; i < sizeof(not_s256) / sizeof(not_s256[0]); i++) {
+        Reply r = authorize_with(not_s256[i]);
+        int refused = r.status == 302 && r.location &&
+                      strstr(r.location, "error=invalid_request") && !strstr(r.location, "code=");
+        reply_free(&r);
+        if (!refused) FAIL("/authorize took the challenge '%s'", not_s256[i]);
+    }
+    printf("✓ a challenge that can't be S256's is refused before a code is made\n");
 
     /* 1. The wrong verifier is refused and the right one exchanges, so the
           refusal was PKCE's (it's checked before the code is spent) */
@@ -443,7 +466,7 @@ static int test_authorization_code_flow(void) {
     /* 6. A client that issues no refresh tokens: replaying its code still
           revokes the access token the first exchange issued */
     if (db_execute_direct(db_pool_get_connection(),
-                          "UPDATE client SET issue_refresh_tokens = 0 "
+                          "UPDATE " TBL_CLIENT " SET issue_refresh_tokens = " BOOL_FALSE " "
                           "WHERE code_name = 'management_ui'") != 0) {
         FAIL("could not turn refresh tokens off");
     }
@@ -457,7 +480,7 @@ static int test_authorization_code_flow(void) {
     reply_free(&r);
     int live = userinfo_status(access);
     if (db_execute_direct(db_pool_get_connection(),
-                          "UPDATE client SET issue_refresh_tokens = 1 "
+                          "UPDATE " TBL_CLIENT " SET issue_refresh_tokens = " BOOL_TRUE " "
                           "WHERE code_name = 'management_ui'") != 0) {
         FAIL("could not turn refresh tokens back on");
     }
@@ -473,13 +496,13 @@ static int test_authorization_code_flow(void) {
           refusal was the link's and it didn't spend the code */
     db_handle_t *db = db_pool_get_connection();
     const char *link =
-        "INSERT INTO client_user (client_pin, user_account_pin) "
-        "SELECT C.pin, A.user_account_pin FROM client C, organization_admin A "
+        "INSERT INTO " TBL_CLIENT_USER " (client_pin, user_account_pin) "
+        "SELECT C.pin, A.user_account_pin FROM " TBL_CLIENT " C, " TBL_ORGANIZATION_ADMIN " A "
         "WHERE C.code_name = 'management_ui'";
     const char *unlink =
-        "DELETE FROM client_user WHERE client_pin = "
-        "(SELECT pin FROM client WHERE code_name = 'management_ui')";
-    if (db_execute_direct(db, "UPDATE client SET is_universal = 0 "
+        "DELETE FROM " TBL_CLIENT_USER " WHERE client_pin = "
+        "(SELECT pin FROM " TBL_CLIENT " WHERE code_name = 'management_ui')";
+    if (db_execute_direct(db, "UPDATE " TBL_CLIENT " SET is_universal = " BOOL_FALSE " "
                               "WHERE code_name = 'management_ui'") != 0 ||
         db_execute_direct(db, link) != 0) {
         FAIL("could not make the client need a link");
@@ -494,7 +517,7 @@ static int test_authorization_code_flow(void) {
     int relinked = r.status;
     reply_free(&r);
     if (db_execute_direct(db, unlink) != 0 ||
-        db_execute_direct(db, "UPDATE client SET is_universal = 1 "
+        db_execute_direct(db, "UPDATE " TBL_CLIENT " SET is_universal = " BOOL_TRUE " "
                               "WHERE code_name = 'management_ui'") != 0) {
         FAIL("could not make the client universal again");
     }
@@ -684,8 +707,8 @@ static int test_client_credentials(void) {
           and in the exp that a resource server verifying the JWT itself trusts */
     int cap = g_config->max_access_token_ttl_seconds;
     char sql[256];
-    snprintf(sql, sizeof(sql), "UPDATE client SET access_token_ttl_seconds = %d "
-             "WHERE id = x'%s'", cap + 3600, svc);
+    snprintf(sql, sizeof(sql), "UPDATE " TBL_CLIENT " SET access_token_ttl_seconds = %d "
+             "WHERE id = " ID_FROM_HEX("%s"), cap + 3600, svc);
     if (db_execute_direct(db_pool_get_connection(), sql) != 0) FAIL("could not raise the TTL");
     snprintf(form, sizeof(form), "grant_type=client_credentials&client_id=%s&client_key_id=%s"
              "&client_secret=%s", svc, ck, cs);
@@ -845,9 +868,9 @@ static int test_mfa_gates(void) {
     char sql[512], reset_hash[SHA256_HEX_LENGTH], set_json[160], pending_cookie[256];
     if (crypto_sha256_hex("mfa-reset", 9, reset_hash, sizeof(reset_hash)) != 0) FAIL("sha256");
     snprintf(sql, sizeof(sql),
-             "INSERT INTO password_reset_token (id, user_account_pin, token, issued_at, "
-             "expected_expiry) SELECT randomblob(16), pin, '%s', datetime('now'), "
-             "datetime('now', '+1 hour') FROM user_account WHERE id = x'%s'", reset_hash, user_id);
+             "INSERT INTO " TBL_PASSWORD_RESET_TOKEN " (id, user_account_pin, token, issued_at, "
+             "expected_expiry) SELECT " NEW_ID ", pin, '%s', " NOW ", " INTERVAL_SECONDS("3600") " "
+             "FROM " TBL_USER_ACCOUNT " WHERE id = " ID_FROM_HEX("%s"), reset_hash, user_id);
     snprintf(set_json, sizeof(set_json),
              "{\"user_id\":\"%s\",\"password\":\"mfa user password 4\"}", user_id);
     static const char *ways[3] = { "a change", "a reset", "set-password" };
@@ -894,6 +917,24 @@ static int test_mfa_gates(void) {
     return 0;
 }
 
+/* A row's address in its table, to pick one of several alike; and a trigger
+   that makes every insert into the MFA attempt log fail, and its removal */
+#ifdef DB_BACKEND_POSTGRESQL
+#define ROW_ADDRESS "ctid"
+#define REFUSE_MFA_USAGE \
+    "CREATE FUNCTION refuse_mfa_usage() RETURNS trigger LANGUAGE plpgsql " \
+    "AS $$ BEGIN RAISE EXCEPTION 'refused'; END $$; " \
+    "CREATE TRIGGER refuse_mfa_usage BEFORE INSERT ON " TBL_USER_MFA_USAGE " " \
+    "FOR EACH ROW EXECUTE FUNCTION refuse_mfa_usage()"
+#define ALLOW_MFA_USAGE "DROP FUNCTION refuse_mfa_usage() CASCADE"
+#else
+#define ROW_ADDRESS "rowid"
+#define REFUSE_MFA_USAGE \
+    "CREATE TRIGGER refuse_mfa_usage BEFORE INSERT ON " TBL_USER_MFA_USAGE " " \
+    "BEGIN SELECT RAISE(FAIL, 'refused'); END"
+#define ALLOW_MFA_USAGE "DROP TRIGGER refuse_mfa_usage"
+#endif
+
 /*
  * Ten failed codes in a day, across the user's methods, refuse even a right
  * code; failures older than a day don't count. (The per-minute limit is
@@ -902,7 +943,7 @@ static int test_mfa_gates(void) {
 static int test_mfa_daily_cap(void) {
     printf("\n=== MFA daily cap ===\n");
 
-    char cookie[256], method[33], secret[64], code[16], json[256], sql[256];
+    char cookie[256], method[33], secret[64], code[16], json[256], sql[512];
     Reply r = admin_port("POST", "/api/admin/users", NULL,
                         "{\"username\":\"capped\",\"password\":\"capped password\"}");
     int status = r.status;
@@ -925,8 +966,9 @@ static int test_mfa_daily_cap(void) {
 
     /* 1. Ten failures two hours ago: a right code is refused */
     snprintf(sql, sizeof(sql),
-             "INSERT INTO user_mfa_usage (user_mfa_pin, submitted_at, success) "
-             "SELECT pin, datetime('now', '-2 hours'), 0 FROM user_mfa WHERE id = x'%s'", method);
+             "INSERT INTO " TBL_USER_MFA_USAGE " (user_mfa_pin, submitted_at, success) "
+             "SELECT pin, " SECONDS_AGO("7200") ", " BOOL_FALSE " FROM " TBL_USER_MFA " "
+             "WHERE id = " ID_FROM_HEX("%s"), method);
     for (int i = 0; i < 10; i++) {
         if (db_execute_direct(db_pool_get_connection(), sql) != 0) FAIL("could not plant failures");
     }
@@ -939,9 +981,10 @@ static int test_mfa_daily_cap(void) {
 
     /* 2. Nine: the right code works */
     snprintf(sql, sizeof(sql),
-             "DELETE FROM user_mfa_usage WHERE rowid = (SELECT max(rowid) FROM user_mfa_usage "
-             "WHERE success = 0 AND user_mfa_pin = (SELECT pin FROM user_mfa WHERE id = x'%s'))",
-             method);
+             "DELETE FROM " TBL_USER_MFA_USAGE " WHERE " ROW_ADDRESS " = (SELECT " ROW_ADDRESS " "
+             "FROM " TBL_USER_MFA_USAGE " WHERE success = " BOOL_FALSE " AND user_mfa_pin = "
+             "(SELECT pin FROM " TBL_USER_MFA " WHERE id = " ID_FROM_HEX("%s") ") "
+             "ORDER BY submitted_at DESC LIMIT 1)", method);
     if (db_execute_direct(db_pool_get_connection(), sql) != 0) FAIL("could not remove a failure");
     r = post_json("/api/user/mfa/verify", cookie, json);
     int nine = r.status == 200 && strstr(r.body, "\"valid\":true") != NULL;
@@ -951,13 +994,14 @@ static int test_mfa_daily_cap(void) {
 
     /* 3. Failures older than a day don't count */
     snprintf(sql, sizeof(sql),
-             "UPDATE user_mfa_usage SET submitted_at = datetime('now', '-25 hours') "
-             "WHERE success = 0 AND user_mfa_pin = (SELECT pin FROM user_mfa WHERE id = x'%s')",
-             method);
+             "UPDATE " TBL_USER_MFA_USAGE " SET submitted_at = " SECONDS_AGO("90000") " "
+             "WHERE success = " BOOL_FALSE " AND user_mfa_pin = (SELECT pin FROM " TBL_USER_MFA " "
+             "WHERE id = " ID_FROM_HEX("%s") ")", method);
     if (db_execute_direct(db_pool_get_connection(), sql) != 0) FAIL("could not age the failures");
     snprintf(sql, sizeof(sql),
-             "INSERT INTO user_mfa_usage (user_mfa_pin, submitted_at, success) "
-             "SELECT pin, datetime('now', '-25 hours'), 0 FROM user_mfa WHERE id = x'%s'", method);
+             "INSERT INTO " TBL_USER_MFA_USAGE " (user_mfa_pin, submitted_at, success) "
+             "SELECT pin, " SECONDS_AGO("90000") ", " BOOL_FALSE " FROM " TBL_USER_MFA " "
+             "WHERE id = " ID_FROM_HEX("%s"), method);
     for (int i = 0; i < 5; i++) {
         if (db_execute_direct(db_pool_get_connection(), sql) != 0) FAIL("could not plant failures");
     }
@@ -970,8 +1014,7 @@ static int test_mfa_daily_cap(void) {
     /* 4. The limits count recorded attempts, so one that can't be recorded gets
           no verdict: right code or wrong, the same 503 */
     db_handle_t *conn = db_pool_get_connection();
-    if (db_execute_direct(conn, "CREATE TRIGGER refuse_mfa_usage BEFORE INSERT ON user_mfa_usage "
-                                "BEGIN SELECT RAISE(FAIL, 'refused'); END") != 0) {
+    if (db_execute_direct(conn, REFUSE_MFA_USAGE) != 0) {
         FAIL("could not make the attempt log refuse");
     }
     r = post_json("/api/user/mfa/verify", cookie, json);
@@ -982,7 +1025,7 @@ static int test_mfa_daily_cap(void) {
     r = post_json("/api/user/mfa/verify", cookie, json);
     int wrong = r.status;
     reply_free(&r);
-    if (db_execute_direct(conn, "DROP TRIGGER refuse_mfa_usage") != 0) FAIL("could not drop the trigger");
+    if (db_execute_direct(conn, ALLOW_MFA_USAGE) != 0) FAIL("could not drop the trigger");
     if (right != 503 || wrong != 503) {
         FAIL("an attempt that couldn't be recorded answered %d (right code), %d (wrong)", right, wrong);
     }
@@ -991,6 +1034,20 @@ static int test_mfa_daily_cap(void) {
     reply_free(&r);
     if (!recorded) FAIL("with the log back, a wrong code wasn't answered as wrong");
     printf("✓ an attempt that can't be recorded gets no verdict, right code or wrong\n");
+
+    /* 5. A client whose User-Agent isn't UTF-8, which PostgreSQL won't store: its
+          attempt is recorded with the header cleaned, and answered */
+    char agent[64];
+    r = request("POST", "/api/user/mfa/verify", cookie, "User-Agent: odd \xff agent\r\n",
+                "application/json", json);
+    int answered = r.status == 200 && strstr(r.body, "\"valid\":false") != NULL;
+    reply_free(&r);
+    if (!answered) FAIL("an attempt with an ill-formed User-Agent wasn't answered");
+    if (query_text("SELECT user_agent FROM " TBL_USER_MFA_USAGE " WHERE user_agent LIKE 'odd %'",
+                   agent, sizeof(agent)) != 0 || strcmp(agent, "odd ? agent") != 0) {
+        FAIL("the attempt's User-Agent was stored as '%s'", agent);
+    }
+    printf("✓ an attempt with an ill-formed User-Agent is recorded, the header cleaned\n");
 
     return 0;
 }
@@ -1140,7 +1197,8 @@ static int test_account_recovery(void) {
           session the old one opened stays: deactivation is what evicts */
     char reset_hash[SHA256_HEX_LENGTH], insert[512], before[256];
     if (login("recovered", "the old password", before, sizeof(before)) != 0) FAIL("could not sign in");
-    snprintf(sql, sizeof(sql), "SELECT pin FROM user_account WHERE id = x'%s'", user_id);
+    snprintf(sql, sizeof(sql), "SELECT pin FROM " TBL_USER_ACCOUNT " WHERE id = " ID_FROM_HEX("%s"),
+             user_id);
     if (query_text(sql, pin, sizeof(pin)) != 0 ||
         user_create_invitation_token(db_pool_get_connection(), atoll(pin), 0, 3600, NULL,
                                      invite) != 0 ||
@@ -1149,9 +1207,9 @@ static int test_account_recovery(void) {
     }
     /* A reset link is a row with a known token hash: all its redemption reads */
     snprintf(insert, sizeof(insert),
-             "INSERT INTO password_reset_token (id, user_account_pin, token, issued_at, "
-             "expected_expiry) VALUES (randomblob(16), %s, '%s', datetime('now'), "
-             "datetime('now', '+1 hour'))", pin, reset_hash);
+             "INSERT INTO " TBL_PASSWORD_RESET_TOKEN " (id, user_account_pin, token, issued_at, "
+             "expected_expiry) VALUES (" NEW_ID ", %s, '%s', " NOW ", " INTERVAL_SECONDS("3600") ")",
+             pin, reset_hash);
     if (db_execute_direct(db_pool_get_connection(), insert) != 0) FAIL("could not plant a reset link");
     snprintf(json, sizeof(json), "{\"user_id\":\"%s\",\"password\":\"the new password\"}", user_id);
     status = post_status("/api/admin/users/set-password", json);
@@ -1216,7 +1274,7 @@ static int test_account_recovery(void) {
 static int test_operator_addresses(void) {
     printf("\n=== The operator and a user's addresses ===\n");
 
-    char user_id[33], cookie[256], json[256], sql[256];
+    char user_id[33], cookie[256], json[256], sql[512];
 
     /* An address alone makes no account: it would go on unverified, so nothing
        could sign in to it */
@@ -1243,9 +1301,9 @@ static int test_operator_addresses(void) {
         if (status != 200) FAIL("adding an address answered %d", status);
     }
     snprintf(sql, sizeof(sql),
-             "UPDATE user_email SET is_verified = 1, verified_at = datetime('now') WHERE pin = "
-             "(SELECT max(pin) FROM user_email WHERE user_account_pin = "
-             "(SELECT pin FROM user_account WHERE id = x'%s'))", user_id);
+             "UPDATE " TBL_USER_EMAIL " SET is_verified = " BOOL_TRUE ", verified_at = " NOW " "
+             "WHERE pin = (SELECT max(pin) FROM " TBL_USER_EMAIL " WHERE user_account_pin = "
+             "(SELECT pin FROM " TBL_USER_ACCOUNT " WHERE id = " ID_FROM_HEX("%s") "))", user_id);
     if (db_execute_direct(db_pool_get_connection(), sql) != 0) FAIL("could not verify theirs");
 
     /* 1. Listed, with verified state and dates */
@@ -1326,7 +1384,8 @@ static int test_form_password_length(void) {
                         "{\"username\":\"longpass\",\"password\":\"a short password\"}");
     int created = r.status == 200 && field(&r, "user_id", user_id, sizeof(user_id)) == 0;
     reply_free(&r);
-    snprintf(sql, sizeof(sql), "SELECT pin FROM user_account WHERE id = x'%s'", user_id);
+    snprintf(sql, sizeof(sql), "SELECT pin FROM " TBL_USER_ACCOUNT " WHERE id = " ID_FROM_HEX("%s"),
+             user_id);
     if (!created || query_text(sql, pin, sizeof(pin)) != 0 ||
         user_create_invitation_token(db_pool_get_connection(), atoll(pin), 0, 3600, NULL,
                                      invite) != 0) {
@@ -1571,8 +1630,8 @@ static int test_provisioning(void) {
     for (int i = 1; i < 5; i++) {
         /* Earlier links issued earlier: SQLite dates to the second, and two from
            the same second both stay valid */
-        if (db_execute_direct(db_pool_get_connection(), "UPDATE invitation_token SET "
-                              "issued_at = datetime(issued_at, '-2 seconds')") != 0) {
+        if (db_execute_direct(db_pool_get_connection(), "UPDATE " TBL_INVITATION_TOKEN " SET "
+                              "issued_at = " SECONDS_BEFORE("issued_at", "2")) != 0) {
             FAIL("could not date the earlier invitations");
         }
         r = provision(AS("pending"), "pending@example.com");
@@ -1665,7 +1724,7 @@ static int test_provisioning(void) {
     /* Patterns apply to new values only. An address stored before the default
        existed, which it refuses, still finds its account: by provisioning, and
        with email support for a reset link. A new value like it is refused. */
-    char legacy[33], legacy_cookie[256], legacy_sql[256];
+    char legacy[33], legacy_cookie[256], legacy_sql[512];
     validation_patterns_t before = { .email = "" };
     validation_patterns_t configured = {
         .username = g_config->username_pattern, .email = g_config->email_pattern,
@@ -1681,8 +1740,9 @@ static int test_provisioning(void) {
     if (validation_init(&configured) != 0) FAIL("could not restore the patterns");
     if (!made) FAIL("could not store an address the default refuses");
     snprintf(legacy_sql, sizeof(legacy_sql),
-             "UPDATE user_email SET is_verified = 1, verified_at = datetime('now') "
-             "WHERE user_account_pin = (SELECT pin FROM user_account WHERE id = x'%s')", legacy);
+             "UPDATE " TBL_USER_EMAIL " SET is_verified = " BOOL_TRUE ", verified_at = " NOW " "
+             "WHERE user_account_pin = (SELECT pin FROM " TBL_USER_ACCOUNT " WHERE id = "
+             ID_FROM_HEX("%s") ")", legacy);
     if (db_execute_direct(db_pool_get_connection(), legacy_sql) != 0) FAIL("could not verify it");
 
     r = provision(NULL, "o'brien@example.com");
@@ -1730,10 +1790,7 @@ int main(void) {
     printf("Handler Test Suite\n");
 #endif
 
-#ifdef DB_BACKEND_POSTGRESQL
-    printf("Skipped: test-handlers runs in the SQLite build only.\n");
-    return 0;
-#endif
+    if (!scratch_db_available()) return 0;
 
     config_t *config = config_load("auth.conf");
     if (!config) {
@@ -1769,22 +1826,28 @@ int main(void) {
     signal(SIGCHLD, SIG_IGN);
 #endif
 
-    /* One in-memory database, bound to this thread as a worker's would be */
+    /* One database, empty, bound to this thread as a worker's would be; the
+       schema and history made in it as the server makes them at its first start */
     validation_patterns_t patterns = {
         .username = config->username_pattern, .email = config->email_pattern,
         .code_name = config->code_name_pattern, .password = config->password_pattern,
         .machine_secret = config->machine_secret_pattern,
     };
+    char conninfo[1024];
     if (validation_init(&patterns) != 0 ||
         encrypt_init(config->encryption_key) != 0 || crypto_password_init(config) != 0 ||
-        db_pool_init(1, DB_TYPE_SQLITE, ":memory:") != 0) {
+        scratch_db_new(conninfo, sizeof(conninfo)) != 0 ||
+        db_pool_init(1, SCRATCH_DB_TYPE, conninfo) != 0) {
         printf("✗ setup failed\n");
         return 1;
     }
     db_handle_t *db = db_pool_get_connection_by_index(0);
     db_pool_set_connection(db);
-    const char *owner_role = config->db_owner_role ? config->db_owner_role : config->db_user;
-    if (db_init_schema(db, DB_TYPE_SQLITE, config->schema_dir, owner_role) < 0) {
+    int schema_rc = db_init_schema(db, SCRATCH_DB_TYPE, config->schema_dir,
+                                   scratch_db_owner_role(config));
+    if (schema_rc < 0 ||
+        (config->enable_history_tables &&
+         db_init_history_tables(db, SCRATCH_DB_TYPE, schema_rc == 0) != 0)) {
         printf("✗ schema setup failed\n");
         return 1;
     }

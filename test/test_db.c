@@ -22,31 +22,25 @@
 #include "db/queries/user.h"
 #include "db/queries/secret.h"
 #include "util/data.h"
+#include "scratch_db.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
+#include <pthread.h>
 #include <sys/stat.h>
 #include <openssl/crypto.h>
 
 /*
- * A database of the test's own: SQLite in memory, schema applied, gone when the
- * handle closes. The tests below delete and rewrite rows on purpose, so they
- * never run against the configured database, and nothing they do reaches a file.
+ * A database of the test's own, the schema applied (scratch_db.h): SQLite in
+ * memory, or a new PostgreSQL database. The tests below delete and rewrite rows
+ * on purpose, so they never run against the configured database.
  *
  * Returns NULL on failure.
  */
 static db_handle_t *open_test_db(const config_t *config) {
-    db_handle_t *db = NULL;
-    if (db_connect(&db, DB_TYPE_SQLITE, ":memory:") != 0) {
-        return NULL;
-    }
-    const char *owner_role = config->db_owner_role ? config->db_owner_role : config->db_user;
-    if (db_init_schema(db, DB_TYPE_SQLITE, config->schema_dir, owner_role) < 0) {
-        db_disconnect(db);
-        return NULL;
-    }
-    return db;
+    return scratch_db_open(config);
 }
 
 /* Read the first column of a one-row query, raw, as stored. */
@@ -60,6 +54,58 @@ static int read_stored_value(db_handle_t *db, const char *sql, char *out, size_t
     db_finalize(stmt);
     return (rc == DB_ROW && v) ? 0 : -1;
 }
+
+/* The first column of every row a query returns, joined with spaces */
+static int read_column_list(db_handle_t *db, const char *sql, char *out, size_t out_size) {
+    db_stmt_t *stmt = NULL;
+    size_t n = 0;
+    out[0] = '\0';
+    if (db_prepare(db, &stmt, sql) != 0) return -1;
+    int rc;
+    while ((rc = db_step(stmt)) == DB_ROW) {
+        const char *v = db_column_text(stmt, 0);
+        int w = snprintf(out + n, out_size - n, "%s%s", n ? " " : "", v ? v : "");
+        if (w < 0 || (size_t)w >= out_size - n) {
+            rc = -1;
+            break;
+        }
+        n += (size_t)w;
+    }
+    db_finalize(stmt);
+    return rc == DB_DONE ? 0 : -1;
+}
+
+/* The SHA-256 of the text in a query's first row, for comparing text too long
+   to keep, before and after */
+static int read_digest(db_handle_t *db, const char *sql, char *out, size_t out_size) {
+    db_stmt_t *stmt = NULL;
+    out[0] = '\0';
+    if (db_prepare(db, &stmt, sql) != 0) return -1;
+    const char *v = db_step(stmt) == DB_ROW ? db_column_text(stmt, 0) : NULL;
+    int rc = v ? crypto_sha256_hex(v, strlen(v), out, out_size) : -1;
+    db_finalize(stmt);
+    return rc == 0 ? 0 : -1;
+}
+
+/*
+ * History as the catalogs show it, on either backend: how many history tables
+ * there are; how many triggers (on PostgreSQL, not counting its own for foreign
+ * keys); and the code that fills history, as one text (SQLite: the triggers'
+ * SQL; PostgreSQL: the trigger functions' definitions).
+ */
+#ifdef DB_BACKEND_POSTGRESQL
+#define HISTORY_TABLES_SQL "SELECT count(*) FROM pg_tables WHERE schemaname LIKE '%\\_history'"
+#define TRIGGERS_SQL       "SELECT count(*) FROM pg_trigger WHERE NOT tgisinternal"
+#define HISTORY_CODE_SQL   "SELECT string_agg(pg_get_functiondef(p.oid), ';' ORDER BY p.proname) " \
+                           "FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace " \
+                           "WHERE n.nspname LIKE '%\\_history'"
+#else
+#define HISTORY_TABLES_SQL "SELECT count(*) FROM sqlite_master WHERE type = 'table' " \
+                           "AND name LIKE 'history\\_\\_%' ESCAPE '\\'"
+#define TRIGGERS_SQL       "SELECT count(*) FROM sqlite_master WHERE type = 'trigger'"
+#define HISTORY_CODE_SQL   "SELECT group_concat(sql, ';') FROM " \
+                           "(SELECT sql FROM sqlite_master WHERE type = 'trigger' ORDER BY name)"
+#endif
 
 /* One organization, resource server and confidential client, the client linked
  * to the server as it must be to get tokens for it; pins are all 1. A test whose
@@ -351,9 +397,10 @@ done:
 /*
  * History tables, the audit trail sql/README.md describes: once
  * db_init_history_tables has built them from the schema, every UPDATE and DELETE on
- * a table keyed by pin copies the row as it was into history__<table>, marked 'U'
- * or 'D'. Running the init again on a database that already has them must not
- * stack a second set of triggers, which would write every change twice.
+ * a table keyed by pin copies the row as it was into its history table (SQLite's
+ * history__<table>, PostgreSQL's <schema>_history.<table>), marked 'U' or 'D'.
+ * Running the init again on a database that already has them must not stack a
+ * second set of triggers, which would write every change twice.
  *
  * Returns 0 on success.
  */
@@ -369,24 +416,24 @@ static int test_history_tables(const config_t *config) {
     int failed = 1;
     char value[256];
 
-    if (db_init_history_tables(sdb, DB_TYPE_SQLITE, 1) != 0 ||
-        db_init_history_tables(sdb, DB_TYPE_SQLITE, 0) != 0) {
+    if (db_init_history_tables(sdb, SCRATCH_DB_TYPE, 1) != 0 ||
+        db_init_history_tables(sdb, SCRATCH_DB_TYPE, 0) != 0) {
         log_error("History: could not create the history tables");
         goto done;
     }
 
     if (db_execute_direct(sdb,
-            "INSERT INTO organization (id, code_name, display_name) "
-            "  VALUES (x'00000000000000000000000000000001', 'org', 'Before');"
-            "UPDATE organization SET display_name = 'After' WHERE pin = 1;"
-            "DELETE FROM organization WHERE pin = 1;") != 0) {
+            "INSERT INTO " TBL_ORGANIZATION " (id, code_name, display_name) "
+            "  VALUES (" ID_FROM_HEX("00000000000000000000000000000001") ", 'org', 'Before');"
+            "UPDATE " TBL_ORGANIZATION " SET display_name = 'After' WHERE pin = 1;"
+            "DELETE FROM " TBL_ORGANIZATION " WHERE pin = 1;") != 0) {
         log_error("History: could not change the row");
         goto done;
     }
 
-    if (read_stored_value(sdb,
-            "SELECT group_concat(history_triggering_action_code || ':' || display_name, ' ') "
-            "FROM (SELECT * FROM history__organization ORDER BY history_pin)",
+    if (read_column_list(sdb,
+            "SELECT history_triggering_action_code || ':' || display_name "
+            "FROM " HISTORY_OF("security", "organization") " ORDER BY history_pin",
             value, sizeof(value)) != 0 ||
         strcmp(value, "U:Before D:After") != 0) {
         log_error("History: expected 'U:Before D:After', got '%s'", value);
@@ -411,19 +458,16 @@ static long long read_count(db_handle_t *db, const char *sql) {
 }
 
 /*
- * --drophistory (maintenance_drop_history): every history table and every
- * trigger that fills one go in one run, a trigger left behind by hand included.
- * With history on, empty ones are made again, and keep the next change; with it
- * off, none are, and updates still work.
+ * --drophistory (maintenance_drop_history): every history table and what fills
+ * it (SQLite's triggers, PostgreSQL's trigger functions) go in one run, what a
+ * table dropped by hand left behind included. With history on, empty ones are
+ * made again, and keep the next change; with it off, none are, and updates
+ * still work.
  *
  * Returns 0 on success.
  */
 static int test_drop_history(const config_t *config) {
     log_info("\nHistory drop tests");
-
-    const char *tables_sql = "SELECT count(*) FROM sqlite_master WHERE type = 'table' "
-                             "AND name LIKE 'history\\_\\_%' ESCAPE '\\'";
-    const char *triggers_sql = "SELECT count(*) FROM sqlite_master WHERE type = 'trigger'";
 
     for (int rebuild = 1; rebuild >= 0; rebuild--) {
         db_handle_t *sdb = open_test_db(config);
@@ -435,46 +479,49 @@ static int test_drop_history(const config_t *config) {
         char value[256];
         drophistory_report_t report;
 
-        if (db_init_history_tables(sdb, DB_TYPE_SQLITE, 1) != 0 ||
+        if (db_init_history_tables(sdb, SCRATCH_DB_TYPE, 1) != 0 ||
             db_execute_direct(sdb,
-                "INSERT INTO organization (id, code_name, display_name) "
-                "  VALUES (x'00000000000000000000000000000001', 'org', 'Before');"
-                "UPDATE organization SET display_name = 'After' WHERE pin = 1;") != 0) {
+                "INSERT INTO " TBL_ORGANIZATION " (id, code_name, display_name) "
+                "  VALUES (" ID_FROM_HEX("00000000000000000000000000000001") ", 'org', 'Before');"
+                "UPDATE " TBL_ORGANIZATION " SET display_name = 'After' WHERE pin = 1;") != 0) {
             log_error("History drop: could not set up history");
             goto next;
         }
-        long long tables = read_count(sdb, tables_sql);
+        long long tables = read_count(sdb, HISTORY_TABLES_SQL);
 
         /* Off: one history table already dropped by hand, its triggers left
            behind, which fail every update of their table until removed */
         if (!rebuild &&
-            (db_execute_direct(sdb, "DROP TABLE history__organization") != 0 ||
-             db_execute_direct(sdb, "UPDATE organization SET display_name = 'x' WHERE pin = 1") == 0)) {
+            (db_execute_direct(sdb, "DROP TABLE " HISTORY_OF("security", "organization")) != 0 ||
+             db_execute_direct(sdb, "UPDATE " TBL_ORGANIZATION " SET display_name = 'x' "
+                                    "WHERE pin = 1") == 0)) {
             log_error("History drop: a trigger without its table didn't fail updates");
             goto next;
         }
 
-        if (maintenance_drop_history(sdb, DB_TYPE_SQLITE, rebuild, &report) != 0 ||
+        if (maintenance_drop_history(sdb, SCRATCH_DB_TYPE, rebuild, &report) != 0 ||
             report.triggers_dropped != 2 * tables || report.rebuilt != rebuild ||
             report.tables_dropped != (rebuild ? tables : tables - 1)) {
             log_error("History drop: the drop failed or miscounted (%d tables, %d triggers, of %lld)",
                       report.tables_dropped, report.triggers_dropped, tables);
             goto next;
         }
-        if (read_count(sdb, tables_sql) != (rebuild ? tables : 0) ||
-            read_count(sdb, triggers_sql) != (rebuild ? 2 * tables : 0)) {
+        if (read_count(sdb, HISTORY_TABLES_SQL) != (rebuild ? tables : 0) ||
+            read_count(sdb, TRIGGERS_SQL) != (rebuild ? 2 * tables : 0)) {
             log_error("History drop: %s history tables and triggers left after the run",
                       rebuild ? "the wrong number of" : "some");
             goto next;
         }
-        if (db_execute_direct(sdb, "UPDATE organization SET display_name = 'Again' WHERE pin = 1") != 0) {
+        if (db_execute_direct(sdb, "UPDATE " TBL_ORGANIZATION " SET display_name = 'Again' "
+                                   "WHERE pin = 1") != 0) {
             log_error("History drop: updates fail after the run");
             goto next;
         }
         if (rebuild &&
-            (read_stored_value(sdb,
-                 "SELECT group_concat(history_triggering_action_code || ':' || display_name, ' ') "
-                 "FROM history__organization", value, sizeof(value)) != 0 ||
+            (read_column_list(sdb,
+                 "SELECT history_triggering_action_code || ':' || display_name "
+                 "FROM " HISTORY_OF("security", "organization") " ORDER BY history_pin",
+                 value, sizeof(value)) != 0 ||
              strcmp(value, "U:After") != 0)) {
             log_error("History drop: the history made again holds '%s', not just the new change",
                       value);
@@ -1323,16 +1370,16 @@ static int test_encryption_params(const config_t *config) {
     log_info("  nothing sealed: a row is made, and later settings don't change it (OK)");
 
     /* 2. Values sealed and no row: HKDF alone, and no row made */
-    if (db_execute_direct(sdb, "DELETE FROM encryption_params") != 0 ||
+    if (db_execute_direct(sdb, "DELETE FROM " TBL_ENCRYPTION_PARAMS) != 0 ||
         user_create(sdb, "sealed-before", NULL, "a password", user_id) != 0 ||
         encryption_params_get_or_make(sdb, "pbkdf2-sha256", 1000, &again) != 1 ||
-        read_count(sdb, "SELECT count(*) FROM encryption_params") != 0) {
+        read_count(sdb, "SELECT count(*) FROM " TBL_ENCRYPTION_PARAMS) != 0) {
         log_error("Params: a row was made for values sealed without one");
         goto done;
     }
 
     /* 3. No table: HKDF alone */
-    if (db_execute_direct(sdb, "DROP TABLE encryption_params") != 0 ||
+    if (db_execute_direct(sdb, "DROP TABLE " TBL_ENCRYPTION_PARAMS) != 0 ||
         encryption_params_get_or_make(sdb, "pbkdf2-sha256", 1000, &again) != 1) {
         log_error("Params: a database without the table didn't derive by HKDF alone");
         goto done;
@@ -1353,15 +1400,16 @@ done:
    there are */
 static int sealed_opening(db_handle_t *db, const encrypt_keys_t *keys, int *total) {
     const char *sql =
-        "SELECT username FROM user_account WHERE username IS NOT NULL "
-        "UNION ALL SELECT email_address FROM user_email "
-        "UNION ALL SELECT email_address FROM passwordless_login_token "
-        "UNION ALL SELECT secret FROM user_mfa "
+        "SELECT username FROM " TBL_USER_ACCOUNT " WHERE username IS NOT NULL "
+        "UNION ALL SELECT email_address FROM " TBL_USER_EMAIL " "
+        "UNION ALL SELECT email_address FROM " TBL_PASSWORDLESS_LOGIN_TOKEN " "
+        "UNION ALL SELECT secret FROM " TBL_USER_MFA " "
         "UNION ALL SELECT substr(v, 4) FROM ("
-        "  SELECT current_secret AS v FROM auth_request_signing "
-        "  UNION ALL SELECT prior_secret FROM auth_request_signing "
-        "  UNION ALL SELECT current_private_key FROM access_token_signing "
-        "  UNION ALL SELECT prior_private_key FROM access_token_signing) WHERE v IS NOT NULL";
+        "  SELECT current_secret AS v FROM " TBL_AUTH_REQUEST_SIGNING " "
+        "  UNION ALL SELECT prior_secret FROM " TBL_AUTH_REQUEST_SIGNING " "
+        "  UNION ALL SELECT current_private_key FROM " TBL_ACCESS_TOKEN_SIGNING " "
+        "  UNION ALL SELECT prior_private_key FROM " TBL_ACCESS_TOKEN_SIGNING ") AS signing "
+        "WHERE v IS NOT NULL";
     *total = 0;
     int opening = 0;
     db_stmt_t *stmt = NULL;
@@ -1384,8 +1432,9 @@ static int sealed_opening(db_handle_t *db, const encrypt_keys_t *keys, int *tota
  * their case, so the blind indexes were made again. The signing keys load,
  * current and prior, and the encryption_params row is the new one. History
  * holds what it held, with no copy of the re-key's own changes, and keeps the
- * next change. A value the old key won't open rolls the whole run back, history
- * triggers included.
+ * next change, from the code that filled it before, unchanged. A value the old
+ * key won't open rolls the whole run back, history triggers included. On
+ * PostgreSQL the run ends by scrubbing: each re-sealed table is rewritten.
  *
  * Returns 0 on success.
  */
@@ -1404,13 +1453,14 @@ static int test_rekey(const config_t *config) {
     signing_key_t *es = NULL, *hmac = NULL, *es_after = NULL, *hmac_after = NULL;
     unsigned char user_id[16], method_id[16];
     char token[64], sealed_totp[256], before[512], after[512];
+    char code[SHA256_HEX_LENGTH], code_after[SHA256_HEX_LENGTH];
     rekey_report_t report;
     const char *totp = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
-    const char *history_sql = "SELECT (SELECT count(*) FROM history__user_account) + "
-                              "(SELECT count(*) FROM history__user_email) + "
-                              "(SELECT count(*) FROM history__user_mfa)";
-    const char *triggers_sql = "SELECT count(*) FROM sqlite_master WHERE type = 'trigger'";
-    const char *username_sql = "SELECT username FROM user_account WHERE pin = 1";
+    const char *history_sql =
+        "SELECT (SELECT count(*) FROM " HISTORY_OF("security", "user_account") ") + "
+        "(SELECT count(*) FROM " HISTORY_OF("security", "user_email") ") + "
+        "(SELECT count(*) FROM " HISTORY_OF("security", "user_mfa") ")";
+    const char *username_sql = "SELECT username FROM " TBL_USER_ACCOUNT " WHERE pin = 1";
 
     /* 1. Derivation: the same parameters give the same keys again; another salt,
           another method, or no stretch at all gives others */
@@ -1470,11 +1520,11 @@ static int test_rekey(const config_t *config) {
           both signing keys, current and prior */
     encrypt_init_keys(&a);
     signing_key_thread_cleanup();
-    if (db_init_history_tables(sdb, DB_TYPE_SQLITE, 1) != 0 ||
+    if (db_init_history_tables(sdb, SCRATCH_DB_TYPE, 1) != 0 ||
         user_create(sdb, "Alice", "Alice@Example.com", "a password", user_id) != 0 ||
         user_create(sdb, NULL, "bob@example.com", "a password", user_id) != 0 ||
-        db_execute_direct(sdb, "UPDATE user_email SET is_verified = 1, "
-                               "verified_at = datetime('now')") != 0 ||
+        db_execute_direct(sdb, "UPDATE " TBL_USER_EMAIL " SET is_verified = " BOOL_TRUE ", "
+                               "verified_at = " NOW) != 0 ||
         user_update_allow_passwordless_login(sdb, 2, 1) != 0 ||
         user_create_passwordless_login_token(sdb, "bob@example.com", 600, NULL, NULL,
                                              token) != 0 ||
@@ -1483,8 +1533,8 @@ static int test_rekey(const config_t *config) {
         signing_key_get_or_rotate(sdb, SIGNING_KEY_ACCESS_TOKEN, &es) != 0 ||
         signing_key_get_or_rotate(sdb, SIGNING_KEY_AUTH_REQUEST, &hmac) != 0 ||
         db_execute_direct(sdb,
-            "UPDATE access_token_signing SET current_generated_at = datetime('now', '-61 days');"
-            "UPDATE auth_request_signing SET current_generated_at = datetime('now', '-2 days');") != 0) {
+            "UPDATE " TBL_ACCESS_TOKEN_SIGNING " SET current_generated_at = " DAYS_AGO("61") ";"
+            "UPDATE " TBL_AUTH_REQUEST_SIGNING " SET current_generated_at = " DAYS_AGO("2") ";") != 0) {
         log_error("Re-key: could not set up sealed values");
         goto done;
     }
@@ -1498,10 +1548,14 @@ static int test_rekey(const config_t *config) {
         goto done;
     }
     long long history = read_count(sdb, history_sql);
-    long long triggers = read_count(sdb, triggers_sql);
+    long long triggers = read_count(sdb, TRIGGERS_SQL);
+    if (read_digest(sdb, HISTORY_CODE_SQL, code, sizeof(code)) != 0) {
+        log_error("Re-key: could not read the code that fills history");
+        goto done;
+    }
 
     /* 3. Re-keyed to b: every value opens under b, none under a */
-    if (maintenance_rekey(sdb, DB_TYPE_SQLITE, &a, &b, &params, &report) != 0 ||
+    if (maintenance_rekey(sdb, SCRATCH_DB_TYPE, &a, &b, &params, &report) != 0 ||
         report.usernames != 1 || report.addresses != 2 || report.passwordless != 1 ||
         report.mfa_secrets != 1 || report.signing_keys != 4 || report.history_tables != 2) {
         /* History rows of the re-sealed tables: user_account's (the passwordless
@@ -1557,14 +1611,20 @@ static int test_rekey(const config_t *config) {
     log_info("  lookups match whatever the case; links, TOTP and signing keys open as they "
              "were; the new stretch is recorded (OK)");
 
-    /* 5. History: no copy of the re-key's changes, and the next change is kept */
-    if (read_count(sdb, history_sql) != history || read_count(sdb, triggers_sql) != triggers ||
-        db_execute_direct(sdb, "UPDATE user_mfa SET display_name = 'laptop' WHERE pin = 1") != 0 ||
+    /* 5. History: no copy of the re-key's changes, and the next change is kept, by
+          the code that filled it before */
+    if (read_count(sdb, history_sql) != history || read_count(sdb, TRIGGERS_SQL) != triggers ||
+        read_digest(sdb, HISTORY_CODE_SQL, code_after, sizeof(code_after)) != 0 ||
+        strcmp(code, code_after) != 0 ||
+        db_execute_direct(sdb, "UPDATE " TBL_USER_MFA " SET display_name = 'laptop' "
+                               "WHERE pin = 1") != 0 ||
         read_count(sdb, history_sql) != history + 1) {
-        log_error("Re-key: history copied the re-key's changes, or stopped keeping new ones");
+        log_error("Re-key: history copied the re-key's changes, or stopped keeping new ones, or "
+                  "what fills it changed");
         goto done;
     }
-    log_info("  history holds no copy of the re-key's changes and keeps the next one (OK)");
+    log_info("  history holds no copy of the re-key's changes and keeps the next one, as "
+             "before (OK)");
 
     /* 6. A value b won't open, in the last table re-sealed, so the tables before it
           are already done when it fails: the whole run rolls back */
@@ -1574,15 +1634,18 @@ static int test_rekey(const config_t *config) {
         log_error("Re-key: could not plant a value that won't open");
         goto done;
     }
-    if (maintenance_rekey(sdb, DB_TYPE_SQLITE, &b, &c, &params_c, &report) != -1) {
+    if (maintenance_rekey(sdb, SCRATCH_DB_TYPE, &b, &c, &params_c, &report) != -1) {
         log_error("Re-key: a value the old key won't open didn't fail the run");
         goto done;
     }
     if (read_stored_value(sdb, username_sql, after, sizeof(after)) != 0 ||
         strcmp(before, after) != 0 || sealed_opening(sdb, &b, &total) != 9 || total != 10 ||
-        read_count(sdb, history_sql) != history || read_count(sdb, triggers_sql) != triggers ||
+        read_count(sdb, history_sql) != history || read_count(sdb, TRIGGERS_SQL) != triggers ||
+        read_digest(sdb, HISTORY_CODE_SQL, code_after, sizeof(code_after)) != 0 ||
+        strcmp(code, code_after) != 0 ||
         encryption_params_load(sdb, &stored) != 0 || strcmp(stored.salt, params.salt) != 0 ||
-        db_execute_direct(sdb, "UPDATE user_mfa SET display_name = 'desk' WHERE pin = 1") != 0 ||
+        db_execute_direct(sdb, "UPDATE " TBL_USER_MFA " SET display_name = 'desk' "
+                               "WHERE pin = 1") != 0 ||
         read_count(sdb, history_sql) != history + 1) {
         log_error("Re-key: the failed run changed something");
         goto done;
@@ -1607,6 +1670,454 @@ done:
     }
     return failed;
 }
+
+/*
+ * Blobs, on either backend: what db_bind_blob writes, db_column_blob reads back
+ * byte for byte, and db_column_bytes gives the length of the column asked for,
+ * before or after any blob is read, on every row. PostgreSQL sends a uuid or a
+ * bytea as text, decoded on the way out (a bytea in either output form); and a
+ * value of 16 bytes may be either, so one bound to a bytea stays 16 bytes.
+ *
+ * Returns 0 on success.
+ */
+static int test_blob_columns(const config_t *config) {
+    log_info("\nBlob column tests");
+
+    db_handle_t *sdb = open_test_db(config);
+    if (!sdb) {
+        log_error("Blobs: could not open a test database");
+        return 1;
+    }
+
+    /* Row 1: an id, 16 bytes of data, a label; row 2: an id, 5 bytes, no label */
+    static const unsigned char ids[2][16] = {
+        {0x10,1,2,3,4,5,6,7,8,9,10,11,12,13,14,0xff},
+        {0x20,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x02} };
+    static const unsigned char sixteen[16] = {0,0xff,'\\','\'','x',0,1,2,3,4,5,6,7,8,9,0x80};
+    static const unsigned char five[5] = {0,0xff,0x10,'\\',0x01};
+    const unsigned char *data[2] = { sixteen, five };
+    const int data_len[2] = { 16, 5 };
+    const char *label[2] = { "label", NULL };
+#ifdef DB_BACKEND_POSTGRESQL
+    const char *create = "CREATE TABLE blob_probe (n integer, id uuid, data bytea, label text)";
+    static const char *outputs[] = { "SET bytea_output = 'hex'", "SET bytea_output = 'escape'" };
+#else
+    const char *create = "CREATE TABLE blob_probe (n integer, id blob, data blob, label text)";
+    static const char *outputs[] = { NULL };
+#endif
+    int failed = 1;
+    db_stmt_t *stmt = NULL;
+
+    if (db_execute_direct(sdb, create) != 0) {
+        log_error("Blobs: could not make the table");
+        goto done;
+    }
+    for (int i = 0; i < 2; i++) {
+        int rc = db_prepare(sdb, &stmt, "INSERT INTO blob_probe (n, id, data, label) "
+                                        "VALUES (" P"1, " P"2, " P"3, " P"4)");
+        if (rc == 0) {
+            db_bind_int(stmt, 1, i + 1);
+            db_bind_blob(stmt, 2, ids[i], 16);
+            db_bind_blob(stmt, 3, data[i], data_len[i]);
+            db_bind_text_or_null(stmt, 4, label[i]);
+            rc = db_step(stmt) == DB_DONE ? 0 : -1;
+        }
+        db_finalize(stmt);
+        stmt = NULL;
+        if (rc != 0) {
+            log_error("Blobs: could not insert row %d", i + 1);
+            goto done;
+        }
+    }
+
+    for (size_t o = 0; o < sizeof(outputs) / sizeof(outputs[0]); o++) {
+        if ((outputs[o] && db_execute_direct(sdb, outputs[o]) != 0) ||
+            db_prepare(sdb, &stmt, "SELECT id, data, label FROM blob_probe ORDER BY n") != 0) {
+            log_error("Blobs: could not read the table back");
+            goto done;
+        }
+        for (int i = 0; i < 2; i++) {
+            if (db_step(stmt) != DB_ROW) {
+                log_error("Blobs: row %d is missing", i + 1);
+                goto done;
+            }
+            int label_len = label[i] ? (int)strlen(label[i]) : 0;
+            /* Each length before any blob is read; then the data, and each length
+               again; then the id, and each length again */
+            int lengths = db_column_bytes(stmt, 0) == 16 && db_column_bytes(stmt, 1) == data_len[i] &&
+                          db_column_bytes(stmt, 2) == label_len;
+            const unsigned char *d = db_column_blob(stmt, 1);
+            int data_ok = d && memcmp(d, data[i], (size_t)data_len[i]) == 0 &&
+                          db_column_bytes(stmt, 1) == data_len[i] && db_column_bytes(stmt, 0) == 16 &&
+                          db_column_bytes(stmt, 2) == label_len;
+            const unsigned char *id = db_column_blob(stmt, 0);
+            int id_ok = id && memcmp(id, ids[i], 16) == 0 && db_column_bytes(stmt, 0) == 16 &&
+                        db_column_bytes(stmt, 1) == data_len[i];
+            if (!lengths || !data_ok || !id_ok) {
+                log_error("Blobs: row %d read back wrong (lengths first %d, data %d, id %d)%s%s",
+                          i + 1, lengths, data_ok, id_ok, outputs[o] ? ", after " : "",
+                          outputs[o] ? outputs[o] : "");
+                goto done;
+            }
+        }
+        db_finalize(stmt);
+        stmt = NULL;
+    }
+    log_info("  blobs read back as bound, and lengths are right in any order, on every row (OK)");
+
+    /* Found by what was bound: an id, and the 16 bytes of data */
+    for (int c = 0; c < 2; c++) {
+        int found = 0;
+        if (db_prepare(sdb, &stmt, c == 0 ? "SELECT n FROM blob_probe WHERE id = " P"1"
+                                          : "SELECT n FROM blob_probe WHERE data = " P"1") == 0) {
+            db_bind_blob(stmt, 1, c == 0 ? ids[1] : sixteen, 16);
+            found = db_step(stmt) == DB_ROW ? db_column_int(stmt, 0) : 0;
+        }
+        db_finalize(stmt);
+        stmt = NULL;
+        if (found != (c == 0 ? 2 : 1)) {
+            log_error("Blobs: no row found by its %s", c == 0 ? "id" : "16 bytes of data");
+            goto done;
+        }
+    }
+    log_info("  a row is found by a bound id, and by bound data of 16 bytes (OK)");
+
+    failed = 0;
+
+done:
+    db_finalize(stmt);
+    db_disconnect(sdb);
+    if (!failed) {
+        log_info("Blob column tests passed!");
+    }
+    return failed;
+}
+
+#ifdef DB_BACKEND_POSTGRESQL
+
+/* A query's one number, as an int; -1 if there's none */
+static int read_int(db_handle_t *db, const char *sql) {
+    long long n = read_count(db, sql);
+    return n < 0 || n > 0x7fffffff ? -1 : (int)n;
+}
+
+static void pause_ms(int ms) {
+    struct timespec pause = { ms / 1000, (long)(ms % 1000) * 1000000L };
+    nanosleep(&pause, NULL);
+}
+
+/* encryption_params_get_or_make, in a thread, on a connection of its own */
+typedef struct {
+    db_handle_t *db;
+    encrypt_params_t params;
+    int rc;
+} params_race_t;
+
+static void *get_or_make(void *arg) {
+    params_race_t *race = arg;
+    race->rc = encryption_params_get_or_make(race->db, "argon2id", 1, &race->params);
+    return NULL;
+}
+
+/*
+ * Two instances starting at once on a database with nothing sealed: each finds
+ * no encryption_params row and makes one, and the insert that comes second
+ * waits on the first, then does nothing. The second must then stretch with the
+ * first's row, or it would seal under keys no other instance derives. Here the
+ * first is a transaction left open with its row inserted, so the second is sure
+ * to find none, and to wait.
+ *
+ * Returns 0 on success.
+ */
+static int test_pg_params_race(const config_t *config) {
+    log_info("\nEncryption params race tests (PostgreSQL)");
+
+    char conninfo[1024], sql[128];
+    db_handle_t *first = scratch_db_open_shared(config, conninfo, sizeof(conninfo));
+    db_handle_t *second = NULL, *watcher = NULL;
+    if (!first || db_connect(&second, DB_TYPE_POSTGRESQL, conninfo) != 0 ||
+        db_connect(&watcher, DB_TYPE_POSTGRESQL, conninfo) != 0) {
+        log_error("Params race: could not open the connections");
+        if (first) db_disconnect(first);
+        if (second) db_disconnect(second);
+        return 1;
+    }
+
+    int failed = 1, running = 0, waiting = 0;
+    pthread_t thread;
+    params_race_t race = { .db = second, .rc = -1 };
+    const char *salt = "000102030405060708090a0b0c0d0e0f";
+    int pid = read_int(second, "SELECT pg_backend_pid()");
+
+    if (pid <= 0 || db_execute_direct(first, "BEGIN") != 0 ||
+        db_execute_direct(first, "INSERT INTO " TBL_ENCRYPTION_PARAMS " (method, iterations, salt) "
+                                 "VALUES ('pbkdf2-sha256', 1000, '000102030405060708090a0b0c0d0e0f')") != 0) {
+        log_error("Params race: the first instance couldn't make its row");
+        goto done;
+    }
+    if (pthread_create(&thread, NULL, get_or_make, &race) != 0) {
+        log_error("Params race: could not start the second instance");
+        goto done;
+    }
+    running = 1;
+
+    /* Until the second waits on the first's row, then the first commits */
+    snprintf(sql, sizeof(sql), "SELECT cardinality(pg_blocking_pids(%d))", pid);
+    for (int i = 0; i < 400 && !waiting; i++) {
+        waiting = read_int(watcher, sql) > 0;
+        if (!waiting) pause_ms(25);
+    }
+    if (db_execute_direct(first, "COMMIT") != 0) {
+        log_error("Params race: the first instance couldn't commit its row");
+        goto done;
+    }
+    pthread_join(thread, NULL);
+    running = 0;
+    if (!waiting) {
+        log_error("Params race: the second instance never waited on the first's row");
+        goto done;
+    }
+    if (race.rc != 0 || strcmp(race.params.method, "pbkdf2-sha256") != 0 ||
+        race.params.iterations != 1000 || strcmp(race.params.salt, salt) != 0 ||
+        read_count(watcher, "SELECT count(*) FROM " TBL_ENCRYPTION_PARAMS) != 1) {
+        log_error("Params race: the second instance didn't take the first's row (%d: %s, %d)",
+                  race.rc, race.params.method, race.params.iterations);
+        goto done;
+    }
+    log_info("  the second of two instances waits on the first's row, then stretches with it (OK)");
+
+    failed = 0;
+
+done:
+    if (running) {
+        db_execute_direct(first, "ROLLBACK");
+        pthread_join(thread, NULL);
+    }
+    db_disconnect(first);
+    db_disconnect(second);
+    db_disconnect(watcher);
+    if (!failed) {
+        log_info("Encryption params race tests passed!");
+    }
+    return failed;
+}
+
+/* A serving connection's session hook: the shared instance lock, as main.c's
+   takes it (which also checks the session is a direct one) */
+static int take_shared(db_handle_t *db) {
+    return instance_lock_pg(db, 0);
+}
+
+/* Does this backend hold the instance lock in this mode: "ShareLock" (an
+   instance's) or "ExclusiveLock" (a maintenance run's)? 1, 0, or -1 */
+static int holds_instance_lock(db_handle_t *watcher, int pid, const char *mode) {
+    char sql[256];
+    snprintf(sql, sizeof(sql), "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' "
+             "AND classid = 1096111176 AND objid = 1 AND objsubid = 2 AND granted "
+             "AND pid = %d AND mode = '%s'", pid, mode);
+    return read_int(watcher, sql);
+}
+
+/* End a backend's session from another, as a restart or an operator would,
+   once it has gone. 0, or -1 */
+static int end_session(db_handle_t *watcher, int pid) {
+    char sql[64], ended[8];
+    snprintf(sql, sizeof(sql), "SELECT pg_terminate_backend(%d, 5000)", pid);
+    return read_stored_value(watcher, sql, ended, sizeof(ended)) == 0 && ended[0] == 't' ? 0 : -1;
+}
+
+/*
+ * The instance lock's PostgreSQL form: a session advisory lock that instances
+ * hold shared and a maintenance run alone, each refusing the other. And the
+ * session hook that holds it on a serving connection: when the session ends
+ * under it (a restart, an operator's pg_terminate_backend), the connection
+ * reconnects, and holds the lock again before it runs anything else; while a
+ * maintenance run holds it, nothing runs.
+ *
+ * Returns 0 on success.
+ */
+static int test_pg_instance_lock(const config_t *config) {
+    log_info("\nInstance lock tests (PostgreSQL)");
+
+    char conninfo[1024], unlocked[8];
+    db_handle_t *watcher = scratch_db_open_shared(config, conninfo, sizeof(conninfo));
+    db_handle_t *conn[5] = { NULL };
+    db_handle_t **a = &conn[0], **b = &conn[1], **run = &conn[2], **late = &conn[3];
+    db_handle_t **serving = &conn[4];
+    int failed = 1;
+    if (!watcher) {
+        log_error("Instance lock: could not open a test database");
+        return 1;
+    }
+    for (int i = 0; i < 5; i++) {
+        if (db_connect(&conn[i], DB_TYPE_POSTGRESQL, conninfo) != 0) {
+            log_error("Instance lock: could not open the connections");
+            goto done;
+        }
+    }
+
+    /* 1. Two instances share it; a maintenance run is refused it until both have
+          stopped, then holds it alone, and an instance is refused */
+    int pid_a = read_int(*a, "SELECT pg_backend_pid()");
+    int pid_b = read_int(*b, "SELECT pg_backend_pid()");
+    if (instance_lock_pg(*a, 0) != 0 || instance_lock_pg(*b, 0) != 0 ||
+        instance_lock_pg(*run, 1) != 1) {
+        log_error("Instance lock: two instances couldn't share it, or a run took it from them");
+        goto done;
+    }
+    if (end_session(watcher, pid_a) != 0 || instance_lock_pg(*run, 1) != 1) {
+        log_error("Instance lock: a run took it while one instance still ran");
+        goto done;
+    }
+    if (end_session(watcher, pid_b) != 0 || instance_lock_pg(*run, 1) != 0 ||
+        instance_lock_pg(*late, 0) != 1) {
+        log_error("Instance lock: a run couldn't take it alone, or an instance joined it");
+        goto done;
+    }
+    log_info("  instances share it; a maintenance run takes it alone, and each refuses the other (OK)");
+
+    /* 2. A serving connection holds it as its hook is set, and again once its
+          session has ended under it: the statement that finds the session gone
+          fails, and the next runs on a new session, which holds it */
+    if (end_session(watcher, read_int(*run, "SELECT pg_backend_pid()")) != 0 ||
+        db_set_session_hook(*serving, take_shared) != 0) {
+        log_error("Instance lock: the run's end didn't free it for a serving connection");
+        goto done;
+    }
+    int first = read_int(*serving, "SELECT pg_backend_pid()");
+    if (holds_instance_lock(watcher, first, "ShareLock") != 1 || end_session(watcher, first) != 0) {
+        log_error("Instance lock: the hook didn't take it on the serving connection");
+        goto done;
+    }
+    db_execute_direct(*serving, "SELECT 1");
+    int second = read_int(*serving, "SELECT pg_backend_pid()");
+    if (second <= 0 || second == first || holds_instance_lock(watcher, second, "ShareLock") != 1) {
+        log_error("Instance lock: the serving connection ran on a new session without it");
+        goto done;
+    }
+    log_info("  a serving connection holds it again on a new session before anything runs (OK)");
+
+    /* 3. Its session ends while a maintenance run takes it: nothing runs on the
+          new session until the run lets it go, and then it's held again */
+    if (db_execute_direct(watcher, "CREATE TABLE gate_probe (n integer)") != 0 ||
+        end_session(watcher, second) != 0 || instance_lock_pg(watcher, 1) != 0) {
+        log_error("Instance lock: could not stand in for a maintenance run");
+        goto done;
+    }
+    db_execute_direct(*serving, "SELECT 1");
+    int refused = db_execute_direct(*serving, "INSERT INTO gate_probe VALUES (1)") != 0 &&
+                  read_int(watcher, "SELECT count(*) FROM gate_probe") == 0;
+    if (read_stored_value(watcher, "SELECT pg_advisory_unlock(1096111176, 1)",
+                          unlocked, sizeof(unlocked)) != 0 || unlocked[0] != 't') {
+        log_error("Instance lock: the stand-in run couldn't let it go");
+        goto done;
+    }
+    int ran = db_execute_direct(*serving, "INSERT INTO gate_probe VALUES (2)") == 0 &&
+              read_int(watcher, "SELECT count(*) FROM gate_probe") == 1 &&
+              holds_instance_lock(watcher, read_int(*serving, "SELECT pg_backend_pid()"),
+                                  "ShareLock") == 1;
+    if (!refused || !ran) {
+        log_error("Instance lock: while a run held it, a serving connection %s; after, it %s",
+                  refused ? "ran nothing" : "ran a statement", ran ? "ran" : "didn't run, or ran without it");
+        goto done;
+    }
+    log_info("  while a run holds it, a reconnected session runs nothing; after, it runs (OK)");
+
+    failed = 0;
+
+done:
+    for (int i = 0; i < 5; i++) {
+        if (conn[i]) db_disconnect(conn[i]);
+    }
+    db_disconnect(watcher);
+    if (!failed) {
+        log_info("Instance lock tests passed!");
+    }
+    return failed;
+}
+
+/*
+ * --rekey run by a role that may write the sealed tables and set their history
+ * aside, but may not vacuum them, as on a deployment hardened per
+ * setup_reference.sql run without the owner role. VACUUM FULL then skips each
+ * table with a warning and succeeds all the same: the run re-keys, and says it
+ * didn't scrub (-2), since no table's file was rewritten.
+ *
+ * Returns 0 on success.
+ */
+static int test_pg_rekey_unscrubbed(const config_t *config) {
+    log_info("\nRe-key tests, without leave to vacuum (PostgreSQL)");
+
+    db_handle_t *sdb = open_test_db(config);
+    if (!sdb) {
+        log_error("Re-key unscrubbed: could not open a test database");
+        return 1;
+    }
+
+    int failed = 1, total = 0;
+    char role[64], sql[1024];
+    encrypt_keys_t a, b;
+    encrypt_params_t params;
+    unsigned char user_id[16];
+    rekey_report_t report;
+
+    if (encrypt_derive_keys(config->encryption_key, NULL, &a) != 0 ||
+        encrypt_params_new("pbkdf2-sha256", 1000, &params) != 0 ||
+        encrypt_derive_keys("the new passphrase", &params, &b) != 0) {
+        log_error("Re-key unscrubbed: could not derive keys");
+        goto done;
+    }
+    encrypt_init_keys(&a);
+    if (db_init_history_tables(sdb, DB_TYPE_POSTGRESQL, 1) != 0 ||
+        user_create(sdb, "Alice", "alice@example.com", "a password", user_id) != 0 ||
+        scratch_db_role(role, sizeof(role)) != 0) {
+        log_error("Re-key unscrubbed: could not set up");
+        goto done;
+    }
+
+    /* The run's role reads and writes the tables, and replaces the history
+       functions it owns; the tables it doesn't own, so it can't vacuum them */
+    snprintf(sql, sizeof(sql),
+             "GRANT USAGE ON SCHEMA keys, security, session, security_history TO %s;"
+             "GRANT CREATE ON SCHEMA security_history TO %s;"
+             "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES "
+             "  IN SCHEMA keys, security, session, security_history TO %s;"
+             "ALTER FUNCTION security_history.tg_fn_user_account_before_update() OWNER TO %s;"
+             "ALTER FUNCTION security_history.tg_fn_user_email_before_update() OWNER TO %s;"
+             "ALTER FUNCTION security_history.tg_fn_user_mfa_before_update() OWNER TO %s;"
+             "SET ROLE %s",
+             role, role, role, role, role, role, role);
+    if (db_execute_direct(sdb, sql) != 0) {
+        log_error("Re-key unscrubbed: could not set up the run's role");
+        goto done;
+    }
+    int rc = maintenance_rekey(sdb, DB_TYPE_POSTGRESQL, &a, &b, &params, &report);
+    if (db_execute_direct(sdb, "RESET ROLE") != 0 || rc != -2 ||
+        report.usernames != 1 || report.addresses != 1) {
+        log_error("Re-key unscrubbed: the run returned %d, re-keying %d usernames and %d addresses",
+                  rc, report.usernames, report.addresses);
+        goto done;
+    }
+    if (sealed_opening(sdb, &b, &total) != 2 || total != 2) {
+        log_error("Re-key unscrubbed: not every value was re-sealed");
+        goto done;
+    }
+    log_info("  a run that may not vacuum re-keys, and says it didn't scrub (OK)");
+
+    failed = 0;
+
+done:
+    OPENSSL_cleanse(&a, sizeof(a));
+    OPENSSL_cleanse(&b, sizeof(b));
+    encrypt_init(config->encryption_key);
+    db_disconnect(sdb);
+    if (!failed) {
+        log_info("Re-key unscrubbed tests passed!");
+    }
+    return failed;
+}
+
+#endif /* DB_BACKEND_POSTGRESQL */
 
 /*
  * MFA-management gate — keyed on enrollment (has_mfa), not on the require_mfa
@@ -2887,19 +3398,60 @@ done:
     return failed;
 }
 
+/* The tests that take no configuration, as the table wants them */
+static int run_instance_lock(const config_t *config) {
+    (void)config;
+    return test_instance_lock();
+}
+
+static int run_hashing_config(const config_t *config) {
+    (void)config;
+    return test_hashing_config();
+}
+
+/* Every test, in order. Those for either backend run on both; the others write
+   SQLite's SQL, and run in the SQLite build. */
+static const struct {
+    int (*run)(const config_t *config);
+    int either_backend;
+} TESTS[] = {
+    { test_storage_at_rest, 0 },
+    { test_credential_lifetimes, 0 },
+    { test_schema_constraints, 0 },
+    { test_history_tables, 1 },
+    { test_drop_history, 1 },
+    { run_instance_lock, 0 },
+    { test_signing_key_cache, 0 },
+    { test_signing_key_encryption, 0 },
+    { test_mfa_management_gate, 0 },
+    { test_mfa_reset, 0 },
+    { test_deactivated_user_tokens, 0 },
+    { test_deactivation_revokes, 0 },
+    { test_unlink_revokes, 0 },
+    { test_encryption_key_check, 0 },
+    { test_encryption_params, 1 },
+    { test_rekey, 1 },
+    { run_hashing_config, 0 },
+    { test_rehash, 0 },
+    { test_single_use, 0 },
+    { test_short_id_blobs, 0 },
+    { test_zero_row_writes, 0 },
+    { test_blob_columns, 1 },
+#ifdef DB_BACKEND_POSTGRESQL
+    { test_pg_params_race, 1 },
+    { test_pg_instance_lock, 1 },
+    { test_pg_rekey_unscrubbed, 1 },
+#endif
+};
+
 int main(void) {
     log_init(LOG_INFO);
     log_info("Database Integration Test");
 
-#ifdef DB_BACKEND_POSTGRESQL
-    /* Every test below runs on SQLite in memory. The PostgreSQL backend has no
-       runtime tests; saying so beats pretending. */
-    log_info("Skipped: test-db runs in the SQLite build only.");
-    return 0;
-#endif
+    if (!scratch_db_available()) return 0;
 
     /* The configuration supplies the schema directory, the encryption key and the
-       hashing settings. Each test opens its own in-memory database (open_test_db);
+       hashing settings. Each test opens a database of its own (open_test_db);
        none of them touches the database auth.conf points at. */
     config_t *config = config_load("auth.conf");
     if (!config) {
@@ -2922,76 +3474,16 @@ int main(void) {
         return 1;
     }
 
-    if (test_storage_at_rest(config) != 0 ||
-        test_credential_lifetimes(config) != 0 ||
-        test_schema_constraints(config) != 0 ||
-        test_history_tables(config) != 0 ||
-        test_drop_history(config) != 0 ||
-        test_instance_lock() != 0) {
-        config_free(config);
-        return 1;
+    for (size_t i = 0; i < sizeof(TESTS) / sizeof(TESTS[0]); i++) {
+#ifdef DB_BACKEND_POSTGRESQL
+        if (!TESTS[i].either_backend) continue;
+#endif
+        if (TESTS[i].run(config) != 0) {
+            config_free(config);
+            return 1;
+        }
     }
 
-    if (test_signing_key_cache(config) != 0) {
-        config_free(config);
-        return 1;
-    }
-
-    if (test_signing_key_encryption(config) != 0) {
-        config_free(config);
-        return 1;
-    }
-
-    if (test_mfa_management_gate(config) != 0) {
-        config_free(config);
-        return 1;
-    }
-
-    if (test_mfa_reset(config) != 0) {
-        config_free(config);
-        return 1;
-    }
-
-    if (test_deactivated_user_tokens(config) != 0) {
-        config_free(config);
-        return 1;
-    }
-
-    if (test_deactivation_revokes(config) != 0) {
-        config_free(config);
-        return 1;
-    }
-
-    if (test_unlink_revokes(config) != 0) {
-        config_free(config);
-        return 1;
-    }
-
-    if (test_encryption_key_check(config) != 0 ||
-        test_encryption_params(config) != 0 ||
-        test_rekey(config) != 0 ||
-        test_hashing_config() != 0 ||
-        test_rehash(config) != 0) {
-        config_free(config);
-        return 1;
-    }
-
-    if (test_single_use(config) != 0) {
-        config_free(config);
-        return 1;
-    }
-
-    if (test_short_id_blobs(config) != 0) {
-        config_free(config);
-        return 1;
-    }
-
-    if (test_zero_row_writes(config) != 0) {
-        config_free(config);
-        return 1;
-    }
-
-    /* Cleanup */
     config_free(config);
 
     log_info("=== Database Integration Test Passed! ===");
