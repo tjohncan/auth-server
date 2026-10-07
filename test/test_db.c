@@ -26,6 +26,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/stat.h>
 #include <openssl/crypto.h>
 
 /*
@@ -982,6 +983,26 @@ static int test_hashing_config(void) {
         config_free(as_dir);
         log_error("Hashing config: a directory was loaded as a config file");
         return 1;
+    }
+
+    /* A file that's there but can't be read: refused, not taken for a missing one
+       (as root it can always be read, so there's nothing to check) */
+    if (geteuid() != 0) {
+        char unreadable[] = "/tmp/test-db-config-unreadable.XXXXXX";
+        int fd = mkstemp(unreadable);
+        if (fd < 0) {
+            log_error("Hashing config: could not make a file");
+            return 1;
+        }
+        close(fd);
+        chmod(unreadable, 0);
+        config_t *refused = config_load(unreadable);
+        unlink(unreadable);
+        if (refused) {
+            config_free(refused);
+            log_error("Hashing config: an unreadable config file was taken for a missing one");
+            return 1;
+        }
     }
 
     config_t *a = config_from(user), *b = config_from(both), *c = config_from(over);

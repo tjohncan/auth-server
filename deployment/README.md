@@ -67,7 +67,13 @@ cp .env.example .env
 
 # The server's own settings, at the project root. The compose file mounts ../auth.conf and
 # ../data; a mount whose source is missing comes up as an empty directory, which the server
-# refuses to start on. Set encryption_key in auth.conf before the first start.
+# refuses to start on. Before the first start, set in auth.conf:
+#   server_host = auth.yourdomain.com   (bootstrap stores the console's URLs from it, tokens
+#                                        carry it as their issuer, and emailed links use it;
+#                                        bootstrap can't be re-run to change them)
+#   encryption_key = <a long random secret>
+# auth.conf must be readable by uid 1000 (the container's user): the server refuses one it
+# can't read.
 cp ../auth.conf.example ../auth.conf
 mkdir -p ../data && sudo chown 1000:1000 ../data    # the container runs as uid 1000
 # The compose file mounts an email script too: the no-op one unless the server sends mail
@@ -234,8 +240,10 @@ rest go in `auth.conf`.
 | `AUTH_EMAIL_FROM`     | `email_from`     | Sender address           | —              |
 | `AUTH_EMAIL_FROM_NAME`| `email_from_name`| Sender display name      | —              |
 
-Environment variable names can be customized in `auth.conf` (e.g., `db_password_env = MY_SECRET`)
-to match your infrastructure's naming conventions. See `auth.conf.example` for the full list of
+Where `auth.conf.example` lists a `<key>_env` setting (the server, database, encryption, admin,
+mothership, log and email ones), the variable's name can be changed in `auth.conf` (e.g.,
+`db_password_env = MY_SECRET`) to match your infrastructure's naming conventions; the history,
+cleaner and retention variables keep the names above. See `auth.conf.example` for the full list of
 configuration options including password policy, session TTL, token limits, and cleaner settings.
 
 ## Email Delivery (Optional)

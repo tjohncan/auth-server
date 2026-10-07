@@ -1308,6 +1308,14 @@ config_t *config_load(const char *config_file) {
         return NULL;
     }
     FILE *file = fopen(config_file, "r");
+    if (!file && errno != ENOENT) {
+        /* There but unreadable (another user's, say): running on the defaults
+           instead would run on the published encryption_key */
+        log_error("Can't read config file '%s': %s. Make it readable by the user the server "
+                  "runs as.", config_file, strerror(errno));
+        config_free(config);
+        return NULL;
+    }
     if (!file) {
         /* Check if an example file exists and hint to the user */
         char example_path[512];
