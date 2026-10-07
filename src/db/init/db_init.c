@@ -157,7 +157,10 @@ static int enable_sqlite_optimizations(db_handle_t *db) {
         log_warn("Failed to set auto_vacuum=INCREMENTAL");
     }
 
-    /* Enable WAL mode for concurrent access (persistent per-file) */
+    /* Enable WAL mode for concurrent access (persistent per-file). A maintenance
+     * run relies on it too: an open connection in WAL mode holds a shared lock on
+     * the file, which keeps the run's exclusive lock out while any instance has
+     * the database open (main.c, open_for_maintenance). */
     if (db_execute_trusted(db, "PRAGMA journal_mode = WAL;") != 0) {
         log_error("Failed to enable WAL mode");
         return -1;

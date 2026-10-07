@@ -197,10 +197,12 @@ static int open_for_maintenance(const config_t *config, const char *connection_s
     }
 
     /* SQLite's own lock on the database file, the kernel's, which a connection
-       still open anywhere refuses: one in another container (docker compose run
-       starts one) or under another user, whatever became of the lock file. In
-       exclusive locking mode it's held until the run disconnects, so an instance
-       started mid-run can't use the database before the run is over. */
+       still open anywhere refuses: in WAL mode, which every instance sets as it
+       starts (db_init.c), an open connection holds a shared lock on the file.
+       That reaches one in another container (docker compose run starts one) or
+       under another user, whatever became of the lock file. In exclusive
+       locking mode it's held until the run disconnects, so an instance started
+       mid-run can't use the database before the run is over. */
     if (config->db_type == DB_TYPE_SQLITE &&
         (db_execute_trusted(*db, "PRAGMA locking_mode = EXCLUSIVE") != 0 ||
          db_execute_trusted(*db, "BEGIN EXCLUSIVE") != 0 ||
