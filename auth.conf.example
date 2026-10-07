@@ -22,9 +22,10 @@ server_workers = 0
 # socket file's mode: 0600 lets in the server's own user (and root), 0660 its group too.
 # Call it with ./auth-server --admin METHOD PATH [JSON | -], or curl --unix-socket; in
 # Docker, through docker exec. Each deployment needs its own socket, which its data
-# directory gives it. The socket's directory must be the server user's (or root's) and
-# not writable by every user, or the server won't start: whoever can write there could
-# replace the socket and receive the operator's calls. Empty turns it off.
+# directory gives it. No directory on its path may be writable by every user (as /tmp
+# is), and its own directory must be the server user's or root's, or the server won't
+# start: whoever can write there could replace the socket and receive the operator's
+# calls. Empty turns it off.
 admin_socket = ./data/admin.sock
 admin_socket_mode = 0600
 # The admin API on loopback TCP as well (127.0.0.1, and ::1 where the host has it), off

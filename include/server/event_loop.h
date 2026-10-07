@@ -140,12 +140,14 @@ EventLoopPool *event_loop_pool_create(EventLoopConfig *config);
 
 /*
  * admin_socket_dir_private - May only the right users replace the admin
- * socket at path? Anyone who can write its directory can remove the socket
- * and put one of their own there, and receive the operator's calls, passwords
- * included. A directory every user can write is refused; with owner_too, so is
- * one another user owns (the server's own, or root's, is fine). The server
- * checks both; ./auth-server --admin, which may run as root, the first. A
- * directory that isn't there yet passes: the server makes it 0700.
+ * socket at path? Anyone who can write a directory on its path can make or
+ * swap what's below it, put a socket of their own there, and receive the
+ * operator's calls, passwords included. A path with any directory up to /
+ * that every user can write (as written, or as it resolves) is refused, the
+ * sticky bit or not; with owner_too, so is a socket directory another user owns
+ * (the server's own, or root's, is fine). The server checks both;
+ * ./auth-server --admin, which may run as root, the first. A socket directory
+ * that isn't there yet passes: the server makes it 0700.
  *
  * Returns: 1, or 0 with what's wrong in reason
  */

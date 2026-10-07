@@ -14,6 +14,7 @@
 #include <stdatomic.h>
 #include <unistd.h>
 #include <errno.h>
+#include <limits.h>
 #include <pthread.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
@@ -308,6 +309,26 @@ static int create_loopback_listen_socket(int family, int port, int backlog) {
 }
 
 
+/* The first directory on path, from / down, that every user can write: into
+   found, 1; 0 if there's none. Missing ones are skipped. */
+static int world_writable_dir_on(const char *path, char *found, size_t size) {
+    char prefix[PATH_MAX];
+    size_t len = strlen(path);
+    for (size_t i = 0; i <= len; i++) {
+        if (i < len && path[i] != '/') continue;
+        size_t n = i == 0 ? 1 : i;  /* the root, then each directory below it */
+        if (n >= sizeof(prefix)) return 0;
+        memcpy(prefix, path, n);
+        prefix[n] = '\0';
+        struct stat st;
+        if (stat(prefix, &st) == 0 && S_ISDIR(st.st_mode) && (st.st_mode & S_IWOTH)) {
+            snprintf(found, size, "%s", prefix);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int admin_socket_dir_private(const char *path, int owner_too, char *reason, size_t size) {
     char dir[1024];
     snprintf(dir, sizeof(dir), "%s", path);
@@ -320,12 +341,23 @@ int admin_socket_dir_private(const char *path, int owner_too, char *reason, size
         *slash = '\0';
     }
 
-    struct stat st;
-    if (stat(dir, &st) != 0) return 1;  /* not there yet: the server makes it, 0700 */
-    if (st.st_mode & S_IWOTH) {
-        snprintf(reason, size, "its directory %s is writable by every user", dir);
+    /* Every directory on the way, as written and as it resolves: one every user
+       can write lets anyone make or swap what's below it */
+    char absolute[PATH_MAX], resolved[PATH_MAX], found[PATH_MAX];
+    if (dir[0] == '/') {
+        snprintf(absolute, sizeof(absolute), "%s", dir);
+    } else if (!getcwd(resolved, sizeof(resolved)) ||
+               snprintf(absolute, sizeof(absolute), "%s/%s", resolved, dir) >= (int)sizeof(absolute)) {
+        absolute[0] = '\0';
+    }
+    if ((absolute[0] && world_writable_dir_on(absolute, found, sizeof(found))) ||
+        (realpath(dir, resolved) && world_writable_dir_on(resolved, found, sizeof(found)))) {
+        snprintf(reason, size, "%s, on its path, is writable by every user", found);
         return 0;
     }
+
+    struct stat st;
+    if (stat(dir, &st) != 0) return 1;  /* not there yet: the server makes it, 0700 */
     if (owner_too && st.st_uid != geteuid() && st.st_uid != 0) {
         snprintf(reason, size, "its directory %s belongs to another user (uid %u)", dir,
                  (unsigned)st.st_uid);
@@ -362,9 +394,10 @@ static int create_unix_listen_socket(const char *path, int mode, int backlog) {
 
     char reason[1100];
     if (!admin_socket_dir_private(path, 1, reason, sizeof(reason))) {
-        log_error("admin_socket %s can't be used: %s, so someone else could put a socket of "
-                  "their own at the path and receive the operator's calls. Use a directory only "
-                  "the server's user can write (./data, the default, is one).", path, reason);
+        log_error("admin_socket %s can't be used: %s, so someone else could put a directory or "
+                  "a socket of their own on the path and receive the operator's calls. Put it "
+                  "where no directory up to / is writable by every user, as /tmp is (./data, the "
+                  "default, is such a place in the usual layouts).", path, reason);
         return -1;
     }
 
