@@ -67,12 +67,3 @@ int instance_lock_pg(db_handle_t *db, int exclusive) {
     return taken < 0 ? -1 : !taken;
 }
 
-int instance_lock_pg_held(db_handle_t *db) {
-    char sql[256];
-    snprintf(sql, sizeof(sql),
-             "SELECT count(*) > 0 FROM pg_locks WHERE locktype = 'advisory' "
-             "AND pid = pg_backend_pid() AND classid = %d AND objid = %d "
-             "AND objsubid = 2 AND mode = 'ShareLock' AND granted",
-             INSTANCE_LOCK_CLASS, INSTANCE_LOCK_ID);
-    return query_bool(db, sql);
-}

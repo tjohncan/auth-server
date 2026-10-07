@@ -17,9 +17,13 @@
  *   Not the database file: SQLite's locks on it are POSIX locks, which a
  *   process loses when it closes any descriptor of that file. An in-memory
  *   database has nothing to lock.
- * PostgreSQL: a session advisory lock in the database, held by one connection.
- *   Session locks don't survive a transaction-pooling proxy, so the server and
- *   the maintenance modes reach PostgreSQL directly.
+ * PostgreSQL: a session advisory lock in the database, held by every
+ *   connection a server serves with (each pool connection and the cleaner's).
+ *   Each takes it as it connects, and again after a reconnect before it runs
+ *   anything else, since PostgreSQL drops a session's lock with the session
+ *   (main.c, hold_instance_lock). Session locks don't survive a
+ *   transaction-pooling proxy, so the server and the maintenance modes reach
+ *   PostgreSQL directly; the server checks it can, at each connect.
  */
 
 /*
@@ -49,13 +53,5 @@ void instance_lock_file_release(int fd);
  * Returns: 0 taken, 1 held the other way, -1 on error
  */
 int instance_lock_pg(db_handle_t *db, int exclusive);
-
-/*
- * instance_lock_pg_held - Does this connection hold the shared lock? A
- * reconnect (after PostgreSQL restarts, say) starts a session without it.
- *
- * Returns: 1 held, 0 not, -1 on error (a dead connection, reconnected for the next call)
- */
-int instance_lock_pg_held(db_handle_t *db);
 
 #endif /* INSTANCE_LOCK_H */

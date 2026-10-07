@@ -485,10 +485,12 @@ so no page of the old rows stays behind. WAL archives, replicas and backups keep
 
 - **Every instance stopped.** An instance lock enforces it: a `<db_path>.lock` file beside an
   SQLite database, or an advisory lock in PostgreSQL. The run refuses while an instance holds it,
-  and an instance won't start while a run does. If PostgreSQL drops the lock's connection, the
-  instance takes the lock again, and stops if a run holds it by then. Point the server and the
-  run at PostgreSQL directly, not through a transaction-pooling proxy, whose sessions can't hold
-  the lock.
+  and an instance won't start while a run does. On PostgreSQL every connection a server serves
+  with holds the lock: each takes it when it connects, and again after a reconnect (PostgreSQL
+  drops it with the session, on a restart, say) before it runs anything else. One that finds a
+  run holding it stops its instance without serving. Point the server and the run at PostgreSQL
+  directly, not through a transaction-pooling proxy, whose sessions can't hold the lock; the
+  server refuses to start when it can tell its statements reach different sessions.
 - **Turning `enable_history_tables` off** doesn't remove the existing tables or triggers, so history
   keeps being written. Run `--drophistory` after turning it off.
 - **PostgreSQL hardened per `setup_reference.sql`.** Dropping needs only what the login role owns:

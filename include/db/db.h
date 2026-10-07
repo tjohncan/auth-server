@@ -226,6 +226,22 @@ int db_column_int(db_stmt_t *stmt, int col);
 long long db_column_int64(db_stmt_t *stmt, int col);
 
 /*
+ * db_set_session_hook - What must hold on this connection's session before it
+ * runs anything
+ *
+ * The hook runs now, and on PostgreSQL again before the first statement after
+ * any reconnect, since PostgreSQL drops a session's state (an advisory lock,
+ * say) with the session. Until it returns 0, no statement on the connection
+ * runs; each fails, retrying the hook first. Its own statements run ungated.
+ * SQLite never reconnects, so there it runs once. For the instance lock
+ * (main.c).
+ *
+ * Returns: the hook's result now
+ */
+typedef int (*db_session_hook_t)(db_handle_t *db);
+int db_set_session_hook(db_handle_t *db, db_session_hook_t hook);
+
+/*
  * Get blob column
  *
  * Returns: Pointer to binary data, or NULL if column is NULL

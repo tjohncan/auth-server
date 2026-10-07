@@ -25,6 +25,11 @@ struct db_handle_t {
     db_type_t type;
     void *connection;  /* sqlite3* or PGconn* */
     char error_msg[512];
+
+    /* What must hold on the session before it runs anything (db_set_session_hook) */
+    db_session_hook_t session_hook;
+    int session_ready;    /* the hook has held since the last (re)connect */
+    int in_session_hook;  /* the hook's own statements run ungated */
 };
 
 /*
@@ -698,7 +703,29 @@ static int pg_reconnect(db_handle_t *db) {
     }
     PQclear(tz_result);
 
+    /* A new session: the hook holds again before it runs anything else */
+    db->session_ready = 0;
+
     log_info("PostgreSQL reconnected successfully");
+    return 0;
+}
+
+/*
+ * The session hook must hold before this connection runs a statement: once at
+ * connect, and again after every reconnect. Returns 0, or -1 if it doesn't (the
+ * statement isn't run).
+ */
+static int pg_session_gate(db_handle_t *db) {
+    if (!db->session_hook || db->session_ready || db->in_session_hook) return 0;
+    db->in_session_hook = 1;
+    int rc = db->session_hook(db);
+    db->in_session_hook = 0;
+    db->session_ready = rc == 0;
+    if (rc != 0) {
+        str_copy(db->error_msg, sizeof(db->error_msg),
+                 "This connection's session doesn't hold what it must to run statements");
+        return -1;
+    }
     return 0;
 }
 
@@ -706,6 +733,7 @@ static int pg_reconnect(db_handle_t *db) {
  * Execute SQL directly (no parameters, no result set)
  */
 static int pg_execute(db_handle_t *db, const char *sql) {
+    if (pg_session_gate(db) != 0) return -1;
     PGconn *conn = (PGconn *)db->connection;
     PGresult *result = PQexec(conn, sql);
     ExecStatusType status = PQresultStatus(result);
@@ -730,6 +758,7 @@ static int pg_execute(db_handle_t *db, const char *sql) {
  * Execute SQL and collect results into db_result_t
  */
 static int pg_query(db_handle_t *db, const char *sql, db_result_t **out) {
+    if (pg_session_gate(db) != 0) return -1;
     PGconn *conn = (PGconn *)db->connection;
     PGresult *pg_result = PQexec(conn, sql);
     ExecStatusType status = PQresultStatus(pg_result);
@@ -1104,6 +1133,7 @@ static int pg_step(db_stmt_t *stmt) {
 
     if (!stmt->pg_executed) {
         /* First call: execute the query */
+        if (pg_session_gate(stmt->db) != 0) return -1;
         PGconn *conn = (PGconn *)stmt->db->connection;
 
         stmt->pg_result = PQexecParams(conn,
@@ -1470,6 +1500,19 @@ int db_disconnect(db_handle_t *db) {
 
     free(db);
     return result;
+}
+
+int db_set_session_hook(db_handle_t *db, db_session_hook_t hook) {
+    if (!db || !hook) {
+        log_error("Invalid arguments to db_set_session_hook");
+        return -1;
+    }
+    db->session_hook = hook;
+    db->in_session_hook = 1;
+    int rc = hook(db);
+    db->in_session_hook = 0;
+    db->session_ready = rc == 0;
+    return rc;
 }
 
 int db_execute_trusted(db_handle_t *db, const char *sql, ...) {

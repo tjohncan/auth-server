@@ -89,6 +89,7 @@ void cleaner_config_defaults(cleaner_config_t *config) {
 void cleaner_config_from_main_config(cleaner_config_t *cleaner_cfg,
                                       const config_t *main_cfg) {
     cleaner_cfg->db_type = main_cfg->db_type;
+    cleaner_cfg->session_hook = NULL;  /* main sets it for PostgreSQL */
     cleaner_cfg->enabled = main_cfg->cleaner_enabled;
     cleaner_cfg->interval_seconds = main_cfg->cleaner_interval_seconds;
     cleaner_cfg->batch_size = main_cfg->cleaner_batch_size;
@@ -551,6 +552,17 @@ static void* cleaner_thread_main(void *arg) {
     db_handle_t *db = NULL;
     if (db_connect(&db, config->db_type, config->connection_string) != 0) {
         log_error("Cleaner: failed to create database connection");
+        if (config->connection_string)
+            OPENSSL_cleanse((char *)config->connection_string, strlen(config->connection_string));
+        free((char *)config->connection_string);
+        free(config);
+        return NULL;
+    }
+
+    /* PostgreSQL: the instance lock, as every serving connection holds it */
+    if (config->session_hook && db_set_session_hook(db, config->session_hook) != 0) {
+        log_error("Cleaner: its connection couldn't take the instance lock");
+        db_disconnect(db);
         if (config->connection_string)
             OPENSSL_cleanse((char *)config->connection_string, strlen(config->connection_string));
         free((char *)config->connection_string);

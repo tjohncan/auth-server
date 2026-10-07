@@ -47,78 +47,67 @@ static bool cleaner_started = false;
  * ============================================================================ */
 
 static int g_lock_fd = -1;               /* SQLite: the lock file */
-static db_handle_t *g_lock_db = NULL;    /* PostgreSQL: the connection holding it */
-static pthread_t g_lock_keeper;
-static bool g_lock_keeper_started = false;
-static atomic_bool g_lock_keeper_stop = false;
 static atomic_bool g_lock_lost = false;  /* a maintenance run took it: exit 1 */
 
-/*
- * PostgreSQL drops a session's advisory lock with the session, as when it
- * restarts. So every few seconds this checks the lock is still held, taking it
- * again if not. If a maintenance run holds it by then, this instance stops: it
- * would be serving with keys or history the run is replacing.
- */
-static void *lock_keeper(void *arg) {
-    (void)arg;
-    while (!atomic_load(&g_lock_keeper_stop)) {
-        for (int i = 0; i < 5 && !atomic_load(&g_lock_keeper_stop); i++) sleep(1);
-        if (atomic_load(&g_lock_keeper_stop)) break;
-
-        int held = instance_lock_pg_held(g_lock_db);
-        if (held == -1) held = instance_lock_pg_held(g_lock_db);  /* reconnected by the first */
-        if (held != 0) continue;  /* held, or PostgreSQL still unreachable */
-
-        int rc = instance_lock_pg(g_lock_db, 0);
-        if (rc == 0) {
-            log_warn("Took the instance lock again: the connection holding it had dropped");
-        } else if (rc == 1) {
-            log_error("A maintenance run holds the database: this instance stops, since "
-                      "what it serves with is being replaced. Start it after the run.");
-            atomic_store(&g_lock_lost, true);
-            if (global_pool) event_loop_pool_stop((EventLoopPool *)global_pool);
-            break;
-        }
+/* Are two statements on this connection served by one PostgreSQL backend? A
+   transaction-pooling proxy may hand each to another, where this session's
+   lock isn't. It can miss a proxy that happens to repeat a backend, never a
+   direct connection. 1, 0, or -1 on error. */
+static int same_backend(db_handle_t *db) {
+    db_result_t *a = NULL, *b = NULL;
+    int rc = -1;
+    if (db_query(db, &a, "%s", "SELECT pg_backend_pid()") == 0 &&
+        db_query(db, &b, "%s", "SELECT pg_backend_pid()") == 0 &&
+        db_result_row_count(a) == 1 && db_result_row_count(b) == 1) {
+        const char *pa = db_result_get(a, 0, 0), *pb = db_result_get(b, 0, 0);
+        rc = pa && pb && strcmp(pa, pb) == 0;
     }
-    return NULL;
+    db_result_free(a);
+    db_result_free(b);
+    return rc;
 }
 
 /*
- * Take the shared lock before the database is touched. Returns 0; 1 if a
- * maintenance run holds it (logged); -1 on error.
+ * The shared lock on a PostgreSQL connection that serves, as its session hook
+ * (db_set_session_hook): taken when it connects, and again after every
+ * reconnect before it runs anything else, since PostgreSQL drops a session's
+ * lock with the session (a restart, say). So no connection serves without it,
+ * and a maintenance run can't start while one does. One that finds a run
+ * holding it stops the instance: what it would serve with is being replaced.
  */
-static int instance_lock_take_shared(const config_t *config, const char *connection_string) {
-    if (config->db_type == DB_TYPE_SQLITE) {
-        char path[1100];
-        if (instance_lock_path(config->db_path, path, sizeof(path)) != 0) return 0;  /* in memory */
-        int rc = instance_lock_file(path, 0, &g_lock_fd);
-        if (rc == 1) {
-            log_error("A maintenance run holds %s: start after it finishes", path);
-        }
-        return rc;
+static int hold_instance_lock(db_handle_t *db) {
+    int rc = instance_lock_pg(db, 0);
+    if (rc == 1) {
+        log_error("A maintenance run holds the database: this instance stops, since what it "
+                  "serves with is being replaced. Start it after the run.");
+        atomic_store(&g_lock_lost, true);
+        if (global_pool) event_loop_pool_stop((EventLoopPool *)global_pool);
+        return 1;
     }
-
-    if (db_connect(&g_lock_db, config->db_type, connection_string) != 0) {
-        log_error("Can't connect to take the instance lock");
+    if (rc != 0) return -1;
+    if (same_backend(db) != 1) {
+        log_error("This connection's statements don't reach one PostgreSQL session (a "
+                  "transaction-pooling proxy?), so it can't hold the instance lock: connect "
+                  "the server to PostgreSQL directly");
         return -1;
     }
-    int rc = instance_lock_pg(g_lock_db, 0);
+    return 0;
+}
+
+/* SQLite: take the shared lock before the database is touched. Returns 0; 1 if
+   a maintenance run holds it (logged); -1 on error. (PostgreSQL connections
+   take theirs as they connect: hold_instance_lock.) */
+static int instance_lock_take_shared(const config_t *config) {
+    char path[1100];
+    if (instance_lock_path(config->db_path, path, sizeof(path)) != 0) return 0;  /* in memory */
+    int rc = instance_lock_file(path, 0, &g_lock_fd);
     if (rc == 1) {
-        log_error("A maintenance run holds the database: start after it finishes");
+        log_error("A maintenance run holds %s: start after it finishes", path);
     }
     return rc;
 }
 
 static void instance_lock_release_all(void) {
-    if (g_lock_keeper_started) {
-        atomic_store(&g_lock_keeper_stop, true);
-        pthread_join(g_lock_keeper, NULL);
-        g_lock_keeper_started = false;
-    }
-    if (g_lock_db) {
-        db_disconnect(g_lock_db);
-        g_lock_db = NULL;
-    }
     instance_lock_file_release(g_lock_fd);
     g_lock_fd = -1;
 }
@@ -638,8 +627,9 @@ int main(int argc, char **argv) {
     }
 
     /* The instance lock, held shared until exit, before anything touches the
-       database: a maintenance run in progress refuses this start */
-    if (instance_lock_take_shared(config, connection_string) != 0) {
+       database: a maintenance run in progress refuses this start. SQLite: the
+       lock file, now. PostgreSQL: every pool connection, as soon as it's made. */
+    if (config->db_type == DB_TYPE_SQLITE && instance_lock_take_shared(config) != 0) {
         instance_lock_release_all();
         encrypt_cleanup();
         config_free(config);
@@ -651,6 +641,18 @@ int main(int argc, char **argv) {
         encrypt_cleanup();
         config_free(config);
         return 1;
+    }
+    if (config->db_type != DB_TYPE_SQLITE) {
+        for (int i = 0; i < num_workers; i++) {
+            int rc = db_set_session_hook(db_pool_get_connection_by_index(i), hold_instance_lock);
+            if (rc != 0) {
+                if (rc == 1) log_error("A maintenance run holds the database: start after it finishes");
+                db_pool_shutdown();
+                encrypt_cleanup();
+                config_free(config);
+                return 1;
+            }
+        }
     }
     if (config->db_password) {
         OPENSSL_cleanse(config->db_password, strlen(config->db_password));
@@ -717,6 +719,7 @@ int main(int argc, char **argv) {
     cleaner_config_t cleaner_cfg;
     cleaner_config_from_main_config(&cleaner_cfg, config);
     cleaner_cfg.connection_string = connection_string;
+    if (config->db_type != DB_TYPE_SQLITE) cleaner_cfg.session_hook = hold_instance_lock;
     if (cleaner_start(&cleaner_cfg, &cleaner_thread) != 0) {
         log_error("Failed to start cleaner thread");
         db_pool_shutdown();
@@ -799,16 +802,6 @@ int main(int argc, char **argv) {
 
     /* Set global pool for signal handler */
     global_pool = pool;
-
-    /* PostgreSQL: keep the instance lock held through reconnects */
-    if (g_lock_db) {
-        if (pthread_create(&g_lock_keeper, NULL, lock_keeper, NULL) == 0) {
-            g_lock_keeper_started = true;
-        } else {
-            log_warn("Failed to start the instance lock keeper: the lock holds until "
-                     "PostgreSQL drops its connection");
-        }
-    }
 
     /* Start event loop (blocks until shutdown signal) */
     int serve_rc = event_loop_pool_start(pool);

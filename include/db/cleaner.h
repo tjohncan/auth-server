@@ -23,6 +23,7 @@ typedef struct {
     /* Database connection info (cleaner creates its own connection) */
     db_type_t db_type;
     const char *connection_string;
+    db_session_hook_t session_hook;        /* PostgreSQL: the instance lock (NULL: none) */
 
     /* Operational parameters */
     int enabled;                           /* Master switch: 0=off, 1=on */
