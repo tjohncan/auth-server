@@ -139,6 +139,19 @@ typedef struct {
 EventLoopPool *event_loop_pool_create(EventLoopConfig *config);
 
 /*
+ * admin_socket_dir_private - May only the right users replace the admin
+ * socket at path? Anyone who can write its directory can remove the socket
+ * and put one of their own there, and receive the operator's calls, passwords
+ * included. A directory every user can write is refused; with owner_too, so is
+ * one another user owns (the server's own, or root's, is fine). The server
+ * checks both; ./auth-server --admin, which may run as root, the first. A
+ * directory that isn't there yet passes: the server makes it 0700.
+ *
+ * Returns: 1, or 0 with what's wrong in reason
+ */
+int admin_socket_dir_private(const char *path, int owner_too, char *reason, size_t size);
+
+/*
  * event_loop_pool_start - Start all worker threads and begin accepting connections
  *
  * This blocks until the server is shut down (e.g., SIGINT).

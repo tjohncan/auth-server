@@ -185,6 +185,53 @@ static int create_listen_socket(int port, int backlog) {
 }
 
 /*
+ * claim_public_port - Is the public port free of every other process?
+ *
+ * The public listener is a group of SO_REUSEPORT sockets, one per worker, and
+ * Linux lets any process running as the same user join that group: a second
+ * deployment on the same port would share it, and the kernel would split
+ * connections between the two databases. A socket without SO_REUSEPORT can't
+ * bind a port anyone listens on, so one is bound and closed first, and a port
+ * held refuses the start. SO_REUSEADDR still lets a restart past its
+ * predecessor's connections in TIME_WAIT.
+ *
+ * Returns: 0, or -1 (logged)
+ */
+static int claim_public_port(int port) {
+    int fd = socket(AF_INET6, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) {
+        log_error("socket(AF_INET6) failed: %s", strerror(errno));
+        return -1;
+    }
+    int opt = 0;
+    if (setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &opt, sizeof(opt)) < 0) {
+        log_warn("setsockopt(IPV6_V6ONLY) failed: %s - IPv4 may not work", strerror(errno));
+    }
+    opt = 1;
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+        log_warn("setsockopt(SO_REUSEADDR) failed: %s", strerror(errno));
+    }
+
+    struct sockaddr_in6 addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin6_family = AF_INET6;
+    addr.sin6_addr = in6addr_any;
+    addr.sin6_port = htons(port);
+    int rc = bind(fd, (struct sockaddr *)&addr, sizeof(addr));
+    int err = errno;
+    close(fd);
+    if (rc == 0) return 0;
+    if (err == EADDRINUSE) {
+        log_error("server_port %d is in use: another program, or another deployment of this "
+                  "server, holds it. Each deployment on a host needs a server_port of its own "
+                  "(auth.conf, or AUTH_SERVER_PORT).", port);
+    } else {
+        log_error("bind() failed on port %d: %s", port, strerror(err));
+    }
+    return -1;
+}
+
+/*
  * create_loopback_listen_socket - One loopback address only, for the admin listener
  *
  * Loopback has no dual-stack form: a socket on ::1 doesn't take connections to
@@ -261,16 +308,44 @@ static int create_loopback_listen_socket(int family, int port, int backlog) {
 }
 
 
+int admin_socket_dir_private(const char *path, int owner_too, char *reason, size_t size) {
+    char dir[1024];
+    snprintf(dir, sizeof(dir), "%s", path);
+    char *slash = strrchr(dir, '/');
+    if (!slash) {
+        snprintf(dir, sizeof(dir), ".");
+    } else if (slash == dir) {
+        dir[1] = '\0';
+    } else {
+        *slash = '\0';
+    }
+
+    struct stat st;
+    if (stat(dir, &st) != 0) return 1;  /* not there yet: the server makes it, 0700 */
+    if (st.st_mode & S_IWOTH) {
+        snprintf(reason, size, "its directory %s is writable by every user", dir);
+        return 0;
+    }
+    if (owner_too && st.st_uid != geteuid() && st.st_uid != 0) {
+        snprintf(reason, size, "its directory %s belongs to another user (uid %u)", dir,
+                 (unsigned)st.st_uid);
+        return 0;
+    }
+    return 1;
+}
+
 /*
  * create_unix_listen_socket - The admin listener on a Unix socket at path
  *
  * Who may connect is the file's mode: 0600 lets only the server's own user (and
  * root) in, 0660 its group too. It's set before listen(), so no connection is
- * ever taken under a looser one. A file already at the path is left alone
- * unless it's a socket nobody answers on, one a server left when it stopped:
- * a live one is another server's, and anything else isn't ours to remove. The
- * directory is made (0700) if it's missing, one level, as ./data may be on
- * PostgreSQL.
+ * ever taken under a looser one. Who may replace it is its directory's: one
+ * every user can write, or another user's, is refused (admin_socket_dir_private).
+ * A file already at the path is left alone unless it's a socket that refuses
+ * connections, one a server left when it stopped: a live one is another
+ * server's, one this user may not connect to may be another user's, and
+ * anything else isn't ours to remove. The directory is made (0700) if it's
+ * missing, one level, as ./data may be on PostgreSQL.
  *
  * Returns: the descriptor, or -1 (logged)
  */
@@ -285,6 +360,14 @@ static int create_unix_listen_socket(const char *path, int mode, int backlog) {
     }
     memcpy(addr.sun_path, path, strlen(path) + 1);
 
+    char reason[1100];
+    if (!admin_socket_dir_private(path, 1, reason, sizeof(reason))) {
+        log_error("admin_socket %s can't be used: %s, so someone else could put a socket of "
+                  "their own at the path and receive the operator's calls. Use a directory only "
+                  "the server's user can write (./data, the default, is one).", path, reason);
+        return -1;
+    }
+
     struct stat st;
     if (lstat(path, &st) == 0) {
         if (!S_ISSOCK(st.st_mode)) {
@@ -292,14 +375,24 @@ static int create_unix_listen_socket(const char *path, int mode, int backlog) {
             return -1;
         }
         int probe = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-        int live = probe >= 0 && connect(probe, (struct sockaddr *)&addr, sizeof(addr)) == 0;
-        if (probe >= 0) close(probe);
-        if (live) {
+        if (probe < 0) {
+            log_error("socket(AF_UNIX) to try admin_socket %s failed: %s", path, strerror(errno));
+            return -1;
+        }
+        int rc = connect(probe, (struct sockaddr *)&addr, sizeof(addr));
+        int err = errno;
+        close(probe);
+        if (rc == 0) {
             log_error("admin_socket %s is in use: another server answers on it. Each deployment "
                       "needs an admin_socket of its own.", path);
             return -1;
         }
-        if (unlink(path) != 0) {
+        if (err != ECONNREFUSED && err != ENOENT) {
+            log_error("admin_socket %s is there, and this server can't try it (%s): it may be "
+                      "another user's server's, so it isn't replaced.", path, strerror(err));
+            return -1;
+        }
+        if (err == ECONNREFUSED && unlink(path) != 0 && errno != ENOENT) {
             log_error("admin_socket %s was left by a server that stopped, and can't be removed: %s",
                       path, strerror(errno));
             return -1;
@@ -1137,7 +1230,7 @@ EventLoopPool *event_loop_pool_create(EventLoopConfig *config) {
     /* Every listening socket, before the server says it's ready, so a port
        that can't be had stops the start: the admin listener's once for the
        process (127.0.0.1, and ::1 where the host has it), then each worker's
-       public one */
+       public one, once no other process holds its port */
     int failed = 0;
     if (pool->config.admin_socket) {
         int fd = create_unix_listen_socket(pool->config.admin_socket,
@@ -1163,6 +1256,9 @@ EventLoopPool *event_loop_pool_create(EventLoopConfig *config) {
                 pool->admin_fds[pool->admin_fd_count++] = fd;
             }
         }
+    }
+    if (!failed && claim_public_port(pool->config.port) != 0) {
+        failed = 1;
     }
     for (int i = 0; i < pool->num_workers && !failed; i++) {
         EventLoop *loop = pool->event_loops[i];

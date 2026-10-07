@@ -567,7 +567,11 @@ static int run_admin_client(const config_t *config, const char *method, const ch
     /* The admin socket, else loopback TCP on admin_port */
     const char *socket_path = admin_socket_of(config);
     int fd = -1;
-    if (socket_path) {
+    char reason[1100];
+    if (socket_path && !admin_socket_dir_private(socket_path, 0, reason, sizeof(reason))) {
+        fprintf(stderr, "--admin: the call isn't sent: %s, so whoever answers on %s may not be "
+                        "this server\n", reason, socket_path);
+    } else if (socket_path) {
         struct sockaddr_un addr;
         memset(&addr, 0, sizeof(addr));
         addr.sun_family = AF_UNIX;
