@@ -36,4 +36,15 @@ int encryption_params_store(db_handle_t *db, const encrypt_params_t *params);
 int encryption_params_get_or_make(db_handle_t *db, const char *method, int iterations,
                                   encrypt_params_t *out);
 
+/*
+ * encryption_params_unchanged - Is the row as it was when this process derived
+ * its field keys by it (have and params as encryption_params_get_or_make gave
+ * them)? A re-key always writes a fresh salt, so one that has run since shows
+ * here, even if it took the instance lock and let it go while this process's
+ * sessions were gone (db/instance_lock.h).
+ *
+ * Returns: 1 unchanged, 0 changed, -1 on error
+ */
+int encryption_params_unchanged(db_handle_t *db, int have, const encrypt_params_t *params);
+
 #endif /* ENCRYPTION_PARAMS_H */

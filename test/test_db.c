@@ -1549,6 +1549,8 @@ static int test_rekey(const config_t *config) {
     }
     long long history = read_count(sdb, history_sql);
     long long triggers = read_count(sdb, TRIGGERS_SQL);
+    encrypt_params_t derived;
+    int derived_have = encryption_params_load(sdb, &derived);
     if (read_digest(sdb, HISTORY_CODE_SQL, code, sizeof(code)) != 0) {
         log_error("Re-key: could not read the code that fills history");
         goto done;
@@ -1571,6 +1573,15 @@ static int test_rekey(const config_t *config) {
         goto done;
     }
     log_info("  every sealed value opens under the new key and none under the old (OK)");
+
+    /* An instance that derived its keys before the run sees the run changed
+       them, however it came to miss the lock; one that derived them after, not */
+    if (derived_have != 1 || encryption_params_unchanged(sdb, derived_have, &derived) != 0 ||
+        encryption_params_unchanged(sdb, 0, &params) != 1) {
+        log_error("Re-key: the run doesn't show to an instance that derived its keys before it");
+        goto done;
+    }
+    log_info("  an instance keyed before the run sees it changed; one keyed after doesn't (OK)");
 
     /* 4. Under b: lookups by username and address match whatever the case, the
           link and the TOTP secret open as they were, and so do the signing keys */
@@ -1648,6 +1659,10 @@ static int test_rekey(const config_t *config) {
                                "WHERE pin = 1") != 0 ||
         read_count(sdb, history_sql) != history + 1) {
         log_error("Re-key: the failed run changed something");
+        goto done;
+    }
+    if (encryption_params_unchanged(sdb, 0, &params) != 1) {
+        log_error("Re-key: the failed run shows as a change to running instances");
         goto done;
     }
     log_info("  a value the old key won't open rolls the whole run back (OK)");

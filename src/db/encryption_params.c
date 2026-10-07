@@ -129,3 +129,13 @@ int encryption_params_get_or_make(db_handle_t *db, const char *method, int itera
        values were sealed before stretching existed */
     return encryption_params_load(db, out);
 }
+
+int encryption_params_unchanged(db_handle_t *db, int have, const encrypt_params_t *params) {
+    encrypt_params_t now;
+    int have_now = encryption_params_load(db, &now);
+    if (have_now == -1) return -1;
+    if (have_now != have) return 0;
+    if (have_now == 1) return 1;
+    return strcmp(now.method, params->method) == 0 && now.iterations == params->iterations &&
+           strcmp(now.salt, params->salt) == 0;
+}

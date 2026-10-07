@@ -24,6 +24,12 @@
  *   (main.c, hold_instance_lock). Session locks don't survive a
  *   transaction-pooling proxy, so the server and the maintenance modes reach
  *   PostgreSQL directly; the server checks it can, at each connect.
+ *   While an instance's sessions are gone, a run can take the lock and finish
+ *   before they come back, and the lock then shows nothing. A re-key leaves the
+ *   encryption_params row changed, so a reconnecting connection that finds it
+ *   changed stops the instance (main.c). --drophistory changes nothing an
+ *   instance holds: history is the database's own, made again in the same
+ *   transaction if it's on.
  */
 
 /*

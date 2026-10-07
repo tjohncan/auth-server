@@ -55,6 +55,13 @@ static bool cleaner_started = false;
 static int g_lock_fd = -1;               /* SQLite: the lock file */
 static atomic_bool g_lock_lost = false;  /* a maintenance run took it: exit 1 */
 
+/* How the database stretched encryption_key when this process derived its field
+   keys (init_field_keys): encryption_params_get_or_make's answer, and the row.
+   Set before any worker or the cleaner starts. */
+static bool g_keys_derived = false;
+static int g_keys_have;
+static encrypt_params_t g_keys_params;
+
 /* Are two statements on this connection served by one PostgreSQL backend? A
    transaction-pooling proxy may hand each to another, where this session's
    lock isn't. It can miss a proxy that happens to repeat a backend, never a
@@ -96,6 +103,22 @@ static int hold_instance_lock(db_handle_t *db) {
                   "transaction-pooling proxy?), so it can't hold the instance lock: connect "
                   "the server to PostgreSQL directly");
         return -1;
+    }
+    /* A run that came and went while this connection's session was gone (a
+       PostgreSQL restart, say) left the lock free, so taking it shows nothing. A
+       re-key leaves the encryption_params row changed, and then the field keys
+       this instance holds are the old ones. */
+    if (g_keys_derived) {
+        int same = encryption_params_unchanged(db, g_keys_have, &g_keys_params);
+        if (same == 0) {
+            log_error("The database was re-keyed while this instance's connections were down "
+                      "(after a PostgreSQL restart, say): this instance stops, since its field "
+                      "keys are the old ones. Start it with the new encryption_key.");
+            atomic_store(&g_lock_lost, true);
+            if (global_pool) event_loop_pool_stop((EventLoopPool *)global_pool);
+            return 1;
+        }
+        if (same != 1) return -1;
     }
     return 0;
 }
@@ -441,6 +464,9 @@ static int init_field_keys(db_handle_t *db, const config_t *config) {
     }
     encrypt_init_keys(&keys);
     OPENSSL_cleanse(&keys, sizeof(keys));
+    g_keys_have = have;
+    if (have == 0) g_keys_params = params;
+    g_keys_derived = true;
 
     if (have == 0) {
         log_info("Field encryption initialized (encryption_key stretched with %s, %d iterations)",
