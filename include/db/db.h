@@ -169,7 +169,9 @@ int db_bind_int(db_stmt_t *stmt, int index, int value);
 int db_bind_int64(db_stmt_t *stmt, int index, long long value);
 
 /*
- * Bind binary data parameter
+ * Bind binary data parameter: an id's 16 bytes, or any others. On PostgreSQL the
+ * bytes are sent as they are, and read as the statement's type for the
+ * parameter: a uuid column's, or a bytea's of any length.
  */
 int db_bind_blob(db_stmt_t *stmt, int index, const void *value, int len);
 

@@ -56,7 +56,7 @@ struct db_stmt_t {
     char *pg_query;             /* SQL string (duped from prepare) */
     char **pg_param_values;     /* Parameter value strings */
     int *pg_param_lengths;      /* Parameter lengths */
-    int *pg_param_formats;      /* 0=text per param */
+    int *pg_param_formats;      /* Per param: 0 text, 1 binary (a blob's bytes) */
     char **pg_param_bufs;       /* Allocated buffers for int/blob conversions (to free) */
     PGresult *pg_result;        /* Current result set from PQexecParams */
     int pg_current_row;         /* Cursor position for step() emulation */
@@ -1049,9 +1049,11 @@ static int pg_bind_int64(db_stmt_t *stmt, int index, long long value) {
 }
 
 /*
- * Bind blob parameter
- * 16-byte values are formatted as UUID strings (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
- * All other lengths are hex-encoded for bytea (\x prefix + hex pairs)
+ * Bind blob parameter: the bytes themselves, in binary format, which PostgreSQL
+ * reads as whatever type the statement gives the parameter: a uuid takes its 16
+ * bytes, a bytea any number. In text format the type would have to be guessed
+ * from the length, and a 16-byte bytea guessed to be a uuid would be stored as
+ * the uuid's 36 characters.
  */
 static int pg_bind_blob(db_stmt_t *stmt, int index, const void *value, int len) {
     int idx = index - 1;
@@ -1059,43 +1061,23 @@ static int pg_bind_blob(db_stmt_t *stmt, int index, const void *value, int len) 
         log_error("Parameter index %d out of range (1-%d)", index, stmt->param_count);
         return -1;
     }
-
-    const unsigned char *bytes = (const unsigned char *)value;
-    char *buf;
-
-    if (len == 16) {
-        /* UUID format: 8-4-4-4-12 with dashes (36 chars + null) */
-        buf = malloc(37);
-        if (!buf) {
-            log_error("Failed to allocate UUID param buffer");
-            return -1;
-        }
-        snprintf(buf, 37,
-                 "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
-                 bytes[0], bytes[1], bytes[2], bytes[3],
-                 bytes[4], bytes[5], bytes[6], bytes[7],
-                 bytes[8], bytes[9], bytes[10], bytes[11],
-                 bytes[12], bytes[13], bytes[14], bytes[15]);
-    } else {
-        /* Bytea hex format: \x prefix + 2 hex chars per byte + null */
-        size_t hex_len = 2 + (len * 2) + 1;
-        buf = malloc(hex_len);
-        if (!buf) {
-            log_error("Failed to allocate blob param buffer");
-            return -1;
-        }
-        buf[0] = '\\';
-        buf[1] = 'x';
-        for (int i = 0; i < len; i++) {
-            snprintf(buf + 2 + (i * 2), 3, "%02x", bytes[i]);
-        }
+    if (len < 0 || (len > 0 && !value)) {
+        log_error("Invalid blob for parameter %d", index);
+        return -1;
     }
+
+    char *buf = malloc(len > 0 ? (size_t)len : 1);
+    if (!buf) {
+        log_error("Failed to allocate blob param buffer");
+        return -1;
+    }
+    if (len > 0) memcpy(buf, value, (size_t)len);
 
     free(stmt->pg_param_bufs[idx]);
     stmt->pg_param_bufs[idx] = buf;
     stmt->pg_param_values[idx] = buf;
-    stmt->pg_param_lengths[idx] = 0;
-    stmt->pg_param_formats[idx] = 0;
+    stmt->pg_param_lengths[idx] = len;
+    stmt->pg_param_formats[idx] = 1;  /* Binary format */
     stmt->bound_count++;
     return 0;
 }
