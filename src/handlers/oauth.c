@@ -257,6 +257,15 @@ int oauth_authorize(db_handle_t *db,
         log_error("Only S256 PKCE method is supported, got: %s", code_challenge_method);
         return -1;
     }
+    /* An S256 challenge is a SHA-256 in base64url: 43 of A-Z a-z 0-9 - _ (RFC 7636
+       4.2). Any other can never be met, so it's refused here, not stored with a code
+       no verifier redeems (or, ill-formed text, refused by PostgreSQL as it's stored) */
+    if (strlen(code_challenge) != 43 ||
+        strspn(code_challenge, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+                               "0123456789-_") != 43) {
+        log_error("PKCE code_challenge isn't an S256 challenge (43 base64url characters)");
+        return -1;
+    }
 
     /* Step 9: Get signing key for auth request JWTs */
     signing_key_t *auth_signing_key = NULL;
