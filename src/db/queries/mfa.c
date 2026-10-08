@@ -689,11 +689,13 @@ int recovery_code_set_get_active(db_handle_t *db,
         return -1;
     }
 
-    /* The set's method is its codes' label: they all carry the same one */
+    /* The set's method is its codes' label: they all carry the same one. It's
+       read from an unused code, the only kind that can match; with none left,
+       nothing can */
     const char *sql =
         "SELECT S.id, S.user_account_pin, S.salt, S.hash_iterations, S.is_active, S.generated_at, "
         "(SELECT C.secret_hash FROM " TBL_RECOVERY_CODE " C "
-        " WHERE C.recovery_code_set_pin = S.pin LIMIT 1) "
+        " WHERE C.recovery_code_set_pin = S.pin AND C.is_used = " BOOL_FALSE " LIMIT 1) "
         "FROM " TBL_RECOVERY_CODE_SET " S "
         "WHERE S.user_account_pin = " P"1 AND S.is_active = " BOOL_TRUE " "
         "LIMIT 1";
@@ -729,6 +731,7 @@ int recovery_code_set_get_active(db_handle_t *db,
         str_copy(out_set->generated_at, sizeof(out_set->generated_at), generated_at);
 
         const char *code_hash = db_column_text(stmt, 6);
+        out_set->codes_left = code_hash != NULL;
         if (crypto_password_hash_method(code_hash, out_set->method,
                                         sizeof(out_set->method)) != 0) {
             out_set->method[0] = '\0';
@@ -765,6 +768,11 @@ int recovery_code_verify(db_handle_t *db,
     if (result != 0) {
         log_debug("No active recovery code set found");
         return 0;  /* Invalid - no active set */
+    }
+    if (!set.codes_left) {
+        log_debug("Every code of the active recovery code set is used");
+        OPENSSL_cleanse(&set, sizeof(set));
+        return 0;
     }
 
     /* Hash the provided code as the set's codes were: its method, salt and

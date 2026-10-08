@@ -1343,7 +1343,8 @@ static int test_rehash(const config_t *config) {
              "method (OK)");
 
     /* 6. Recovery codes: a set under the machine method; the same set made under
-          another method still verifies, by its codes' label; with no label, fails */
+          another method still verifies, by its codes' label; with no label, fails,
+          unless no code is left unused to match */
     const char *codes[] = { "AAAA-BBBB-CCCC-DDDD", "EEEE-FFFF-GGGG-HHHH", "JJJJ-KKKK-LLLL-MMMM" };
     if (recovery_code_set_create(sdb, 1, codes, 3, set_id) != 0 ||
         read_stored_value(sdb, "SELECT group_concat(DISTINCT substr(secret_hash, 1, "
@@ -1380,7 +1381,14 @@ static int test_rehash(const config_t *config) {
         log_error("Re-hash: a code with no label didn't fail, or was used");
         goto done;
     }
-    log_info("  recovery codes: hashed and verified as their set was; no label fails (OK)");
+    /* Only an unused code can match, so with every code used the labels don't matter */
+    if (db_execute_direct(sdb, "UPDATE recovery_code SET is_used = 1") != 0 ||
+        recovery_code_verify(sdb, 1, codes[2]) != 0) {
+        log_error("Re-hash: a set with every code used didn't answer no match");
+        goto done;
+    }
+    log_info("  recovery codes: hashed and verified as their set was; no label fails, unless "
+             "every code is used (OK)");
 
     failed = 0;
 
@@ -3199,7 +3207,15 @@ static int test_single_use(const config_t *config) {
         log_error("Single-use: a replaced set's code was accepted, or the new set's refused");
         goto done;
     }
-    log_info("  recovery code: works once; a replaced set's codes refused (OK)");
+    /* Every code of the new set used, and the used ones purged as the cleaner
+       purges them: the set is still active, with nothing left to match */
+    if (db_execute_direct(sdb, "DELETE FROM recovery_code WHERE is_used = 1") != 0 ||
+        recovery_code_verify(sdb, 1, new_codes[0]) != 0) {
+        log_error("Single-use: a set with no codes left didn't answer no match");
+        goto done;
+    }
+    log_info("  recovery code: works once; a replaced set's codes refused; a set with none "
+             "left matches nothing (OK)");
 
     failed = 0;
 

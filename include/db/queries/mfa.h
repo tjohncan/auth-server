@@ -77,7 +77,9 @@ typedef struct {
     int hash_iterations;
     int is_active;
     char generated_at[32];
-    char method[16];                /* its codes' hashing method; "" if they name none */
+    char method[16];                /* its unused codes' hashing method; "" if they name none */
+    int codes_left;                 /* 0 once every code is used (the cleaner purges used
+                                       ones, so a set can end up with none at all) */
 } recovery_code_set_t;
 
 /* Create recovery code set with hashed codes
