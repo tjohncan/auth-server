@@ -14,8 +14,10 @@ hands one blob of bytes to one function; the fuzzer generates the blobs.
 
 Each harness mirrors the real call path. `fuzz_http.c` follows
 `main.c:router_request_handler()`: the same private NUL-terminated copy of the socket
-bytes, the same parse call, the same accessors afterward. `fuzz_jwt.c` follows the
-OAuth token-exchange path into `jwt_decode_auth_request()`. `fuzz_json.c` follows
+bytes, the same parse call, the same accessors afterward. It also aborts if the two layers
+read a request differently: on a request the socket layer frames and the parser accepts,
+both must see the same Content-Length, and the body must be what it frames. `fuzz_jwt.c`
+follows the OAuth token-exchange path into `jwt_decode_auth_request()`. `fuzz_json.c` follows
 `router_dispatch()`'s body checks into the field reads handlers make, and also aborts if
 unescaping ever lengthens a string, or if a body that passed both checks yields a value
 that isn't well-formed UTF-8. A harness that drifts from the real call path fuzzes

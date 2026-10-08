@@ -829,10 +829,11 @@ static int handle_read(Connection *conn, size_t max_request_size) {
             int cl_result = http_scan_content_length(conn->read_buffer, conn->header_end,
                                                      &content_length);
 
-            if (cl_result == -3) {
-                /* The parser would stop reading header lines at the NUL, short of
-                 * what framed the request here */
-                log_warn("Rejecting request with a NUL in its header block from connection %lu",
+            if (cl_result == -3 || cl_result == -4) {
+                /* The parser would read other header lines than framed the request
+                 * here: it stops at a NUL, and at a line that starts with a bare CR */
+                log_warn("Rejecting request with %s in its header block from connection %lu",
+                        cl_result == -3 ? "a NUL" : "a CR or LF outside a line ending",
                         conn->connection_id);
                 return -1;
             }

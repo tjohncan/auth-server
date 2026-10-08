@@ -180,6 +180,27 @@ static int parse_content_length_value(const char *value, size_t len, size_t *out
 }
 
 /*
+ * The bytes a header block (request line, header lines, blank line) may not hold,
+ * checked by both layers before either reads it. The socket layer frames a request
+ * from its lines (http_scan_content_length) and the parser interprets them, each
+ * walking lines its own way: a NUL ends the parser's lines as C strings, and a line
+ * starting with a bare CR ends its walk, while the scan reads on to the blank line.
+ * Past either, the two read different headers, a Content-Length among them. So a
+ * NUL, a CR not followed by LF and an LF not preceded by CR are refused, as RFC 9110
+ * §5.5 and RFC 9112 §2.2 have a recipient do.
+ *
+ * Returns 0, -3 for a NUL, or -4 for a bare CR or LF.
+ */
+static int header_block_bytes(const char *block, size_t len) {
+    for (size_t i = 0; i < len; i++) {
+        if (block[i] == '\0') return -3;
+        if (block[i] == '\r' && (i + 1 == len || block[i + 1] != '\n')) return -4;
+        if (block[i] == '\n' && (i == 0 || block[i - 1] != '\r')) return -4;
+    }
+    return 0;
+}
+
+/*
  * Main parser - zero-copy, modifies buffer in place
  */
 HttpRequest http_request_parse(char *raw, size_t length) {
@@ -199,11 +220,10 @@ HttpRequest http_request_parse(char *raw, size_t length) {
         return req;
     }
 
-    /* No NUL in the header block (RFC 9110 §5.5 has a recipient reject one). Every
-     * walk below reads lines as C strings and would stop at it, so the headers
-     * after it, a Content-Length among them, would go unseen. The socket layer
-     * refuses the same (http_scan_content_length). */
-    if (memchr(raw, '\0', (size_t)(body_start - raw)) != NULL) {
+    /* No NUL, and no CR or LF outside a CRLF, in the header block: past one, the
+     * walks below would read other lines than the socket layer framed the request
+     * with (header_block_bytes). The socket layer refuses the same. */
+    if (header_block_bytes(raw, (size_t)(body_start - raw)) != 0) {
         req.method = HTTP_UNKNOWN;
         return req;
     }
@@ -265,7 +285,13 @@ HttpRequest http_request_parse(char *raw, size_t length) {
             char *next = crlf ? crlf + 2 : NULL;
             if (crlf) *crlf = '\0';
 
-            if (!parse_header_line(line, &req.headers[req.header_count])) {
+            /* A line that starts with a space or tab continues the one before it
+             * (obs-fold, RFC 9112 §5.2): one front end unfolds it into that header's
+             * value, another reads it as a header of its own, a folded
+             * Transfer-Encoding included. Refused, colon or not, with the 400 the RFC
+             * asks for. */
+            if (*line == ' ' || *line == '\t' ||
+                !parse_header_line(line, &req.headers[req.header_count])) {
                 /* Header line with no colon — malformed (RFC 7230 §3.2.4). Reject the
                  * request rather than skip the line. Request framing is already fixed at
                  * the socket layer (event_loop.c); this is header-interpretation hygiene:
@@ -501,10 +527,11 @@ int http_scan_content_length(const char *headers, size_t header_len, size_t *out
 
     const char *end = headers + header_len;
 
-    /* The parser reads header lines as C strings and stops at a NUL, so past one
-       it would see none of the lines this reads */
-    if (memchr(headers, '\0', header_len) != NULL) {
-        return -3;
+    /* A NUL, or a CR or LF outside a CRLF, past which the parser would read other
+       lines than this does (header_block_bytes) */
+    int bytes = header_block_bytes(headers, header_len);
+    if (bytes != 0) {
+        return bytes;
     }
 
     /* Header lines begin after the request line */

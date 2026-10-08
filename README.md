@@ -38,8 +38,8 @@ This server focuses on authentication logic.
 - Dual-stack IPv4/IPv6 support (single socket handles both)
 - Connection timeouts with efficient linked-list tracking: a request must arrive whole within 30 s
     of its connection opening, and a connection idle that long closes
-- Control characters in a request target answer 400, and a NUL anywhere in the header block
-    closes the connection unanswered
+- Control characters in a request target answer 400, and a NUL, or a CR or LF outside a line
+    ending, anywhere in the header block closes the connection unanswered
 - Request smuggling protection (detects conflicting Content-Length headers, rejects Transfer-Encoding)
 - Per-worker connection limit (default 1024) prevents resource exhaustion
 
@@ -740,12 +740,14 @@ act is the token's `sub` and `client_id`, which the server does check (`client_u
 `client_resource_server` links). Use scope only to narrow what a token already allowed.
 
 **A malformed header line fails the whole request; it is not skipped.**
-A line in the header block with no colon (including an obsolete `obs-fold` continuation) gets
-a 400, rather than being quietly ignored the way a lenient parser would. RFC 7230 §3.2.4
-explicitly sanctions this. Request *framing* — the control that actually stops smuggling — is
-enforced earlier, at the socket layer (`src/server/event_loop.c`): conflicting `Content-Length`
-headers, any `Transfer-Encoding` and a NUL anywhere in the header block are rejected outright
-(the parser refuses that NUL too), and the connection is closed after a
+A line in the header block with no colon, and one that starts with a space or tab (an obsolete
+`obs-fold` continuation, colon or not), gets a 400, rather than being quietly ignored the way a
+lenient parser would. RFC 7230 §3.2.4 and RFC 9112 §5.2 sanction this. Request *framing* — the
+control that actually stops smuggling — is enforced earlier, at the socket layer
+(`src/server/event_loop.c`): conflicting `Content-Length` headers, any `Transfer-Encoding`, and
+a NUL or a CR or LF outside a line ending anywhere in the header block are rejected outright
+(the parser refuses those bytes too, so the two layers read the same lines), a request without
+`Content-Length` has no body, and the connection is closed after a
 single request (HTTP/1.0, no keep-alive), so there is no reused connection to smuggle into.
 This rejection is narrower and is header-interpretation hygiene: it removes the divergence
 between a front-end proxy that might fold or tolerate a malformed line and an origin that would

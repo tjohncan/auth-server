@@ -649,6 +649,45 @@ void test_content_length_scan(void) {
         http_request_cleanup(&parsed);
         printf("✓ a NUL in the header block is refused by the scan and the parser; in the body, not\n");
     }
+
+    /* A CR or LF outside a CRLF: a line starting with a bare CR ended the parser's
+     * walk short of a Content-Length the scan still framed the request with, so
+     * both refuse such bytes. A line starting with a space or tab (obs-fold), colon
+     * or not: the parser refuses it; the scan, framing by Content-Length alone,
+     * reads nothing in it. */
+    {
+        static const struct { const char *raw; int scan; const char *what; } cases[] = {
+            { "POST /api HTTP/1.0\r\n\rX: y\r\nContent-Length: 1\r\n\r\n{\"a\":1}", -4,
+              "a line starting with a bare CR, before the Content-Length" },
+            { "POST /api HTTP/1.0\r\nX: a\rb\r\nContent-Length: 1\r\n\r\n{", -4,
+              "a bare CR in a value" },
+            { "GET /health HTTP/1.0\r\nUser-Agent: a\nb\r\n\r\n", -4, "a bare LF in a value" },
+            { "GET /health HTTP/1.0\r\nX-A: 1\r\n X-B: 2\r\n\r\n", 1, "a folded line with a colon" },
+            { "GET /health HTTP/1.0\r\nX-A: 1\r\n Transfer-Encoding: chunked\r\n\r\n", 1,
+              "a folded Transfer-Encoding" },
+            { "GET /health HTTP/1.0\r\nX-A: 1\r\n\tfolded\r\n\r\n", 1, "a line folded with a tab" },
+        };
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+            size_t len = strlen(cases[i].raw);
+            char *exact = malloc(len);
+            assert(exact);
+            memcpy(exact, cases[i].raw, len);
+            size_t header_end = http_find_header_end(exact, len, 0);
+            size_t length = 0;
+            assert(header_end > 0);
+            assert(http_scan_content_length(exact, header_end, &length) == cases[i].scan);
+            free(exact);
+
+            char copy[128];
+            assert(len < sizeof(copy));
+            memcpy(copy, cases[i].raw, len + 1);
+            HttpRequest parsed = http_request_parse(copy, len);
+            assert(parsed.method == HTTP_UNKNOWN);
+            http_request_cleanup(&parsed);
+            printf("✓ %s: refused by %s\n", cases[i].what,
+                   cases[i].scan < 0 ? "the scan and the parser" : "the parser");
+        }
+    }
 }
 
 void test_cross_origin(void) {
