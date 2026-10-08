@@ -1338,7 +1338,7 @@ config_t *config_load(const char *config_file) {
         FILE *example = fopen(example_path, "r");
         if (example) {
             fclose(example);
-            log_warn("Config file '%s' not found — copy '%s' to '%s' and customize it",
+            log_warn("Config file '%s' not found: copy '%s' to '%s' and customize it",
                      config_file, example_path, config_file);
         } else {
             log_warn("Config file '%s' not found, using defaults", config_file);

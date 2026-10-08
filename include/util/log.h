@@ -4,9 +4,10 @@
 /*
  * Logging module - provides timestamped logging at different severity levels
  *
- * Each record is one line on stderr: a control character in a message, but tab,
- * is written as \xNN, so text a caller passes on from a request can't start a
- * record of its own.
+ * Each record is one line of printable ASCII on stderr: every other byte in a
+ * message, but tab, is written as \xNN. So text a caller passes on from a request
+ * can't start a record of its own, by a line feed or a Unicode line separator,
+ * nor carry a control character or a bidirectional override to a terminal.
  *
  * Usage:
  *   log_init(LOG_INFO);  // Initialize with minimum level

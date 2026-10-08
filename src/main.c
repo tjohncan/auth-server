@@ -926,7 +926,7 @@ int main(int argc, char **argv) {
      * deployer's call; this server ships ready to run, not ready to ship. Revisit if
      * we add a strict/production mode that refuses known-default secrets. */
     if (strcmp(config->encryption_key, "customize_me") == 0) {
-        log_warn("Using default encryption key — set encryption_key in auth.conf or AUTH_ENCRYPTION_KEY env");
+        log_warn("Using default encryption key: set encryption_key in auth.conf or AUTH_ENCRYPTION_KEY env");
     }
     /* The field keys themselves are derived once the database is open: how the
        key is stretched is recorded there (init_field_keys) */

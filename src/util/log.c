@@ -43,10 +43,12 @@ static const char* level_to_string(LogLevel level) {
 /*
  * Core logging function - all the log_* functions use this internally
  *
- * The message is formatted whole, then written with each control character but
- * tab as \xNN. A caller may pass text that came from a request, decoded or not,
- * and a line feed in it would start a forged record of its own: this way every
- * record is one line, whatever any caller passes.
+ * The message is formatted whole, then written as printable ASCII, every other
+ * byte but tab as \xNN. A caller may pass text that came from a request, decoded
+ * or not, and a line feed in it would start a forged record of its own; so would
+ * NEL or U+2028 to a reader that splits lines on them, and a C1 control or a
+ * bidirectional override can rewrite what a terminal shows. This way every
+ * record is one line, shown as written, whatever any caller passes.
  */
 static void log_message(LogLevel level, const char *fmt, va_list args) {
     /* Skip if this message is below our minimum level */
@@ -81,7 +83,7 @@ static void log_message(LogLevel level, const char *fmt, va_list args) {
     /* Print: [timestamp] LEVEL: message */
     fprintf(stderr, "[%s] %s: ", timestamp, level_to_string(level));
     for (const unsigned char *c = (const unsigned char *)message; *c; c++) {
-        if ((*c < 0x20 && *c != '\t') || *c == 0x7f) {
+        if ((*c < 0x20 && *c != '\t') || *c >= 0x7f) {
             fprintf(stderr, "\\x%02x", *c);
         } else {
             putc_unlocked(*c, stderr);

@@ -611,8 +611,9 @@ void test_validation_patterns(void) {
 }
 
 /*
- * A log record is one line whatever its message holds: a line feed from a
- * request (decoded from %0A, say) would otherwise start a forged record.
+ * A log record is one line of printable ASCII whatever its message holds: a line
+ * feed from a request (decoded from %0A, say) would otherwise start a forged
+ * record, and so would NEL or U+2028 to a reader that splits lines on them.
  */
 void test_log_one_line(void) {
     printf("\n=== Test: Log records are one line ===\n");
@@ -622,7 +623,7 @@ void test_log_one_line(void) {
     fflush(stderr);
     int saved = dup(fileno(stderr));
     assert(saved >= 0 && dup2(fileno(capture), fileno(stderr)) >= 0);
-    log_error("method %s", "x\nERROR: forged\r\x1b[0m\tend");
+    log_error("method %s", "x\nERROR: forged\r\x1b[0m\tend\xc2\x85nel\xe2\x80\xa8ls");
     fflush(stderr);
     assert(dup2(saved, fileno(stderr)) >= 0);
     close(saved);
@@ -632,9 +633,11 @@ void test_log_one_line(void) {
     size_t n = fread(record, 1, sizeof(record) - 1, capture);
     record[n] = '\0';
     fclose(capture);
-    assert(strstr(record, "ERROR: method x\\x0aERROR: forged\\x0d\\x1b[0m\tend\n") != NULL);
+    assert(strstr(record, "ERROR: method x\\x0aERROR: forged\\x0d\\x1b[0m\tend"
+                          "\\xc2\\x85nel\\xe2\\x80\\xa8ls\n") != NULL);
     assert(n > 0 && strchr(record, '\n') == record + n - 1);
-    printf("✓ a line feed, CR and escape in a message are written as \\xNN, a tab as it is\n");
+    printf("✓ a line feed, CR, escape, NEL and U+2028 in a message are written as \\xNN, "
+           "a tab as it is\n");
 }
 
 int main(void) {
