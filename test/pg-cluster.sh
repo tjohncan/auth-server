@@ -17,6 +17,8 @@
 # which keep them off PATH). initdb won't run as root.
 
 PORT=5432
+# What start writes in DIR before anything else, so stop removes only what it made
+MARK=.pg-cluster.sh
 
 bin_dir() {
     if [ -n "$PG_BIN" ]; then
@@ -46,7 +48,7 @@ start() {
         echo "pg-cluster: no initdb found: install PostgreSQL's server programs, or set PG_BIN" >&2
         return 1
     fi
-    mkdir -p "$dir" || return 1
+    mkdir -p "$dir" && echo "made by test/pg-cluster.sh start" > "$dir/$MARK" || return 1
     if ! "$bin/initdb" -D "$dir/data" -U postgres -A trust -E UTF8 --locale=C --no-sync \
             > "$dir/initdb.log" 2>&1; then
         cat "$dir/initdb.log" >&2
@@ -63,8 +65,9 @@ start() {
 
 stop() {
     dir=$1
-    # Only what this script made: a directory it ran initdb in, or one still empty
-    if [ ! -f "$dir/initdb.log" ]; then
+    # Only what this script made: a directory start marked (another cluster's can
+    # hold the same files), or one still empty
+    if [ ! -f "$dir/$MARK" ]; then
         rmdir "$dir" 2> /dev/null && return 0
         echo "pg-cluster: $dir isn't a cluster this script started" >&2
         return 1
