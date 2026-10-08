@@ -74,9 +74,17 @@ static const char *header_value(const HttpResponse *resp, const char *name) {
     return NULL;
 }
 
+/* raw is a request with its body, if any, after the blank line; the Content-Length
+   that frames the body is added here, as a client sends it */
 static HttpResponse *request(Router *router, const char *raw) {
     char buf[512];
-    snprintf(buf, sizeof(buf), "%s", raw);
+    const char *blank = strstr(raw, "\r\n\r\n");
+    if (blank && blank[4] && !strstr(raw, "Content-Length:")) {
+        snprintf(buf, sizeof(buf), "%.*s\r\nContent-Length: %zu\r\n\r\n%s",
+                 (int)(blank - raw), raw, strlen(blank + 4), blank + 4);
+    } else {
+        snprintf(buf, sizeof(buf), "%s", raw);
+    }
     HttpRequest req = http_request_parse(buf, strlen(buf));
     HttpResponse *resp = router_dispatch(router, &req);
     http_request_cleanup(&req);

@@ -326,6 +326,23 @@ void test_malformed_requests(void) {
         printf("✓ Body truncated to Content-Length\n");
     }
 
+    /* No Content-Length, no body: the socket layer takes the request as complete at
+     * the blank line, so bytes that came in the same read must not become one, or a
+     * handler would see a body or not depending on how TCP split the request */
+    {
+        char req[] =
+            "POST /api HTTP/1.0\r\n"
+            "Content-Type: application/json\r\n"
+            "\r\n"
+            "{\"code_name\":\"x\"}";
+
+        HttpRequest parsed = http_request_parse(req, strlen(req));
+        assert(parsed.method == HTTP_POST);
+        assert(parsed.body == NULL && parsed.body_length == 0);
+        http_request_cleanup(&parsed);
+        printf("✓ No Content-Length: no body, whatever arrived with the headers\n");
+    }
+
     /* Test 7: Garbage input */
     {
         char req[] = "\x01\x02\x03\x04\x05\x06\x07\x08";

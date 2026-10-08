@@ -297,13 +297,16 @@ HttpRequest http_request_parse(char *raw, size_t length) {
         return req;
     }
 
-    /* Body (if present) */
+    /* Body: what Content-Length framed, as the socket layer read it. With none
+     * there is no body (RFC 9112 §6.3), whatever bytes came in the same read as
+     * the headers: the socket layer took the request as complete at the blank
+     * line, and taking them would make the body depend on how TCP split it. */
     size_t body_offset = body_start - raw;
-    if (body_offset < length) {
+    if (content_length_str && body_offset < length) {
         req.body = body_start;
         req.body_length = length - body_offset;
 
-        if (content_length_str && req.body_length > declared_length) {
+        if (req.body_length > declared_length) {
             req.body_length = declared_length;
         }
 

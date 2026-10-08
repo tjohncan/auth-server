@@ -51,7 +51,7 @@ typedef struct {
     HttpHeader *headers;    /* Array of headers */
     int header_count;       /* Number of headers */
 
-    char *body;             /* Request body (NULL if none) */
+    char *body;             /* The body Content-Length framed (NULL without one) */
     size_t body_length;     /* Length of body in bytes */
 
     char remote_ip[46];     /* Client socket IP (INET6_ADDRSTRLEN = 46) for localhost validation */
