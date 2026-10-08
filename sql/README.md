@@ -353,12 +353,15 @@ The `client.is_universal` flag enables special public clients (like system manag
   still holds the hash that verified. With history on, the replaced hash goes to history like any
   update. Once history is purged (retention, or `--drophistory`), no row holds a retired hash,
   and on PostgreSQL no planner statistics keep a sample of one, in history or out (as for sealed
-  columns, under `--rekey` below). The tables' own files keep the row versions re-hashing
-  replaced until they're rewritten. On SQLite that's `VACUUM`, then
-  `PRAGMA wal_checkpoint(TRUNCATE)`, with every instance stopped, as `--drophistory` does. On
-  PostgreSQL it's `VACUUM FULL` on `user_account`, `client_key`, `resource_server_key` and
-  `organization_key`, as their owner, which locks each table while it runs. A copy of the files
-  taken before then holds some of the retired hashes.
+  columns, under `--rekey` below). The files still hold some until they're rewritten: the
+  tables' own keep the row versions re-hashing replaced, and history's the rows retention
+  deleted. On SQLite that's `VACUUM`, then `PRAGMA wal_checkpoint(TRUNCATE)`, with every
+  instance stopped, as `--drophistory` does. On PostgreSQL it's `VACUUM FULL` on `user_account`,
+  `client_key`, `resource_server_key` and `organization_key`, and on the same tables in
+  `security_history` while history is kept, as the database's owner (`auth_dbo` in
+  `setup_reference.sql`: the history tables belong to the login role), which locks each table
+  while it runs. Backups and WAL archives keep what they had, and on PostgreSQL so does each
+  server's `pg_wal` until its segments are overwritten.
 - Recovery codes aren't hashed again: a code is used once, and its siblings' plaintexts are
   unknown. A new method reaches them when the user regenerates the set.
 - Until then, a secret costs what its old settings cost to check, while a missing account (or an

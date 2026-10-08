@@ -15,7 +15,7 @@
  * overwritten. table is one of the TBL_ names whose rows keep salt,
  * hash_iterations and secret_hash. With history on, the replaced hash is copied
  * into history like any update, so once history is purged no row holds it; the
- * table's file keeps the replaced row version until it's rewritten
+ * table's file, and history's after retention, keep it until they're rewritten
  * (sql/README.md, "Hash methods").
  *
  * Returns: 0 if stored; 1 if the row had changed, or the secret is outside
