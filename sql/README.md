@@ -530,6 +530,9 @@ sample of its columns. WAL archives, replicas and backups keep what they had.
   -- ./auth-server --drophistory
   revoke auth_dbo from auth_service;
   ```
+- **Stopping a run.** Ctrl-C or SIGTERM stops it. Stopped before its COMMIT, it changed nothing;
+  after, history is gone and the scrub may not have run. Either way, running it again finishes
+  it: every run scrubs, with or without history to drop.
 - Only history is touched: sessions, tokens, keys and every main table stay as they were.
 
 For reference, what it runs for each table `T` with history, in one transaction. Dropping a
@@ -603,6 +606,11 @@ SCRUBBED, naming them, if any has statistics.
   keys from a fresh salt and the configured stretch. That's how a database made before
   `encryption_params` gets its stretch, and how a new hashing method or iteration count takes
   effect.
+- **Stopping a run.** Ctrl-C or SIGTERM stops it. Stopped before its COMMIT, it changed nothing:
+  run it again as it was. Stopped after, while it scrubs, everything is sealed under the new
+  passphrase: run it again giving that one as both, which seals again and scrubs. Not knowing
+  which, run it as it was first: if it had committed, the old passphrase opens nothing, so the run
+  fails at the first value and rolls back.
 - **History** made before the re-key stays sealed under the old key. After a leak, run
   `--drophistory` next; `--rekey` says how many history tables of the re-sealed tables (those of
   `user_account`, `user_email` and `user_mfa`) hold some.

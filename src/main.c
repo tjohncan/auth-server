@@ -803,10 +803,6 @@ int main(int argc, char **argv) {
     log_info(drophistory ? "=== Auth Server: --drophistory ===" :
              rekey ? "=== Auth Server: --rekey ===" : "=== Auth Server Starting ===");
 
-    /* Install signal handlers */
-    setup_signal_handlers();
-    log_info("Signal handlers installed");
-
     /* Load configuration */
     log_info("Loading configuration...");
     config_t *config = config_load("auth.conf");
@@ -828,6 +824,12 @@ int main(int argc, char **argv) {
         config_free(config);
         return rc;
     }
+
+    /* Serving only. A maintenance run above keeps the default dispositions, so
+       Ctrl-C or SIGTERM stops it: its changes are one transaction, and a run
+       stopped part way is finished by running it again (sql/README.md). */
+    setup_signal_handlers();
+    log_info("Signal handlers installed");
 
     /* Only --rekey reads it: a server has no use for the old passphrase */
     if (config->encryption_key_previous) {
