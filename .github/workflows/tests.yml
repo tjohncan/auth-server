@@ -1,11 +1,16 @@
 name: tests
 
-# Pull requests, pushes to main, and a manual button.
+# Pull requests, pushes to main, and a manual button, which can name the PostgreSQL
+# versions test-postgresql runs against.
 on:
   pull_request:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      postgresql:
+        description: "PostgreSQL major versions for test-postgresql, as a JSON list, e.g. [14, 15, 16, 17, 18]"
+        default: "[14, 18]"
 
 # A new push to the same PR cancels the in-flight run; runs on main are left to finish.
 concurrency:
@@ -167,30 +172,44 @@ jobs:
   # can't scrub) and both handler suites, built for PostgreSQL. make runs them
   # against a throwaway cluster that test/pg-cluster.sh starts in a temporary
   # directory, reachable only through its Unix socket, and removes.
-  # Runs in parallel with the other jobs.
+  # One job per PostgreSQL version, in parallel with each other and the other
+  # jobs: the oldest release PostgreSQL still supports, which sql/README.md
+  # names as the floor, and the newest. Move both as PostgreSQL retires one
+  # (14 on 2026-11-12) and releases one (19, due in 2026-10). The manual button
+  # runs any list of versions.
   test-postgresql:
+    name: test-postgresql (${{ matrix.postgresql }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        postgresql: ${{ fromJSON(inputs.postgresql || '[14, 18]') }}
     steps:
       - uses: actions/checkout@v7
 
       # libpq-dev for the build, as in build-postgresql. The cluster needs the
-      # server's own programs (initdb, pg_ctl), which the runner image carries
-      # with its service off; the distribution's package is the fallback for an
-      # image that doesn't.
-      - name: Install build dependencies
+      # server's own programs (initdb, pg_ctl) of the version under test, from
+      # PostgreSQL's own apt repository, which carries every supported one. Any
+      # cluster the package makes is left alone: pg-cluster.sh starts its own, on
+      # a socket in its own directory and no TCP port.
+      - name: Install build dependencies and PostgreSQL ${{ matrix.postgresql }}
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential libssl-dev libargon2-dev libpq-dev
-          ls /usr/lib/postgresql/*/bin/initdb 2> /dev/null || sudo apt-get install -y postgresql
-          ls /usr/lib/postgresql/*/bin/initdb
+          sudo apt-get install -y postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y build-essential libssl-dev libargon2-dev libpq-dev \
+              postgresql-${{ matrix.postgresql }}
+          /usr/lib/postgresql/${{ matrix.postgresql }}/bin/initdb --version
 
       # As in build-and-test: the suites read auth.conf for the schema directory
       # and the encryption key. Each uses a database of its own on the cluster.
       - name: Provide a test configuration
         run: cp auth.conf.example auth.conf
 
-      - name: Build and run the database suites against PostgreSQL
+      - name: Build and run the database suites against PostgreSQL ${{ matrix.postgresql }}
+        env:
+          PG_BIN: /usr/lib/postgresql/${{ matrix.postgresql }}/bin
         run: |
           set -o pipefail
           make DB_BACKEND=postgresql test-postgresql 2>&1 | tee /tmp/pgtest.log

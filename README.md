@@ -584,7 +584,9 @@ vendor/
     PostgreSQL, on a throwaway cluster that `test/pg-cluster.sh` starts and removes. It needs
     PostgreSQL's server programs (initdb, pg_ctl): from `PG_BIN`, `PATH`, or Debian's and
     Ubuntu's `/usr/lib/postgresql/<version>/bin`. On PostgreSQL, test-db runs the tests written
-    for either backend and PostgreSQL's own; the rest are SQLite's.
+    for either backend and PostgreSQL's own; the rest are SQLite's. CI runs it against the
+    oldest PostgreSQL still supported, the schema's floor, and the newest (now 14 and 18), side
+    by side; its manual Run workflow button takes any list of versions.
 - `make test-email` - Deliver a test email through the deployed "send script" (optional infrastructure)
 
 The database suites use a database of their own for each test: on SQLite one in memory, on
