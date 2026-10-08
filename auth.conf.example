@@ -107,6 +107,11 @@ machine_secret_hash_max_iterations = 777
 # Minimum password length (default 1, minimum 1)
 # password_min_length = 8
 
+# Refuse to start on the defaults fit only for trying the server out: encryption_key
+# left at customize_me, which anyone can read, or password_min_length under 8 (NIST's
+# minimum). Set it in production. Off, the server starts on them, warning about the key.
+# strict = true
+
 # Patterns a value must match when it's created or set (POSIX extended, matched
 # against the whole value). They never apply to what's already stored, so an
 # existing user keeps signing in and getting links. Whatever the pattern, values

@@ -502,6 +502,15 @@ static void set_config_value(config_t *config, const char *key, const char *valu
         } else {
             config->password_min_length = len;
         }
+    } else if (strcmp(key, "strict") == 0) {
+        if (strcmp(value, "true") == 0 || strcmp(value, "1") == 0) {
+            config->strict = 1;
+        } else if (strcmp(value, "false") == 0 || strcmp(value, "0") == 0) {
+            config->strict = 0;
+        } else {
+            log_warn("Invalid strict value '%s', must be true/false or 1/0. Keeping current: %d",
+                    value, config->strict);
+        }
     }
 
     /* OAuth2 token limits */
@@ -979,6 +988,18 @@ static void apply_env_overrides(config_t *config) {
         log_info("Config override from %s: %s", env_var_name, env_value);
     }
 
+    /* STRICT */
+    env_value = getenv("AUTH_STRICT");
+    if (env_value) {
+        if (strcmp(env_value, "true") == 0 || strcmp(env_value, "1") == 0) {
+            config->strict = 1;
+            log_info("Config override from AUTH_STRICT: on");
+        } else if (strcmp(env_value, "false") == 0 || strcmp(env_value, "0") == 0) {
+            config->strict = 0;
+            log_info("Config override from AUTH_STRICT: off");
+        }
+    }
+
     /* CLEANER_ENABLED */
     env_value = getenv("AUTH_CLEANER_ENABLED");
     if (env_value) {
@@ -1246,6 +1267,7 @@ config_t *config_load(const char *config_file) {
     config->machine_secret_hash_min_iterations = 0;
     config->machine_secret_hash_max_iterations = 0;
     config->password_min_length = 1;
+    config->strict = 0;
 
     /* OAuth2 token limits */
     config->max_access_token_ttl_seconds = DEFAULT_MAX_ACCESS_TOKEN_TTL_SECONDS;
@@ -1466,6 +1488,26 @@ static int pg_quote_append(char *dst, size_t dst_size, size_t pos, const char *v
     dst[i++] = '\'';
     dst[i] = '\0';
     return (int)(i - pos);
+}
+
+int config_check_weak_defaults(const config_t *config) {
+    int weak = 0;
+    if (strcmp(config->encryption_key, "customize_me") == 0) {
+        weak = 1;
+        if (config->strict) {
+            log_error("strict: encryption_key is the shipped default, customize_me, which anyone "
+                      "can read: set encryption_key in auth.conf, or AUTH_ENCRYPTION_KEY");
+        } else {
+            log_warn("Using default encryption key: set encryption_key in auth.conf or "
+                     "AUTH_ENCRYPTION_KEY env");
+        }
+    }
+    if (config->strict && config->password_min_length < STRICT_PASSWORD_MIN_LENGTH) {
+        weak = 1;
+        log_error("strict: password_min_length is %d, under %d", config->password_min_length,
+                  STRICT_PASSWORD_MIN_LENGTH);
+    }
+    return config->strict && weak ? -1 : 0;
 }
 
 int config_build_pg_connection_string(const config_t *config, char *out, size_t out_size) {

@@ -714,7 +714,9 @@ warns and runs. `git clone && make && run` has to work, or nobody gets far enoug
 the project; taxing every newcomer to protect a deployer who ignored both a startup warning
 *and* a documented config line is the wrong trade. Field encryption's threat model is bounded
 and stated: keep PII out of plain view of whoever is reading the database — not defeat an
-attacker who holds the database *and* the configuration.
+attacker who holds the database *and* the configuration. A production deployment sets
+`strict = true` (or `AUTH_STRICT=true`), and then the server refuses to start on either: the
+placeholder key, or a password minimum under 8.
 One default is strict on purpose. New usernames, code names and email addresses take a
 conservative ASCII shape (letters, digits, `. _ + -`; an address like `name@example.com`). A name
 with a Cyrillic а or an invisible space looks identical to the real one in every list an admin

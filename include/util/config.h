@@ -74,6 +74,10 @@ typedef struct {
     /* Password policy */
     int password_min_length;  /* Minimum password length (default 1, minimum 1) */
 
+    /* Refuse to start on the shipped defaults fit only for trying the server out
+       (config_check_weak_defaults). Off by default, so a fresh clone runs. */
+    int strict;
+
     /* Patterns a value created or set must match (util/validation.h): NULL for
        the default, "" for none */
     char *username_pattern;
@@ -170,6 +174,21 @@ config_t *config_load(const char *config_file);
  * Returns 0 on success, -1 on overflow.
  */
 int config_build_pg_connection_string(const config_t *config, char *out, size_t out_size);
+
+/* The shortest password_min_length strict accepts: NIST SP 800-63B's minimum
+   for a password a person chooses */
+#define STRICT_PASSWORD_MIN_LENGTH 8
+
+/*
+ * config_check_weak_defaults - The shipped defaults fit only for trying the
+ * server out: encryption_key left at customize_me, which anyone can read, and
+ * password_min_length under STRICT_PASSWORD_MIN_LENGTH. Without strict, the key
+ * is a warning and the length nothing, as before strict existed; with strict,
+ * each is an error.
+ *
+ * Returns: 0, or -1 if strict is set and either is in use
+ */
+int config_check_weak_defaults(const config_t *config);
 
 /*
  * Free configuration structure

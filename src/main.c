@@ -283,6 +283,11 @@ static int run_rekey(const config_t *config, const char *connection_string) {
         return 1;
     }
     if (strcmp(config->encryption_key, "customize_me") == 0) {
+        if (config->strict) {
+            log_error("strict: encryption_key is the shipped default, customize_me: re-sealing "
+                      "under it would seal everything under a published key");
+            return 1;
+        }
         log_warn("encryption_key is the shipped default: this re-seals everything under a "
                  "published key");
     }
@@ -917,18 +922,21 @@ int main(int argc, char **argv) {
     jwt_set_clock_skew_seconds(config->jwt_clock_skew_seconds);
     log_info("JWT clock skew tolerance: %d seconds", config->jwt_clock_skew_seconds);
 
-    /* DESIGN DECISION: the default encryption key warns; it does not refuse to boot.
-     * Field encryption's threat model is bounded and stated — keep PII out of plain
-     * view of whoever is reading the database — not defeat an attacker holding the
-     * database *and* the config. The default key is public on purpose: a fresh clone
-     * has to build and run, or nobody gets far enough to evaluate the project. Taxing
-     * every newcomer to protect a deployer who ignored both a startup warning and a
-     * documented config line is the wrong trade. The same philosophy governs the other
-     * permissive defaults, notably password_min_length (ships at 1). Policy is the
-     * deployer's call; this server ships ready to run, not ready to ship. Revisit if
-     * we add a strict/production mode that refuses known-default secrets. */
-    if (strcmp(config->encryption_key, "customize_me") == 0) {
-        log_warn("Using default encryption key: set encryption_key in auth.conf or AUTH_ENCRYPTION_KEY env");
+    /* DESIGN DECISION: the defaults fit only for trying the server out don't stop it
+     * starting unless strict is set. Field encryption's threat model is bounded and
+     * stated — keep PII out of plain view of whoever is reading the database — not
+     * defeat an attacker holding the database *and* the config. The default key is
+     * public on purpose: a fresh clone has to build and run, or nobody gets far enough
+     * to evaluate the project. Taxing every newcomer to protect a deployer who ignored
+     * both a startup warning and a documented config line is the wrong trade, so the
+     * key only warns, and password_min_length ships at 1. This server ships ready to
+     * run, not ready to ship: strict is how a deployment says it's the latter, and
+     * then both refuse the start (config_check_weak_defaults). */
+    if (config_check_weak_defaults(config) != 0) {
+        log_error("strict is set, so the server won't start on those: set them, or turn "
+                  "strict off to try the server out");
+        config_free(config);
+        return 1;
     }
     /* The field keys themselves are derived once the database is open: how the
        key is stretched is recorded there (init_field_keys) */

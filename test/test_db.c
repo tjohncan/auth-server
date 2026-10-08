@@ -1148,6 +1148,30 @@ static int test_hashing_config(void) {
         return 1;
     }
     log_info("  admin API: the socket by default (0600), no TCP port; modes octal (OK)");
+
+    /* strict: off by default, where the shipped values start the server; on, the
+       shipped key and a password minimum under 8 each refuse the start alone */
+    config_t *lax = config_from("log_level = warn\n");
+    config_t *strict = config_from("strict = true\nencryption_key = a passphrase of its own\n"
+                                   "password_min_length = 8\n");
+    int ok_strict = lax && strict && !lax->strict && strict->strict &&
+        config_check_weak_defaults(lax) == 0 && config_check_weak_defaults(strict) == 0;
+    if (ok_strict) {
+        strict->password_min_length = 7;
+        ok_strict = config_check_weak_defaults(strict) == -1;
+        lax->strict = 1;
+        lax->password_min_length = 8;
+        ok_strict = ok_strict && config_check_weak_defaults(lax) == -1;
+    }
+    config_free(lax);
+    config_free(strict);
+    if (!ok_strict) {
+        log_error("Hashing config: strict didn't refuse the shipped key or a short password "
+                  "minimum, or refused what it shouldn't");
+        return 1;
+    }
+    log_info("  strict: off by default; on, the shipped key or a password minimum under 8 "
+             "refuses the start (OK)");
     log_info("Hashing config tests passed!");
     return 0;
 }
