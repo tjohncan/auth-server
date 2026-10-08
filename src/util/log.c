@@ -4,6 +4,7 @@
 #include "util/log.h"
 #include <stdio.h>
 #include <stdarg.h>
+#include <stdlib.h>
 #include <time.h>
 
 static LogLevel current_min_level = LOG_INFO;
@@ -42,8 +43,10 @@ static const char* level_to_string(LogLevel level) {
 /*
  * Core logging function - all the log_* functions use this internally
  *
- * The "..." (variadic arguments) let us do printf-style formatting.
- * We use va_list to handle them.
+ * The message is formatted whole, then written with each control character but
+ * tab as \xNN. A caller may pass text that came from a request, decoded or not,
+ * and a line feed in it would start a forged record of its own: this way every
+ * record is one line, whatever any caller passes.
  */
 static void log_message(LogLevel level, const char *fmt, va_list args) {
     /* Skip if this message is below our minimum level */
@@ -55,22 +58,45 @@ static void log_message(LogLevel level, const char *fmt, va_list args) {
     char timestamp[32];
     get_timestamp(timestamp, sizeof(timestamp));
 
+    /* Format the message: on the stack, or on the heap when it's longer */
+    char stack[1024];
+    char *message = stack;
+    va_list again;
+    va_copy(again, args);
+    int length = vsnprintf(stack, sizeof(stack), fmt, args);
+    if (length < 0) {
+        snprintf(stack, sizeof(stack), "(a log message that couldn't be formatted)");
+    } else if ((size_t)length >= sizeof(stack)) {
+        char *heap = malloc((size_t)length + 1);
+        if (heap) {
+            vsnprintf(heap, (size_t)length + 1, fmt, again);
+            message = heap;
+        }
+    }
+    va_end(again);
+
     /* Lock stderr so multi-threaded output doesn't interleave */
     flockfile(stderr);
 
     /* Print: [timestamp] LEVEL: message */
     fprintf(stderr, "[%s] %s: ", timestamp, level_to_string(level));
-
-    /* Print the actual message with user's formatting */
-    vfprintf(stderr, fmt, args);
-
-    /* End with newline */
-    fprintf(stderr, "\n");
+    for (const unsigned char *c = (const unsigned char *)message; *c; c++) {
+        if ((*c < 0x20 && *c != '\t') || *c == 0x7f) {
+            fprintf(stderr, "\\x%02x", *c);
+        } else {
+            putc_unlocked(*c, stderr);
+        }
+    }
+    putc_unlocked('\n', stderr);
 
     /* Flush to make sure it appears immediately (useful for crashes) */
     fflush(stderr);
 
     funlockfile(stderr);
+
+    if (message != stack) {
+        free(message);
+    }
 }
 
 /*

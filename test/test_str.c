@@ -1,3 +1,6 @@
+/* fileno, dup and dup2, for capturing a log record */
+#define _POSIX_C_SOURCE 200809L
+
 #include "util/str.h"
 #include "util/json.h"
 #include "util/log.h"
@@ -6,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <unistd.h>
 
 void test_str_copy(void) {
     printf("\n=== Testing str_copy ===\n\n");
@@ -606,6 +610,33 @@ void test_validation_patterns(void) {
     printf("A bad pattern is refused; secrets have no default pattern OK\n");
 }
 
+/*
+ * A log record is one line whatever its message holds: a line feed from a
+ * request (decoded from %0A, say) would otherwise start a forged record.
+ */
+void test_log_one_line(void) {
+    printf("\n=== Test: Log records are one line ===\n");
+
+    FILE *capture = tmpfile();
+    assert(capture);
+    fflush(stderr);
+    int saved = dup(fileno(stderr));
+    assert(saved >= 0 && dup2(fileno(capture), fileno(stderr)) >= 0);
+    log_error("method %s", "x\nERROR: forged\r\x1b[0m\tend");
+    fflush(stderr);
+    assert(dup2(saved, fileno(stderr)) >= 0);
+    close(saved);
+
+    char record[256];
+    rewind(capture);
+    size_t n = fread(record, 1, sizeof(record) - 1, capture);
+    record[n] = '\0';
+    fclose(capture);
+    assert(strstr(record, "ERROR: method x\\x0aERROR: forged\\x0d\\x1b[0m\tend\n") != NULL);
+    assert(n > 0 && strchr(record, '\n') == record + n - 1);
+    printf("✓ a line feed, CR and escape in a message are written as \\xNN, a tab as it is\n");
+}
+
 int main(void) {
     log_init(LOG_INFO);
     log_info("TESTING - String Utilities");
@@ -623,6 +654,7 @@ int main(void) {
     test_json_unescape();
     test_json_utf8_valid();
     test_validation_patterns();
+    test_log_one_line();
 
     printf("\n=== All tests complete ===\n");
 

@@ -4,6 +4,10 @@
 /*
  * Logging module - provides timestamped logging at different severity levels
  *
+ * Each record is one line on stderr: a control character in a message, but tab,
+ * is written as \xNN, so text a caller passes on from a request can't start a
+ * record of its own.
+ *
  * Usage:
  *   log_init(LOG_INFO);  // Initialize with minimum level
  *   log_info("Server started on port %d", 8080);
