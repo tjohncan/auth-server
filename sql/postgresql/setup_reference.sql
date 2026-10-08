@@ -79,10 +79,10 @@ grant select, insert, update, delete on all tables in schema lookup_history to a
 -- !! IMPORTANT NOTE !! :: After revoking membership, auth_service cannot VACUUM tables owned
 -- by auth_dbo. Set cleaner_postgres_vacuum_enabled = false in auth.conf
 -- and rely on PostgreSQL's built-in autovacuum instead.
--- Likewise, ./auth-server --drophistory with enable_history_tables on makes the history
--- tables again, and ./auth-server --rekey sets the history functions aside and scrubs with
--- VACUUM FULL: both need the owner role. Grant auth_dbo to auth_service for the run, and
--- revoke it after (sql/README.md).
+-- Likewise, ./auth-server --drophistory scrubs pg_statistic with VACUUM FULL (and with
+-- enable_history_tables on makes the history tables again), and ./auth-server --rekey sets
+-- the history functions aside and scrubs with VACUUM FULL: both need the owner role. Grant
+-- auth_dbo to auth_service for the run, and revoke it after (sql/README.md).
 
 -- ============================================================================
 -- OPTIONAL: Read-only role for reporting / analytics

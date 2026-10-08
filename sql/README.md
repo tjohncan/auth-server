@@ -489,7 +489,9 @@ display name, a hash. After a key leak, or when history is no longer wanted, low
 It removes every history table and every trigger that fills one, in one transaction, then makes
 empty ones again if `enable_history_tables` is on. A failure rolls back and changes nothing. On
 SQLite it then rewrites the file (`VACUUM`) and empties the `-wal` file (a truncating checkpoint),
-so no page of the old rows stays behind. WAL archives, replicas and backups keep what they had.
+so no page of the old rows stays behind. On PostgreSQL the dropped tables' files go with them,
+and it rewrites `pg_statistic` (`VACUUM FULL`), where each table's planner statistics kept a
+sample of its columns. WAL archives, replicas and backups keep what they had.
 
 - **Every instance stopped.** An instance lock enforces it: a `<db_path>.lock` file beside an
   SQLite database, or an advisory lock in PostgreSQL. The run refuses while an instance holds it,
@@ -505,9 +507,12 @@ so no page of the old rows stays behind. WAL archives, replicas and backups keep
   server refuses to start when it can tell its statements reach different sessions.
 - **Turning `enable_history_tables` off** doesn't remove the existing tables or triggers, so history
   keeps being written. Run `--drophistory` after turning it off.
-- **PostgreSQL hardened per `setup_reference.sql`.** Dropping needs only what the login role owns:
-  the server made the history tables and their trigger functions. Making them again needs the
-  owner role for the run. Without it the run fails and changes nothing:
+- **PostgreSQL hardened per `setup_reference.sql`.** Dropping needs only what the login role owns
+  (the server made the history tables and their trigger functions), but rewriting `pg_statistic`
+  takes the database's owner, and making the tables again the owner role: `auth_dbo` is both, so
+  grant it for the run. Without the grant the run fails and changes nothing if
+  `enable_history_tables` is on; if it's off, the run drops history, then reports `pg_statistic`
+  unrewritten and exits non-zero, and `vacuum full pg_statistic` as the owner finishes it.
   ```sql
   grant auth_dbo to auth_service;
   -- ./auth-server --drophistory
@@ -570,8 +575,15 @@ In one transaction, `--rekey`:
 A value the old key won't open rolls everything back, naming its table and row. After COMMIT
 the replaced ciphertext and the old blind indexes are still in the files, so the run scrubs them:
 on SQLite it rewrites the file (`VACUUM`) and empties the `-wal` file; on PostgreSQL it runs
-`VACUUM FULL` on the re-sealed tables, which rewrites them and their indexes. It prints what it
+`VACUUM FULL` on the re-sealed tables, which rewrites them and their indexes, and on
+`encryption_params` (its replaced row holds the old salt) and `pg_statistic`. It prints what it
 re-sealed, per kind.
+
+On PostgreSQL, sealed columns and blind indexes keep no planner statistics: `schema.sql` sets
+their statistics target to 0. `ANALYZE`, which autovacuum runs, would otherwise keep a sample
+of their values in `pg_statistic`, where no rewrite reaches it, and anyone who may read a table
+may read its sample (the `pg_stats` view). The run checks, and reports NOT SCRUBBED, naming the
+columns, if any has statistics.
 
 - **Keeping the passphrase.** Give the same passphrase as both: everything is sealed again under
   keys from a fresh salt and the configured stretch. That's how a database made before
@@ -585,13 +597,14 @@ re-sealed, per kind.
   opens those.
 - **PostgreSQL hardened per `setup_reference.sql`.** Grant the owner role for the run, as for
   `--drophistory`. Setting the history functions aside replaces them, which takes CREATE on
-  the history schemas, and `VACUUM FULL` takes the tables' owner. Without the grant:
+  the history schemas, and `VACUUM FULL` takes the tables' owner, and for `pg_statistic` the
+  database's. Without the grant:
   - while history tables exist (whatever `enable_history_tables` says now), the run fails at
     the start and changes nothing;
   - with none (never made, or removed by `--drophistory`), it re-keys, then finds each table
     `VACUUM FULL` left unwritten (PostgreSQL only warns, and skips a table its role may not
-    vacuum), names them, reports NOT SCRUBBED and exits non-zero. `VACUUM FULL` on the
-    re-sealed tables, as the owner, finishes it.
+    vacuum), names them, reports NOT SCRUBBED and exits non-zero. `VACUUM FULL` on each, as
+    the owner, finishes it.
   ```sql
   grant auth_dbo to auth_service;
   -- ./auth-server --rekey
@@ -623,6 +636,26 @@ re-sealed, per kind.
   );
   -- hardened per setup_reference.sql: the login role's grant on it
   grant select, insert, update, delete on keys.encryption_params to auth_service;
+  ```
+- **PostgreSQL databases made before sealed columns kept no statistics** need that set by hand,
+  like any schema change, and the sample already taken removed. Until then, once autovacuum has
+  sampled them, the run reports NOT SCRUBBED. As a superuser:
+  ```sql
+  alter table keys.auth_request_signing
+    alter column current_secret set statistics 0, alter column prior_secret set statistics 0;
+  alter table keys.access_token_signing
+    alter column current_private_key set statistics 0,
+    alter column prior_private_key set statistics 0;
+  alter table security.user_account
+    alter column username set statistics 0, alter column username_hash set statistics 0;
+  alter table security.user_email
+    alter column email_address set statistics 0, alter column email_hash set statistics 0;
+  alter table security.user_mfa alter column secret set statistics 0;
+  alter table session.passwordless_login_token alter column email_address set statistics 0;
+  -- the sample already taken, then the file it was in
+  delete from pg_statistic s using pg_attribute a
+   where a.attrelid = s.starelid and a.attnum = s.staattnum and a.attstattarget = 0;
+  vacuum full pg_statistic;
   ```
 
 ### SQLite-Specific: Incremental Vacuum

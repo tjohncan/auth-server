@@ -2117,46 +2117,69 @@ done:
 }
 
 /*
- * --rekey run by a role that may write the sealed tables and set their history
- * aside, but may not vacuum them, as on a deployment hardened per
- * setup_reference.sql run without the owner role. VACUUM FULL then skips each
- * table with a warning and succeeds all the same: the run re-keys, and says it
- * didn't scrub (-2), since no table's file was rewritten.
+ * What PostgreSQL's scrub can't reach, said rather than passed over:
+ *   - --rekey run by a role that may write the sealed tables and set their
+ *     history aside, but may not vacuum them, as on a deployment hardened per
+ *     setup_reference.sql run without the owner role. VACUUM FULL then skips
+ *     each table with a warning and succeeds all the same: the run re-keys, and
+ *     says it didn't scrub (-2), since no table's file was rewritten.
+ *   - Planner statistics: ANALYZE takes no sample of a sealed column, which
+ *     schema.sql keeps out. One given statistics, as in a database made before
+ *     that, has its sample live in pg_statistic, which no rewrite reaches, so
+ *     the run says it didn't scrub. After sql/README.md's step it does,
+ *     encryption_params and pg_statistic rewritten too.
+ *   - --drophistory by a role that owns history but not the database: history
+ *     goes, and the run says it couldn't rewrite pg_statistic.
  *
  * Returns 0 on success.
  */
-static int test_pg_rekey_unscrubbed(const config_t *config) {
-    log_info("\nRe-key tests, without leave to vacuum (PostgreSQL)");
+static int test_pg_unscrubbed(const config_t *config) {
+    log_info("\nUnscrubbed tests (PostgreSQL)");
 
     db_handle_t *sdb = open_test_db(config);
     if (!sdb) {
-        log_error("Re-key unscrubbed: could not open a test database");
+        log_error("Unscrubbed: could not open a test database");
         return 1;
     }
 
     int failed = 1, total = 0;
-    char role[64], sql[1024];
-    encrypt_keys_t a, b;
-    encrypt_params_t params;
+    char role[64], sql[2048], statistic_node[32], params_node[32], node[32];
+    encrypt_keys_t a, b, c, d;
+    encrypt_params_t params, params_c, params_d;
     unsigned char user_id[16];
     rekey_report_t report;
+    drophistory_report_t dropped;
+    const char *statistic_node_sql = "SELECT pg_relation_filenode('pg_catalog.pg_statistic')";
+    const char *params_node_sql = "SELECT pg_relation_filenode('" TBL_ENCRYPTION_PARAMS "')";
+    const char *sealed_statistics_sql =
+        "SELECT count(*) FROM pg_stats WHERE schemaname || '.' || tablename || '.' || attname IN ("
+        "'security.user_account.username', 'security.user_account.username_hash', "
+        "'security.user_email.email_address', 'security.user_email.email_hash', "
+        "'session.passwordless_login_token.email_address', 'security.user_mfa.secret', "
+        "'keys.auth_request_signing.current_secret', 'keys.auth_request_signing.prior_secret', "
+        "'keys.access_token_signing.current_private_key', "
+        "'keys.access_token_signing.prior_private_key')";
 
     if (encrypt_derive_keys(config->encryption_key, NULL, &a) != 0 ||
         encrypt_params_new("pbkdf2-sha256", 1000, &params) != 0 ||
-        encrypt_derive_keys("the new passphrase", &params, &b) != 0) {
-        log_error("Re-key unscrubbed: could not derive keys");
+        encrypt_params_new("pbkdf2-sha256", 1000, &params_c) != 0 ||
+        encrypt_params_new("pbkdf2-sha256", 1000, &params_d) != 0 ||
+        encrypt_derive_keys("the new passphrase", &params, &b) != 0 ||
+        encrypt_derive_keys("a third passphrase", &params_c, &c) != 0 ||
+        encrypt_derive_keys("a fourth passphrase", &params_d, &d) != 0) {
+        log_error("Unscrubbed: could not derive keys");
         goto done;
     }
     encrypt_init_keys(&a);
     if (db_init_history_tables(sdb, DB_TYPE_POSTGRESQL, 1) != 0 ||
         user_create(sdb, "Alice", "alice@example.com", "a password", user_id) != 0 ||
         scratch_db_role(role, sizeof(role)) != 0) {
-        log_error("Re-key unscrubbed: could not set up");
+        log_error("Unscrubbed: could not set up");
         goto done;
     }
 
-    /* The run's role reads and writes the tables, and replaces the history
-       functions it owns; the tables it doesn't own, so it can't vacuum them */
+    /* 1. The run's role reads and writes the tables, and replaces the history
+          functions it owns; the tables it doesn't own, so it can't vacuum them */
     snprintf(sql, sizeof(sql),
              "GRANT USAGE ON SCHEMA keys, security, session, security_history TO %s;"
              "GRANT CREATE ON SCHEMA security_history TO %s;"
@@ -2168,31 +2191,105 @@ static int test_pg_rekey_unscrubbed(const config_t *config) {
              "SET ROLE %s",
              role, role, role, role, role, role, role);
     if (db_execute_direct(sdb, sql) != 0) {
-        log_error("Re-key unscrubbed: could not set up the run's role");
+        log_error("Unscrubbed: could not set up the run's role");
         goto done;
     }
     int rc = maintenance_rekey(sdb, DB_TYPE_POSTGRESQL, &a, &b, &params, &report);
     if (db_execute_direct(sdb, "RESET ROLE") != 0 || rc != -2 ||
         report.usernames != 1 || report.addresses != 1) {
-        log_error("Re-key unscrubbed: the run returned %d, re-keying %d usernames and %d addresses",
+        log_error("Unscrubbed: the run returned %d, re-keying %d usernames and %d addresses",
                   rc, report.usernames, report.addresses);
         goto done;
     }
     if (sealed_opening(sdb, &b, &total) != 2 || total != 2) {
-        log_error("Re-key unscrubbed: not every value was re-sealed");
+        log_error("Unscrubbed: not every value was re-sealed");
         goto done;
     }
     log_info("  a run that may not vacuum re-keys, and says it didn't scrub (OK)");
+
+    /* 2. ANALYZE takes no sample of a sealed column. Given one, username, the
+          run, which may vacuum all it rewrites, still says it didn't scrub */
+    if (db_execute_direct(sdb, "ANALYZE") != 0 || read_count(sdb, sealed_statistics_sql) != 0) {
+        log_error("Unscrubbed: ANALYZE took a sample of a sealed column");
+        goto done;
+    }
+    if (db_execute_direct(sdb, "ALTER TABLE " TBL_USER_ACCOUNT " ALTER COLUMN username "
+                               "SET STATISTICS -1; ANALYZE " TBL_USER_ACCOUNT) != 0 ||
+        read_count(sdb, sealed_statistics_sql) != 1) {
+        log_error("Unscrubbed: could not give username planner statistics");
+        goto done;
+    }
+    rc = maintenance_rekey(sdb, DB_TYPE_POSTGRESQL, &b, &c, &params_c, &report);
+    if (rc != -2 || sealed_opening(sdb, &c, &total) != 2) {
+        log_error("Unscrubbed: a run leaving a sealed column's statistics returned %d", rc);
+        goto done;
+    }
+    /* sql/README.md's step, for this column: no statistics, and the sample gone */
+    if (db_execute_direct(sdb, "ALTER TABLE " TBL_USER_ACCOUNT " ALTER COLUMN username "
+                               "SET STATISTICS 0;"
+                               "DELETE FROM pg_statistic s USING pg_attribute a "
+                               "WHERE a.attrelid = s.starelid AND a.attnum = s.staattnum "
+                               "AND a.attstattarget = 0") != 0 ||
+        read_count(sdb, sealed_statistics_sql) != 0 ||
+        read_stored_value(sdb, statistic_node_sql, statistic_node, sizeof(statistic_node)) != 0 ||
+        read_stored_value(sdb, params_node_sql, params_node, sizeof(params_node)) != 0) {
+        log_error("Unscrubbed: sql/README.md's step didn't remove username's statistics");
+        goto done;
+    }
+    rc = maintenance_rekey(sdb, DB_TYPE_POSTGRESQL, &c, &d, &params_d, &report);
+    if (rc != 0 || sealed_opening(sdb, &d, &total) != 2 ||
+        read_stored_value(sdb, statistic_node_sql, node, sizeof(node)) != 0 ||
+        strcmp(node, statistic_node) == 0 ||
+        read_stored_value(sdb, params_node_sql, node, sizeof(node)) != 0 ||
+        strcmp(node, params_node) == 0) {
+        log_error("Unscrubbed: after sql/README.md's step the run returned %d, or left "
+                  "pg_statistic or encryption_params unrewritten", rc);
+        goto done;
+    }
+    log_info("  no sealed column has planner statistics; one given some isn't scrubbed, and after "
+             "the step is, pg_statistic and encryption_params with it (OK)");
+
+    /* 3. --drophistory by the role, owning history but not the database */
+    snprintf(sql, sizeof(sql),
+             "DO $$ DECLARE r record; BEGIN "
+             "FOR r IN SELECT schemaname, tablename FROM pg_tables WHERE schemaname IN "
+             "('security_history', 'session_history', 'logging_history', 'lookup_history') LOOP "
+             "EXECUTE format('ALTER TABLE %%I.%%I OWNER TO %%I', r.schemaname, r.tablename, "
+             "'%s'); END LOOP; "
+             "FOR r IN SELECT n.nspname, p.proname FROM pg_proc p "
+             "JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname IN "
+             "('security_history', 'session_history', 'logging_history', 'lookup_history') LOOP "
+             "EXECUTE format('ALTER FUNCTION %%I.%%I() OWNER TO %%I', r.nspname, r.proname, "
+             "'%s'); END LOOP; END $$;"
+             "GRANT USAGE ON SCHEMA session_history, logging_history, lookup_history TO %s;"
+             "SET ROLE %s",
+             role, role, role, role);
+    if (db_execute_direct(sdb, sql) != 0) {
+        log_error("Unscrubbed: could not give the run's role the history");
+        goto done;
+    }
+    rc = maintenance_drop_history(sdb, DB_TYPE_POSTGRESQL, 0, &dropped);
+    if (db_execute_direct(sdb, "RESET ROLE") != 0 || rc != -2 || dropped.tables_dropped == 0 ||
+        read_count(sdb, "SELECT count(*) FROM pg_tables WHERE schemaname IN ('security_history', "
+                        "'session_history', 'logging_history', 'lookup_history')") != 0) {
+        log_error("Unscrubbed: --drophistory without leave to rewrite pg_statistic returned %d, "
+                  "dropping %d tables", rc, dropped.tables_dropped);
+        goto done;
+    }
+    log_info("  --drophistory that may not rewrite pg_statistic drops history, and says it didn't "
+             "scrub (OK)");
 
     failed = 0;
 
 done:
     OPENSSL_cleanse(&a, sizeof(a));
     OPENSSL_cleanse(&b, sizeof(b));
+    OPENSSL_cleanse(&c, sizeof(c));
+    OPENSSL_cleanse(&d, sizeof(d));
     encrypt_init(config->encryption_key);
     db_disconnect(sdb);
     if (!failed) {
-        log_info("Re-key unscrubbed tests passed!");
+        log_info("Unscrubbed tests passed!");
     }
     return failed;
 }
@@ -3528,7 +3625,7 @@ static const struct {
 #ifdef DB_BACKEND_POSTGRESQL
     { test_pg_params_race, 1 },
     { test_pg_instance_lock, 1 },
-    { test_pg_rekey_unscrubbed, 1 },
+    { test_pg_unscrubbed, 1 },
 #endif
 };
 

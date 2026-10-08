@@ -833,6 +833,36 @@ create index idx_access_token_client_resource_server
 create index idx_invitation_token_user
   on session.invitation_token(user_account_pin);
 
+-- ============================================================================
+-- SEALED COLUMNS - No planner statistics
+-- ============================================================================
+-- ANALYZE (autovacuum runs it) keeps a sample of each column's values in
+-- pg_statistic, which no rewrite of the table reaches: after --rekey it would
+-- still hold values sealed under the old key. Sealed columns and blind indexes
+-- are kept out. Their values are random, so a sample tells the planner little.
+
+alter table keys.auth_request_signing
+  alter column current_secret set statistics 0
+, alter column prior_secret set statistics 0;
+
+alter table keys.access_token_signing
+  alter column current_private_key set statistics 0
+, alter column prior_private_key set statistics 0;
+
+alter table security.user_account
+  alter column username set statistics 0
+, alter column username_hash set statistics 0;
+
+alter table security.user_email
+  alter column email_address set statistics 0
+, alter column email_hash set statistics 0;
+
+alter table security.user_mfa
+  alter column secret set statistics 0;
+
+alter table session.passwordless_login_token
+  alter column email_address set statistics 0;
+
 reset role;
 
 commit;

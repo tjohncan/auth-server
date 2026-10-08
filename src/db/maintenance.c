@@ -37,6 +37,50 @@ static int sqlite_scrub(db_handle_t *db) {
     return scrubbed ? 0 : -1;
 }
 
+/* Each relation's file node, into nodes. Returns 0, or -1. */
+static int pg_filenodes(db_handle_t *db, const char *const *relations, size_t count,
+                        char nodes[][24]) {
+    for (size_t i = 0; i < count; i++) {
+        db_result_t *result = NULL;
+        if (db_query(db, &result, "SELECT pg_relation_filenode('%s')", relations[i]) != 0 ||
+            db_result_row_count(result) != 1 || !db_result_get(result, 0, 0)) {
+            db_result_free(result);
+            return -1;
+        }
+        snprintf(nodes[i], 24, "%s", db_result_get(result, 0, 0));
+        db_result_free(result);
+    }
+    return 0;
+}
+
+#define PG_REWRITE_MAX 16
+
+/* PostgreSQL, after a run: VACUUM FULL rewrites each relation, with its indexes
+   and TOAST, into new files without its dead rows. A role that may not vacuum
+   one gets only a WARNING and it skipped, the statement succeeding all the
+   same, so what proves it is each one's file having changed. Names each one
+   left as it was; returns how many, or -1 if the statement failed. */
+static int pg_rewrite(db_handle_t *db, const char *const *relations, size_t count) {
+    char sql[512], before[PG_REWRITE_MAX][24], after[PG_REWRITE_MAX][24];
+    size_t pos = 0;
+    int built = count <= PG_REWRITE_MAX && str_appendf(sql, sizeof(sql), &pos, "VACUUM FULL") == 0;
+    for (size_t i = 0; built && i < count; i++) {
+        built = str_appendf(sql, sizeof(sql), &pos, "%s %s", i ? "," : "", relations[i]) == 0;
+    }
+    if (!built || pg_filenodes(db, relations, count, before) != 0 ||
+        db_execute_direct(db, sql) != 0 || pg_filenodes(db, relations, count, after) != 0) {
+        return -1;
+    }
+    int kept = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (strcmp(before[i], after[i]) == 0) {
+            log_error("%s wasn't rewritten: its old rows are still in its file", relations[i]);
+            kept++;
+        }
+    }
+    return kept;
+}
+
 /* Run one DROP of a catalog object (schema may be NULL), logging what went */
 static int drop(db_handle_t *db, const char *format, const char *schema, const char *name) {
     char quoted_schema[160] = "", quoted_name[160], target[330], sql[400];
@@ -132,7 +176,19 @@ int maintenance_drop_history(db_handle_t *db, db_type_t type, int rebuild,
         return -1;
     }
 
-    if (type != DB_TYPE_SQLITE) return 0;
+    if (type != DB_TYPE_SQLITE) {
+        /* DROP TABLE removes a table's files, but not its planner statistics, a
+           sample of each column: they're dead rows in pg_statistic now */
+        static const char *const statistics[] = { "pg_catalog.pg_statistic" };
+        if (out->tables_dropped > 0 && pg_rewrite(db, statistics, 1) != 0) {
+            log_error("History is gone, but a sample of it may still be in pg_statistic's file. "
+                      "Rewriting that takes the database's owner (on a deployment hardened per "
+                      "setup_reference.sql, grant auth_dbo to auth_service for the run): as the "
+                      "owner, run VACUUM FULL pg_catalog.pg_statistic");
+            return -2;
+        }
+        return 0;
+    }
 
     /* The dropped rows' pages are free but still in the file, and their page
        images may be in the -wal file */
@@ -386,26 +442,44 @@ static int history_holding_old_values(db_handle_t *db, db_type_t type) {
     return holding;
 }
 
-/* The tables --rekey re-seals, which on PostgreSQL its VACUUM FULL rewrites */
+/* What --rekey rewrites on PostgreSQL: the tables it re-sealed; encryption_params,
+   whose replaced row holds the old salt; and pg_statistic, where planner
+   statistics replaced or dropped are dead rows */
 static const char *const RESCRUBBED[] = {
     TBL_USER_ACCOUNT, TBL_USER_EMAIL, TBL_PASSWORDLESS_LOGIN_TOKEN, TBL_USER_MFA,
-    TBL_AUTH_REQUEST_SIGNING, TBL_ACCESS_TOKEN_SIGNING,
+    TBL_AUTH_REQUEST_SIGNING, TBL_ACCESS_TOKEN_SIGNING, TBL_ENCRYPTION_PARAMS,
+    "pg_catalog.pg_statistic",
 };
 #define RESCRUBBED_COUNT (sizeof(RESCRUBBED) / sizeof(RESCRUBBED[0]))
 
-/* Each re-sealed table's file node, into nodes. Returns 0, or -1. */
-static int pg_filenodes(db_handle_t *db, char nodes[][24]) {
-    for (size_t i = 0; i < RESCRUBBED_COUNT; i++) {
-        db_result_t *result = NULL;
-        if (db_query(db, &result, "SELECT pg_relation_filenode('%s')", RESCRUBBED[i]) != 0 ||
-            db_result_row_count(result) != 1 || !db_result_get(result, 0, 0)) {
-            db_result_free(result);
-            return -1;
-        }
-        snprintf(nodes[i], 24, "%s", db_result_get(result, 0, 0));
-        db_result_free(result);
+/* The sealed columns and blind indexes, as pg_stats names them. Planner
+   statistics hold a sample of a column's values in pg_statistic, which no
+   rewrite reaches while it's live, so schema.sql keeps these out of them. */
+static const char SEALED_COLUMNS[] =
+    "'" TBL_USER_ACCOUNT ".username', '" TBL_USER_ACCOUNT ".username_hash', "
+    "'" TBL_USER_EMAIL ".email_address', '" TBL_USER_EMAIL ".email_hash', "
+    "'" TBL_PASSWORDLESS_LOGIN_TOKEN ".email_address', '" TBL_USER_MFA ".secret', "
+    "'" TBL_AUTH_REQUEST_SIGNING ".current_secret', '" TBL_AUTH_REQUEST_SIGNING ".prior_secret', "
+    "'" TBL_ACCESS_TOKEN_SIGNING ".current_private_key', "
+    "'" TBL_ACCESS_TOKEN_SIGNING ".prior_private_key'";
+
+/* Which sealed columns have planner statistics, comma-separated into out.
+   Returns how many, or -1. */
+static int pg_sealed_statistics(db_handle_t *db, char *out, size_t size) {
+    db_result_t *result = NULL;
+    if (db_query(db, &result, "SELECT schemaname || '.' || tablename || '.' || attname "
+                 "FROM pg_stats WHERE schemaname || '.' || tablename || '.' || attname IN (%s) "
+                 "ORDER BY 1", SEALED_COLUMNS) != 0) {
+        return -1;
     }
-    return 0;
+    size_t pos = 0;
+    out[0] = '\0';
+    int count = db_result_row_count(result);
+    for (int i = 0; i < count; i++) {
+        str_appendf(out, size, &pos, "%s%s", i ? ", " : "", db_result_get(result, i, 0));
+    }
+    db_result_free(result);
+    return count;
 }
 
 int maintenance_rekey(db_handle_t *db, db_type_t type, const encrypt_keys_t *old_keys,
@@ -500,33 +574,27 @@ int maintenance_rekey(db_handle_t *db, db_type_t type, const encrypt_keys_t *old
             return -2;
         }
     } else {
-        /* VACUUM FULL rewrites each table, and its indexes, into new files: that is
-           the scrub. A role that may not vacuum a table gets only a WARNING and
-           the table skipped, the statement succeeding all the same, so what
-           proves it is each table's file having changed. */
-        char before[RESCRUBBED_COUNT][24], after[RESCRUBBED_COUNT][24];
-        int vacuumed = pg_filenodes(db, before) == 0 &&
-                       db_execute_direct(db, "VACUUM FULL " TBL_USER_ACCOUNT ", " TBL_USER_EMAIL ", "
-                                         TBL_PASSWORDLESS_LOGIN_TOKEN ", " TBL_USER_MFA ", "
-                                         TBL_AUTH_REQUEST_SIGNING ", "
-                                         TBL_ACCESS_TOKEN_SIGNING) == 0 &&
-                       pg_filenodes(db, after) == 0;
-        int kept = 0;
-        for (size_t i = 0; vacuumed && i < RESCRUBBED_COUNT; i++) {
-            if (strcmp(before[i], after[i]) == 0) {
-                log_error("%s wasn't rewritten: its old values are still in its file", RESCRUBBED[i]);
-                kept++;
-            }
-        }
-        if (!vacuumed || kept) {
+        int kept = pg_rewrite(db, RESCRUBBED, RESCRUBBED_COUNT);
+        if (kept != 0) {
             log_error("Re-keyed, but not scrubbed: the replaced values are still in dead tuples, and "
                       "the old blind indexes in old index entries. The run's role may not VACUUM "
                       "these tables (on a deployment hardened per setup_reference.sql, grant "
                       "auth_dbo to auth_service for the run). As the tables' owner, run VACUUM FULL "
-                      "on user_account, user_email, passwordless_login_token, user_mfa and both "
-                      "signing tables.");
-            return -2;
+                      "on user_account, user_email, passwordless_login_token, user_mfa, both "
+                      "signing tables and encryption_params; as the database's, on "
+                      "pg_catalog.pg_statistic.");
         }
+        char columns[640];
+        int sampled = pg_sealed_statistics(db, columns, sizeof(columns));
+        if (sampled < 0) {
+            log_error("Re-keyed, but couldn't read which sealed columns have planner statistics");
+        } else if (sampled > 0) {
+            log_error("Re-keyed, but not scrubbed: pg_statistic keeps a sample of %s, which may be "
+                      "under the old key (planner statistics, which no rewrite reaches). "
+                      "sql/README.md shows, under --rekey, how to keep sealed columns out of them "
+                      "and remove the sample.", columns);
+        }
+        if (kept != 0 || sampled != 0) return -2;
     }
     return 0;
 }

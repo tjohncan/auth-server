@@ -30,8 +30,8 @@ typedef struct {
  *   PostgreSQL: each history table and its tg_fn_* trigger functions, with
  *     CASCADE, which takes their triggers on the main tables (PostgreSQL prints
  *     a NOTICE for each). The history schemas stay. The login role owns all of
- *     these (the server made them after schema.sql's reset role), so this needs
- *     no owner role, hardened or not.
+ *     these (the server made them after schema.sql's reset role), so dropping
+ *     needs no owner role, hardened or not.
  *   With rebuild set (enable_history_tables), empty history is then made again
  *   with the startup code, as the same role, so ownership is what the first
  *   start made. On a PostgreSQL hardened per setup_reference.sql that needs the
@@ -40,11 +40,14 @@ typedef struct {
  *
  * After COMMIT, on SQLite: VACUUM, then wal_checkpoint(TRUNCATE), so no page of
  * the dropped rows stays in the file or its -wal file. The checkpoint must
- * report no other connection busy. (PostgreSQL's DROP TABLE removes the files.)
- * WAL archives, replicas and backups keep what they had.
+ * report no other connection busy. PostgreSQL's DROP TABLE removes the files,
+ * but each table's planner statistics, a sample of its columns, are then dead
+ * rows in pg_statistic: VACUUM FULL rewrites it, which takes the database's
+ * owner, proven by its file node changing. WAL archives, replicas and backups
+ * keep what they had.
  *
  * Returns: 0; -1 if nothing changed (rolled back, or failed before);
- *          -2 if history is gone but the SQLite scrub after it failed
+ *          -2 if history is gone but the scrub after it failed
  */
 int maintenance_drop_history(db_handle_t *db, db_type_t type, int rebuild,
                              drophistory_report_t *out);
@@ -83,8 +86,12 @@ typedef struct {
  * After COMMIT the old-key ciphertext the re-key replaced is still in the
  * files: SQLite's free space and -wal, PostgreSQL's dead tuples and old index
  * entries. SQLite: VACUUM, then a truncating checkpoint. PostgreSQL: VACUUM
- * FULL on the re-sealed tables, which needs their owner (the owner role, on a
- * deployment hardened per setup_reference.sql).
+ * FULL on the re-sealed tables, on encryption_params (the old salt) and on
+ * pg_statistic, proven by each file node changing; the tables need their
+ * owner, pg_statistic the database's (the owner role, on a deployment
+ * hardened per setup_reference.sql). Planner statistics are a sample of a
+ * column's values that no rewrite reaches while they're live, so schema.sql
+ * keeps sealed columns out of them; one that has some isn't scrubbed.
  *
  * History made before stays sealed under the old key until it's purged:
  * --drophistory next (out->history_tables says how many tables hold some).
