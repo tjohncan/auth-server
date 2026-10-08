@@ -512,7 +512,9 @@ sample of its columns. WAL archives, replicas and backups keep what they had.
   takes the database's owner, and making the tables again the owner role: `auth_dbo` is both, so
   grant it for the run. Without the grant the run fails and changes nothing if
   `enable_history_tables` is on; if it's off, the run drops history, then reports `pg_statistic`
-  unrewritten and exits non-zero, and `vacuum full pg_statistic` as the owner finishes it.
+  unrewritten and exits non-zero. Running it again with the grant finishes it (every run rewrites
+  `pg_statistic`, with or without history to drop), as does `vacuum full pg_statistic` as the
+  owner.
   ```sql
   grant auth_dbo to auth_service;
   -- ./auth-server --drophistory

@@ -2129,7 +2129,8 @@ done:
  *     the run says it didn't scrub. After sql/README.md's step it does,
  *     encryption_params and pg_statistic rewritten too.
  *   - --drophistory by a role that owns history but not the database: history
- *     goes, and the run says it couldn't rewrite pg_statistic.
+ *     goes, and the run says it couldn't rewrite pg_statistic. Run again with
+ *     nothing left to drop, it says so again, and run with leave, finishes.
  *
  * Returns 0 on success.
  */
@@ -2269,15 +2270,31 @@ static int test_pg_unscrubbed(const config_t *config) {
         goto done;
     }
     rc = maintenance_drop_history(sdb, DB_TYPE_POSTGRESQL, 0, &dropped);
-    if (db_execute_direct(sdb, "RESET ROLE") != 0 || rc != -2 || dropped.tables_dropped == 0 ||
+    if (rc != -2 || dropped.tables_dropped == 0 ||
         read_count(sdb, "SELECT count(*) FROM pg_tables WHERE schemaname IN ('security_history', "
                         "'session_history', 'logging_history', 'lookup_history')") != 0) {
+        db_execute_direct(sdb, "RESET ROLE");
         log_error("Unscrubbed: --drophistory without leave to rewrite pg_statistic returned %d, "
                   "dropping %d tables", rc, dropped.tables_dropped);
         goto done;
     }
-    log_info("  --drophistory that may not rewrite pg_statistic drops history, and says it didn't "
-             "scrub (OK)");
+    /* Run again with nothing left to drop: still unscrubbed without leave, and
+       finished with it */
+    rc = maintenance_drop_history(sdb, DB_TYPE_POSTGRESQL, 0, &dropped);
+    int again = -1;
+    if (db_execute_direct(sdb, "RESET ROLE") == 0 && rc == -2 && dropped.tables_dropped == 0 &&
+        read_stored_value(sdb, statistic_node_sql, statistic_node, sizeof(statistic_node)) == 0) {
+        again = maintenance_drop_history(sdb, DB_TYPE_POSTGRESQL, 0, &dropped);
+    }
+    if (rc != -2 || again != 0 ||
+        read_stored_value(sdb, statistic_node_sql, node, sizeof(node)) != 0 ||
+        strcmp(node, statistic_node) == 0) {
+        log_error("Unscrubbed: --drophistory run again returned %d without leave and %d with it, "
+                  "or didn't rewrite pg_statistic", rc, again);
+        goto done;
+    }
+    log_info("  --drophistory that may not rewrite pg_statistic drops history and says it didn't "
+             "scrub; run again, it says so again, and with leave it finishes (OK)");
 
     failed = 0;
 

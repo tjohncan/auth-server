@@ -178,13 +178,16 @@ int maintenance_drop_history(db_handle_t *db, db_type_t type, int rebuild,
 
     if (type != DB_TYPE_SQLITE) {
         /* DROP TABLE removes a table's files, but not its planner statistics, a
-           sample of each column: they're dead rows in pg_statistic now */
+           sample of each column: they're dead rows in pg_statistic now. Every
+           run rewrites it, so one that found nothing left to drop still finishes
+           an earlier run that couldn't. */
         static const char *const statistics[] = { "pg_catalog.pg_statistic" };
-        if (out->tables_dropped > 0 && pg_rewrite(db, statistics, 1) != 0) {
-            log_error("History is gone, but a sample of it may still be in pg_statistic's file. "
-                      "Rewriting that takes the database's owner (on a deployment hardened per "
-                      "setup_reference.sql, grant auth_dbo to auth_service for the run): as the "
-                      "owner, run VACUUM FULL pg_catalog.pg_statistic");
+        if (pg_rewrite(db, statistics, 1) != 0) {
+            log_error("History is gone, but a sample of it may still be in pg_statistic's file, "
+                      "and rewriting that takes the database's owner. Run --drophistory again "
+                      "as a role that has it (on a deployment hardened per setup_reference.sql, "
+                      "grant auth_dbo to auth_service for the run), or as the owner run VACUUM "
+                      "FULL pg_catalog.pg_statistic");
             return -2;
         }
         return 0;

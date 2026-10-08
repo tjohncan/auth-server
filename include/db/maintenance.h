@@ -43,8 +43,9 @@ typedef struct {
  * report no other connection busy. PostgreSQL's DROP TABLE removes the files,
  * but each table's planner statistics, a sample of its columns, are then dead
  * rows in pg_statistic: VACUUM FULL rewrites it, which takes the database's
- * owner, proven by its file node changing. WAL archives, replicas and backups
- * keep what they had.
+ * owner, proven by its file node changing. Every run does, dropping or not,
+ * so running again finishes a run that couldn't. WAL archives, replicas and
+ * backups keep what they had.
  *
  * Returns: 0; -1 if nothing changed (rolled back, or failed before);
  *          -2 if history is gone but the scrub after it failed
