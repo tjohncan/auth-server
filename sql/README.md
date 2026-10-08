@@ -358,10 +358,10 @@ The `client.is_universal` flag enables special public clients (like system manag
   deleted. On SQLite that's `VACUUM`, then `PRAGMA wal_checkpoint(TRUNCATE)`, with every
   instance stopped, as `--drophistory` does. On PostgreSQL it's `VACUUM FULL` on `user_account`,
   `client_key`, `resource_server_key` and `organization_key`, and on the same tables in
-  `security_history` while history is kept, as the database's owner (`auth_dbo` in
-  `setup_reference.sql`: the history tables belong to the login role), which locks each table
-  while it runs. Backups and WAL archives keep what they had, and on PostgreSQL so does each
-  server's `pg_wal` until its segments are overwritten.
+  `security_history` where they exist (turning history off doesn't remove them), as the
+  database's owner (`auth_dbo` in `setup_reference.sql`: the history tables belong to the login
+  role), which locks each table while it runs. Backups and WAL archives keep what they had, and
+  on PostgreSQL so does each server's `pg_wal` until its segments are overwritten.
 - Recovery codes aren't hashed again: a code is used once, and its siblings' plaintexts are
   unknown. A new method reaches them when the user regenerates the set.
 - Until then, a secret costs what its old settings cost to check, while a missing account (or an
