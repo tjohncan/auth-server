@@ -342,8 +342,14 @@ static int run_rekey(const config_t *config, const char *connection_string) {
             printf("NOT SCRUBBED: the replaced values are still in the database's files (the "
                    "error above says how to finish it).\n");
         }
-        printf("Backups, WAL archives and replicas made before this still hold the old-key "
-               "values.\n");
+        if (config->db_type == DB_TYPE_SQLITE) {
+            printf("Backups made before this, and any copy of the database or its -wal file "
+                   "from before it ended, still hold the old-key values.\n");
+        } else {
+            printf("Backups made before this still hold the old-key values, and so does the WAL "
+                   "up to its end, this run's own included: archived, on replicas, and in pg_wal "
+                   "until it's overwritten (sql/README.md).\n");
+        }
         printf("Start every instance with the new encryption_key, and remove "
                "encryption_key_previous.\n");
     }

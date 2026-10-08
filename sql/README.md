@@ -592,9 +592,15 @@ columns, if any has statistics.
 - **History** made before the re-key stays sealed under the old key. After a leak, run
   `--drophistory` next; `--rekey` says how many history tables of the re-sealed tables (those of
   `user_account`, `user_email` and `user_mfa`) hold some.
-- **Backups, WAL archives and replicas** made before the scrub hold the old-key values, as they
-  did before the re-key, and so does any copy of the old database. A leaked passphrase still
-  opens those.
+- **What the run doesn't reach.** Backups made before it, and any other copy of the database
+  from before it, still hold the old-key values, and a leaked passphrase still opens them. On
+  PostgreSQL so does the WAL written up to the run's end, the run's own included: each page an
+  update first touches after a checkpoint is logged whole, with the replaced row still on it.
+  That's the WAL archive up to then, each replica's `pg_wal`, and the primary's until those
+  segments are overwritten (a copy of the data directory takes them along). After the response
+  to a leak (`--rekey`, then `--drophistory`), as a superuser,
+  `checkpoint; select pg_switch_wal();` ends the segment written last: treat the archive up to
+  there like a backup from before.
 - **PostgreSQL hardened per `setup_reference.sql`.** Grant the owner role for the run, as for
   `--drophistory`. Setting the history functions aside replaces them, which takes CREATE on
   the history schemas, and `VACUUM FULL` takes the tables' owner, and for `pg_statistic` the
