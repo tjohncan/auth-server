@@ -14,6 +14,9 @@
  *   same name in <schema>_history for PostgreSQL)
  * - History table has: history_created_at, history_triggering_action_code,
  *   all base table columns (with actual types), and history_pin
+ * - PostgreSQL: a column the base table keeps out of planner statistics
+ *   (statistics target 0: sealed columns, the hashes of secrets) has its copy
+ *   kept out too
  * - Installs BEFORE UPDATE and BEFORE DELETE triggers to populate history
  *
  * Design:

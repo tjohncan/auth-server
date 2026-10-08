@@ -2123,11 +2123,12 @@ done:
  *     setup_reference.sql run without the owner role. VACUUM FULL then skips
  *     each table with a warning and succeeds all the same: the run re-keys, and
  *     says it didn't scrub (-2), since no table's file was rewritten.
- *   - Planner statistics: ANALYZE takes no sample of a sealed column, which
- *     schema.sql keeps out. One given statistics, as in a database made before
- *     that, has its sample live in pg_statistic, which no rewrite reaches, so
- *     the run says it didn't scrub. After sql/README.md's step it does,
- *     encryption_params and pg_statistic rewritten too.
+ *   - Planner statistics: ANALYZE takes no sample of a sealed column or a
+ *     secret's hash, which schema.sql keeps out, nor of history's copies. One
+ *     given statistics, as in a database made before that, has its sample live
+ *     in pg_statistic, which no rewrite reaches, so the run says it didn't
+ *     scrub. After sql/README.md's step it does, encryption_params and
+ *     pg_statistic rewritten too.
  *   - --drophistory by a role that owns history but not the database: history
  *     goes, and the run says it couldn't rewrite pg_statistic. Run again with
  *     nothing left to drop, it says so again, and run with leave, finishes.
@@ -2152,14 +2153,14 @@ static int test_pg_unscrubbed(const config_t *config) {
     drophistory_report_t dropped;
     const char *statistic_node_sql = "SELECT pg_relation_filenode('pg_catalog.pg_statistic')";
     const char *params_node_sql = "SELECT pg_relation_filenode('" TBL_ENCRYPTION_PARAMS "')";
-    const char *sealed_statistics_sql =
-        "SELECT count(*) FROM pg_stats WHERE schemaname || '.' || tablename || '.' || attname IN ("
-        "'security.user_account.username', 'security.user_account.username_hash', "
-        "'security.user_email.email_address', 'security.user_email.email_hash', "
-        "'session.passwordless_login_token.email_address', 'security.user_mfa.secret', "
-        "'keys.auth_request_signing.current_secret', 'keys.auth_request_signing.prior_secret', "
-        "'keys.access_token_signing.current_private_key', "
-        "'keys.access_token_signing.prior_private_key')";
+    /* Samples of what's kept out of planner statistics: sealed columns, blind
+       indexes and the hashes of secrets, and history's copies of them */
+    const char *kept_out_sql =
+        "SELECT count(*) FROM pg_stats "
+        "WHERE schemaname IN ('keys', 'security', 'session', 'security_history') "
+        "AND attname IN ('username', 'username_hash', 'email_address', 'email_hash', 'secret', "
+        "'secret_hash', 'current_secret', 'prior_secret', 'current_private_key', "
+        "'prior_private_key')";
 
     if (encrypt_derive_keys(config->encryption_key, NULL, &a) != 0 ||
         encrypt_params_new("pbkdf2-sha256", 1000, &params) != 0 ||
@@ -2208,15 +2209,20 @@ static int test_pg_unscrubbed(const config_t *config) {
     }
     log_info("  a run that may not vacuum re-keys, and says it didn't scrub (OK)");
 
-    /* 2. ANALYZE takes no sample of a sealed column. Given one, username, the
-          run, which may vacuum all it rewrites, still says it didn't scrub */
-    if (db_execute_direct(sdb, "ANALYZE") != 0 || read_count(sdb, sealed_statistics_sql) != 0) {
-        log_error("Unscrubbed: ANALYZE took a sample of a sealed column");
+    /* 2. ANALYZE takes no sample of a sealed column or a secret's hash, nor of
+          history's copies (the updates give history rows). Given one, username,
+          the run, which may vacuum all it rewrites, still says it didn't scrub */
+    if (db_execute_direct(sdb, "UPDATE " TBL_USER_ACCOUNT " SET updated_at = updated_at;"
+                               "UPDATE " TBL_USER_EMAIL " SET updated_at = updated_at;"
+                               "ANALYZE") != 0 ||
+        read_count(sdb, "SELECT count(*) FROM " HISTORY_OF("security", "user_account")) != 1 ||
+        read_count(sdb, kept_out_sql) != 0) {
+        log_error("Unscrubbed: ANALYZE took a sample of a sealed column or a secret's hash");
         goto done;
     }
     if (db_execute_direct(sdb, "ALTER TABLE " TBL_USER_ACCOUNT " ALTER COLUMN username "
                                "SET STATISTICS -1; ANALYZE " TBL_USER_ACCOUNT) != 0 ||
-        read_count(sdb, sealed_statistics_sql) != 1) {
+        read_count(sdb, kept_out_sql) != 1) {
         log_error("Unscrubbed: could not give username planner statistics");
         goto done;
     }
@@ -2231,7 +2237,7 @@ static int test_pg_unscrubbed(const config_t *config) {
                                "DELETE FROM pg_statistic s USING pg_attribute a "
                                "WHERE a.attrelid = s.starelid AND a.attnum = s.staattnum "
                                "AND a.attstattarget = 0") != 0 ||
-        read_count(sdb, sealed_statistics_sql) != 0 ||
+        read_count(sdb, kept_out_sql) != 0 ||
         read_stored_value(sdb, statistic_node_sql, statistic_node, sizeof(statistic_node)) != 0 ||
         read_stored_value(sdb, params_node_sql, params_node, sizeof(params_node)) != 0) {
         log_error("Unscrubbed: sql/README.md's step didn't remove username's statistics");
@@ -2247,8 +2253,9 @@ static int test_pg_unscrubbed(const config_t *config) {
                   "pg_statistic or encryption_params unrewritten", rc);
         goto done;
     }
-    log_info("  no sealed column has planner statistics; one given some isn't scrubbed, and after "
-             "the step is, pg_statistic and encryption_params with it (OK)");
+    log_info("  no sealed column or secret's hash has planner statistics, in history either; one "
+             "given some isn't scrubbed, and after the step is, pg_statistic and "
+             "encryption_params with it (OK)");
 
     /* 3. --drophistory by the role, owning history but not the database */
     snprintf(sql, sizeof(sql),

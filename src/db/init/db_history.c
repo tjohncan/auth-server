@@ -4,6 +4,7 @@
 #include "db/init/db_history.h"
 #include "db/db_sql.h"
 #include "util/log.h"
+#include "util/str.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -720,6 +721,61 @@ static int ensure_history_schema_postgresql(db_handle_t *db, const char *base_sc
 }
 
 /*
+ * Keep a history table's copies out of planner statistics wherever its base
+ * table keeps a column out (schema.sql: sealed columns and the hashes of
+ * secrets). A sample of history would outlive the rows it was taken from: an
+ * ANALYZE that finds the table emptied leaves the last sample in place.
+ */
+static int keep_statistics_off_postgresql(db_handle_t *db, const char *base_schema,
+                                          const char *table_name, const char *history_schema) {
+    char literal_schema[MAX_TABLE_NAME_SIZE], literal_table[MAX_TABLE_NAME_SIZE], sql[512];
+    quote_literal(literal_schema, sizeof(literal_schema), base_schema);
+    quote_literal(literal_table, sizeof(literal_table), table_name);
+    snprintf(sql, sizeof(sql),
+             "SELECT a.attname FROM pg_attribute a "
+             "JOIN pg_class c ON c.oid = a.attrelid "
+             "JOIN pg_namespace n ON n.oid = c.relnamespace "
+             "WHERE n.nspname = %s AND c.relname = %s "
+             "AND a.attnum > 0 AND NOT a.attisdropped AND a.attstattarget = 0 "
+             "ORDER BY a.attnum;",
+             literal_schema, literal_table);
+
+    db_result_t *result = NULL;
+    if (db_query(db, &result, "%s", sql) != 0) {
+        log_error("Failed to read which columns of %s.%s keep no statistics",
+                  base_schema, table_name);
+        return -1;
+    }
+
+    char ddl[2048], quoted_schema[MAX_TABLE_NAME_SIZE * 2], quoted_table[MAX_TABLE_NAME_SIZE * 2];
+    char quoted_col[MAX_TABLE_NAME_SIZE * 2];
+    size_t pos = 0;
+    quote_identifier(quoted_schema, sizeof(quoted_schema), history_schema);
+    quote_identifier(quoted_table, sizeof(quoted_table), table_name);
+    int count = db_result_row_count(result);
+    int built = str_appendf(ddl, sizeof(ddl), &pos, "ALTER TABLE %s.%s", quoted_schema,
+                            quoted_table) == 0;
+    for (int i = 0; built && i < count; i++) {
+        const char *col = db_result_get(result, i, 0);
+        if (!col) {
+            built = 0;
+            break;
+        }
+        quote_identifier(quoted_col, sizeof(quoted_col), col);
+        built = str_appendf(ddl, sizeof(ddl), &pos, "%s ALTER COLUMN %s SET STATISTICS 0",
+                            i ? "," : "", quoted_col) == 0;
+    }
+    db_result_free(result);
+
+    if (!built || (count > 0 && db_execute_direct(db, ddl) != 0)) {
+        log_error("Failed to keep %s.%s's copies out of planner statistics",
+                  history_schema, table_name);
+        return -1;
+    }
+    return 0;
+}
+
+/*
  * Create history table for PostgreSQL
  * Table name format: <schema>_history.<table_name>
  *
@@ -825,7 +881,8 @@ static int create_history_table_postgresql(db_handle_t *db, const char *base_sch
 
     /* Execute DDL */
     rc = db_execute_direct(db, ddl);
-    if (rc != 0) {
+    if (rc != 0 || keep_statistics_off_postgresql(db, base_schema, base_table_name,
+                                                  history_schema) != 0) {
         log_error("Failed to create history table: %s.%s", history_schema, base_table_name);
         free(columns);
         free(ddl);

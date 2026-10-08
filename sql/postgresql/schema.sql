@@ -834,12 +834,15 @@ create index idx_invitation_token_user
   on session.invitation_token(user_account_pin);
 
 -- ============================================================================
--- SEALED COLUMNS - No planner statistics
+-- SEALED COLUMNS AND SECRET HASHES - No planner statistics
 -- ============================================================================
 -- ANALYZE (autovacuum runs it) keeps a sample of each column's values in
--- pg_statistic, which no rewrite of the table reaches: after --rekey it would
--- still hold values sealed under the old key. Sealed columns and blind indexes
--- are kept out. Their values are random, so a sample tells the planner little.
+-- pg_statistic, which outlives the rows it was taken from: after --rekey it
+-- would still hold values sealed under the old key, and after a hashing method
+-- is retired, hashes made with it. Sealed columns, blind indexes and the hashes
+-- of secrets are kept out, and so are history's copies of them (the server
+-- makes history tables that way). Their values are random, so a sample tells
+-- the planner little.
 
 alter table keys.auth_request_signing
   alter column current_secret set statistics 0
@@ -851,7 +854,8 @@ alter table keys.access_token_signing
 
 alter table security.user_account
   alter column username set statistics 0
-, alter column username_hash set statistics 0;
+, alter column username_hash set statistics 0
+, alter column secret_hash set statistics 0;
 
 alter table security.user_email
   alter column email_address set statistics 0
@@ -862,6 +866,18 @@ alter table security.user_mfa
 
 alter table session.passwordless_login_token
   alter column email_address set statistics 0;
+
+alter table security.client_key
+  alter column secret_hash set statistics 0;
+
+alter table security.resource_server_key
+  alter column secret_hash set statistics 0;
+
+alter table security.organization_key
+  alter column secret_hash set statistics 0;
+
+alter table security.recovery_code
+  alter column secret_hash set statistics 0;
 
 reset role;
 

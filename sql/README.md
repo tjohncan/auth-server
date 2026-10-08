@@ -352,6 +352,8 @@ The `client.is_universal` flag enables special public clients (like system manag
   range, is hashed again with today's settings and stored, at its next use, only while the row
   still holds the hash that verified. With history on, the replaced hash goes to history like any
   update, so retiring a method is finished when history is purged (retention, or `--drophistory`).
+  On PostgreSQL no planner statistics keep a sample of a hash, in history or out (as for sealed
+  columns, under `--rekey` below), so none outlives that.
 - Recovery codes aren't hashed again: a code is used once, and its siblings' plaintexts are
   unknown. A new method reaches them when the user regenerates the set.
 - Until then, a secret costs what its old settings cost to check, while a missing account (or an
@@ -581,11 +583,13 @@ on SQLite it rewrites the file (`VACUUM`) and empties the `-wal` file; on Postgr
 `encryption_params` (its replaced row holds the old salt) and `pg_statistic`. It prints what it
 re-sealed, per kind.
 
-On PostgreSQL, sealed columns and blind indexes keep no planner statistics: `schema.sql` sets
-their statistics target to 0. `ANALYZE`, which autovacuum runs, would otherwise keep a sample
-of their values in `pg_statistic`, where no rewrite reaches it, and anyone who may read a table
-may read its sample (the `pg_stats` view). The run checks, and reports NOT SCRUBBED, naming the
-columns, if any has statistics.
+On PostgreSQL, sealed columns, blind indexes and the hashes of secrets keep no planner
+statistics: `schema.sql` sets their statistics target to 0, and the server makes history's
+copies of them the same way. `ANALYZE`, which autovacuum runs, would otherwise keep a sample of
+their values in `pg_statistic`, where no rewrite reaches it, and anyone who may read a table may
+read its sample (the `pg_stats` view). A sample outlives its rows: an `ANALYZE` that finds a
+table emptied leaves the last one in place. The run checks the sealed columns, and reports NOT
+SCRUBBED, naming them, if any has statistics.
 
 - **Keeping the passphrase.** Give the same passphrase as both: everything is sealed again under
   keys from a fresh salt and the configured stretch. That's how a database made before
@@ -645,21 +649,40 @@ columns, if any has statistics.
   -- hardened per setup_reference.sql: the login role's grant on it
   grant select, insert, update, delete on keys.encryption_params to auth_service;
   ```
-- **PostgreSQL databases made before sealed columns kept no statistics** need that set by hand,
-  like any schema change, and the sample already taken removed. Until then, once autovacuum has
-  sampled them, the run reports NOT SCRUBBED. As a superuser:
+- **PostgreSQL databases made before sealed columns and hashes kept no statistics** need that
+  set by hand, like any schema change, history's copies included, and the sample already taken
+  removed. Until then, once autovacuum has sampled them, the run reports NOT SCRUBBED. As a
+  superuser:
   ```sql
   alter table keys.auth_request_signing
     alter column current_secret set statistics 0, alter column prior_secret set statistics 0;
   alter table keys.access_token_signing
     alter column current_private_key set statistics 0,
     alter column prior_private_key set statistics 0;
+  alter table session.passwordless_login_token alter column email_address set statistics 0;
   alter table security.user_account
-    alter column username set statistics 0, alter column username_hash set statistics 0;
+    alter column username set statistics 0, alter column username_hash set statistics 0,
+    alter column secret_hash set statistics 0;
   alter table security.user_email
     alter column email_address set statistics 0, alter column email_hash set statistics 0;
   alter table security.user_mfa alter column secret set statistics 0;
-  alter table session.passwordless_login_token alter column email_address set statistics 0;
+  alter table security.client_key alter column secret_hash set statistics 0;
+  alter table security.resource_server_key alter column secret_hash set statistics 0;
+  alter table security.organization_key alter column secret_hash set statistics 0;
+  alter table security.recovery_code alter column secret_hash set statistics 0;
+  -- history's copies, where history was made
+  alter table if exists security_history.user_account
+    alter column username set statistics 0, alter column username_hash set statistics 0,
+    alter column secret_hash set statistics 0;
+  alter table if exists security_history.user_email
+    alter column email_address set statistics 0, alter column email_hash set statistics 0;
+  alter table if exists security_history.user_mfa alter column secret set statistics 0;
+  alter table if exists security_history.client_key alter column secret_hash set statistics 0;
+  alter table if exists security_history.resource_server_key
+    alter column secret_hash set statistics 0;
+  alter table if exists security_history.organization_key
+    alter column secret_hash set statistics 0;
+  alter table if exists security_history.recovery_code alter column secret_hash set statistics 0;
   -- the sample already taken, then the file it was in
   delete from pg_statistic s using pg_attribute a
    where a.attrelid = s.starelid and a.attnum = s.staattnum and a.attstattarget = 0;
