@@ -32,6 +32,7 @@
 #include <stdatomic.h>
 #include <errno.h>
 #include <sys/types.h>
+#include <sys/resource.h>
 #include <sys/time.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -550,6 +551,60 @@ static const char *admin_socket_of(const config_t *config) {
     return config->admin_socket && config->admin_socket[0] ? config->admin_socket : NULL;
 }
 
+/* A worker's connections on the public port at most, where descriptors allow */
+#define CONNECTIONS_PER_WORKER 1024
+
+/*
+ * The connections each worker may hold on the public port, sized so that limit is
+ * reached before the process runs out of descriptors. Past that, every listener's
+ * accept fails alike, the admin listener's included, and a flood on the public port
+ * would lock the operator out of the admin API they'd answer it with. The soft
+ * descriptor limit is raised first, within the hard one, as far as the workers can
+ * use. A reserve is kept back for the admin listener's connections, the database's,
+ * each worker's listener and epoll instance, a file a request reads, an email's pipe.
+ * Returns the limit per worker, or 0 if descriptors are too few to serve with
+ * (logged).
+ */
+static int connections_per_worker(int workers) {
+    rlim_t reserve = 64 + 8 * (rlim_t)workers;
+    rlim_t wanted = reserve + (rlim_t)workers * CONNECTIONS_PER_WORKER;
+
+    struct rlimit limit;
+    if (getrlimit(RLIMIT_NOFILE, &limit) != 0) {
+        log_error("getrlimit(RLIMIT_NOFILE) failed: %s", strerror(errno));
+        return 0;
+    }
+    if (limit.rlim_cur != RLIM_INFINITY && limit.rlim_cur < wanted) {
+        struct rlimit raised = limit;
+        raised.rlim_cur = limit.rlim_max != RLIM_INFINITY && limit.rlim_max < wanted
+                          ? limit.rlim_max : wanted;
+        if (setrlimit(RLIMIT_NOFILE, &raised) == 0) {
+            limit = raised;
+        }
+    }
+
+    rlim_t usable = limit.rlim_cur == RLIM_INFINITY ? wanted : limit.rlim_cur;
+    rlim_t per_worker = usable > reserve ? (usable - reserve) / (rlim_t)workers : 0;
+    if (per_worker > CONNECTIONS_PER_WORKER) {
+        per_worker = CONNECTIONS_PER_WORKER;
+    }
+    if (per_worker < 16) {
+        log_error("The descriptor limit (%llu) leaves too few for %d workers: raise it (ulimit "
+                  "-n, or LimitNOFILE= in a systemd unit), or set fewer server_workers",
+                  (unsigned long long)usable, workers);
+        return 0;
+    }
+    log_info("Descriptor limit %llu: up to %llu connections a worker, %llu kept back for the "
+             "admin listener and the rest", (unsigned long long)usable,
+             (unsigned long long)per_worker, (unsigned long long)reserve);
+    if (per_worker < CONNECTIONS_PER_WORKER) {
+        log_warn("The descriptor limit allows fewer connections than the %d a worker takes at "
+                 "most: raise it (ulimit -n, or LimitNOFILE= in a systemd unit) for more",
+                 CONNECTIONS_PER_WORKER);
+    }
+    return (int)per_worker;
+}
+
 /*
  * ./auth-server --admin METHOD PATH [BODY | -]: one call to this server's admin
  * API, on the admin socket auth.conf names, else its admin_port, printing the
@@ -887,6 +942,12 @@ int main(int argc, char **argv) {
         #endif
         log_info("Auto-detected %d CPU cores for workers", num_workers);
     }
+    int max_connections = connections_per_worker(num_workers);
+    if (max_connections == 0) {
+        encrypt_cleanup();
+        config_free(config);
+        return 1;
+    }
 
     /* Initialize database pool */
     log_info("Initializing database pool...");
@@ -1049,7 +1110,7 @@ int main(int argc, char **argv) {
         .backlog = 128,
         .max_request_size = 1024 * 1024,
         .connection_timeout_ms = 30000,
-        .max_connections_per_worker = 1024,
+        .max_connections_per_worker = max_connections,
         .handler = router_request_handler,
         .handler_context = router,
         .on_worker_exit = worker_thread_cleanup

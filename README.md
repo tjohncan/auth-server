@@ -41,7 +41,9 @@ This server focuses on authentication logic.
 - Control characters in a request target answer 400, and a NUL, or a CR or LF outside a line
     ending, anywhere in the header block closes the connection unanswered
 - Request smuggling protection (detects conflicting Content-Length headers, rejects Transfer-Encoding)
-- Per-worker connection limit (default 1024) prevents resource exhaustion
+- Per-worker connection limit (1024, or fewer where the descriptor limit requires) prevents
+    resource exhaustion, and is reached before descriptors run out, so a flood on the public
+    port leaves the admin API reachable
 
 **Security hardening**
 - Stack buffer overflow protection (`-fstack-protector-strong`)

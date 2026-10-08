@@ -82,6 +82,7 @@ struct EventLoop {
     Connection *connections_head;
     Connection *connections_tail;
     int active_connections;        /* Current count of active connections */
+    bool at_limit;                 /* Refusing public connections at the limit (logged once) */
 };
 
 /*
@@ -689,13 +690,21 @@ static void handle_accept(EventLoop *loop, Listener *listener) {
 
         /* Reject if at connection limit. Not on the admin listener: only the host
          * can reach it, and a flood on the public port mustn't lock the operator
-         * out of the admin API, which is how they'd respond to one. */
+         * out of the admin API, which is how they'd respond to one. The limit is
+         * sized to leave descriptors for it (main.c). Logged once until a public
+         * connection is taken again: under a flood, every attempt lands here. */
         if (!listener->admin && loop->config.max_connections_per_worker > 0 &&
             loop->active_connections >= loop->config.max_connections_per_worker) {
             close(client_fd);
-            log_warn("Connection limit reached (%d), rejecting new connection",
-                    loop->active_connections);
+            if (!loop->at_limit) {
+                log_warn("Connection limit reached (%d), refusing new connections until one "
+                         "closes", loop->active_connections);
+                loop->at_limit = true;
+            }
             continue;
+        }
+        if (!listener->admin) {
+            loop->at_limit = false;
         }
 
         /* Get client IP (handle both IPv4 and IPv6) */

@@ -196,6 +196,10 @@ Restart=always
 WantedBy=multi-user.target
 ```
 
+   The server raises its own soft descriptor limit as far as its workers need, within the
+   hard limit, and logs at start how many connections a worker may hold. Where the hard limit
+   is low, `LimitNOFILE=` under `[Service]` raises it.
+
 6. Enable and start:
 
 ```bash
