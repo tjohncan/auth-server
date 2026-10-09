@@ -359,21 +359,25 @@ class OAuthClient {
     }
 
     /**
-     * Log out: revoke the refresh token at the server, then clear local state.
+     * Log out: clear local state, then revoke the refresh token at the server.
      *
-     * This is what clearTokens() alone cannot do. Forgetting a token locally leaves it
-     * alive server-side for the remainder of its TTL — so "log out" would not actually
-     * log anyone out, and a token lifted from storage beforehand would keep working.
-     * Revoking first is what closes that window.
+     * The revoking is what clearTokens() alone cannot do. Forgetting a token locally
+     * leaves it alive server-side for the remainder of its TTL — so "log out" would not
+     * actually log anyone out, and a token lifted from storage beforehand would keep
+     * working. Revoking any of a grant's refresh tokens revokes all of it, the newest
+     * included, and the server refuses what a refresh still in flight makes.
      *
-     * Best-effort by design: if the revocation request fails (offline, server down), the
-     * local session is cleared anyway. A user who asks to log out must always end up
-     * logged out on the device in front of them, whatever the network is doing.
+     * Local state goes first, so a refresh in flight finds its token gone and leaves
+     * storage alone (_executeRefresh). The revocation is best-effort: if it fails
+     * (offline, server down), the user is logged out here all the same. A user who asks
+     * to log out must always end up logged out on the device in front of them, whatever
+     * the network is doing.
      *
      * @returns {Promise<void>}
      */
     async logout() {
         const tokens = this.getTokens();
+        this.clearTokens();
 
         if (tokens && tokens.refresh_token) {
             try {
@@ -387,12 +391,10 @@ class OAuthClient {
                     })
                 });
             } catch (e) {
-                /* Network failure. Fall through and clear locally anyway — never trap a
+                /* Network failure. The local session is already gone — never trap a
                  * user inside a session they have asked to leave. */
             }
         }
-
-        this.clearTokens();
     }
 
     /* ======================================================================
@@ -595,6 +597,15 @@ class OAuthClient {
                 client_id: this.clientId
             })
         });
+
+        /* Act on the answer only while storage still holds the refresh token this
+         * refresh used. Anything else means a logout or a new sign-in landed while it was
+         * in flight, in this tab or another: storing would bring back tokens the user is
+         * rid of, and clearing on a 4xx would end a session that isn't this one. */
+        const current = this.getTokens();
+        if (!current || current.refresh_token !== refreshToken) {
+            throw new Error('Tokens changed during the refresh (logged out, or signed in again)');
+        }
 
         if (!response.ok) {
             /* Only a 4xx means the grant itself is dead (revoked, replayed, expired) —

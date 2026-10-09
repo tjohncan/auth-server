@@ -236,6 +236,18 @@ Removes tokens and PKCE data from storage, releases the cross-tab refresh lock i
 client.clearTokens();
 ```
 
+This only makes this browser forget the tokens. The refresh token stays valid at the server until it expires. To end a session, call `logout()`.
+
+---
+
+#### `logout()`
+
+Logs out: clears local state as `clearTokens()` does, then revokes the refresh token at the server, which revokes its whole grant. A refresh in flight finds the tokens gone and stores nothing. If the revocation can't be sent (offline, server down), the user is still logged out on this device.
+
+```javascript
+await client.logout();
+```
+
 ---
 
 #### `destroy()`
