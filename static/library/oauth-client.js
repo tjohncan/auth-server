@@ -100,6 +100,7 @@ class OAuthClient {
         /* Set by logout() until a session is stored again: tokens this instance's own
          * logout cleared are not an expired session (_handleSessionExpired) */
         this._loggedOut = false;
+        this._destroyed = false;
         this._tabId = Math.random().toString(36).slice(2) + Date.now().toString(36);
 
         // Listen for token updates from other tabs
@@ -632,7 +633,7 @@ class OAuthClient {
         this._assertStillHeld(refreshToken);
         this.storeTokens(tokenData);
         this._scheduleRefresh(tokenData);
-        if (this.onTokenRefresh) this.onTokenRefresh(tokenData);
+        if (this.onTokenRefresh && !this._destroyed) this.onTokenRefresh(tokenData);
         return tokenData;
     }
 
@@ -659,7 +660,7 @@ class OAuthClient {
      */
     _scheduleRefresh(tokens) {
         this._cancelRefresh();
-        if (!tokens || !tokens.refresh_token || !tokens.expires_at) return;
+        if (this._destroyed || !tokens || !tokens.refresh_token || !tokens.expires_at) return;
 
         const msUntilExpiry = tokens.expires_at - Date.now();
 
@@ -715,7 +716,7 @@ class OAuthClient {
          * request answered 401 because the logout revoked its token, then finds the
          * tokens gone, as the user asked. Apps send the user to sign in from here, and
          * doing that mid-logout could cut the revocation short. */
-        if (this.onSessionExpired && !this._loggedOut) this.onSessionExpired();
+        if (this.onSessionExpired && !this._loggedOut && !this._destroyed) this.onSessionExpired();
     }
 
     /* ======================================================================
@@ -799,8 +800,13 @@ class OAuthClient {
      *
      * Call this when the client instance is no longer needed
      * (e.g., on page unload or when switching accounts).
+     *
+     * A refresh in flight still lands, and stores its tokens for other tabs (the
+     * token it sent is spent). Past that a destroyed instance schedules no refresh
+     * and calls none of its callbacks.
      */
     destroy() {
+        this._destroyed = true;
         this._cancelRefresh();
         window.removeEventListener('storage', this._onStorage);
     }
