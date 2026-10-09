@@ -258,7 +258,9 @@ int user_add_email(db_handle_t *db, long long user_account_pin,
 
 /*
  * Delete email from user account (idempotent), with its verification and
- * invitation links
+ * invitation links. Deleting one also voids the account's outstanding
+ * password-reset and passwordless sign-in links, as deactivating does: neither is
+ * kept by address, and one emailed to the address removed mustn't still work.
  *
  * Returns: 0 on success, 1 if the account has no such address (nothing
  * changed), -1 on error

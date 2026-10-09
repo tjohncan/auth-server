@@ -3372,6 +3372,79 @@ done:
     return failed;
 }
 
+/* A password-reset and a passwordless sign-in link for user pin 1, with known tokens */
+static int plant_links(db_handle_t *db, const char *reset, const char *pwless) {
+    char reset_hash[SHA256_HEX_LENGTH], pwless_hash[SHA256_HEX_LENGTH], sql[1024];
+    if (crypto_sha256_hex(reset, strlen(reset), reset_hash, sizeof(reset_hash)) != 0 ||
+        crypto_sha256_hex(pwless, strlen(pwless), pwless_hash, sizeof(pwless_hash)) != 0) {
+        return -1;
+    }
+    snprintf(sql, sizeof(sql),
+        "INSERT INTO password_reset_token (id, user_account_pin, token, issued_at, expected_expiry) "
+        "  VALUES (randomblob(16), 1, '%s', datetime('now'), datetime('now', '+1 hour'));"
+        "INSERT INTO passwordless_login_token "
+        "  (id, user_account_pin, email_address, token, issued_at, expected_expiry) "
+        "  VALUES (randomblob(16), 1, 'not-read', '%s', datetime('now'), "
+        "          datetime('now', '+10 minutes'));",
+        reset_hash, pwless_hash);
+    return db_execute_direct(db, sql);
+}
+
+/*
+ * Removing an address voids the account's outstanding password-reset and
+ * passwordless sign-in links, as deactivating does: neither is kept by address,
+ * and one emailed to the address removed mustn't still sign anyone in. An address
+ * the account doesn't have changes nothing.
+ *
+ * Returns 0 on success.
+ */
+static int test_email_removal_voids_links(const config_t *config) {
+    log_info("\nEmail removal tests");
+
+    db_handle_t *sdb = open_test_db(config);
+    if (!sdb) {
+        log_error("Email removal: could not open a test database");
+        return 1;
+    }
+
+    int failed = 1;
+    unsigned char user_id[16], seen_id[16];
+    long long seen_pin;
+    char return_to[64];
+    if (user_create(sdb, "alice", "alice@example.com", "a password", user_id) != 0 ||
+        db_execute_direct(sdb, "UPDATE user_account SET allow_passwordless_login = 1") != 0 ||
+        plant_links(sdb, "removal-reset-1", "removal-pwless-1") != 0) {
+        log_error("Email removal: could not set up");
+        goto done;
+    }
+    if (user_delete_email(sdb, 1, "nobody@example.com") != 1 ||
+        user_consume_password_reset_token(sdb, "removal-reset-1", "a new password") != 0 ||
+        user_consume_passwordless_login_token(sdb, "removal-pwless-1", &seen_pin, seen_id,
+                                              return_to, sizeof(return_to)) != 0) {
+        log_error("Email removal: removing an address the account doesn't have voided its links");
+        goto done;
+    }
+    if (plant_links(sdb, "removal-reset-2", "removal-pwless-2") != 0 ||
+        user_delete_email(sdb, 1, "Alice@Example.com") != 0 ||
+        user_consume_password_reset_token(sdb, "removal-reset-2", "another password") != 1 ||
+        user_consume_passwordless_login_token(sdb, "removal-pwless-2", &seen_pin, seen_id,
+                                              return_to, sizeof(return_to)) != 1) {
+        log_error("Email removal: a link outstanding when the address was removed still worked");
+        goto done;
+    }
+    log_info("  removing an address voids the account's reset and sign-in links; one it "
+             "doesn't have, nothing (OK)");
+
+    failed = 0;
+
+done:
+    db_disconnect(sdb);
+    if (!failed) {
+        log_info("Email removal tests passed!");
+    }
+    return failed;
+}
+
 /*
  * Authorization-scoped writes must report when they matched nothing.
  *
@@ -3667,6 +3740,7 @@ static const struct {
     { run_hashing_config, 0 },
     { test_rehash, 0 },
     { test_single_use, 0 },
+    { test_email_removal_voids_links, 0 },
     { test_short_id_blobs, 0 },
     { test_zero_row_writes, 0 },
     { test_blob_columns, 1 },

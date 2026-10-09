@@ -1015,6 +1015,40 @@ int user_delete_email(db_handle_t *db, long long user_account_pin,
         return -1;
     }
 
+    /* With the address gone, a link emailed to it must stop working too: void the
+       account's outstanding sign-in and reset links, as deactivating does. Neither
+       kind is kept by address (a sign-in link's address is sealed), so it's all of
+       them; any still wanted can be asked for again. */
+    if (rc == DB_ROW) {
+        const char *void_links[] = {
+            "UPDATE " TBL_PASSWORD_RESET_TOKEN " "
+            "SET is_revoked = " BOOL_TRUE ", revoked_at = " NOW ", updated_at = " NOW " "
+            "WHERE user_account_pin = " P"1 AND is_used = " BOOL_FALSE
+            " AND is_revoked = " BOOL_FALSE,
+
+            /* No revoked flag: marking it used is what refuses it */
+            "UPDATE " TBL_PASSWORDLESS_LOGIN_TOKEN " "
+            "SET is_used = " BOOL_TRUE ", used_at = " NOW ", updated_at = " NOW " "
+            "WHERE user_account_pin = " P"1 AND is_used = " BOOL_FALSE,
+        };
+        for (size_t i = 0; i < sizeof(void_links) / sizeof(void_links[0]); i++) {
+            db_stmt_t *v_stmt = NULL;
+            if (db_prepare(db, &v_stmt, void_links[i]) != 0) {
+                log_error("Failed to prepare the link cleanup for email delete");
+                db_execute_trusted(db, "ROLLBACK");
+                return -1;
+            }
+            db_bind_int64(v_stmt, 1, user_account_pin);
+            int v_rc = db_step(v_stmt);
+            db_finalize(v_stmt);
+            if (v_rc != DB_DONE) {
+                log_error("Failed to void the account's sign-in and reset links");
+                db_execute_trusted(db, "ROLLBACK");
+                return -1;
+            }
+        }
+    }
+
     if (db_execute_trusted(db, "COMMIT") != 0) {
         log_error("Failed to commit email delete transaction");
         db_execute_trusted(db, "ROLLBACK");

@@ -588,8 +588,10 @@ EOF
 ### DELETE /api/admin/users/emails
 
 Remove an address from a user's account, with any verification or invitation link outstanding
-for it. Works while the account is deactivated, so a suspicious address can go before the
-account is handed back. Matching is case-insensitive.
+for it, and every password-reset and passwordless sign-in link outstanding on the account:
+those aren't kept by address, and one sent to the address removed mustn't still work. Works
+while the account is deactivated, so a suspicious address can go before the account is handed
+back. Matching is case-insensitive.
 
 **Request Body**:
 ```json
@@ -1840,6 +1842,8 @@ Remove an email address from the current user's account.
 **Notes**:
 - Idempotent: returns success even if the email was already gone
 - No restriction on deleting primary emails (caller's responsibility)
+- Removing one voids the account's outstanding password-reset and passwordless sign-in links,
+  so one sent to the address removed stops working; ask for a new one at an address kept
 
 **Error Responses**:
 
