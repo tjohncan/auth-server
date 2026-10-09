@@ -746,9 +746,11 @@ act is the token's `sub` and `client_id`, which the server does check (`client_u
 `client_resource_server` links). Use scope only to narrow what a token already allowed.
 
 **A malformed header line fails the whole request; it is not skipped.**
-A line in the header block with no colon, and one that starts with a space or tab (an obsolete
-`obs-fold` continuation, colon or not), gets a 400, rather than being quietly ignored the way a
-lenient parser would. RFC 7230 §3.2.4 and RFC 9112 §5.2 sanction this. Request *framing* — the
+A line in the header block with no colon, one that starts with a space or tab (an obsolete
+`obs-fold` continuation, colon or not), and one whose name has a space, a tab or another control
+character in it (a space before the colon among them) gets a 400, rather than being quietly
+ignored the way a lenient parser would. RFC 7230 §3.2.4 and RFC 9112 §5.1 and §5.2 sanction this,
+and nginx refuses such names too. Request *framing* — the
 control that actually stops smuggling — is enforced earlier, at the socket layer
 (`src/server/event_loop.c`): conflicting `Content-Length` headers, any `Transfer-Encoding`, and
 a NUL or a CR or LF outside a line ending anywhere in the header block are rejected outright

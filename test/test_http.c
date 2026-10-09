@@ -653,8 +653,9 @@ void test_content_length_scan(void) {
     /* A CR or LF outside a CRLF: a line starting with a bare CR ended the parser's
      * walk short of a Content-Length the scan still framed the request with, so
      * both refuse such bytes. A line starting with a space or tab (obs-fold), colon
-     * or not: the parser refuses it; the scan, framing by Content-Length alone,
-     * reads nothing in it. */
+     * or not, and a name with a space, a tab or another control character in it:
+     * the parser refuses them; the scan, framing by Content-Length alone, reads
+     * nothing in them. */
     {
         static const struct { const char *raw; int scan; const char *what; } cases[] = {
             { "POST /api HTTP/1.0\r\n\rX: y\r\nContent-Length: 1\r\n\r\n{\"a\":1}", -4,
@@ -666,6 +667,10 @@ void test_content_length_scan(void) {
             { "GET /health HTTP/1.0\r\nX-A: 1\r\n Transfer-Encoding: chunked\r\n\r\n", 1,
               "a folded Transfer-Encoding" },
             { "GET /health HTTP/1.0\r\nX-A: 1\r\n\tfolded\r\n\r\n", 1, "a line folded with a tab" },
+            { "POST /api HTTP/1.0\r\nContent-Length : 1\r\n\r\n{", 1,
+              "a space before a Content-Length's colon" },
+            { "GET /health HTTP/1.0\r\nX-A\t: 1\r\n\r\n", 1, "a tab before a colon" },
+            { "GET /health HTTP/1.0\r\nX\001A: 1\r\n\r\n", 1, "a control character in a name" },
         };
         for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
             size_t len = strlen(cases[i].raw);

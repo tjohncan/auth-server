@@ -124,12 +124,21 @@ static bool parse_request_line(char *line, HttpRequest *req) {
 /*
  * Parse a single header line: "Name: Value\r\n"
  *
+ * A name with a space, a tab or another control character in it is refused, as
+ * nginx refuses it. A space before the colon is the 400 RFC 9112 §5.1 requires:
+ * front ends have read "Name :" both as Name and as a header of its own. Other
+ * characters outside RFC 9110's token are left alone.
+ *
  * Modifies buffer in place.
  */
 static bool parse_header_line(char *line, HttpHeader *header) {
     /* Find colon */
     char *colon = strchr(line, ':');
     if (!colon) return false;
+
+    for (const char *c = line; c < colon; c++) {
+        if ((unsigned char)*c < 0x21 || *c == 0x7F) return false;
+    }
 
     *colon = '\0';  /* Null-terminate name */
     header->name = line;
@@ -292,7 +301,8 @@ HttpRequest http_request_parse(char *raw, size_t length) {
              * asks for. */
             if (*line == ' ' || *line == '\t' ||
                 !parse_header_line(line, &req.headers[req.header_count])) {
-                /* Header line with no colon — malformed (RFC 7230 §3.2.4). Reject the
+                /* Header line with no colon, or a name parse_header_line() refuses —
+                 * malformed (RFC 7230 §3.2.4, RFC 9112 §5.1). Reject the
                  * request rather than skip the line. Request framing is already fixed at
                  * the socket layer (event_loop.c); this is header-interpretation hygiene:
                  * a proxy that folds or accepts such a line while the origin ignores it is
