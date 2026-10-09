@@ -3131,6 +3131,173 @@ done:
     return failed;
 }
 
+#ifdef DB_BACKEND_POSTGRESQL
+
+/* A grant's revocation, in a thread, on a connection of its own: /revoke's, given
+ * a refresh token, or replay detection's, given the grant's first token */
+typedef struct {
+    db_handle_t *db;
+    const char *token;
+    const unsigned char *origin;
+    int rc;
+} revoke_race_t;
+
+static void *revoke_in_thread(void *arg) {
+    revoke_race_t *race = arg;
+    int refresh_count = 0, access_count = 0;
+    race->rc = race->token
+        ? oauth_revoke_token(race->db, race->token, "refresh_token", 1)
+        : oauth_revoke_token_chain(race->db, race->origin, 0, &refresh_count, &access_count);
+    return NULL;
+}
+
+/*
+ * A grant revoked while a refresh of it is in flight. Each statement of a
+ * PostgreSQL transaction reads what was committed when it began, so the
+ * revocation can't see the refresh token and access token the refresh is
+ * making: it waits on the token being exchanged, revokes that once the refresh
+ * commits, and misses the two new ones. They must be dead anyway, from their
+ * first use. Here the refresh is a transaction left open with its tokens made,
+ * so the revocation is sure to wait on it: /revoke's, then replay detection's.
+ *
+ * Returns 0 on success.
+ */
+static int test_pg_revoke_race(const config_t *config) {
+    log_info("=== Grant revocation race tests (PostgreSQL)");
+
+    char conninfo[1024], sql[128];
+    db_handle_t *first = scratch_db_open_shared(config, conninfo, sizeof(conninfo));
+    db_handle_t *second = NULL, *watcher = NULL;
+    if (!first || db_connect(&second, DB_TYPE_POSTGRESQL, conninfo) != 0 ||
+        db_connect(&watcher, DB_TYPE_POSTGRESQL, conninfo) != 0) {
+        log_error("Revoke race: could not open the connections");
+        if (first) db_disconnect(first);
+        if (second) db_disconnect(second);
+        return 1;
+    }
+
+    int failed = 1, running = 0;
+    pthread_t thread;
+    revoke_race_t race = { .db = second, .rc = -1 };
+    int pid = read_int(second, "SELECT pg_backend_pid()");
+
+    /* FIXTURE_ORG_RS_CLIENT as PostgreSQL takes it, and two users linked to the client */
+    if (pid <= 0 || db_execute_direct(first,
+            "INSERT INTO " TBL_ORGANIZATION " (id, code_name, display_name) "
+            "  VALUES ('00000000-0000-0000-0000-000000000001', 'org', 'Org');"
+            "INSERT INTO " TBL_RESOURCE_SERVER " (id, organization_pin, code_name, "
+            "                                     display_name, address) "
+            "  VALUES ('00000000-0000-0000-0000-000000000002', 1, 'rs', 'RS', "
+            "          'https://rs.example');"
+            "INSERT INTO " TBL_CLIENT " (id, organization_pin, code_name, client_type, "
+            "                            grant_type, display_name, access_token_ttl_seconds) "
+            "  VALUES ('00000000-0000-0000-0000-000000000003', 1, 'cl', 'confidential', "
+            "          'authorization_code', 'Client', 3600);"
+            "INSERT INTO " TBL_CLIENT_RESOURCE_SERVER " (organization_pin, client_pin, "
+            "                                            resource_server_pin) VALUES (1, 1, 1);"
+            "INSERT INTO " TBL_USER_ACCOUNT " (id) "
+            "  VALUES ('00000000-0000-0000-0000-000000000004'), "
+            "         ('00000000-0000-0000-0000-000000000005');"
+            "INSERT INTO " TBL_CLIENT_USER " (client_pin, user_account_pin) "
+            "  VALUES (1, 1), (1, 2);") != 0) {
+        log_error("Revoke race: could not insert fixtures");
+        goto done;
+    }
+    const unsigned char user_ids[2][16] = {
+        {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x04},
+        {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x05},
+    };
+    const char *revocation[2] = { "/revoke", "replay detection" };
+    snprintf(sql, sizeof(sql), "SELECT cardinality(pg_blocking_pids(%d))", pid);
+
+    /* A grant for each user: /revoke revokes user 1's, replay detection user 2's */
+    for (int c = 0; c < 2; c++) {
+        char code[32], refresh[32], next[32], access[32], after[32];
+        snprintf(code, sizeof(code), "race-code-%d", c);
+        snprintf(refresh, sizeof(refresh), "race-refresh-%d", c);
+        snprintf(next, sizeof(next), "race-next-%d", c);
+        snprintf(access, sizeof(access), "race-access-%d", c);
+        snprintf(after, sizeof(after), "race-after-%d", c);
+
+        unsigned char code_id[16], origin[16], next_id[16], id[16];
+        oauth_refresh_token_data_t data;
+        if (oauth_auth_code_create(first, 1, FIXTURE_CLIENT_ID, c + 1, user_ids[c], code,
+                                   NULL, NULL, 600, code_id) != 0 ||
+            oauth_token_create_refresh(first, 1, c + 1, code_id, refresh, "read",
+                                       3600, origin) != 0) {
+            log_error("Revoke race: could not make the grant");
+            goto done;
+        }
+
+        /* The refresh as /token makes it: the token exchanged, and the next refresh
+           token and an access token made, not yet committed */
+        if (db_execute_direct(first, "BEGIN") != 0 ||
+            oauth_token_rotate_refresh(first, refresh, next, 3600, &data, next_id) != 0 ||
+            oauth_token_create_access(first, 1, 1, c + 1, NULL, next_id, access, "read",
+                                      3600, id) != 0) {
+            log_error("Revoke race: could not start the refresh");
+            goto done;
+        }
+        race.token = c == 0 ? refresh : NULL;
+        race.origin = c == 0 ? NULL : origin;
+        race.rc = -1;
+        if (pthread_create(&thread, NULL, revoke_in_thread, &race) != 0) {
+            log_error("Revoke race: could not start the revocation");
+            goto done;
+        }
+        running = 1;
+
+        /* Until the revocation waits on the exchanged token, then the refresh commits */
+        int waiting = 0;
+        for (int i = 0; i < 400 && !waiting; i++) {
+            waiting = read_int(watcher, sql) > 0;
+            if (!waiting) pause_ms(25);
+        }
+        if (db_execute_direct(first, "COMMIT") != 0) {
+            log_error("Revoke race: the refresh couldn't commit");
+            goto done;
+        }
+        pthread_join(thread, NULL);
+        running = 0;
+        if (!waiting || race.rc != 0) {
+            log_error("Revoke race (%s): the revocation %s", revocation[c],
+                      waiting ? "failed" : "never waited on the refresh");
+            goto done;
+        }
+
+        /* What the refresh made is dead at its first use */
+        if (oauth_token_rotate_refresh(watcher, next, after, 3600, &data, id) == 0) {
+            log_error("Revoke race (%s): the refresh's new refresh token still exchanges",
+                      revocation[c]);
+            goto done;
+        }
+        if (token_live(watcher, access, 1) != 0) {
+            log_error("Revoke race (%s): the refresh's access token is still live",
+                      revocation[c]);
+            goto done;
+        }
+        log_info("  %s during a refresh: the refresh's new tokens are dead from first use (OK)",
+                 revocation[c]);
+    }
+
+    failed = 0;
+
+done:
+    if (running) {
+        db_execute_direct(first, "ROLLBACK");
+        pthread_join(thread, NULL);
+    }
+    db_disconnect(first);
+    db_disconnect(second);
+    db_disconnect(watcher);
+    if (!failed) {
+        log_info("Grant revocation race tests passed!");
+    }
+    return failed;
+}
+
+#endif
+
 /* User 1's stored password hash */
 static int stored_password(db_handle_t *db, char *out, size_t out_size) {
     return read_stored_value(db, "SELECT secret_hash FROM user_account WHERE pin = 1",
@@ -3746,6 +3913,7 @@ static const struct {
     { test_blob_columns, 1 },
 #ifdef DB_BACKEND_POSTGRESQL
     { test_pg_params_race, 1 },
+    { test_pg_revoke_race, 1 },
     { test_pg_instance_lock, 1 },
     { test_pg_unscrubbed, 1 },
 #endif

@@ -1455,7 +1455,8 @@ client_secret=<client_secret>         # confidential clients only
   retry (RFC 7009 §2.2.1).
 - **Revoking a refresh token revokes its whole grant** (RFC 7009 §2.1): every access token
   issued under it, the code exchange's and each refresh's, and the grant's refresh tokens,
-  including a newer one when an earlier one is revoked. This is what makes a logout an actual
+  including a newer one when an earlier one is revoked. Tokens that a refresh still in flight
+  makes are refused from their first use. This is what makes a logout an actual
   logout: without it the refresh token dies while an access token lifted from storage keeps
   working until it expires. Revoking an *access* token revokes only that token.
 - Only the token's own client can revoke it — the lookup is scoped to the `client_id` supplied.

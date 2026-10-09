@@ -822,7 +822,9 @@ int oauth_token_rotate_refresh(db_handle_t *db, const char *old_token,
         return -1;
     }
 
-    /* Step 1: Consume old refresh token */
+    /* Step 1: Consume old refresh token, unless its grant's first token is revoked:
+     * a revocation that ran while the refresh making this token was in flight
+     * misses it on PostgreSQL (revoke_grant) */
     const char *update_sql =
         "UPDATE " TBL_REFRESH_TOKEN " "
         "SET is_exchanged = " BOOL_TRUE ", "
@@ -832,6 +834,9 @@ int oauth_token_rotate_refresh(db_handle_t *db, const char *old_token,
         "AND is_exchanged = " BOOL_FALSE " "
         "AND is_revoked = " BOOL_FALSE " "
         "AND (expected_expiry IS NULL OR expected_expiry > " NOW ") "
+        "AND NOT EXISTS (SELECT 1 FROM " TBL_REFRESH_TOKEN " AS gen1 "
+        "                WHERE gen1.id = " TBL_REFRESH_TOKEN ".origin_refresh_token_id "
+        "                AND gen1.is_revoked = " BOOL_TRUE ") "
         "RETURNING id, origin_refresh_token_id, client_pin, user_account_pin, "
         "authorization_code_id, generation, scopes";
 
@@ -1323,6 +1328,12 @@ int oauth_resource_server_authenticate(db_handle_t *db,
  *   a token issued while one of those was running escapes its sweep, and so does
  *   anything held from before the sweep existed. The revoking is what stops a
  *   reactivation or a new link from bringing old tokens back.
+ * - Revoking a grant revokes its tokens (revoke_grant), and for a token a
+ *   refresh made, the grant's first refresh token is read too. On PostgreSQL a
+ *   refresh in flight while the grant is revoked makes a refresh token and an
+ *   access token the revocation can't see. The code exchange makes its access
+ *   token together with that first refresh token, which a revocation starts
+ *   from, so a revocation never misses that one.
  * A client_credentials token (NULL user) has no account or user link to read,
  * and a universal client's users need no link, as at sign-in.
  */
@@ -1346,6 +1357,11 @@ int oauth_resource_server_authenticate(db_handle_t *db,
     "     OR EXISTS (SELECT 1 FROM " TBL_CLIENT_USER " cu " \
     "                WHERE cu.client_pin = at.client_pin " \
     "                AND cu.user_account_pin = at.user_account_pin)) " \
+    "AND NOT EXISTS (SELECT 1 FROM " TBL_REFRESH_TOKEN " rt " \
+    "                INNER JOIN " TBL_REFRESH_TOKEN " gen1 " \
+    "                ON gen1.id = rt.origin_refresh_token_id " \
+    "                WHERE rt.id = at.refresh_token_id " \
+    "                AND gen1.is_revoked = " BOOL_TRUE ") " \
     "AND (at.expected_expiry IS NULL OR at.expected_expiry > " NOW ") "
 
 int oauth_introspect_token(db_handle_t *db,
@@ -1546,6 +1562,12 @@ int oauth_access_token_is_active(db_handle_t *db, const char *token) {
  * client that issues no refresh tokens leaves the code's access token with no
  * chain to be found by. A chain found from a refresh token passes no code, and
  * its generation-1 token supplies it.
+ *
+ * On PostgreSQL, each statement reads only what was committed when it began. So
+ * while a refresh of the grant is in flight, these statements wait on the token
+ * being exchanged and revoke it, but miss the refresh token and access token
+ * the refresh is making. Those are refused at use instead, because the grant's
+ * first token is revoked: by the rotation's UPDATE and by ACCESS_TOKEN_LIVE_WHERE.
  *
  * Runs in the caller's transaction. Returns 0, or -1 on error.
  */
