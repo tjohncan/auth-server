@@ -100,7 +100,7 @@ new OAuthClient(config)
 - `config.redirectUri` (string, required) - Redirect URI for callbacks
 - `config.scope` (string, optional) - OAuth2 scope (default: `'openid'`)
 - `config.refreshBufferSeconds` (number, optional) - Seconds before expiry to trigger proactive refresh (default: `60`)
-- `config.onSessionExpired` (function, optional) - Called when session cannot be recovered (refresh token expired or revoked)
+- `config.onSessionExpired` (function, optional) - Called when session cannot be recovered (refresh token expired or revoked). Not called for this instance's own `logout()`
 - `config.onTokenRefresh` (function, optional) - Called after successful token refresh with new token data
 - `config.tokenStorage` (string, optional) - Token storage: `'local'` (default, cross-tab) or `'session'` (per-tab, disables cross-tab coordination)
 
@@ -242,7 +242,7 @@ This only makes this browser forget the tokens. The refresh token stays valid at
 
 #### `logout()`
 
-Logs out: clears local state as `clearTokens()` does, then revokes the refresh token at the server, which revokes its whole grant. A refresh in flight finds the tokens gone and stores nothing. If the revocation can't be sent (offline, server down), the user is still logged out on this device.
+Logs out: clears local state as `clearTokens()` does, then revokes the refresh token at the server, which revokes its whole grant. A refresh in flight finds the tokens gone and stores nothing. Until a session is stored again, this instance doesn't call `onSessionExpired`: a refresh or request still in flight that finds the tokens gone just fails. If the revocation can't be sent (offline, server down), the user is still logged out on this device.
 
 ```javascript
 await client.logout();

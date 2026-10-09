@@ -77,7 +77,7 @@ class OAuthClient {
      * @param {string} config.redirectUri - Redirect URI for callbacks
      * @param {string} [config.scope='openid'] - OAuth2 scope
      * @param {number} [config.refreshBufferSeconds=60] - Seconds before expiry to trigger proactive refresh
-     * @param {Function} [config.onSessionExpired] - Called when session cannot be recovered (refresh token expired/revoked)
+     * @param {Function} [config.onSessionExpired] - Called when session cannot be recovered (refresh token expired/revoked); not for this instance's own logout()
      * @param {Function} [config.onTokenRefresh] - Called after successful token refresh with new token data
      * @param {string} [config.tokenStorage='local'] - Token storage: 'local' (cross-tab) or 'session' (per-tab)
      */
@@ -97,6 +97,9 @@ class OAuthClient {
 
         this._refreshTimer = null;
         this._refreshPromise = null;
+        /* Set by logout() until a session is stored again: tokens this instance's own
+         * logout cleared are not an expired session (_handleSessionExpired) */
+        this._loggedOut = false;
         this._tabId = Math.random().toString(36).slice(2) + Date.now().toString(36);
 
         // Listen for token updates from other tabs
@@ -275,6 +278,7 @@ class OAuthClient {
      * @param {Object} tokens - Token data to store
      */
     storeTokens(tokens) {
+        this._loggedOut = false;
         this._tokenStorage.setItem(this.tokenKey, JSON.stringify(tokens));
     }
 
@@ -377,6 +381,7 @@ class OAuthClient {
      */
     async logout() {
         const tokens = this.getTokens();
+        this._loggedOut = true;
         this.clearTokens();
 
         if (tokens && tokens.refresh_token) {
@@ -417,6 +422,7 @@ class OAuthClient {
         if (event.newValue) {
             const tokens = this._safeParse(event.newValue);
             if (!tokens) return;  /* Corrupt value — ignore rather than throw in a listener */
+            this._loggedOut = false;  /* Another tab holds a session, and this one follows it */
             this._scheduleRefresh(tokens);
             if (this.onTokenRefresh) this.onTokenRefresh(tokens);
         } else {
@@ -705,7 +711,11 @@ class OAuthClient {
      */
     _handleSessionExpired() {
         this._cancelRefresh();
-        if (this.onSessionExpired) this.onSessionExpired();
+        /* Not after this instance's own logout(). A refresh waiting on another tab, or a
+         * request answered 401 because the logout revoked its token, then finds the
+         * tokens gone, as the user asked. Apps send the user to sign in from here, and
+         * doing that mid-logout could cut the revocation short. */
+        if (this.onSessionExpired && !this._loggedOut) this.onSessionExpired();
     }
 
     /* ======================================================================
