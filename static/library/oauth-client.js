@@ -598,14 +598,7 @@ class OAuthClient {
             })
         });
 
-        /* Act on the answer only while storage still holds the refresh token this
-         * refresh used. Anything else means a logout or a new sign-in landed while it was
-         * in flight, in this tab or another: storing would bring back tokens the user is
-         * rid of, and clearing on a 4xx would end a session that isn't this one. */
-        const current = this.getTokens();
-        if (!current || current.refresh_token !== refreshToken) {
-            throw new Error('Tokens changed during the refresh (logged out, or signed in again)');
-        }
+        this._assertStillHeld(refreshToken);
 
         if (!response.ok) {
             /* Only a 4xx means the grant itself is dead (revoked, replayed, expired) —
@@ -629,10 +622,29 @@ class OAuthClient {
             expires_at: Date.now() + (data.expires_in * 1000)
         };
 
+        /* Again: reading the body is a wait of its own */
+        this._assertStillHeld(refreshToken);
         this.storeTokens(tokenData);
         this._scheduleRefresh(tokenData);
         if (this.onTokenRefresh) this.onTokenRefresh(tokenData);
         return tokenData;
+    }
+
+    /**
+     * Throw unless storage still holds the refresh token a refresh sent. Anything else
+     * means a logout or a new sign-in landed while the refresh was out, in this tab or
+     * another: storing would bring back tokens the user is rid of, and clearing on a
+     * 4xx would end a session that isn't this one. Called with no await between it and
+     * what it guards.
+     *
+     * @private
+     * @param {string} refreshToken - the refresh token the refresh sent
+     */
+    _assertStillHeld(refreshToken) {
+        const current = this.getTokens();
+        if (!current || current.refresh_token !== refreshToken) {
+            throw new Error('Tokens changed during the refresh (logged out, or signed in again)');
+        }
     }
 
     /**
