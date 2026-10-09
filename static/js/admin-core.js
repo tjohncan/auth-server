@@ -486,10 +486,16 @@ function switchTab(tab) {
 // ===== Dashboard & Initialization =====
 
 async function logout() {
-    /* Revoke each client's refresh token (OAuthClient.logout), not just forget it.
-     * POST /logout ends the sign-in session, and removing the keys makes this browser
-     * forget the tokens, but a refresh token copied out of storage beforehand would
-     * keep working until it expired. */
+    /* POST /logout ends the sign-in session the console's API calls run on. Each
+     * stored client's OAuthClient.logout() clears its tokens and revokes its refresh
+     * token, not just forgets it: one copied out of storage beforehand would keep
+     * working until it expired. All of it starts before the first await, and the
+     * requests are kept alive, so none is lost if the page goes before they're
+     * answered: a slow revocation, or a redirect from elsewhere on the page. */
+    const pending = [
+        fetch(`${HOST}/logout`, { method: 'POST', credentials: 'include', keepalive: true })
+            .catch(error => console.error('Logout error:', error))
+    ];
     const clientIds = [];
     for (let i = 0; i < localStorage.length; i++) {
         const key = localStorage.key(i);
@@ -498,14 +504,9 @@ async function logout() {
     for (const clientId of clientIds) {
         const client = oauthClient && oauthClient.clientId === clientId
             ? oauthClient : createOAuthClient(clientId);
-        await client.logout();
-        if (client !== oauthClient) client.destroy();
-    }
-
-    try {
-        await fetch(`${HOST}/logout`, { method: 'POST', credentials: 'include' });
-    } catch (error) {
-        console.error('Logout error:', error);
+        pending.push(client.logout().finally(() => {
+            if (client !== oauthClient) client.destroy();
+        }));
     }
 
     const keysToRemove = [];
@@ -517,6 +518,7 @@ async function logout() {
     }
     keysToRemove.forEach(key => localStorage.removeItem(key));
 
+    await Promise.allSettled(pending);
     window.location.href = '/login';
 }
 

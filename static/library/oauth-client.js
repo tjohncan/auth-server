@@ -387,8 +387,11 @@ class OAuthClient {
 
         if (tokens && tokens.refresh_token) {
             try {
+                /* keepalive: sent even if the page goes before it's answered, as an app
+                 * that moves on once logout() is called may make it */
                 await fetch(`${this.authUrl}/revoke`, {
                     method: 'POST',
+                    keepalive: true,
                     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                     body: new URLSearchParams({
                         token: tokens.refresh_token,

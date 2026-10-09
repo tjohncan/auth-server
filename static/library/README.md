@@ -242,7 +242,7 @@ This only makes this browser forget the tokens. The refresh token stays valid at
 
 #### `logout()`
 
-Logs out: clears local state as `clearTokens()` does, then revokes the refresh token at the server, which revokes its whole grant. A refresh in flight finds the tokens gone and stores nothing. Until a session is stored again, this instance doesn't call `onSessionExpired`: a refresh or request still in flight that finds the tokens gone just fails. If the revocation can't be sent (offline, server down), the user is still logged out on this device.
+Logs out: clears local state as `clearTokens()` does, then revokes the refresh token at the server, which revokes its whole grant. A refresh in flight finds the tokens gone and stores nothing. Until a session is stored again, this instance doesn't call `onSessionExpired`: a refresh or request still in flight that finds the tokens gone just fails. The revocation is sent with `keepalive`, so it goes out even if the page navigates away before it's answered. If it can't be sent (offline, server down), the user is still logged out on this device.
 
 ```javascript
 await client.logout();
