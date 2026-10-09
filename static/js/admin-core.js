@@ -486,6 +486,22 @@ function switchTab(tab) {
 // ===== Dashboard & Initialization =====
 
 async function logout() {
+    /* Revoke each client's refresh token (OAuthClient.logout), not just forget it.
+     * POST /logout ends the sign-in session, and removing the keys makes this browser
+     * forget the tokens, but a refresh token copied out of storage beforehand would
+     * keep working until it expired. */
+    const clientIds = [];
+    for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key.startsWith('tokens_')) clientIds.push(key.slice('tokens_'.length));
+    }
+    for (const clientId of clientIds) {
+        const client = oauthClient && oauthClient.clientId === clientId
+            ? oauthClient : createOAuthClient(clientId);
+        await client.logout();
+        if (client !== oauthClient) client.destroy();
+    }
+
     try {
         await fetch(`${HOST}/logout`, { method: 'POST', credentials: 'include' });
     } catch (error) {
