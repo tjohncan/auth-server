@@ -138,7 +138,7 @@ static const unsigned char FIXTURE_CLIENT_ID[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,
  * Returns 0 on success.
  */
 static int test_storage_at_rest(const config_t *config) {
-    log_info("\nStorage-at-rest tests");
+    log_info("=== Storage-at-rest tests");
 
     db_handle_t *sdb = open_test_db(config);
     if (!sdb) {
@@ -229,7 +229,7 @@ done:
  * Returns 0 on success.
  */
 static int test_credential_lifetimes(const config_t *config) {
-    log_info("\nCredential lifetime tests");
+    log_info("=== Credential lifetime tests");
 
     db_handle_t *sdb = open_test_db(config);
     if (!sdb) {
@@ -351,7 +351,7 @@ done:
  * Returns 0 on success.
  */
 static int test_schema_constraints(const config_t *config) {
-    log_info("\nSchema constraint tests");
+    log_info("=== Schema constraint tests");
 
     db_handle_t *sdb = open_test_db(config);
     if (!sdb) {
@@ -408,7 +408,7 @@ done:
  * Returns 0 on success.
  */
 static int test_history_tables(const config_t *config) {
-    log_info("\nHistory table tests");
+    log_info("=== History table tests");
 
     db_handle_t *sdb = open_test_db(config);
     if (!sdb) {
@@ -470,7 +470,7 @@ static long long read_count(db_handle_t *db, const char *sql) {
  * Returns 0 on success.
  */
 static int test_drop_history(const config_t *config) {
-    log_info("\nHistory drop tests");
+    log_info("=== History drop tests");
 
     for (int rebuild = 1; rebuild >= 0; rebuild--) {
         db_handle_t *sdb = open_test_db(config);
@@ -551,7 +551,7 @@ next:
  * Returns 0 on success.
  */
 static int test_instance_lock(void) {
-    log_info("\nInstance lock tests");
+    log_info("=== Instance lock tests");
 
     char path[] = "/tmp/test-db-instance-lock.XXXXXX";
     int tmp = mkstemp(path);
@@ -642,7 +642,7 @@ done:
  * Returns 0 on success.
  */
 static int test_signing_key_cache(const config_t *config) {
-    log_info("\nSigning-key cache tests");
+    log_info("=== Signing-key cache tests");
 
     db_handle_t *sdb = open_test_db(config);
     if (!sdb) {
@@ -739,7 +739,7 @@ done:
  * Returns 0 on success.
  */
 static int test_signing_key_encryption(const config_t *config) {
-    log_info("\nSigning-key encryption tests");
+    log_info("=== Signing-key encryption tests");
 
     db_handle_t *sdb = open_test_db(config);
     if (!sdb) {
@@ -887,7 +887,7 @@ static int key_check_is(db_handle_t *db, const config_t *config, int want_right,
  * Returns 0 on success.
  */
 static int test_encryption_key_check(const config_t *config) {
-    log_info("\nEncryption key check tests");
+    log_info("=== Encryption key check tests");
 
     db_handle_t *sdb = open_test_db(config);
     if (!sdb) {
@@ -1023,7 +1023,7 @@ static config_t *config_from(const char *lines) {
  * Returns 0 on success.
  */
 static int test_hashing_config(void) {
-    log_info("\nHashing config tests");
+    log_info("=== Hashing config tests");
 
     const char *user = "secret_hashing_algorithm = pbkdf2-sha256\n"
                        "secret_hash_min_iterations = 1000\n"
@@ -1221,7 +1221,7 @@ static int stored_method(db_handle_t *db, const char *table, long long pin,
  * Returns 0 on success.
  */
 static int test_rehash(const config_t *config) {
-    log_info("\nRe-hash tests");
+    log_info("=== Re-hash tests");
 
     db_handle_t *sdb = open_test_db(config);
     if (!sdb) {
@@ -1434,7 +1434,7 @@ done:
  * Returns 0 on success.
  */
 static int test_encryption_params(const config_t *config) {
-    log_info("\nEncryption params tests");
+    log_info("=== Encryption params tests");
 
     db_handle_t *sdb = open_test_db(config);
     if (!sdb) {
@@ -1528,7 +1528,7 @@ static int sealed_opening(db_handle_t *db, const encrypt_keys_t *keys, int *tota
  * Returns 0 on success.
  */
 static int test_rekey(const config_t *config) {
-    log_info("\nRe-key tests");
+    log_info("=== Re-key tests");
 
     db_handle_t *sdb = open_test_db(config);
     if (!sdb) {
@@ -1785,7 +1785,7 @@ done:
  * Returns 0 on success.
  */
 static int test_blob_columns(const config_t *config) {
-    log_info("\nBlob column tests");
+    log_info("=== Blob column tests");
 
     db_handle_t *sdb = open_test_db(config);
     if (!sdb) {
@@ -1934,7 +1934,7 @@ static void *get_or_make(void *arg) {
  * Returns 0 on success.
  */
 static int test_pg_params_race(const config_t *config) {
-    log_info("\nEncryption params race tests (PostgreSQL)");
+    log_info("=== Encryption params race tests (PostgreSQL)");
 
     char conninfo[1024], sql[128];
     db_handle_t *first = scratch_db_open_shared(config, conninfo, sizeof(conninfo));
@@ -2041,7 +2041,7 @@ static int end_session(db_handle_t *watcher, int pid) {
  * Returns 0 on success.
  */
 static int test_pg_instance_lock(const config_t *config) {
-    log_info("\nInstance lock tests (PostgreSQL)");
+    log_info("=== Instance lock tests (PostgreSQL)");
 
     char conninfo[1024], unlocked[8];
     db_handle_t *watcher = scratch_db_open_shared(config, conninfo, sizeof(conninfo));
@@ -2160,7 +2160,7 @@ done:
  * Returns 0 on success.
  */
 static int test_pg_unscrubbed(const config_t *config) {
-    log_info("\nUnscrubbed tests (PostgreSQL)");
+    log_info("=== Unscrubbed tests (PostgreSQL)");
 
     db_handle_t *sdb = open_test_db(config);
     if (!sdb) {
@@ -2359,7 +2359,7 @@ done:
  * Returns 0 on success.
  */
 static int test_mfa_management_gate(const config_t *config) {
-    log_info("\nMFA-management gate tests");
+    log_info("=== MFA-management gate tests");
 
     db_handle_t *sdb = open_test_db(config);
     if (!sdb) {
@@ -2456,7 +2456,7 @@ done:
  * Returns 0 on success.
  */
 static int test_mfa_reset(const config_t *config) {
-    log_info("\nMFA reset tests");
+    log_info("=== MFA reset tests");
 
     db_handle_t *sdb = open_test_db(config);
     if (!sdb) {
@@ -2566,7 +2566,7 @@ done:
  * Returns 0 on success.
  */
 static int test_deactivated_user_tokens(const config_t *config) {
-    log_info("\nDeactivated-user token tests");
+    log_info("=== Deactivated-user token tests");
 
     db_handle_t *sdb = open_test_db(config);
     if (!sdb) {
@@ -2719,7 +2719,7 @@ done:
  * Returns 0 on success.
  */
 static int test_deactivation_revokes(const config_t *config) {
-    log_info("\nDeactivation revocation tests");
+    log_info("=== Deactivation revocation tests");
 
     db_handle_t *sdb = open_test_db(config);
     if (!sdb) {
@@ -2960,7 +2960,7 @@ static int refresh_revoked(db_handle_t *db, int user_pin) {
  * Returns 0 on success.
  */
 static int test_unlink_revokes(const config_t *config) {
-    log_info("\nUnlink revocation tests");
+    log_info("=== Unlink revocation tests");
 
     db_handle_t *sdb = open_test_db(config);
     if (!sdb) {
@@ -3152,7 +3152,7 @@ static int stored_password(db_handle_t *db, char *out, size_t out_size) {
  * Returns 0 on success.
  */
 static int test_single_use(const config_t *config) {
-    log_info("\nSingle-use tests");
+    log_info("=== Single-use tests");
 
     db_handle_t *sdb = open_test_db(config);
     if (!sdb) {
@@ -3399,7 +3399,7 @@ static int plant_links(db_handle_t *db, const char *reset, const char *pwless) {
  * Returns 0 on success.
  */
 static int test_email_removal_voids_links(const config_t *config) {
-    log_info("\nEmail removal tests");
+    log_info("=== Email removal tests");
 
     db_handle_t *sdb = open_test_db(config);
     if (!sdb) {
@@ -3459,7 +3459,7 @@ done:
  * revoked key and another org's key are refused. Returns 0 on success.
  */
 static int test_zero_row_writes(const config_t *config) {
-    log_info("\nZero-row write reporting tests");
+    log_info("=== Zero-row write reporting tests");
 
     db_handle_t *sdb = open_test_db(config);
     if (!sdb) {
@@ -3651,7 +3651,7 @@ done:
  * Returns 0 on success.
  */
 static int test_short_id_blobs(const config_t *config) {
-    log_info("\nShort id blob tests");
+    log_info("=== Short id blob tests");
 
     db_handle_t *sdb = open_test_db(config);
     if (!sdb) {
