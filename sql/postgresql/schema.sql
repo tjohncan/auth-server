@@ -64,6 +64,21 @@ create table keys.access_token_signing (
 , constraint uix_access_token_signing_singleton unique(singleton)
 );
 
+-- How encryption_key is stretched before the field keys are derived from it:
+-- the method, its iterations and a salt of this deployment's own. Written at
+-- the first start and by --rekey; a database without the row derives the keys
+-- by HKDF alone. The keys schema has no history.
+create table keys.encryption_params (
+  singleton boolean not null default true
+, method text not null
+, iterations integer not null
+, salt text not null
+, created_at timestamp not null default current_timestamp
+
+, constraint ck_encryption_params_singleton check(singleton = true)
+, constraint uix_encryption_params_singleton unique(singleton)
+);
+
 -- ============================================================================
 -- SECURITY - Organizations, clients, resource servers, and users
 -- ============================================================================
@@ -796,8 +811,8 @@ create index idx_recovery_code_set_cleanup
 -- INDEXES - Finding a user's or a client's rows
 -- ============================================================================
 -- Deactivating a user closes their sessions and revokes their tokens and
--- emailed links, finding the rows by user, and none of these tables was indexed
--- that way, so each of those updates read the whole table. (user, client) also
+-- emailed links, finding the rows by user: without these indexes, each of those
+-- updates reads the whole table. (user, client) also
 -- serves a user's rows for one client, and (client, resource server) a client's
 -- access tokens for one resource server: the lookups revoking on unlink needs.
 -- password_reset_token and passwordless_login_token are already covered by
@@ -817,6 +832,52 @@ create index idx_access_token_client_resource_server
 
 create index idx_invitation_token_user
   on session.invitation_token(user_account_pin);
+
+-- ============================================================================
+-- SEALED COLUMNS AND SECRET HASHES - No planner statistics
+-- ============================================================================
+-- ANALYZE (autovacuum runs it) keeps a sample of each column's values in
+-- pg_statistic, which outlives the rows it was taken from: after --rekey it
+-- would still hold values sealed under the old key, and after a hashing method
+-- is retired, hashes made with it. Sealed columns, blind indexes and the hashes
+-- of secrets are kept out, and so are history's copies of them (the server
+-- makes history tables that way). Their values are random, so a sample tells
+-- the planner little.
+
+alter table keys.auth_request_signing
+  alter column current_secret set statistics 0
+, alter column prior_secret set statistics 0;
+
+alter table keys.access_token_signing
+  alter column current_private_key set statistics 0
+, alter column prior_private_key set statistics 0;
+
+alter table security.user_account
+  alter column username set statistics 0
+, alter column username_hash set statistics 0
+, alter column secret_hash set statistics 0;
+
+alter table security.user_email
+  alter column email_address set statistics 0
+, alter column email_hash set statistics 0;
+
+alter table security.user_mfa
+  alter column secret set statistics 0;
+
+alter table session.passwordless_login_token
+  alter column email_address set statistics 0;
+
+alter table security.client_key
+  alter column secret_hash set statistics 0;
+
+alter table security.resource_server_key
+  alter column secret_hash set statistics 0;
+
+alter table security.organization_key
+  alter column secret_hash set statistics 0;
+
+alter table security.recovery_code
+  alter column secret_hash set statistics 0;
 
 reset role;
 

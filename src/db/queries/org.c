@@ -2,6 +2,7 @@
 #include "db/db_sql.h"
 #include "crypto/random.h"
 #include "crypto/password.h"
+#include "db/queries/secret.h"
 #include "util/log.h"
 #include "util/str.h"
 #include <openssl/crypto.h>
@@ -42,11 +43,7 @@ int org_create(db_handle_t *db, const char *code_name,
     db_bind_text(stmt, 2, code_name, -1);
     db_bind_text(stmt, 3, display_name, -1);
 
-    if (note != NULL) {
-        db_bind_text(stmt, 4, note, -1);
-    } else {
-        db_bind_null(stmt, 4);
-    }
+    db_bind_text_or_null(stmt, 4, note);
 
     /* Execute and get returned pin */
     int rc = db_step(stmt);
@@ -726,10 +723,10 @@ int organization_key_create(db_handle_t *db,
 
     /* Hash secret using configured algorithm */
     char salt_hex[PASSWORD_SALT_HEX_MAX_LENGTH];
-    char hash_hex[PASSWORD_HASH_HEX_MAX_LENGTH];
+    char hash_hex[PASSWORD_HASH_MAX_LENGTH];
     int iterations;
 
-    int hash_rc = crypto_password_hash(secret, strlen(secret),
+    int hash_rc = crypto_password_hash(SECRET_MACHINE, secret, strlen(secret),
                             salt_hex, sizeof(salt_hex),
                             &iterations,
                             hash_hex, sizeof(hash_hex));
@@ -768,11 +765,7 @@ int organization_key_create(db_handle_t *db,
     db_bind_text(stmt, 3, hash_hex, -1);
     db_bind_text(stmt, 4, salt_hex, -1);
     db_bind_int(stmt, 5, iterations);
-    if (note != NULL) {
-        db_bind_text(stmt, 6, note, -1);
-    } else {
-        db_bind_null(stmt, 6);
-    }
+    db_bind_text_or_null(stmt, 6, note);
 
     int rc = db_step(stmt);
     db_finalize(stmt);
@@ -983,6 +976,8 @@ int organization_key_verify(db_handle_t *db,
     if (rc != DB_ROW) {
         db_finalize(stmt);
         log_error("Organization key not found or inactive");
+        /* As long as a wrong secret takes, so key ids aren't told apart by time */
+        crypto_password_verify_dummy(SECRET_MACHINE, secret, strlen(secret));
         return -1;
     }
 
@@ -1006,8 +1001,13 @@ int organization_key_verify(db_handle_t *db,
     db_finalize(stmt);
 
     /* Verify password using timing-safe comparison */
-    int valid = crypto_password_verify(secret, strlen(secret),
-                                       salt, iterations, hash);
+    int rehash = 0;
+    int valid = crypto_password_verify(SECRET_MACHINE, secret, strlen(secret),
+                                       salt, iterations, hash, &rehash);
+    if (valid == 1 && rehash) {
+        /* Hashed under another method or iteration count than the configured ones */
+        secret_rehash(db, TBL_ORGANIZATION_KEY, key_pin, SECRET_MACHINE, secret, hash);
+    }
     OPENSSL_cleanse(salt, sizeof(salt));
     OPENSSL_cleanse(hash, sizeof(hash));
 

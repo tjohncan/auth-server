@@ -1,9 +1,15 @@
+/* mkstemp */
+#define _POSIX_C_SOURCE 200809L
+
 #include "util/config.h"
 #include "util/log.h"
 #include "db/db.h"
 #include "db/db_sql.h"
 #include "db/init/db_init.h"
 #include "db/init/db_history.h"
+#include "db/instance_lock.h"
+#include "db/maintenance.h"
+#include "db/encryption_params.h"
 #include "crypto/signing_keys.h"
 #include "db/queries/oauth.h"
 #include "db/queries/client.h"
@@ -14,29 +20,30 @@
 #include "crypto/encrypt.h"
 #include "crypto/sha256.h"
 #include "db/queries/user.h"
+#include "db/queries/secret.h"
+#include "util/data.h"
+#include "scratch_db.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <pthread.h>
+#include <signal.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
 #include <openssl/crypto.h>
 
 /*
- * A database of the test's own: SQLite in memory, schema applied, gone when the
- * handle closes. The tests below delete and rewrite rows on purpose, so they
- * never run against the configured database, and nothing they do reaches a file.
+ * A database of the test's own, the schema applied (scratch_db.h): SQLite in
+ * memory, or a new PostgreSQL database. The tests below delete and rewrite rows
+ * on purpose, so they never run against the configured database.
  *
  * Returns NULL on failure.
  */
 static db_handle_t *open_test_db(const config_t *config) {
-    db_handle_t *db = NULL;
-    if (db_connect(&db, DB_TYPE_SQLITE, ":memory:") != 0) {
-        return NULL;
-    }
-    const char *owner_role = config->db_owner_role ? config->db_owner_role : config->db_user;
-    if (db_init_schema(db, DB_TYPE_SQLITE, config->schema_dir, owner_role) < 0) {
-        db_disconnect(db);
-        return NULL;
-    }
-    return db;
+    return scratch_db_open(config);
 }
 
 /* Read the first column of a one-row query, raw, as stored. */
@@ -51,7 +58,61 @@ static int read_stored_value(db_handle_t *db, const char *sql, char *out, size_t
     return (rc == DB_ROW && v) ? 0 : -1;
 }
 
-/* One organization, resource server and confidential client; pins are all 1. */
+/* The first column of every row a query returns, joined with spaces */
+static int read_column_list(db_handle_t *db, const char *sql, char *out, size_t out_size) {
+    db_stmt_t *stmt = NULL;
+    size_t n = 0;
+    out[0] = '\0';
+    if (db_prepare(db, &stmt, sql) != 0) return -1;
+    int rc;
+    while ((rc = db_step(stmt)) == DB_ROW) {
+        const char *v = db_column_text(stmt, 0);
+        int w = snprintf(out + n, out_size - n, "%s%s", n ? " " : "", v ? v : "");
+        if (w < 0 || (size_t)w >= out_size - n) {
+            rc = -1;
+            break;
+        }
+        n += (size_t)w;
+    }
+    db_finalize(stmt);
+    return rc == DB_DONE ? 0 : -1;
+}
+
+/* The SHA-256 of the text in a query's first row, for comparing text too long
+   to keep, before and after */
+static int read_digest(db_handle_t *db, const char *sql, char *out, size_t out_size) {
+    db_stmt_t *stmt = NULL;
+    out[0] = '\0';
+    if (db_prepare(db, &stmt, sql) != 0) return -1;
+    const char *v = db_step(stmt) == DB_ROW ? db_column_text(stmt, 0) : NULL;
+    int rc = v ? crypto_sha256_hex(v, strlen(v), out, out_size) : -1;
+    db_finalize(stmt);
+    return rc == 0 ? 0 : -1;
+}
+
+/*
+ * History as the catalogs show it, on either backend: how many history tables
+ * there are; how many triggers (on PostgreSQL, not counting its own for foreign
+ * keys); and the code that fills history, as one text (SQLite: the triggers'
+ * SQL; PostgreSQL: the trigger functions' definitions).
+ */
+#ifdef DB_BACKEND_POSTGRESQL
+#define HISTORY_TABLES_SQL "SELECT count(*) FROM pg_tables WHERE schemaname LIKE '%\\_history'"
+#define TRIGGERS_SQL       "SELECT count(*) FROM pg_trigger WHERE NOT tgisinternal"
+#define HISTORY_CODE_SQL   "SELECT string_agg(pg_get_functiondef(p.oid), ';' ORDER BY p.proname) " \
+                           "FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace " \
+                           "WHERE n.nspname LIKE '%\\_history'"
+#else
+#define HISTORY_TABLES_SQL "SELECT count(*) FROM sqlite_master WHERE type = 'table' " \
+                           "AND name LIKE 'history\\_\\_%' ESCAPE '\\'"
+#define TRIGGERS_SQL       "SELECT count(*) FROM sqlite_master WHERE type = 'trigger'"
+#define HISTORY_CODE_SQL   "SELECT group_concat(sql, ';') FROM " \
+                           "(SELECT sql FROM sqlite_master WHERE type = 'trigger' ORDER BY name)"
+#endif
+
+/* One organization, resource server and confidential client, the client linked
+ * to the server as it must be to get tokens for it; pins are all 1. A test whose
+ * tokens have users links each user to the client too (client_user). */
 #define FIXTURE_ORG_RS_CLIENT \
     "INSERT INTO organization (id, code_name, display_name) " \
     "  VALUES (x'00000000000000000000000000000001', 'org', 'Org');" \
@@ -60,7 +121,9 @@ static int read_stored_value(db_handle_t *db, const char *sql, char *out, size_t
     "INSERT INTO client (id, organization_pin, code_name, client_type, grant_type, " \
     "                    display_name, access_token_ttl_seconds) " \
     "  VALUES (x'00000000000000000000000000000003', 1, 'cl', 'confidential', " \
-    "          'authorization_code', 'Client', 3600);"
+    "          'authorization_code', 'Client', 3600);" \
+    "INSERT INTO client_resource_server (organization_pin, client_pin, resource_server_pin) " \
+    "  VALUES (1, 1, 1);"
 
 static const unsigned char FIXTURE_CLIENT_ID[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x03};
 
@@ -75,7 +138,7 @@ static const unsigned char FIXTURE_CLIENT_ID[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,
  * Returns 0 on success.
  */
 static int test_storage_at_rest(const config_t *config) {
-    log_info("\nStorage-at-rest tests");
+    log_info("=== Storage-at-rest tests");
 
     db_handle_t *sdb = open_test_db(config);
     if (!sdb) {
@@ -166,7 +229,7 @@ done:
  * Returns 0 on success.
  */
 static int test_credential_lifetimes(const config_t *config) {
-    log_info("\nCredential lifetime tests");
+    log_info("=== Credential lifetime tests");
 
     db_handle_t *sdb = open_test_db(config);
     if (!sdb) {
@@ -177,7 +240,8 @@ static int test_credential_lifetimes(const config_t *config) {
     int failed = 1;
 
     if (db_execute_direct(sdb, FIXTURE_ORG_RS_CLIENT
-            "INSERT INTO user_account (id) VALUES (x'00000000000000000000000000000004');") != 0) {
+            "INSERT INTO user_account (id) VALUES (x'00000000000000000000000000000004');"
+            "INSERT INTO client_user (client_pin, user_account_pin) VALUES (1, 1);") != 0) {
         log_error("Lifetimes: could not insert fixtures");
         goto done;
     }
@@ -281,12 +345,13 @@ done:
  * Two guarantees the schema makes and the code leans on without checking:
  * foreign keys are enforced -- SQLite leaves them off unless each connection
  * asks, which db_connect does -- and require_mfa cannot be on without has_mfa,
- * which oauth_session_mfa_pending relies on to cover both flags.
+ * which the factor-management gate (SESSION_MFA_IF_ENROLLED) relies on to cover
+ * both flags.
  *
  * Returns 0 on success.
  */
 static int test_schema_constraints(const config_t *config) {
-    log_info("\nSchema constraint tests");
+    log_info("=== Schema constraint tests");
 
     db_handle_t *sdb = open_test_db(config);
     if (!sdb) {
@@ -333,13 +398,251 @@ done:
 }
 
 /*
+ * History tables, the audit trail sql/README.md describes: once
+ * db_init_history_tables has built them from the schema, every UPDATE and DELETE on
+ * a table keyed by pin copies the row as it was into its history table (SQLite's
+ * history__<table>, PostgreSQL's <schema>_history.<table>), marked 'U' or 'D'.
+ * Running the init again on a database that already has them must not stack a
+ * second set of triggers, which would write every change twice.
+ *
+ * Returns 0 on success.
+ */
+static int test_history_tables(const config_t *config) {
+    log_info("=== History table tests");
+
+    db_handle_t *sdb = open_test_db(config);
+    if (!sdb) {
+        log_error("History: could not open a test database");
+        return 1;
+    }
+
+    int failed = 1;
+    char value[256];
+
+    if (db_init_history_tables(sdb, SCRATCH_DB_TYPE, 1) != 0 ||
+        db_init_history_tables(sdb, SCRATCH_DB_TYPE, 0) != 0) {
+        log_error("History: could not create the history tables");
+        goto done;
+    }
+
+    if (db_execute_direct(sdb,
+            "INSERT INTO " TBL_ORGANIZATION " (id, code_name, display_name) "
+            "  VALUES (" ID_FROM_HEX("00000000000000000000000000000001") ", 'org', 'Before');"
+            "UPDATE " TBL_ORGANIZATION " SET display_name = 'After' WHERE pin = 1;"
+            "DELETE FROM " TBL_ORGANIZATION " WHERE pin = 1;") != 0) {
+        log_error("History: could not change the row");
+        goto done;
+    }
+
+    if (read_column_list(sdb,
+            "SELECT history_triggering_action_code || ':' || display_name "
+            "FROM " HISTORY_OF("security", "organization") " ORDER BY history_pin",
+            value, sizeof(value)) != 0 ||
+        strcmp(value, "U:Before D:After") != 0) {
+        log_error("History: expected 'U:Before D:After', got '%s'", value);
+        goto done;
+    }
+    log_info("  an update and a delete each keep the row as it was, once (OK)");
+
+    failed = 0;
+
+done:
+    db_disconnect(sdb);
+    if (!failed) {
+        log_info("History table tests passed!");
+    }
+    return failed;
+}
+
+/* One integer a query returns, or -1 */
+static long long read_count(db_handle_t *db, const char *sql) {
+    char value[32];
+    return read_stored_value(db, sql, value, sizeof(value)) == 0 ? atoll(value) : -1;
+}
+
+/*
+ * --drophistory (maintenance_drop_history): every history table and what fills
+ * it (SQLite's triggers, PostgreSQL's trigger functions) go in one run, what a
+ * table dropped by hand left behind included. With history on, empty ones are
+ * made again, and keep the next change; with it off, none are, and updates
+ * still work.
+ *
+ * Returns 0 on success.
+ */
+static int test_drop_history(const config_t *config) {
+    log_info("=== History drop tests");
+
+    for (int rebuild = 1; rebuild >= 0; rebuild--) {
+        db_handle_t *sdb = open_test_db(config);
+        if (!sdb) {
+            log_error("History drop: could not open a test database");
+            return 1;
+        }
+        int failed = 1;
+        char value[256];
+        drophistory_report_t report;
+
+        if (db_init_history_tables(sdb, SCRATCH_DB_TYPE, 1) != 0 ||
+            db_execute_direct(sdb,
+                "INSERT INTO " TBL_ORGANIZATION " (id, code_name, display_name) "
+                "  VALUES (" ID_FROM_HEX("00000000000000000000000000000001") ", 'org', 'Before');"
+                "UPDATE " TBL_ORGANIZATION " SET display_name = 'After' WHERE pin = 1;") != 0) {
+            log_error("History drop: could not set up history");
+            goto next;
+        }
+        long long tables = read_count(sdb, HISTORY_TABLES_SQL);
+
+        /* Off: one history table already dropped by hand, its triggers left
+           behind, which fail every update of their table until removed */
+        if (!rebuild &&
+            (db_execute_direct(sdb, "DROP TABLE " HISTORY_OF("security", "organization")) != 0 ||
+             db_execute_direct(sdb, "UPDATE " TBL_ORGANIZATION " SET display_name = 'x' "
+                                    "WHERE pin = 1") == 0)) {
+            log_error("History drop: a trigger without its table didn't fail updates");
+            goto next;
+        }
+
+        if (maintenance_drop_history(sdb, SCRATCH_DB_TYPE, rebuild, &report) != 0 ||
+            report.triggers_dropped != 2 * tables || report.rebuilt != rebuild ||
+            report.tables_dropped != (rebuild ? tables : tables - 1)) {
+            log_error("History drop: the drop failed or miscounted (%d tables, %d triggers, of %lld)",
+                      report.tables_dropped, report.triggers_dropped, tables);
+            goto next;
+        }
+        if (read_count(sdb, HISTORY_TABLES_SQL) != (rebuild ? tables : 0) ||
+            read_count(sdb, TRIGGERS_SQL) != (rebuild ? 2 * tables : 0)) {
+            log_error("History drop: %s history tables and triggers left after the run",
+                      rebuild ? "the wrong number of" : "some");
+            goto next;
+        }
+        if (db_execute_direct(sdb, "UPDATE " TBL_ORGANIZATION " SET display_name = 'Again' "
+                                   "WHERE pin = 1") != 0) {
+            log_error("History drop: updates fail after the run");
+            goto next;
+        }
+        if (rebuild &&
+            (read_column_list(sdb,
+                 "SELECT history_triggering_action_code || ':' || display_name "
+                 "FROM " HISTORY_OF("security", "organization") " ORDER BY history_pin",
+                 value, sizeof(value)) != 0 ||
+             strcmp(value, "U:After") != 0)) {
+            log_error("History drop: the history made again holds '%s', not just the new change",
+                      value);
+            goto next;
+        }
+        log_info(rebuild
+                 ? "  history on: dropped, made again empty, keeping the next change (OK)"
+                 : "  history off: dropped with a trigger left by hand, and updates work (OK)");
+        failed = 0;
+next:
+        db_disconnect(sdb);
+        if (failed) return 1;
+    }
+
+    log_info("History drop tests passed!");
+    return 0;
+}
+
+/*
+ * The instance lock's SQLite form: instances share it, a maintenance run takes
+ * it alone, and each refuses the other. (flock locks belong to the open file,
+ * so two opens in this process stand for two processes.)
+ *
+ * Returns 0 on success.
+ */
+static int test_instance_lock(void) {
+    log_info("=== Instance lock tests");
+
+    char path[] = "/tmp/test-db-instance-lock.XXXXXX";
+    int tmp = mkstemp(path);
+    if (tmp < 0) {
+        log_error("Instance lock: could not make a lock file");
+        return 1;
+    }
+    close(tmp);
+
+    int a = -1, b = -1, m = -1, failed = 1;
+    char lock[64];
+    if (instance_lock_file(path, 0, &a) != 0 || instance_lock_file(path, 0, &b) != 0) {
+        log_error("Instance lock: two instances couldn't share it");
+        goto done;
+    }
+    if (instance_lock_file(path, 1, &m) != 1) {
+        log_error("Instance lock: a maintenance run took it from running instances");
+        goto done;
+    }
+    instance_lock_file_release(a);
+    a = -1;
+    if (instance_lock_file(path, 1, &m) != 1) {
+        log_error("Instance lock: a maintenance run took it while one instance still ran");
+        goto done;
+    }
+    instance_lock_file_release(b);
+    b = -1;
+    if (instance_lock_file(path, 1, &m) != 0 || instance_lock_file(path, 0, &a) != 1) {
+        log_error("Instance lock: a maintenance run couldn't take it alone, or an instance joined it");
+        goto done;
+    }
+    /* Another process with the file open is seen, and named; once it's gone, not.
+       A run checks the database this way too, in case the lock file was removed
+       while an instance held it. */
+    int ready[2], release[2];
+    if (pipe(ready) != 0 || pipe(release) != 0) {
+        log_error("Instance lock: could not make pipes");
+        goto done;
+    }
+    pid_t child = fork();
+    if (child == 0) {
+        int held = open(path, O_RDONLY);
+        char go = held >= 0 ? 'y' : 'n';
+        if (write(ready[1], &go, 1) != 1 || read(release[0], &go, 1) < 0) _exit(1);
+        _exit(0);
+    }
+    char go = 'n', who[64] = "";
+    int seen = child > 0 && read(ready[0], &go, 1) == 1 && go == 'y' &&
+               instance_lock_file_user(path, who, sizeof(who)) == (int)child &&
+               strstr(who, "process ") == who;
+    if (child > 0) {
+        if (write(release[1], "x", 1) != 1) kill(child, SIGKILL);
+        waitpid(child, NULL, 0);
+    }
+    close(ready[0]);
+    close(ready[1]);
+    close(release[0]);
+    close(release[1]);
+    if (!seen || instance_lock_file_user(path, who, sizeof(who)) != 0) {
+        log_error("Instance lock: another process with the file open wasn't seen, or was "
+                  "after it exited");
+        goto done;
+    }
+    log_info("  another process with the file open is seen and named, and not once it's gone (OK)");
+
+    if (instance_lock_path(":memory:", lock, sizeof(lock)) != -1 ||
+        instance_lock_path("./data/auth.db", lock, sizeof(lock)) != 0 ||
+        strcmp(lock, "./data/auth.db.lock") != 0) {
+        log_error("Instance lock: wrong lock path, or one for an in-memory database");
+        goto done;
+    }
+    log_info("  instances share it; a maintenance run takes it alone, and each refuses the other (OK)");
+    failed = 0;
+
+done:
+    instance_lock_file_release(a);
+    instance_lock_file_release(b);
+    instance_lock_file_release(m);
+    unlink(path);
+    if (!failed) log_info("Instance lock tests passed!");
+    return failed;
+}
+
+/*
  * Signing-key cache — the claim is that it is VALIDATED on every use, never
  * trusted for an interval.
  *
  * Returns 0 on success.
  */
 static int test_signing_key_cache(const config_t *config) {
-    log_info("\nSigning-key cache tests");
+    log_info("=== Signing-key cache tests");
 
     db_handle_t *sdb = open_test_db(config);
     if (!sdb) {
@@ -436,7 +739,7 @@ done:
  * Returns 0 on success.
  */
 static int test_signing_key_encryption(const config_t *config) {
-    log_info("\nSigning-key encryption tests");
+    log_info("=== Signing-key encryption tests");
 
     db_handle_t *sdb = open_test_db(config);
     if (!sdb) {
@@ -501,10 +804,10 @@ static int test_signing_key_encryption(const config_t *config) {
     }
     log_info("  rotation carries the sealed key into prior and it opens (OK)");
 
-    /* 3. Pre-encryption plaintext row: every load fails, nothing is regenerated */
+    /* 3. A plaintext row (no e1: prefix): every load fails, nothing is regenerated */
     if (db_execute_direct(sdb,
-            "UPDATE auth_request_signing SET current_secret = 'legacy-plaintext-secret'") != 0) {
-        log_error("Key encryption: could not plant a legacy row");
+            "UPDATE auth_request_signing SET current_secret = 'plaintext-secret'") != 0) {
+        log_error("Key encryption: could not plant a plaintext row");
         goto done;
     }
     signing_key_thread_cleanup();  /* the cache is keyed on timestamps; force a reload */
@@ -514,11 +817,11 @@ static int test_signing_key_encryption(const config_t *config) {
     }
     if (read_stored_value(sdb, "SELECT current_secret FROM auth_request_signing",
                         stored, sizeof(stored)) != 0 ||
-        strcmp(stored, "legacy-plaintext-secret") != 0) {
-        log_error("Key encryption: the legacy row was overwritten");
+        strcmp(stored, "plaintext-secret") != 0) {
+        log_error("Key encryption: the plaintext row was overwritten");
         goto done;
     }
-    log_info("  plaintext legacy row fails and is left alone (OK)");
+    log_info("  a plaintext row fails and is left alone (OK)");
 
     /* 4. Different encryption_key: fails, row untouched; right key recovers */
     if (encrypt_init("not-the-key-that-sealed-these") != 0) {
@@ -561,6 +864,1488 @@ done:
     return failed;
 }
 
+/* signing_key_check_encryption_key under the configured key and under another;
+   1 if they come out as want_right and want_wrong */
+static int key_check_is(db_handle_t *db, const config_t *config, int want_right,
+                        int want_wrong) {
+    int right = signing_key_check_encryption_key(db);
+    if (encrypt_init("not-the-key-that-sealed-these") != 0) return 0;
+    int wrong = signing_key_check_encryption_key(db);
+    if (encrypt_init(config->encryption_key) != 0) return 0;
+    return right == want_right && wrong == want_wrong;
+}
+
+/*
+ * The server refuses to start with an encryption_key that doesn't open what the
+ * database holds. The check opens a username (else an address) first, since
+ * that's what says which key sealed the database, then every signing key. A
+ * signing key that won't open under the key that opens the users came from
+ * elsewhere, and is told apart (-2) so the error names the right fix. A fresh
+ * database has nothing to open, and a signing key stored in plaintext proves
+ * nothing, so neither stops a start.
+ *
+ * Returns 0 on success.
+ */
+static int test_encryption_key_check(const config_t *config) {
+    log_info("=== Encryption key check tests");
+
+    db_handle_t *sdb = open_test_db(config);
+    if (!sdb) {
+        log_error("Key check: could not open a test database");
+        return 1;
+    }
+
+    int failed = 1;
+    signing_key_t *es = NULL, *hmac = NULL;
+    unsigned char user_id[16];
+
+    /* 1. Fresh: nothing to open, under either key */
+    if (!key_check_is(sdb, config, 0, 0)) {
+        log_error("Key check: a fresh database didn't pass under any key");
+        goto done;
+    }
+    log_info("  fresh database: nothing to check (OK)");
+
+    /* 2. A user and no signing keys yet: the username decides */
+    if (user_create(sdb, "keycheck", NULL, "a password", user_id) != 0) {
+        log_error("Key check: could not create a user");
+        goto done;
+    }
+    if (!key_check_is(sdb, config, 0, -1)) {
+        log_error("Key check: a username didn't tell the right key from a wrong one");
+        goto done;
+    }
+    log_info("  users only: a username tells the right key from a wrong one (OK)");
+
+    /* 3. Signing keys, the auth-request one in plaintext: it's
+          passed over under the right key; under a wrong one the username decides */
+    signing_key_thread_cleanup();
+    if (signing_key_get_or_rotate(sdb, SIGNING_KEY_ACCESS_TOKEN, &es) != 0 ||
+        signing_key_get_or_rotate(sdb, SIGNING_KEY_AUTH_REQUEST, &hmac) != 0 ||
+        db_execute_direct(sdb, "UPDATE auth_request_signing "
+                               "SET current_secret = 'plaintext-secret'") != 0) {
+        log_error("Key check: could not set up signing keys");
+        goto done;
+    }
+    if (!key_check_is(sdb, config, 0, -1)) {
+        log_error("Key check: a plaintext signing key wasn't passed over");
+        goto done;
+    }
+    log_info("  a plaintext signing key is passed over (OK)");
+
+    /* 4. Signing keys sealed under another key, as if copied in from another
+          deployment: under the users' key it's the signing rows (-2), under the
+          other the users (-1). Deleting both tables' rows, the fix the error
+          names, starts it */
+    const char *drop_keys[] = { "DELETE FROM auth_request_signing",
+                                "DELETE FROM access_token_signing" };
+    signing_key_free(es);
+    signing_key_free(hmac);
+    es = hmac = NULL;
+    signing_key_thread_cleanup();
+    if (db_execute_direct(sdb, drop_keys[0]) != 0 || db_execute_direct(sdb, drop_keys[1]) != 0 ||
+        encrypt_init("not-the-key-that-sealed-these") != 0 ||
+        signing_key_get_or_rotate(sdb, SIGNING_KEY_ACCESS_TOKEN, &es) != 0 ||
+        signing_key_get_or_rotate(sdb, SIGNING_KEY_AUTH_REQUEST, &hmac) != 0 ||
+        encrypt_init(config->encryption_key) != 0) {
+        log_error("Key check: could not seal signing keys under another key");
+        goto done;
+    }
+    if (!key_check_is(sdb, config, -2, -1)) {
+        log_error("Key check: signing keys from elsewhere weren't told apart from a wrong key");
+        goto done;
+    }
+    signing_key_thread_cleanup();
+    if (db_execute_direct(sdb, drop_keys[0]) != 0 || db_execute_direct(sdb, drop_keys[1]) != 0 ||
+        !key_check_is(sdb, config, 0, -1)) {
+        log_error("Key check: deleting the foreign signing rows didn't clear the check");
+        goto done;
+    }
+    log_info("  signing keys from elsewhere refuse with their own fix, which works (OK)");
+
+    /* 5. Users sealed under another key, signing keys under this one: the users
+          decide, though the signing keys open */
+    signing_key_free(es);
+    signing_key_free(hmac);
+    es = hmac = NULL;
+    if (db_execute_direct(sdb, "DELETE FROM user_account") != 0 ||
+        encrypt_init("not-the-key-that-sealed-these") != 0 ||
+        user_create(sdb, "elsewhere", NULL, "a password", user_id) != 0 ||
+        encrypt_init(config->encryption_key) != 0 ||
+        signing_key_get_or_rotate(sdb, SIGNING_KEY_ACCESS_TOKEN, &es) != 0 ||
+        signing_key_get_or_rotate(sdb, SIGNING_KEY_AUTH_REQUEST, &hmac) != 0) {
+        log_error("Key check: could not seal the users under another key");
+        goto done;
+    }
+    if (!key_check_is(sdb, config, -1, -2)) {
+        log_error("Key check: users from elsewhere passed because the signing keys open");
+        goto done;
+    }
+    log_info("  users sealed under another key refuse, though the signing keys open (OK)");
+
+    failed = 0;
+
+done:
+    signing_key_free(es);
+    signing_key_free(hmac);
+    signing_key_thread_cleanup();
+    db_disconnect(sdb);
+    if (!failed) {
+        log_info("Encryption key check tests passed!");
+    }
+    return failed;
+}
+
+/* config_load on these lines, from a file of the test's own; NULL if refused */
+static config_t *config_from(const char *lines) {
+    char path[] = "/tmp/test-db-config.XXXXXX";
+    int fd = mkstemp(path);
+    if (fd < 0) return NULL;
+    FILE *f = fdopen(fd, "w");
+    if (!f) {
+        close(fd);
+        unlink(path);
+        return NULL;
+    }
+    fputs(lines, f);
+    fclose(f);
+    config_t *config = config_load(path);
+    unlink(path);
+    return config;
+}
+
+/*
+ * The machine-secret hashing settings: each one left out takes the password
+ * setting's value, so an auth.conf from before they existed hashes every secret
+ * as it did. Set, they're the machine secrets' alone, held to the method's
+ * iteration limit like the password ones.
+ *
+ * Returns 0 on success.
+ */
+static int test_hashing_config(void) {
+    log_info("=== Hashing config tests");
+
+    const char *user = "secret_hashing_algorithm = pbkdf2-sha256\n"
+                       "secret_hash_min_iterations = 1000\n"
+                       "secret_hash_max_iterations = 2000\n";
+    char both[512];
+    snprintf(both, sizeof(both), "%smachine_secret_hashing_algorithm = argon2id\n"
+                                 "machine_secret_hash_min_iterations = 2\n"
+                                 "machine_secret_hash_max_iterations = 3\n", user);
+    char over[512];
+    snprintf(over, sizeof(over), "%smachine_secret_hashing_algorithm = argon2id\n", user);
+
+    /* No file at all: the defaults and the environment configure the server,
+       and the machine settings are filled in from them all the same */
+    char missing[] = "/tmp/test-db-no-config.XXXXXX";
+    int fd = mkstemp(missing);
+    if (fd >= 0) {
+        close(fd);
+        unlink(missing);
+    }
+    config_t *none = fd >= 0 ? config_load(missing) : NULL;
+    int ok_none = none && none->machine_secret_hashing_algorithm == none->secret_hashing_algorithm &&
+        none->machine_secret_hash_min_iterations == none->secret_hash_min_iterations &&
+        none->machine_secret_hash_max_iterations == none->secret_hash_max_iterations &&
+        none->machine_secret_hash_min_iterations >= 1;
+    config_free(none);
+    if (!ok_none) {
+        log_error("Hashing config: without a config file, the machine settings weren't filled in");
+        return 1;
+    }
+
+    /* A directory where the file should be, as Docker makes for a bind mount whose
+       source is missing: refused, not read as nothing */
+    char dir[] = "/tmp/test-db-config-dir.XXXXXX";
+    if (!mkdtemp(dir)) {
+        log_error("Hashing config: could not make a directory");
+        return 1;
+    }
+    config_t *as_dir = config_load(dir);
+    rmdir(dir);
+    if (as_dir) {
+        config_free(as_dir);
+        log_error("Hashing config: a directory was loaded as a config file");
+        return 1;
+    }
+
+    /* A link to a file that isn't there, as to a secret not mounted yet: refused,
+       not taken for no file */
+    char linked[] = "/tmp/test-db-config-link.XXXXXX";
+    if (!mkdtemp(linked)) {
+        log_error("Hashing config: could not make a directory");
+        return 1;
+    }
+    char link_path[64], target[64];
+    snprintf(link_path, sizeof(link_path), "%s/auth.conf", linked);
+    snprintf(target, sizeof(target), "%s/missing.conf", linked);
+    int linked_ok = symlink(target, link_path) == 0;
+    config_t *dangling = linked_ok ? config_load(link_path) : NULL;
+    unlink(link_path);
+    rmdir(linked);
+    if (!linked_ok || dangling) {
+        config_free(dangling);
+        log_error("Hashing config: a link to a missing file was taken for no config file");
+        return 1;
+    }
+
+    /* A file that's there but can't be read: refused, not taken for a missing one
+       (as root it can always be read, so there's nothing to check) */
+    if (geteuid() != 0) {
+        char unreadable[] = "/tmp/test-db-config-unreadable.XXXXXX";
+        int fd = mkstemp(unreadable);
+        if (fd < 0) {
+            log_error("Hashing config: could not make a file");
+            return 1;
+        }
+        close(fd);
+        chmod(unreadable, 0);
+        config_t *refused = config_load(unreadable);
+        unlink(unreadable);
+        if (refused) {
+            config_free(refused);
+            log_error("Hashing config: an unreadable config file was taken for a missing one");
+            return 1;
+        }
+    }
+
+    config_t *a = config_from(user), *b = config_from(both), *c = config_from(over);
+    int ok = a && b && !c &&
+        a->machine_secret_hashing_algorithm == PASSWORD_HASH_PBKDF2_SHA256 &&
+        a->machine_secret_hash_min_iterations == 1000 &&
+        a->machine_secret_hash_max_iterations == 2000 &&
+        b->machine_secret_hashing_algorithm == PASSWORD_HASH_ARGON2ID &&
+        b->machine_secret_hash_min_iterations == 2 && b->machine_secret_hash_max_iterations == 3 &&
+        b->secret_hashing_algorithm == PASSWORD_HASH_PBKDF2_SHA256 &&
+        b->secret_hash_min_iterations == 1000;
+    config_free(a);
+    config_free(b);
+    config_free(c);
+    if (!ok) {
+        log_error("Hashing config: machine settings weren't filled in from the password ones, "
+                  "kept apart, or held to the method's limit");
+        return 1;
+    }
+    log_info("  left out, the password settings, with or without a config file; set, their "
+             "own; argon2id above 20 iterations refused; a directory for the file refused (OK)");
+
+    /* The admin API's listeners: the socket by default, mode 0600, no TCP port;
+       a mode is octal, and one that isn't keeps the default; empty is none */
+    config_t *dflt = config_from("log_level = warn\n");
+    config_t *mode = config_from("admin_socket_mode = 0660\n");
+    config_t *bad = config_from("admin_socket_mode = 9\n");
+    config_t *off = config_from("admin_socket =\nadmin_port = 8081\n");
+    int ok_admin = dflt && mode && bad && off &&
+        strcmp(dflt->admin_socket, "./data/admin.sock") == 0 && dflt->admin_socket_mode == 0600 &&
+        dflt->admin_port == 0 && mode->admin_socket_mode == 0660 && bad->admin_socket_mode == 0600 &&
+        off->admin_socket[0] == '\0' && off->admin_port == 8081;
+    config_free(dflt);
+    config_free(mode);
+    config_free(bad);
+    config_free(off);
+    if (!ok_admin) {
+        log_error("Hashing config: the admin listener settings didn't default or parse as documented");
+        return 1;
+    }
+    log_info("  admin API: the socket by default (0600), no TCP port; modes octal (OK)");
+
+    /* strict: off by default, where the shipped values start the server; on, the
+       shipped key and a password minimum under 8 each refuse the start alone */
+    config_t *lax = config_from("log_level = warn\n");
+    config_t *strict = config_from("strict = true\nencryption_key = a passphrase of its own\n"
+                                   "password_min_length = 8\n");
+    int ok_strict = lax && strict && !lax->strict && strict->strict &&
+        config_check_weak_defaults(lax) == 0 && config_check_weak_defaults(strict) == 0;
+    if (ok_strict) {
+        strict->password_min_length = 7;
+        ok_strict = config_check_weak_defaults(strict) == -1;
+        lax->strict = 1;
+        lax->password_min_length = 8;
+        ok_strict = ok_strict && config_check_weak_defaults(lax) == -1;
+    }
+    config_free(lax);
+    config_free(strict);
+    if (!ok_strict) {
+        log_error("Hashing config: strict didn't refuse the shipped key or a short password "
+                  "minimum, or refused what it shouldn't");
+        return 1;
+    }
+    log_info("  strict: off by default; on, the shipped key or a password minimum under 8 "
+             "refuses the start (OK)");
+    log_info("Hashing config tests passed!");
+    return 0;
+}
+
+/* Store secret in table's row pin as method makes it at iterations, with a fixed
+   salt. Returns 0, or -1. */
+static int plant_hash(db_handle_t *db, const char *table, long long pin, const char *method,
+                      int iterations, const char *secret) {
+    const char *salt = "0123456789abcdef0123456789abcdef";
+    char hash[PASSWORD_HASH_MAX_LENGTH], sql[160];
+    if (crypto_password_hash_with_salt(method, secret, strlen(secret), salt, iterations,
+                                       hash, sizeof(hash)) != 0) {
+        return -1;
+    }
+    snprintf(sql, sizeof(sql), "UPDATE %s SET salt = ?1, hash_iterations = ?2, "
+                               "secret_hash = ?3 WHERE pin = ?4", table);
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) return -1;
+    db_bind_text(stmt, 1, salt, -1);
+    db_bind_int(stmt, 2, iterations);
+    db_bind_text(stmt, 3, hash, -1);
+    db_bind_int64(stmt, 4, pin);
+    int rc = db_step(stmt);
+    db_finalize(stmt);
+    return rc == DB_DONE ? 0 : -1;
+}
+
+/* table's row pin, as "<the method its hash names>/<iterations>" */
+static int stored_method(db_handle_t *db, const char *table, long long pin,
+                         char *out, size_t size) {
+    char sql[200];
+    snprintf(sql, sizeof(sql), "SELECT substr(secret_hash, 1, instr(secret_hash, '$') - 1) "
+                               "|| '/' || hash_iterations FROM %s WHERE pin = %lld", table, pin);
+    return read_stored_value(db, sql, out, size);
+}
+
+/*
+ * Stored hashes name their method, and a secret is hashed with its kind's method
+ * (main sets passwords to argon2id, one pass; machine secrets to PBKDF2, 777).
+ * One that verifies under another method, or an iteration count outside its
+ * kind's range, is hashed again as configured and stored: passwords at
+ * sign-in, and client, resource-server and organization key secrets when they
+ * authenticate. Within the settings, or on a wrong secret, nothing is stored. A
+ * hash with no label fails, changing nothing. Recovery codes are hashed as their
+ * set was, whatever the settings say now.
+ *
+ * Returns 0 on success.
+ */
+static int test_rehash(const config_t *config) {
+    log_info("=== Re-hash tests");
+
+    db_handle_t *sdb = open_test_db(config);
+    if (!sdb) {
+        log_error("Re-hash: could not open a test database");
+        return 1;
+    }
+
+    int failed = 1;
+    char seen[64], before[128], after[128], salt[64];
+    unsigned char user_id[16], set_id[16];
+    long long pin = 0, key_pin = 0;
+    const char *hash_sql = "SELECT secret_hash FROM user_account WHERE pin = 1";
+    static const unsigned char rs_id[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x02};
+    static const unsigned char key_id[3][16] = {
+        {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x04},
+        {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x05},
+        {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x06},
+    };
+
+    if (user_create(sdb, "rehash", NULL, "a password", user_id) != 0 ||
+        db_execute_direct(sdb, FIXTURE_ORG_RS_CLIENT
+            "INSERT INTO client_key (id, client_pin, salt, hash_iterations, secret_hash) "
+            "  VALUES (x'00000000000000000000000000000004', 1, 's', 1, 'h');"
+            "INSERT INTO resource_server_key (id, resource_server_pin, salt, hash_iterations, "
+            "                                 secret_hash) "
+            "  VALUES (x'00000000000000000000000000000005', 1, 's', 1, 'h');"
+            "INSERT INTO organization_key (id, organization_pin, salt, hash_iterations, secret_hash) "
+            "  VALUES (x'00000000000000000000000000000006', 1, 's', 1, 'h');") != 0) {
+        log_error("Re-hash: could not insert fixtures");
+        goto done;
+    }
+
+    /* 1. What's made is hashed with its kind's method: a new password with the
+          password method; new org, client and resource-server keys (made with the
+          org key, pin 2) with the machine method */
+    unsigned char new_id[16];
+    if (stored_method(sdb, "user_account", 1, seen, sizeof(seen)) != 0 ||
+        strcmp(seen, "argon2id/1") != 0) {
+        log_error("Re-hash: a new password is stored as '%s', not argon2id/1", seen);
+        goto done;
+    }
+    if (organization_key_create(sdb, "org", "a new machine secret", NULL, new_id) != 0 ||
+        client_key_create(sdb, -1, 2, FIXTURE_CLIENT_ID, "a new machine secret", NULL,
+                          new_id) != 0 ||
+        resource_server_key_create(sdb, -1, 2, rs_id, "a new machine secret", NULL,
+                                   new_id) != 0) {
+        log_error("Re-hash: could not make new keys");
+        goto done;
+    }
+    static const char *machine_tables[] = { "client_key", "resource_server_key",
+                                            "organization_key" };
+    for (int i = 0; i < 3; i++) {
+        if (stored_method(sdb, machine_tables[i], 2, seen, sizeof(seen)) != 0 ||
+            strcmp(seen, "pbkdf2-sha256/777") != 0) {
+            log_error("Re-hash: a new %s is stored as '%s', not pbkdf2-sha256/777",
+                      machine_tables[i], seen);
+            goto done;
+        }
+    }
+    log_info("  new passwords and keys are hashed with their kind's method (OK)");
+
+    /* 2. Under another method, at an iteration count within the range: signs in,
+          and is stored under the configured method; signing in again stores nothing */
+    if (plant_hash(sdb, "user_account", 1, "pbkdf2-sha256", 1, "a password") != 0 ||
+        user_verify_password(sdb, "rehash", "a password", NULL, NULL) != 1 ||
+        stored_method(sdb, "user_account", 1, seen, sizeof(seen)) != 0 ||
+        strcmp(seen, "argon2id/1") != 0) {
+        log_error("Re-hash: a password under another method wasn't stored again (%s)", seen);
+        goto done;
+    }
+    if (read_stored_value(sdb, hash_sql, before, sizeof(before)) != 0 ||
+        user_verify_password(sdb, "rehash", "a password", NULL, NULL) != 1 ||
+        read_stored_value(sdb, hash_sql, after, sizeof(after)) != 0 || strcmp(before, after) != 0) {
+        log_error("Re-hash: a password within the configured settings was stored again");
+        goto done;
+    }
+    /* The write lands only on the hash that verified: one changed meanwhile stays */
+    if (secret_rehash(sdb, TBL_USER_ACCOUNT, 1, SECRET_USER, "a password",
+                      "argon2id$not-the-stored-hash") != 1 ||
+        read_stored_value(sdb, hash_sql, after, sizeof(after)) != 0 || strcmp(before, after) != 0) {
+        log_error("Re-hash: a re-hash overwrote a hash other than the one that verified");
+        goto done;
+    }
+    log_info("  password: under another method, stored again at sign-in; within the "
+             "settings, left alone (OK)");
+
+    /* 3. The same method at an iteration count outside the range: stored again */
+    if (plant_hash(sdb, "user_account", 1, "argon2id", 2, "a password") != 0 ||
+        user_verify_password(sdb, "rehash", "a password", NULL, NULL) != 1 ||
+        stored_method(sdb, "user_account", 1, seen, sizeof(seen)) != 0 ||
+        strcmp(seen, "argon2id/1") != 0) {
+        log_error("Re-hash: a password at iterations outside the range wasn't stored again (%s)",
+                  seen);
+        goto done;
+    }
+    log_info("  password: iterations outside the range, stored again (OK)");
+
+    /* 4. A wrong password under another method stores nothing; and a hash with no
+          label fails, changing nothing */
+    if (plant_hash(sdb, "user_account", 1, "pbkdf2-sha256", 1000, "a password") != 0 ||
+        read_stored_value(sdb, hash_sql, before, sizeof(before)) != 0 ||
+        user_verify_password(sdb, "rehash", "not the password", NULL, NULL) != 0 ||
+        read_stored_value(sdb, hash_sql, after, sizeof(after)) != 0 || strcmp(before, after) != 0) {
+        log_error("Re-hash: a wrong password stored something");
+        goto done;
+    }
+    if (plant_hash(sdb, "user_account", 1, "argon2id", 1, "a password") != 0 ||
+        db_execute_direct(sdb, "UPDATE user_account SET secret_hash = "
+                               "substr(secret_hash, instr(secret_hash, '$') + 1) WHERE pin = 1") != 0 ||
+        read_stored_value(sdb, hash_sql, before, sizeof(before)) != 0 ||
+        user_verify_password(sdb, "rehash", "a password", NULL, NULL) != -1 ||
+        read_stored_value(sdb, hash_sql, after, sizeof(after)) != 0 || strcmp(before, after) != 0) {
+        log_error("Re-hash: a hash with no label didn't fail, or changed");
+        goto done;
+    }
+    log_info("  a wrong password stores nothing; a hash with no label fails (OK)");
+
+    /* 5. Machine secrets under the password method: each authenticates, and is
+          stored under the machine method */
+    for (int i = 0; i < 3; i++) {
+        if (plant_hash(sdb, machine_tables[i], 1, "argon2id", 1, "a machine secret") != 0) {
+            log_error("Re-hash: could not plant a %s hash", machine_tables[i]);
+            goto done;
+        }
+    }
+    if (oauth_client_authenticate(sdb, FIXTURE_CLIENT_ID, key_id[0], "a machine secret",
+                                  &pin, &key_pin) != 1 ||
+        oauth_resource_server_authenticate(sdb, rs_id, key_id[1], "a machine secret",
+                                           &pin, &key_pin) != 1 ||
+        organization_key_verify(sdb, key_id[2], "a machine secret", &pin, &key_pin) != 0) {
+        log_error("Re-hash: a machine secret under the password method didn't authenticate");
+        goto done;
+    }
+    for (int i = 0; i < 3; i++) {
+        if (stored_method(sdb, machine_tables[i], 1, seen, sizeof(seen)) != 0 ||
+            strcmp(seen, "pbkdf2-sha256/777") != 0) {
+            log_error("Re-hash: %s is stored as '%s', not pbkdf2-sha256/777",
+                      machine_tables[i], seen);
+            goto done;
+        }
+    }
+    log_info("  client, resource-server and org key secrets: stored again under the machine "
+             "method (OK)");
+
+    /* 6. Recovery codes: a set under the machine method; the same set made under
+          another method still verifies, by its codes' label; with no label, fails,
+          unless no code is left unused to match */
+    const char *codes[] = { "AAAA-BBBB-CCCC-DDDD", "EEEE-FFFF-GGGG-HHHH", "JJJJ-KKKK-LLLL-MMMM" };
+    if (recovery_code_set_create(sdb, 1, codes, 3, set_id) != 0 ||
+        read_stored_value(sdb, "SELECT group_concat(DISTINCT substr(secret_hash, 1, "
+                               "instr(secret_hash, '$') - 1)) FROM recovery_code",
+                          seen, sizeof(seen)) != 0 || strcmp(seen, "pbkdf2-sha256") != 0 ||
+        recovery_code_verify(sdb, 1, codes[0]) != 1) {
+        log_error("Re-hash: a new recovery code set isn't under the machine method (%s), "
+                  "or its code didn't verify", seen);
+        goto done;
+    }
+    if (read_stored_value(sdb, "SELECT salt FROM recovery_code_set", salt, sizeof(salt)) != 0 ||
+        db_execute_direct(sdb, "UPDATE recovery_code_set SET hash_iterations = 1") != 0) {
+        log_error("Re-hash: could not remake the set");
+        goto done;
+    }
+    for (int i = 0; i < 3; i++) {
+        char hash[PASSWORD_HASH_MAX_LENGTH], sql[300];
+        if (crypto_password_hash_with_salt("argon2id", codes[i], strlen(codes[i]), salt, 1,
+                                           hash, sizeof(hash)) != 0) {
+            goto done;
+        }
+        snprintf(sql, sizeof(sql), "UPDATE recovery_code SET secret_hash = '%s' "
+                                   "WHERE plaintext_last4 = '%s'", hash, codes[i] + 15);
+        if (db_execute_direct(sdb, sql) != 0) goto done;
+    }
+    if (recovery_code_verify(sdb, 1, codes[1]) != 1) {
+        log_error("Re-hash: a code of a set made under another method didn't verify");
+        goto done;
+    }
+    if (db_execute_direct(sdb, "UPDATE recovery_code SET secret_hash = "
+                               "substr(secret_hash, instr(secret_hash, '$') + 1)") != 0 ||
+        recovery_code_verify(sdb, 1, codes[2]) != -1 ||
+        read_count(sdb, "SELECT count(*) FROM recovery_code WHERE is_used = 1") != 2) {
+        log_error("Re-hash: a code with no label didn't fail, or was used");
+        goto done;
+    }
+    /* Only an unused code can match, so with every code used the labels don't matter */
+    if (db_execute_direct(sdb, "UPDATE recovery_code SET is_used = 1") != 0 ||
+        recovery_code_verify(sdb, 1, codes[2]) != 0) {
+        log_error("Re-hash: a set with every code used didn't answer no match");
+        goto done;
+    }
+    log_info("  recovery codes: hashed and verified as their set was; no label fails, unless "
+             "every code is used (OK)");
+
+    failed = 0;
+
+done:
+    db_disconnect(sdb);
+    if (!failed) {
+        log_info("Re-hash tests passed!");
+    }
+    return failed;
+}
+
+/*
+ * The stretch a server derives its field keys by (encryption_params_get_or_make):
+ * a database with nothing sealed yet gets a row at its first start, and keeps it
+ * whatever the configuration says later. One with values sealed and no row, or
+ * without the table, derives by HKDF alone, since those values were sealed
+ * that way.
+ *
+ * Returns 0 on success.
+ */
+static int test_encryption_params(const config_t *config) {
+    log_info("=== Encryption params tests");
+
+    db_handle_t *sdb = open_test_db(config);
+    if (!sdb) {
+        log_error("Params: could not open a test database");
+        return 1;
+    }
+
+    int failed = 1;
+    encrypt_params_t first, again;
+    unsigned char user_id[16];
+
+    /* 1. Nothing sealed: a row is made, then kept over other settings */
+    if (encryption_params_get_or_make(sdb, "pbkdf2-sha256", 1000, &first) != 0 ||
+        strcmp(first.method, "pbkdf2-sha256") != 0 || first.iterations != 1000 ||
+        strlen(first.salt) != 32 ||
+        encryption_params_get_or_make(sdb, "argon2id", 2, &again) != 0 ||
+        strcmp(again.method, first.method) != 0 || again.iterations != first.iterations ||
+        strcmp(again.salt, first.salt) != 0) {
+        log_error("Params: a new database didn't get its row, or a later start changed it");
+        goto done;
+    }
+    log_info("  nothing sealed: a row is made, and later settings don't change it (OK)");
+
+    /* 2. Values sealed and no row: HKDF alone, and no row made */
+    if (db_execute_direct(sdb, "DELETE FROM " TBL_ENCRYPTION_PARAMS) != 0 ||
+        user_create(sdb, "sealed-before", NULL, "a password", user_id) != 0 ||
+        encryption_params_get_or_make(sdb, "pbkdf2-sha256", 1000, &again) != 1 ||
+        read_count(sdb, "SELECT count(*) FROM " TBL_ENCRYPTION_PARAMS) != 0) {
+        log_error("Params: a row was made for values sealed without one");
+        goto done;
+    }
+
+    /* 3. No table: HKDF alone */
+    if (db_execute_direct(sdb, "DROP TABLE " TBL_ENCRYPTION_PARAMS) != 0 ||
+        encryption_params_get_or_make(sdb, "pbkdf2-sha256", 1000, &again) != 1) {
+        log_error("Params: a database without the table didn't derive by HKDF alone");
+        goto done;
+    }
+    log_info("  values sealed without a row, or no table: HKDF alone, nothing made (OK)");
+
+    failed = 0;
+
+done:
+    db_disconnect(sdb);
+    if (!failed) {
+        log_info("Encryption params tests passed!");
+    }
+    return failed;
+}
+
+/* How many of the database's sealed values open under keys; *total, how many
+   there are */
+static int sealed_opening(db_handle_t *db, const encrypt_keys_t *keys, int *total) {
+    const char *sql =
+        "SELECT username FROM " TBL_USER_ACCOUNT " WHERE username IS NOT NULL "
+        "UNION ALL SELECT email_address FROM " TBL_USER_EMAIL " "
+        "UNION ALL SELECT email_address FROM " TBL_PASSWORDLESS_LOGIN_TOKEN " "
+        "UNION ALL SELECT secret FROM " TBL_USER_MFA " "
+        "UNION ALL SELECT substr(v, 4) FROM ("
+        "  SELECT current_secret AS v FROM " TBL_AUTH_REQUEST_SIGNING " "
+        "  UNION ALL SELECT prior_secret FROM " TBL_AUTH_REQUEST_SIGNING " "
+        "  UNION ALL SELECT current_private_key FROM " TBL_ACCESS_TOKEN_SIGNING " "
+        "  UNION ALL SELECT prior_private_key FROM " TBL_ACCESS_TOKEN_SIGNING ") AS signing "
+        "WHERE v IS NOT NULL";
+    *total = 0;
+    int opening = 0;
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) return -1;
+    while (db_step(stmt) == DB_ROW) {
+        const char *v = db_column_text(stmt, 0);
+        char plain[ENCRYPT_FIELD_MAX_LENGTH + 1];
+        opening += v && decrypt_field_with(keys, v, plain, sizeof(plain)) == 0;
+        OPENSSL_cleanse(plain, sizeof(plain));
+        (*total)++;
+    }
+    db_finalize(stmt);
+    return opening;
+}
+
+/*
+ * --rekey (maintenance_rekey): everything sealed under one key is sealed again
+ * under another, in one transaction. Afterwards each value opens under the new
+ * keys and none under the old. Usernames and addresses are still found whatever
+ * their case, so the blind indexes were made again. The signing keys load,
+ * current and prior, and the encryption_params row is the new one. History
+ * holds what it held, with no copy of the re-key's own changes, and keeps the
+ * next change, from the code that filled it before, unchanged. A value the old
+ * key won't open rolls the whole run back, history triggers included. On
+ * PostgreSQL the run ends by scrubbing: each re-sealed table is rewritten.
+ *
+ * Returns 0 on success.
+ */
+static int test_rekey(const config_t *config) {
+    log_info("=== Re-key tests");
+
+    db_handle_t *sdb = open_test_db(config);
+    if (!sdb) {
+        log_error("Re-key: could not open a test database");
+        return 1;
+    }
+
+    int failed = 1, total = 0;
+    encrypt_keys_t a, b, b_again, b_salt, b_bare, c;
+    encrypt_params_t params, params_salt, params_c, stored;
+    signing_key_t *es = NULL, *hmac = NULL, *es_after = NULL, *hmac_after = NULL;
+    unsigned char user_id[16], method_id[16];
+    char token[64], sealed_totp[256], before[512], after[512];
+    char code[SHA256_HEX_LENGTH], code_after[SHA256_HEX_LENGTH];
+    rekey_report_t report;
+    const char *totp = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
+    const char *history_sql =
+        "SELECT (SELECT count(*) FROM " HISTORY_OF("security", "user_account") ") + "
+        "(SELECT count(*) FROM " HISTORY_OF("security", "user_email") ") + "
+        "(SELECT count(*) FROM " HISTORY_OF("security", "user_mfa") ")";
+    const char *username_sql = "SELECT username FROM " TBL_USER_ACCOUNT " WHERE pin = 1";
+
+    /* 1. Derivation: the same parameters give the same keys again; another salt,
+          another method, or no stretch at all gives others */
+    if (encrypt_derive_keys(config->encryption_key, NULL, &a) != 0 ||
+        encrypt_params_new("pbkdf2-sha256", 1000, &params) != 0 ||
+        encrypt_params_new("pbkdf2-sha256", 1000, &params_salt) != 0 ||
+        encrypt_params_new("argon2id", 1, &params_c) != 0 ||
+        encrypt_derive_keys("the new passphrase", &params, &b) != 0 ||
+        encrypt_derive_keys("the new passphrase", &params, &b_again) != 0 ||
+        encrypt_derive_keys("the new passphrase", &params_salt, &b_salt) != 0 ||
+        encrypt_derive_keys("the new passphrase", NULL, &b_bare) != 0 ||
+        encrypt_derive_keys("the new passphrase", &params_c, &c) != 0) {
+        log_error("Re-key: could not derive keys");
+        goto done;
+    }
+    if (memcmp(&b, &b_again, sizeof(b)) != 0 || memcmp(&b, &b_salt, sizeof(b)) == 0 ||
+        memcmp(&b, &b_bare, sizeof(b)) == 0 || memcmp(&b, &c, sizeof(b)) == 0 ||
+        memcmp(&c, &b_bare, sizeof(c)) == 0) {
+        log_error("Re-key: stretched keys don't depend on exactly the passphrase and parameters");
+        goto done;
+    }
+    log_info("  a stretch derives the same keys again, and other keys than another salt, "
+             "method or none (OK)");
+
+    /* Known answers, worked out apart from this code (HKDF and PBKDF2 with
+       Python's standard library, Argon2id with libargon2 alone): a change to the
+       derivation would leave every deployment unable to open what it sealed */
+    static const struct { encrypt_params_t params; int stretched; const char *aes, *hmac; } kat[] = {
+        { { "", 0, "" }, 0,
+          "0a31bafa9c0d112843de0debc9ed20468b0e7501b785befcb1259fd8e275920d",
+          "28d630fb9d38d4fcc9c14421ff45c61fb487a326f3606b039d194d47cef640ab" },
+        { { "pbkdf2-sha256", 1000, "000102030405060708090a0b0c0d0e0f" }, 1,
+          "945b0aaa532a4d59a61489e2bbfbd5e0706fc5f2846670fc28d6d0a46bc5ebe8",
+          "37140403b6cef1bba10f80bcc05bc92d64032519e5cf6e4d56187db8df2cf264" },
+        { { "argon2id", 1, "000102030405060708090a0b0c0d0e0f" }, 1,
+          "ccd3c21e4279f03f4b89cb7ffdac897bf924751deea6e80c146754485f5b9ca1",
+          "e88441f431285fbe36dd93b2b7d3dfb97cfbe8018588806769a11da6f55a66a1" },
+    };
+    for (size_t i = 0; i < sizeof(kat) / sizeof(kat[0]); i++) {
+        encrypt_keys_t k;
+        char aes_hex[65], hmac_hex[65];
+        if (encrypt_derive_keys("correct horse battery staple",
+                                kat[i].stretched ? &kat[i].params : NULL, &k) != 0 ||
+            bytes_to_hex(k.aes, sizeof(k.aes), aes_hex, sizeof(aes_hex)) != 0 ||
+            bytes_to_hex(k.hmac, sizeof(k.hmac), hmac_hex, sizeof(hmac_hex)) != 0 ||
+            strcmp(aes_hex, kat[i].aes) != 0 || strcmp(hmac_hex, kat[i].hmac) != 0) {
+            log_error("Re-key: the keys derived %s aren't the known ones",
+                      kat[i].stretched ? kat[i].params.method : "without a stretch");
+            goto done;
+        }
+    }
+    log_info("  the derivation gives the known keys, unstretched, and under PBKDF2 and "
+             "Argon2id (OK)");
+
+    /* 2. Sealed under a, HKDF alone, as a database without encryption_params:
+          two users (one with no username), a passwordless link, a TOTP secret, and
+          both signing keys, current and prior */
+    encrypt_init_keys(&a);
+    signing_key_thread_cleanup();
+    if (db_init_history_tables(sdb, SCRATCH_DB_TYPE, 1) != 0 ||
+        user_create(sdb, "Alice", "Alice@Example.com", "a password", user_id) != 0 ||
+        user_create(sdb, NULL, "bob@example.com", "a password", user_id) != 0 ||
+        db_execute_direct(sdb, "UPDATE " TBL_USER_EMAIL " SET is_verified = " BOOL_TRUE ", "
+                               "verified_at = " NOW) != 0 ||
+        user_update_allow_passwordless_login(sdb, 2, 1) != 0 ||
+        user_create_passwordless_login_token(sdb, "bob@example.com", 600, NULL, NULL,
+                                             token) != 0 ||
+        encrypt_field(totp, sealed_totp, sizeof(sealed_totp)) != 0 ||
+        mfa_method_create(sdb, 1, "TOTP", "phone", sealed_totp, method_id) != 0 ||
+        signing_key_get_or_rotate(sdb, SIGNING_KEY_ACCESS_TOKEN, &es) != 0 ||
+        signing_key_get_or_rotate(sdb, SIGNING_KEY_AUTH_REQUEST, &hmac) != 0 ||
+        db_execute_direct(sdb,
+            "UPDATE " TBL_ACCESS_TOKEN_SIGNING " SET current_generated_at = " DAYS_AGO("61") ";"
+            "UPDATE " TBL_AUTH_REQUEST_SIGNING " SET current_generated_at = " DAYS_AGO("2") ";") != 0) {
+        log_error("Re-key: could not set up sealed values");
+        goto done;
+    }
+    signing_key_free(es);
+    signing_key_free(hmac);
+    es = hmac = NULL;
+    if (signing_key_get_or_rotate(sdb, SIGNING_KEY_ACCESS_TOKEN, &es) != 0 || !es->prior_private_key ||
+        signing_key_get_or_rotate(sdb, SIGNING_KEY_AUTH_REQUEST, &hmac) != 0 || !hmac->prior_secret ||
+        sealed_opening(sdb, &a, &total) != 9 || total != 9) {
+        log_error("Re-key: the values to re-seal aren't all there under the old key");
+        goto done;
+    }
+    long long history = read_count(sdb, history_sql);
+    long long triggers = read_count(sdb, TRIGGERS_SQL);
+    encrypt_params_t derived;
+    int derived_have = encryption_params_load(sdb, &derived);
+    if (read_digest(sdb, HISTORY_CODE_SQL, code, sizeof(code)) != 0) {
+        log_error("Re-key: could not read the code that fills history");
+        goto done;
+    }
+
+    /* 3. Re-keyed to b: every value opens under b, none under a */
+    if (maintenance_rekey(sdb, SCRATCH_DB_TYPE, &a, &b, &params, &report) != 0 ||
+        report.usernames != 1 || report.addresses != 2 || report.passwordless != 1 ||
+        report.mfa_secrets != 1 || report.signing_keys != 4 || report.history_tables != 2) {
+        /* History rows of the re-sealed tables: user_account's (the passwordless
+           toggle) and user_email's (verification); user_mfa's has none yet */
+        log_error("Re-key: the run failed or miscounted (%d usernames, %d addresses, %d links, "
+                  "%d TOTP, %d signing keys, %d history tables)", report.usernames,
+                  report.addresses, report.passwordless, report.mfa_secrets,
+                  report.signing_keys, report.history_tables);
+        goto done;
+    }
+    if (sealed_opening(sdb, &b, &total) != 9 || total != 9 || sealed_opening(sdb, &a, &total) != 0) {
+        log_error("Re-key: not every value opens under the new key, or some still under the old");
+        goto done;
+    }
+    log_info("  every sealed value opens under the new key and none under the old (OK)");
+
+    /* An instance that derived its keys before the run sees the run changed
+       them, however it came to miss the lock; one that derived them after, not */
+    if (derived_have != 1 || encryption_params_unchanged(sdb, derived_have, &derived) != 0 ||
+        encryption_params_unchanged(sdb, 0, &params) != 1) {
+        log_error("Re-key: the run doesn't show to an instance that derived its keys before it");
+        goto done;
+    }
+    log_info("  an instance keyed before the run sees it changed; one keyed after doesn't (OK)");
+
+    /* 4. Under b: lookups by username and address match whatever the case, the
+          link and the TOTP secret open as they were, and so do the signing keys */
+    encrypt_init_keys(&b);
+    signing_key_thread_cleanup();
+    passwordless_login_lookup_t link;
+    mfa_method_t method;
+    char opened[64];
+    if (user_verify_password(sdb, "ALICE", "a password", NULL, NULL) != 1 ||
+        user_verify_password_by_email(sdb, "alice@EXAMPLE.com", "a password", NULL, NULL) != 1 ||
+        user_verify_password_by_email(sdb, "BOB@example.com", "a password", NULL, NULL) != 1) {
+        log_error("Re-key: a username or address isn't found under the new key");
+        goto done;
+    }
+    if (user_lookup_passwordless_login_token(sdb, token, &link) != 0 ||
+        strcmp(link.email_address, "bob@example.com") != 0 ||
+        mfa_method_get_by_id(sdb, method_id, &method) != 0 ||
+        decrypt_field(method.secret, opened, sizeof(opened)) != 0 || strcmp(opened, totp) != 0) {
+        log_error("Re-key: the passwordless link or the TOTP secret didn't open as it was");
+        goto done;
+    }
+    if (signing_key_get_or_rotate(sdb, SIGNING_KEY_ACCESS_TOKEN, &es_after) != 0 ||
+        signing_key_get_or_rotate(sdb, SIGNING_KEY_AUTH_REQUEST, &hmac_after) != 0 ||
+        strcmp(es_after->current_private_key, es->current_private_key) != 0 ||
+        !es_after->prior_private_key ||
+        strcmp(es_after->prior_private_key, es->prior_private_key) != 0 ||
+        strcmp(hmac_after->current_secret, hmac->current_secret) != 0 ||
+        !hmac_after->prior_secret || strcmp(hmac_after->prior_secret, hmac->prior_secret) != 0 ||
+        signing_key_check_encryption_key(sdb) != 0) {
+        log_error("Re-key: the signing keys aren't the same keys under the new key");
+        goto done;
+    }
+    if (encryption_params_load(sdb, &stored) != 0 || strcmp(stored.method, params.method) != 0 ||
+        stored.iterations != params.iterations || strcmp(stored.salt, params.salt) != 0) {
+        log_error("Re-key: encryption_params doesn't hold the new stretch");
+        goto done;
+    }
+    log_info("  lookups match whatever the case; links, TOTP and signing keys open as they "
+             "were; the new stretch is recorded (OK)");
+
+    /* 5. History: no copy of the re-key's changes, and the next change is kept, by
+          the code that filled it before */
+    if (read_count(sdb, history_sql) != history || read_count(sdb, TRIGGERS_SQL) != triggers ||
+        read_digest(sdb, HISTORY_CODE_SQL, code_after, sizeof(code_after)) != 0 ||
+        strcmp(code, code_after) != 0 ||
+        db_execute_direct(sdb, "UPDATE " TBL_USER_MFA " SET display_name = 'laptop' "
+                               "WHERE pin = 1") != 0 ||
+        read_count(sdb, history_sql) != history + 1) {
+        log_error("Re-key: history copied the re-key's changes, or stopped keeping new ones, or "
+                  "what fills it changed");
+        goto done;
+    }
+    log_info("  history holds no copy of the re-key's changes and keeps the next one, as "
+             "before (OK)");
+
+    /* 6. A value b won't open, in the last table re-sealed, so the tables before it
+          are already done when it fails: the whole run rolls back */
+    history = read_count(sdb, history_sql);
+    if (mfa_method_create(sdb, 1, "TOTP", "tablet", "sealed-under-no-key", method_id) != 0 ||
+        read_stored_value(sdb, username_sql, before, sizeof(before)) != 0) {
+        log_error("Re-key: could not plant a value that won't open");
+        goto done;
+    }
+    if (maintenance_rekey(sdb, SCRATCH_DB_TYPE, &b, &c, &params_c, &report) != -1) {
+        log_error("Re-key: a value the old key won't open didn't fail the run");
+        goto done;
+    }
+    if (read_stored_value(sdb, username_sql, after, sizeof(after)) != 0 ||
+        strcmp(before, after) != 0 || sealed_opening(sdb, &b, &total) != 9 || total != 10 ||
+        read_count(sdb, history_sql) != history || read_count(sdb, TRIGGERS_SQL) != triggers ||
+        read_digest(sdb, HISTORY_CODE_SQL, code_after, sizeof(code_after)) != 0 ||
+        strcmp(code, code_after) != 0 ||
+        encryption_params_load(sdb, &stored) != 0 || strcmp(stored.salt, params.salt) != 0 ||
+        db_execute_direct(sdb, "UPDATE " TBL_USER_MFA " SET display_name = 'desk' "
+                               "WHERE pin = 1") != 0 ||
+        read_count(sdb, history_sql) != history + 1) {
+        log_error("Re-key: the failed run changed something");
+        goto done;
+    }
+    if (encryption_params_unchanged(sdb, 0, &params) != 1) {
+        log_error("Re-key: the failed run shows as a change to running instances");
+        goto done;
+    }
+    log_info("  a value the old key won't open rolls the whole run back (OK)");
+
+    failed = 0;
+
+done:
+    signing_key_free(es);
+    signing_key_free(hmac);
+    signing_key_free(es_after);
+    signing_key_free(hmac_after);
+    signing_key_thread_cleanup();
+    OPENSSL_cleanse(&a, sizeof(a));
+    OPENSSL_cleanse(&b, sizeof(b));
+    OPENSSL_cleanse(&c, sizeof(c));
+    encrypt_init(config->encryption_key);
+    db_disconnect(sdb);
+    if (!failed) {
+        log_info("Re-key tests passed!");
+    }
+    return failed;
+}
+
+/*
+ * Blobs, on either backend: what db_bind_blob writes, db_column_blob reads back
+ * byte for byte, and db_column_bytes gives the length of the column asked for,
+ * before or after any blob is read, on every row. PostgreSQL sends a uuid or a
+ * bytea as text, decoded on the way out (a bytea in either output form); and a
+ * value of 16 bytes may be either, so one bound to a bytea stays 16 bytes.
+ *
+ * Returns 0 on success.
+ */
+static int test_blob_columns(const config_t *config) {
+    log_info("=== Blob column tests");
+
+    db_handle_t *sdb = open_test_db(config);
+    if (!sdb) {
+        log_error("Blobs: could not open a test database");
+        return 1;
+    }
+
+    /* Row 1: an id, 16 bytes of data, a label; row 2: an id, 5 bytes, no label */
+    static const unsigned char ids[2][16] = {
+        {0x10,1,2,3,4,5,6,7,8,9,10,11,12,13,14,0xff},
+        {0x20,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x02} };
+    static const unsigned char sixteen[16] = {0,0xff,'\\','\'','x',0,1,2,3,4,5,6,7,8,9,0x80};
+    static const unsigned char five[5] = {0,0xff,0x10,'\\',0x01};
+    const unsigned char *data[2] = { sixteen, five };
+    const int data_len[2] = { 16, 5 };
+    const char *label[2] = { "label", NULL };
+#ifdef DB_BACKEND_POSTGRESQL
+    const char *create = "CREATE TABLE blob_probe (n integer, id uuid, data bytea, label text)";
+    static const char *outputs[] = { "SET bytea_output = 'hex'", "SET bytea_output = 'escape'" };
+#else
+    const char *create = "CREATE TABLE blob_probe (n integer, id blob, data blob, label text)";
+    static const char *outputs[] = { NULL };
+#endif
+    int failed = 1;
+    db_stmt_t *stmt = NULL;
+
+    if (db_execute_direct(sdb, create) != 0) {
+        log_error("Blobs: could not make the table");
+        goto done;
+    }
+    for (int i = 0; i < 2; i++) {
+        int rc = db_prepare(sdb, &stmt, "INSERT INTO blob_probe (n, id, data, label) "
+                                        "VALUES (" P"1, " P"2, " P"3, " P"4)");
+        if (rc == 0) {
+            db_bind_int(stmt, 1, i + 1);
+            db_bind_blob(stmt, 2, ids[i], 16);
+            db_bind_blob(stmt, 3, data[i], data_len[i]);
+            db_bind_text_or_null(stmt, 4, label[i]);
+            rc = db_step(stmt) == DB_DONE ? 0 : -1;
+        }
+        db_finalize(stmt);
+        stmt = NULL;
+        if (rc != 0) {
+            log_error("Blobs: could not insert row %d", i + 1);
+            goto done;
+        }
+    }
+
+    for (size_t o = 0; o < sizeof(outputs) / sizeof(outputs[0]); o++) {
+        if ((outputs[o] && db_execute_direct(sdb, outputs[o]) != 0) ||
+            db_prepare(sdb, &stmt, "SELECT id, data, label FROM blob_probe ORDER BY n") != 0) {
+            log_error("Blobs: could not read the table back");
+            goto done;
+        }
+        for (int i = 0; i < 2; i++) {
+            if (db_step(stmt) != DB_ROW) {
+                log_error("Blobs: row %d is missing", i + 1);
+                goto done;
+            }
+            int label_len = label[i] ? (int)strlen(label[i]) : 0;
+            /* Each length before any blob is read; then the data, and each length
+               again; then the id, and each length again */
+            int lengths = db_column_bytes(stmt, 0) == 16 && db_column_bytes(stmt, 1) == data_len[i] &&
+                          db_column_bytes(stmt, 2) == label_len;
+            const unsigned char *d = db_column_blob(stmt, 1);
+            int data_ok = d && memcmp(d, data[i], (size_t)data_len[i]) == 0 &&
+                          db_column_bytes(stmt, 1) == data_len[i] && db_column_bytes(stmt, 0) == 16 &&
+                          db_column_bytes(stmt, 2) == label_len;
+            const unsigned char *id = db_column_blob(stmt, 0);
+            int id_ok = id && memcmp(id, ids[i], 16) == 0 && db_column_bytes(stmt, 0) == 16 &&
+                        db_column_bytes(stmt, 1) == data_len[i];
+            if (!lengths || !data_ok || !id_ok) {
+                log_error("Blobs: row %d read back wrong (lengths first %d, data %d, id %d)%s%s",
+                          i + 1, lengths, data_ok, id_ok, outputs[o] ? ", after " : "",
+                          outputs[o] ? outputs[o] : "");
+                goto done;
+            }
+        }
+        db_finalize(stmt);
+        stmt = NULL;
+    }
+    log_info("  blobs read back as bound, and lengths are right in any order, on every row (OK)");
+
+    /* Found by what was bound: an id, and the 16 bytes of data */
+    for (int c = 0; c < 2; c++) {
+        int found = 0;
+        if (db_prepare(sdb, &stmt, c == 0 ? "SELECT n FROM blob_probe WHERE id = " P"1"
+                                          : "SELECT n FROM blob_probe WHERE data = " P"1") == 0) {
+            db_bind_blob(stmt, 1, c == 0 ? ids[1] : sixteen, 16);
+            found = db_step(stmt) == DB_ROW ? db_column_int(stmt, 0) : 0;
+        }
+        db_finalize(stmt);
+        stmt = NULL;
+        if (found != (c == 0 ? 2 : 1)) {
+            log_error("Blobs: no row found by its %s", c == 0 ? "id" : "16 bytes of data");
+            goto done;
+        }
+    }
+    log_info("  a row is found by a bound id, and by bound data of 16 bytes (OK)");
+
+    failed = 0;
+
+done:
+    db_finalize(stmt);
+    db_disconnect(sdb);
+    if (!failed) {
+        log_info("Blob column tests passed!");
+    }
+    return failed;
+}
+
+#ifdef DB_BACKEND_POSTGRESQL
+
+/* A query's one number, as an int; -1 if there's none */
+static int read_int(db_handle_t *db, const char *sql) {
+    long long n = read_count(db, sql);
+    return n < 0 || n > 0x7fffffff ? -1 : (int)n;
+}
+
+static void pause_ms(int ms) {
+    struct timespec pause = { ms / 1000, (long)(ms % 1000) * 1000000L };
+    nanosleep(&pause, NULL);
+}
+
+/* encryption_params_get_or_make, in a thread, on a connection of its own */
+typedef struct {
+    db_handle_t *db;
+    encrypt_params_t params;
+    int rc;
+} params_race_t;
+
+static void *get_or_make(void *arg) {
+    params_race_t *race = arg;
+    race->rc = encryption_params_get_or_make(race->db, "argon2id", 1, &race->params);
+    return NULL;
+}
+
+/*
+ * Two instances starting at once on a database with nothing sealed: each finds
+ * no encryption_params row and makes one, and the insert that comes second
+ * waits on the first, then does nothing. The second must then stretch with the
+ * first's row, or it would seal under keys no other instance derives. Here the
+ * first is a transaction left open with its row inserted, so the second is sure
+ * to find none, and to wait.
+ *
+ * Returns 0 on success.
+ */
+static int test_pg_params_race(const config_t *config) {
+    log_info("=== Encryption params race tests (PostgreSQL)");
+
+    char conninfo[1024], sql[128];
+    db_handle_t *first = scratch_db_open_shared(config, conninfo, sizeof(conninfo));
+    db_handle_t *second = NULL, *watcher = NULL;
+    if (!first || db_connect(&second, DB_TYPE_POSTGRESQL, conninfo) != 0 ||
+        db_connect(&watcher, DB_TYPE_POSTGRESQL, conninfo) != 0) {
+        log_error("Params race: could not open the connections");
+        if (first) db_disconnect(first);
+        if (second) db_disconnect(second);
+        return 1;
+    }
+
+    int failed = 1, running = 0, waiting = 0;
+    pthread_t thread;
+    params_race_t race = { .db = second, .rc = -1 };
+    const char *salt = "000102030405060708090a0b0c0d0e0f";
+    int pid = read_int(second, "SELECT pg_backend_pid()");
+
+    if (pid <= 0 || db_execute_direct(first, "BEGIN") != 0 ||
+        db_execute_direct(first, "INSERT INTO " TBL_ENCRYPTION_PARAMS " (method, iterations, salt) "
+                                 "VALUES ('pbkdf2-sha256', 1000, '000102030405060708090a0b0c0d0e0f')") != 0) {
+        log_error("Params race: the first instance couldn't make its row");
+        goto done;
+    }
+    if (pthread_create(&thread, NULL, get_or_make, &race) != 0) {
+        log_error("Params race: could not start the second instance");
+        goto done;
+    }
+    running = 1;
+
+    /* Until the second waits on the first's row, then the first commits */
+    snprintf(sql, sizeof(sql), "SELECT cardinality(pg_blocking_pids(%d))", pid);
+    for (int i = 0; i < 400 && !waiting; i++) {
+        waiting = read_int(watcher, sql) > 0;
+        if (!waiting) pause_ms(25);
+    }
+    if (db_execute_direct(first, "COMMIT") != 0) {
+        log_error("Params race: the first instance couldn't commit its row");
+        goto done;
+    }
+    pthread_join(thread, NULL);
+    running = 0;
+    if (!waiting) {
+        log_error("Params race: the second instance never waited on the first's row");
+        goto done;
+    }
+    if (race.rc != 0 || strcmp(race.params.method, "pbkdf2-sha256") != 0 ||
+        race.params.iterations != 1000 || strcmp(race.params.salt, salt) != 0 ||
+        read_count(watcher, "SELECT count(*) FROM " TBL_ENCRYPTION_PARAMS) != 1) {
+        log_error("Params race: the second instance didn't take the first's row (%d: %s, %d)",
+                  race.rc, race.params.method, race.params.iterations);
+        goto done;
+    }
+    log_info("  the second of two instances waits on the first's row, then stretches with it (OK)");
+
+    failed = 0;
+
+done:
+    if (running) {
+        db_execute_direct(first, "ROLLBACK");
+        pthread_join(thread, NULL);
+    }
+    db_disconnect(first);
+    db_disconnect(second);
+    db_disconnect(watcher);
+    if (!failed) {
+        log_info("Encryption params race tests passed!");
+    }
+    return failed;
+}
+
+/* A serving connection's session hook: the shared instance lock, as main.c's
+   takes it (which also checks the session is a direct one) */
+static int take_shared(db_handle_t *db) {
+    return instance_lock_pg(db, 0);
+}
+
+/* Does this backend hold the instance lock in this mode: "ShareLock" (an
+   instance's) or "ExclusiveLock" (a maintenance run's)? 1, 0, or -1 */
+static int holds_instance_lock(db_handle_t *watcher, int pid, const char *mode) {
+    char sql[256];
+    snprintf(sql, sizeof(sql), "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' "
+             "AND classid = 1096111176 AND objid = 1 AND objsubid = 2 AND granted "
+             "AND pid = %d AND mode = '%s'", pid, mode);
+    return read_int(watcher, sql);
+}
+
+/* End a backend's session from another, as a restart or an operator would,
+   once it has gone. 0, or -1 */
+static int end_session(db_handle_t *watcher, int pid) {
+    char sql[64], ended[8];
+    snprintf(sql, sizeof(sql), "SELECT pg_terminate_backend(%d, 5000)", pid);
+    return read_stored_value(watcher, sql, ended, sizeof(ended)) == 0 && ended[0] == 't' ? 0 : -1;
+}
+
+/*
+ * The instance lock's PostgreSQL form: a session advisory lock that instances
+ * hold shared and a maintenance run alone, each refusing the other. And the
+ * session hook that holds it on a serving connection: when the session ends
+ * under it (a restart, an operator's pg_terminate_backend), the connection
+ * reconnects, and holds the lock again before it runs anything else; while a
+ * maintenance run holds it, nothing runs.
+ *
+ * Returns 0 on success.
+ */
+static int test_pg_instance_lock(const config_t *config) {
+    log_info("=== Instance lock tests (PostgreSQL)");
+
+    char conninfo[1024], unlocked[8];
+    db_handle_t *watcher = scratch_db_open_shared(config, conninfo, sizeof(conninfo));
+    db_handle_t *conn[5] = { NULL };
+    db_handle_t **a = &conn[0], **b = &conn[1], **run = &conn[2], **late = &conn[3];
+    db_handle_t **serving = &conn[4];
+    int failed = 1;
+    if (!watcher) {
+        log_error("Instance lock: could not open a test database");
+        return 1;
+    }
+    for (int i = 0; i < 5; i++) {
+        if (db_connect(&conn[i], DB_TYPE_POSTGRESQL, conninfo) != 0) {
+            log_error("Instance lock: could not open the connections");
+            goto done;
+        }
+    }
+
+    /* 1. Two instances share it; a maintenance run is refused it until both have
+          stopped, then holds it alone, and an instance is refused */
+    int pid_a = read_int(*a, "SELECT pg_backend_pid()");
+    int pid_b = read_int(*b, "SELECT pg_backend_pid()");
+    if (instance_lock_pg(*a, 0) != 0 || instance_lock_pg(*b, 0) != 0 ||
+        instance_lock_pg(*run, 1) != 1) {
+        log_error("Instance lock: two instances couldn't share it, or a run took it from them");
+        goto done;
+    }
+    if (end_session(watcher, pid_a) != 0 || instance_lock_pg(*run, 1) != 1) {
+        log_error("Instance lock: a run took it while one instance still ran");
+        goto done;
+    }
+    if (end_session(watcher, pid_b) != 0 || instance_lock_pg(*run, 1) != 0 ||
+        instance_lock_pg(*late, 0) != 1) {
+        log_error("Instance lock: a run couldn't take it alone, or an instance joined it");
+        goto done;
+    }
+    log_info("  instances share it; a maintenance run takes it alone, and each refuses the other (OK)");
+
+    /* 2. A serving connection holds it as its hook is set, and again once its
+          session has ended under it: the statement that finds the session gone
+          fails, and the next runs on a new session, which holds it */
+    if (end_session(watcher, read_int(*run, "SELECT pg_backend_pid()")) != 0 ||
+        db_set_session_hook(*serving, take_shared) != 0) {
+        log_error("Instance lock: the run's end didn't free it for a serving connection");
+        goto done;
+    }
+    int first = read_int(*serving, "SELECT pg_backend_pid()");
+    if (holds_instance_lock(watcher, first, "ShareLock") != 1 || end_session(watcher, first) != 0) {
+        log_error("Instance lock: the hook didn't take it on the serving connection");
+        goto done;
+    }
+    db_execute_direct(*serving, "SELECT 1");
+    int second = read_int(*serving, "SELECT pg_backend_pid()");
+    if (second <= 0 || second == first || holds_instance_lock(watcher, second, "ShareLock") != 1) {
+        log_error("Instance lock: the serving connection ran on a new session without it");
+        goto done;
+    }
+    log_info("  a serving connection holds it again on a new session before anything runs (OK)");
+
+    /* 3. Its session ends while a maintenance run takes it: nothing runs on the
+          new session until the run lets it go, and then it's held again */
+    if (db_execute_direct(watcher, "CREATE TABLE gate_probe (n integer)") != 0 ||
+        end_session(watcher, second) != 0 || instance_lock_pg(watcher, 1) != 0) {
+        log_error("Instance lock: could not stand in for a maintenance run");
+        goto done;
+    }
+    db_execute_direct(*serving, "SELECT 1");
+    int refused = db_execute_direct(*serving, "INSERT INTO gate_probe VALUES (1)") != 0 &&
+                  read_int(watcher, "SELECT count(*) FROM gate_probe") == 0;
+    if (read_stored_value(watcher, "SELECT pg_advisory_unlock(1096111176, 1)",
+                          unlocked, sizeof(unlocked)) != 0 || unlocked[0] != 't') {
+        log_error("Instance lock: the stand-in run couldn't let it go");
+        goto done;
+    }
+    int ran = db_execute_direct(*serving, "INSERT INTO gate_probe VALUES (2)") == 0 &&
+              read_int(watcher, "SELECT count(*) FROM gate_probe") == 1 &&
+              holds_instance_lock(watcher, read_int(*serving, "SELECT pg_backend_pid()"),
+                                  "ShareLock") == 1;
+    if (!refused || !ran) {
+        log_error("Instance lock: while a run held it, a serving connection %s; after, it %s",
+                  refused ? "ran nothing" : "ran a statement", ran ? "ran" : "didn't run, or ran without it");
+        goto done;
+    }
+    log_info("  while a run holds it, a reconnected session runs nothing; after, it runs (OK)");
+
+    failed = 0;
+
+done:
+    for (int i = 0; i < 5; i++) {
+        if (conn[i]) db_disconnect(conn[i]);
+    }
+    db_disconnect(watcher);
+    if (!failed) {
+        log_info("Instance lock tests passed!");
+    }
+    return failed;
+}
+
+/*
+ * What PostgreSQL's scrub can't reach, said rather than passed over:
+ *   - --rekey run by a role that may write the sealed tables and set their
+ *     history aside, but may not vacuum them, as on a deployment hardened per
+ *     setup_reference.sql run without the owner role. VACUUM FULL then skips
+ *     each table with a warning and succeeds all the same: the run re-keys, and
+ *     says it didn't scrub (-2), since no table's file was rewritten.
+ *   - Planner statistics: ANALYZE takes no sample of a sealed column or a
+ *     secret's hash, which schema.sql keeps out, nor of history's copies. One
+ *     given statistics has its sample live in pg_statistic, which no rewrite
+ *     reaches, so the run says it didn't scrub. Once the column's statistics
+ *     target is back at 0 and the column is changed to its own type, which
+ *     drops the sample, it does, encryption_params and pg_statistic rewritten
+ *     too.
+ *   - --drophistory by a role that owns history but not the database: history
+ *     goes, and the run says it couldn't rewrite pg_statistic. Run again with
+ *     nothing left to drop, it says so again, and run with leave, finishes.
+ *
+ * Returns 0 on success.
+ */
+static int test_pg_unscrubbed(const config_t *config) {
+    log_info("=== Unscrubbed tests (PostgreSQL)");
+
+    db_handle_t *sdb = open_test_db(config);
+    if (!sdb) {
+        log_error("Unscrubbed: could not open a test database");
+        return 1;
+    }
+
+    int failed = 1, total = 0;
+    char role[64], sql[2048], statistic_node[32], params_node[32], node[32];
+    encrypt_keys_t a, b, c, d;
+    encrypt_params_t params, params_c, params_d;
+    unsigned char user_id[16];
+    rekey_report_t report;
+    drophistory_report_t dropped;
+    const char *statistic_node_sql = "SELECT pg_relation_filenode('pg_catalog.pg_statistic')";
+    const char *params_node_sql = "SELECT pg_relation_filenode('" TBL_ENCRYPTION_PARAMS "')";
+    /* Samples of what's kept out of planner statistics: sealed columns, blind
+       indexes and the hashes of secrets, and history's copies of them */
+    const char *kept_out_sql =
+        "SELECT count(*) FROM pg_stats "
+        "WHERE schemaname IN ('keys', 'security', 'session', 'security_history') "
+        "AND attname IN ('username', 'username_hash', 'email_address', 'email_hash', 'secret', "
+        "'secret_hash', 'current_secret', 'prior_secret', 'current_private_key', "
+        "'prior_private_key')";
+
+    if (encrypt_derive_keys(config->encryption_key, NULL, &a) != 0 ||
+        encrypt_params_new("pbkdf2-sha256", 1000, &params) != 0 ||
+        encrypt_params_new("pbkdf2-sha256", 1000, &params_c) != 0 ||
+        encrypt_params_new("pbkdf2-sha256", 1000, &params_d) != 0 ||
+        encrypt_derive_keys("the new passphrase", &params, &b) != 0 ||
+        encrypt_derive_keys("a third passphrase", &params_c, &c) != 0 ||
+        encrypt_derive_keys("a fourth passphrase", &params_d, &d) != 0) {
+        log_error("Unscrubbed: could not derive keys");
+        goto done;
+    }
+    encrypt_init_keys(&a);
+    if (db_init_history_tables(sdb, DB_TYPE_POSTGRESQL, 1) != 0 ||
+        user_create(sdb, "Alice", "alice@example.com", "a password", user_id) != 0 ||
+        scratch_db_role(role, sizeof(role)) != 0) {
+        log_error("Unscrubbed: could not set up");
+        goto done;
+    }
+
+    /* 1. The run's role reads and writes the tables, and replaces the history
+          functions it owns; the tables it doesn't own, so it can't vacuum them */
+    snprintf(sql, sizeof(sql),
+             "GRANT USAGE ON SCHEMA keys, security, session, security_history TO %s;"
+             "GRANT CREATE ON SCHEMA security_history TO %s;"
+             "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES "
+             "  IN SCHEMA keys, security, session, security_history TO %s;"
+             "ALTER FUNCTION security_history.tg_fn_user_account_before_update() OWNER TO %s;"
+             "ALTER FUNCTION security_history.tg_fn_user_email_before_update() OWNER TO %s;"
+             "ALTER FUNCTION security_history.tg_fn_user_mfa_before_update() OWNER TO %s;"
+             "SET ROLE %s",
+             role, role, role, role, role, role, role);
+    if (db_execute_direct(sdb, sql) != 0) {
+        log_error("Unscrubbed: could not set up the run's role");
+        goto done;
+    }
+    int rc = maintenance_rekey(sdb, DB_TYPE_POSTGRESQL, &a, &b, &params, &report);
+    if (db_execute_direct(sdb, "RESET ROLE") != 0 || rc != -2 ||
+        report.usernames != 1 || report.addresses != 1) {
+        log_error("Unscrubbed: the run returned %d, re-keying %d usernames and %d addresses",
+                  rc, report.usernames, report.addresses);
+        goto done;
+    }
+    if (sealed_opening(sdb, &b, &total) != 2 || total != 2) {
+        log_error("Unscrubbed: not every value was re-sealed");
+        goto done;
+    }
+    log_info("  a run that may not vacuum re-keys, and says it didn't scrub (OK)");
+
+    /* 2. ANALYZE takes no sample of a sealed column or a secret's hash, nor of
+          history's copies (the updates give history rows). Given one, username,
+          the run, which may vacuum all it rewrites, still says it didn't scrub */
+    if (db_execute_direct(sdb, "UPDATE " TBL_USER_ACCOUNT " SET updated_at = updated_at;"
+                               "UPDATE " TBL_USER_EMAIL " SET updated_at = updated_at;"
+                               "ANALYZE") != 0 ||
+        read_count(sdb, "SELECT count(*) FROM " HISTORY_OF("security", "user_account")) != 1 ||
+        read_count(sdb, kept_out_sql) != 0) {
+        log_error("Unscrubbed: ANALYZE took a sample of a sealed column or a secret's hash");
+        goto done;
+    }
+    if (db_execute_direct(sdb, "ALTER TABLE " TBL_USER_ACCOUNT " ALTER COLUMN username "
+                               "SET STATISTICS -1; ANALYZE " TBL_USER_ACCOUNT) != 0 ||
+        read_count(sdb, kept_out_sql) != 1) {
+        log_error("Unscrubbed: could not give username planner statistics");
+        goto done;
+    }
+    rc = maintenance_rekey(sdb, DB_TYPE_POSTGRESQL, &b, &c, &params_c, &report);
+    if (rc != -2 || sealed_opening(sdb, &c, &total) != 2) {
+        log_error("Unscrubbed: a run leaving a sealed column's statistics returned %d", rc);
+        goto done;
+    }
+    /* The fix the run names, for this column: no statistics, and the column
+       changed to its own type, which drops the sample. It takes only the
+       table's owner, so it works without a superuser (as on RDS). */
+    if (db_execute_direct(sdb, "ALTER TABLE " TBL_USER_ACCOUNT " ALTER COLUMN username "
+                               "SET STATISTICS 0;"
+                               "ALTER TABLE " TBL_USER_ACCOUNT " ALTER COLUMN username "
+                               "TYPE text") != 0 ||
+        read_count(sdb, kept_out_sql) != 0 ||
+        read_stored_value(sdb, statistic_node_sql, statistic_node, sizeof(statistic_node)) != 0 ||
+        read_stored_value(sdb, params_node_sql, params_node, sizeof(params_node)) != 0) {
+        log_error("Unscrubbed: the fix didn't remove username's statistics");
+        goto done;
+    }
+    rc = maintenance_rekey(sdb, DB_TYPE_POSTGRESQL, &c, &d, &params_d, &report);
+    if (rc != 0 || sealed_opening(sdb, &d, &total) != 2 ||
+        read_stored_value(sdb, statistic_node_sql, node, sizeof(node)) != 0 ||
+        strcmp(node, statistic_node) == 0 ||
+        read_stored_value(sdb, params_node_sql, node, sizeof(node)) != 0 ||
+        strcmp(node, params_node) == 0) {
+        log_error("Unscrubbed: after the fix the run returned %d, or left "
+                  "pg_statistic or encryption_params unrewritten", rc);
+        goto done;
+    }
+    log_info("  no sealed column or secret's hash has planner statistics, in history either; one "
+             "given some isn't scrubbed, and after the fix is, pg_statistic and "
+             "encryption_params with it (OK)");
+
+    /* 3. --drophistory by the role, owning history but not the database */
+    snprintf(sql, sizeof(sql),
+             "DO $$ DECLARE r record; BEGIN "
+             "FOR r IN SELECT schemaname, tablename FROM pg_tables WHERE schemaname IN "
+             "('security_history', 'session_history', 'logging_history', 'lookup_history') LOOP "
+             "EXECUTE format('ALTER TABLE %%I.%%I OWNER TO %%I', r.schemaname, r.tablename, "
+             "'%s'); END LOOP; "
+             "FOR r IN SELECT n.nspname, p.proname FROM pg_proc p "
+             "JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname IN "
+             "('security_history', 'session_history', 'logging_history', 'lookup_history') LOOP "
+             "EXECUTE format('ALTER FUNCTION %%I.%%I() OWNER TO %%I', r.nspname, r.proname, "
+             "'%s'); END LOOP; END $$;"
+             "GRANT USAGE ON SCHEMA session_history, logging_history, lookup_history TO %s;"
+             "SET ROLE %s",
+             role, role, role, role);
+    if (db_execute_direct(sdb, sql) != 0) {
+        log_error("Unscrubbed: could not give the run's role the history");
+        goto done;
+    }
+    rc = maintenance_drop_history(sdb, DB_TYPE_POSTGRESQL, 0, &dropped);
+    if (rc != -2 || dropped.tables_dropped == 0 ||
+        read_count(sdb, "SELECT count(*) FROM pg_tables WHERE schemaname IN ('security_history', "
+                        "'session_history', 'logging_history', 'lookup_history')") != 0) {
+        db_execute_direct(sdb, "RESET ROLE");
+        log_error("Unscrubbed: --drophistory without leave to rewrite pg_statistic returned %d, "
+                  "dropping %d tables", rc, dropped.tables_dropped);
+        goto done;
+    }
+    /* Run again with nothing left to drop: still unscrubbed without leave, and
+       finished with it */
+    rc = maintenance_drop_history(sdb, DB_TYPE_POSTGRESQL, 0, &dropped);
+    int again = -1;
+    if (db_execute_direct(sdb, "RESET ROLE") == 0 && rc == -2 && dropped.tables_dropped == 0 &&
+        read_stored_value(sdb, statistic_node_sql, statistic_node, sizeof(statistic_node)) == 0) {
+        again = maintenance_drop_history(sdb, DB_TYPE_POSTGRESQL, 0, &dropped);
+    }
+    if (rc != -2 || again != 0 ||
+        read_stored_value(sdb, statistic_node_sql, node, sizeof(node)) != 0 ||
+        strcmp(node, statistic_node) == 0) {
+        log_error("Unscrubbed: --drophistory run again returned %d without leave and %d with it, "
+                  "or didn't rewrite pg_statistic", rc, again);
+        goto done;
+    }
+    log_info("  --drophistory that may not rewrite pg_statistic drops history and says it didn't "
+             "scrub; run again, it says so again, and with leave it finishes (OK)");
+
+    failed = 0;
+
+done:
+    OPENSSL_cleanse(&a, sizeof(a));
+    OPENSSL_cleanse(&b, sizeof(b));
+    OPENSSL_cleanse(&c, sizeof(c));
+    OPENSSL_cleanse(&d, sizeof(d));
+    encrypt_init(config->encryption_key);
+    db_disconnect(sdb);
+    if (!failed) {
+        log_info("Unscrubbed tests passed!");
+    }
+    return failed;
+}
+
+#endif /* DB_BACKEND_POSTGRESQL */
+
 /*
  * MFA-management gate — keyed on enrollment (has_mfa), not on the require_mfa
  * preference.
@@ -568,14 +2353,15 @@ done:
  * The case that matters: a user who has enrolled a factor but not opted in to
  * "require". A gate reading the preference would pass their password-only
  * session -- and several gated endpoints end in a factor that session could then
- * present. The decision itself is oauth_session_mfa_pending(); what can silently
- * break it is the session lookup not carrying has_mfa, which would make the gate
- * read 0 and wave everyone through. So this drives the real lookup.
+ * present. The decision itself is session_authenticate's (handlers.h), and
+ * test-handlers drives it end to end; what can silently break it from here is
+ * the session lookup not carrying has_mfa or mfa_completed, which would make the
+ * gate read 0 and wave everyone through. So this drives the real lookup.
  *
  * Returns 0 on success.
  */
 static int test_mfa_management_gate(const config_t *config) {
-    log_info("\nMFA-management gate tests");
+    log_info("=== MFA-management gate tests");
 
     db_handle_t *sdb = open_test_db(config);
     if (!sdb) {
@@ -618,7 +2404,7 @@ static int test_mfa_management_gate(const config_t *config) {
         log_error("MFA gate: session lookup failed");
         goto done;
     }
-    if (s.user_has_mfa != 0 || oauth_session_mfa_pending(&s)) {
+    if (s.user_has_mfa != 0 || s.mfa_completed != 0) {
         log_error("MFA gate: unenrolled user gated (has_mfa=%d)", s.user_has_mfa);
         goto done;
     }
@@ -631,7 +2417,7 @@ static int test_mfa_management_gate(const config_t *config) {
         log_error("MFA gate: could not mark user enrolled");
         goto done;
     }
-    if (s.user_has_mfa != 1 || s.user_requires_mfa != 0 || !oauth_session_mfa_pending(&s)) {
+    if (s.user_has_mfa != 1 || s.user_requires_mfa != 0 || s.mfa_completed != 0) {
         log_error("MFA gate: enrolled user with password-only session NOT gated "
                   "(has_mfa=%d require_mfa=%d mfa_completed=%d)",
                   s.user_has_mfa, s.user_requires_mfa, s.mfa_completed);
@@ -640,12 +2426,12 @@ static int test_mfa_management_gate(const config_t *config) {
     log_info("  enrolled, require off, password-only session: gated (OK)");
 
     /* 3. Once the session completes MFA, the gate opens. */
-    if (oauth_session_set_mfa_completed(sdb, token) != 0 ||
+    if (oauth_session_set_mfa_completed(sdb, session_id) != 0 ||
         oauth_session_get_by_token(sdb, token, &s) != 0) {
         log_error("MFA gate: could not complete MFA on session");
         goto done;
     }
-    if (oauth_session_mfa_pending(&s)) {
+    if (s.mfa_completed != 1) {
         log_error("MFA gate: still gated after MFA completion");
         goto done;
     }
@@ -672,7 +2458,7 @@ done:
  * Returns 0 on success.
  */
 static int test_mfa_reset(const config_t *config) {
-    log_info("\nMFA reset tests");
+    log_info("=== MFA reset tests");
 
     db_handle_t *sdb = open_test_db(config);
     if (!sdb) {
@@ -710,7 +2496,7 @@ static int test_mfa_reset(const config_t *config) {
     unsigned char session_id[16];
     oauth_session_info_t s;
     if (oauth_session_create(sdb, 1, user1, token, "password", NULL, NULL, 3600, session_id) != 0 ||
-        oauth_session_get_by_token(sdb, token, &s) != 0 || !oauth_session_mfa_pending(&s)) {
+        oauth_session_get_by_token(sdb, token, &s) != 0 || !s.user_has_mfa || s.mfa_completed) {
         log_error("MFA reset: the password-only session should start out gated");
         goto done;
     }
@@ -744,7 +2530,7 @@ static int test_mfa_reset(const config_t *config) {
     log_info("  methods deleted, recovery codes revoked, both flags clear (OK)");
     log_info("  another user's MFA untouched (OK)");
 
-    if (oauth_session_get_by_token(sdb, token, &s) != 0 || oauth_session_mfa_pending(&s)) {
+    if (oauth_session_get_by_token(sdb, token, &s) != 0 || s.user_has_mfa) {
         log_error("MFA reset: the session is still held at the gate");
         goto done;
     }
@@ -772,17 +2558,17 @@ done:
  *
  * user_set_active revokes a user's tokens (test_deactivation_revokes), but every
  * liveness query also reads is_active at use time, for the tokens that sweep
- * misses: one issued while the deactivation was running, or anything an account
- * deactivated before the sweep existed still holds. So this flips is_active
- * directly, as such an account was left, and pins the use-time check in both
- * queries, and that a client_credentials token (no user row) is not collateral
- * damage of it. Deactivating the client's organization, or the token's resource
- * server, revokes nothing and is read the same way, for both kinds of token.
+ * misses, such as one issued while the deactivation was running. So this flips
+ * is_active directly, leaving the tokens unrevoked, and pins the use-time check
+ * in both queries, and that a client_credentials token (no user row) is not
+ * collateral damage of it. Deactivating the client's organization, or the
+ * token's resource server, revokes nothing and is read the same way, for both
+ * kinds of token.
  *
  * Returns 0 on success.
  */
 static int test_deactivated_user_tokens(const config_t *config) {
-    log_info("\nDeactivated-user token tests");
+    log_info("=== Deactivated-user token tests");
 
     db_handle_t *sdb = open_test_db(config);
     if (!sdb) {
@@ -802,7 +2588,10 @@ static int test_deactivated_user_tokens(const config_t *config) {
             "                    display_name, access_token_ttl_seconds) "
             "  VALUES (x'00000000000000000000000000000003', 1, 'cl', 'confidential', "
             "          'authorization_code', 'Client', 3600);"
-            "INSERT INTO user_account (id) VALUES (x'00000000000000000000000000000004');") != 0) {
+            "INSERT INTO user_account (id) VALUES (x'00000000000000000000000000000004');"
+            "INSERT INTO client_resource_server (organization_pin, client_pin, resource_server_pin) "
+            "  VALUES (1, 1, 1);"
+            "INSERT INTO client_user (client_pin, user_account_pin) VALUES (1, 1);") != 0) {
         log_error("Deactivation: could not insert fixtures");
         goto done;
     }
@@ -925,13 +2714,14 @@ done:
  * attacker's included, MFA-complete sessions and all, and every emailed link
  * still in date. user_set_active must close the sessions, revoke the refresh and
  * access tokens and void the password-reset, passwordless-login and invitation
- * links when it deactivates, leave another user's alone, and sweep an account an
- * older build flagged inactive without revoking anything.
+ * links when it deactivates, leave another user's alone, and sweep an account
+ * flagged inactive with its tokens left unrevoked. Reactivating, it must
+ * close whatever the account came to hold while the deactivation ran.
  *
  * Returns 0 on success.
  */
 static int test_deactivation_revokes(const config_t *config) {
-    log_info("\nDeactivation revocation tests");
+    log_info("=== Deactivation revocation tests");
 
     db_handle_t *sdb = open_test_db(config);
     if (!sdb) {
@@ -944,7 +2734,8 @@ static int test_deactivation_revokes(const config_t *config) {
     /* Two users, pins 1 and 2 */
     if (db_execute_direct(sdb, FIXTURE_ORG_RS_CLIENT
             "INSERT INTO user_account (id) VALUES (x'00000000000000000000000000000004');"
-            "INSERT INTO user_account (id) VALUES (x'00000000000000000000000000000005');") != 0) {
+            "INSERT INTO user_account (id) VALUES (x'00000000000000000000000000000005');"
+            "INSERT INTO client_user (client_pin, user_account_pin) VALUES (1, 1), (1, 2);") != 0) {
         log_error("Revocation: could not insert fixtures");
         goto done;
     }
@@ -968,7 +2759,7 @@ static int test_deactivation_revokes(const config_t *config) {
         unsigned char id[16], code_id[16];
         if (oauth_session_create(sdb, u + 1, user_ids[u], sessions[u], "password",
                                  NULL, NULL, 3600, id) != 0 ||
-            oauth_session_set_mfa_completed(sdb, sessions[u]) != 0 ||
+            oauth_session_set_mfa_completed(sdb, id) != 0 ||
             oauth_auth_code_create(sdb, 1, FIXTURE_CLIENT_ID, u + 1, user_ids[u], codes[u],
                                    NULL, NULL, 600, code_id) != 0 ||
             oauth_token_create_refresh(sdb, 1, u + 1, code_id, refresh[u], "read",
@@ -1092,12 +2883,733 @@ static int test_deactivation_revokes(const config_t *config) {
     }
     log_info("  unknown id reported (OK)");
 
+    /* 5. Whatever an inactive account holds escaped its deactivation's sweep, made
+          by a sign-in that read the account as active an instant before. Planted
+          here while user 1 is inactive, and reactivating closes it. A new session
+          of user 2's survives that, and activating user 2, already active, too. */
+    unsigned char planted_id[16], planted_code[16];
+    if (user_set_active(sdb, user_ids[0], 0) != 0 ||
+        oauth_session_create(sdb, 1, user_ids[0], "escaped-session", "password",
+                             NULL, NULL, 3600, planted_id) != 0 ||
+        oauth_auth_code_create(sdb, 1, FIXTURE_CLIENT_ID, 1, user_ids[0], "escaped-code",
+                               NULL, NULL, 600, planted_code) != 0 ||
+        oauth_token_create_refresh(sdb, 1, 1, planted_code, "escaped-refresh", "read",
+                                   3600, planted_id) != 0 ||
+        oauth_token_create_access(sdb, 1, 1, 1, NULL, NULL, "escaped-access", "read",
+                                  3600, planted_id) != 0 ||
+        oauth_session_create(sdb, 2, user_ids[1], "bystander-session", "password",
+                             NULL, NULL, 3600, planted_id) != 0) {
+        log_error("Revocation: could not plant what escaped the sweep");
+        goto done;
+    }
+    if (user_set_active(sdb, user_ids[0], 1) != 0 ||
+        oauth_session_get_by_token(sdb, "escaped-session", &session) == 0 ||
+        read_stored_value(sdb, "SELECT MIN(is_revoked) FROM refresh_token "
+                               "WHERE user_account_pin = 1",
+                          revoked, sizeof(revoked)) != 0 || strcmp(revoked, "1") != 0 ||
+        oauth_access_token_is_active(sdb, "escaped-access") != 0) {
+        log_error("Revocation: what escaped the deactivation survived reactivation");
+        goto done;
+    }
+    if (user_set_active(sdb, user_ids[1], 1) != 0 ||
+        oauth_session_get_by_token(sdb, "bystander-session", &session) != 0) {
+        log_error("Revocation: reactivating closed another user's session, or activating "
+                  "an active account closed its own");
+        goto done;
+    }
+    log_info("  reactivated: what escaped the deactivation is closed, nothing else (OK)");
+
     failed = 0;
 
 done:
     db_disconnect(sdb);
     if (!failed) {
         log_info("Deactivation revocation tests passed!");
+    }
+    return failed;
+}
+
+/* 1 if both liveness queries call the token active, 0 if both call it inactive,
+ * -1 if they disagree or fail */
+static int token_live(db_handle_t *db, const char *token, long long resource_server_pin) {
+    int active = -1;
+    if (oauth_introspect_token(db, token, NULL, resource_server_pin, &active,
+                               NULL, NULL, NULL, NULL, NULL, NULL) != 0) {
+        return -1;
+    }
+    return oauth_access_token_is_active(db, token) == active ? active : -1;
+}
+
+/* 1 if the user's refresh token is revoked, 0 if not, -1 if it can't be read */
+static int refresh_revoked(db_handle_t *db, int user_pin) {
+    char sql[96], value[8];
+    snprintf(sql, sizeof(sql),
+             "SELECT is_revoked FROM refresh_token WHERE user_account_pin = %d", user_pin);
+    if (read_stored_value(db, sql, value, sizeof(value)) != 0) return -1;
+    return strcmp(value, "1") == 0;
+}
+
+/*
+ * Unlinking withdraws tokens, and linking again doesn't bring them back.
+ *
+ * Unlinking a user from a client, or a client from a resource server, revokes
+ * the pair's tokens, so a new link revives none of them. Both liveness queries
+ * also read the links, for a token that escapes the revocation by being issued
+ * while the unlink runs. So each half unlinks, links again, and then un-revokes
+ * a token by hand while its link is gone. A universal client's users need no
+ * link, and unlinking from one revokes nothing.
+ *
+ * Returns 0 on success.
+ */
+static int test_unlink_revokes(const config_t *config) {
+    log_info("=== Unlink revocation tests");
+
+    db_handle_t *sdb = open_test_db(config);
+    if (!sdb) {
+        log_error("Unlink: could not open a test database");
+        return 1;
+    }
+
+    int failed = 1;
+
+    /* Besides the fixture's client 1 and resource server 1: resource server 2,
+       also linked to client 1; client 2, universal, linked to resource server 1;
+       users 1 and 2, linked to client 1; and user 1 an admin of the
+       organization, to unlink as. */
+    if (db_execute_direct(sdb, FIXTURE_ORG_RS_CLIENT
+            "INSERT INTO resource_server (id, organization_pin, code_name, display_name, address) "
+            "  VALUES (x'00000000000000000000000000000012', 1, 'rs2', 'RS 2', 'https://rs2.example');"
+            "INSERT INTO client (id, organization_pin, code_name, client_type, grant_type, "
+            "                    display_name, access_token_ttl_seconds, is_universal) "
+            "  VALUES (x'00000000000000000000000000000013', 1, 'ui', 'public', "
+            "          'authorization_code', 'Universal', 3600, 1);"
+            "INSERT INTO client_resource_server (organization_pin, client_pin, resource_server_pin) "
+            "  VALUES (1, 1, 2), (1, 2, 1);"
+            "INSERT INTO user_account (id) VALUES (x'00000000000000000000000000000004'),"
+            "                                     (x'00000000000000000000000000000005');"
+            "INSERT INTO client_user (client_pin, user_account_pin) VALUES (1, 1), (1, 2);"
+            "INSERT INTO organization_admin (organization_pin, user_account_pin) VALUES (1, 1);") != 0) {
+        log_error("Unlink: could not insert fixtures");
+        goto done;
+    }
+    const unsigned char user_ids[2][16] = {
+        {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x04},
+        {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x05},
+    };
+    const unsigned char rs_1[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x02};
+
+    /* Access tokens by resource server, client and user (0: no user), and a
+       refresh token for each user at client 1 */
+    const struct { long long rs, client, user; const char *token; } tokens[] = {
+        { 1, 1, 1, "unlink-user-1" },
+        { 1, 1, 2, "unlink-user-2" },
+        { 1, 2, 1, "unlink-universal" },
+        { 1, 1, 0, "unlink-machine-rs-1" },
+        { 2, 1, 0, "unlink-machine-rs-2" },
+    };
+    unsigned char id[16], code_id[16];
+    for (size_t i = 0; i < sizeof(tokens) / sizeof(tokens[0]); i++) {
+        if (oauth_token_create_access(sdb, tokens[i].rs, tokens[i].client, tokens[i].user,
+                                      NULL, NULL, tokens[i].token, "read", 3600, id) != 0 ||
+            token_live(sdb, tokens[i].token, tokens[i].rs) != 1) {
+            log_error("Unlink: %s isn't active to begin with", tokens[i].token);
+            goto done;
+        }
+    }
+    const char *codes[] = { "unlink-code-1", "unlink-code-2" };
+    const char *refresh[] = { "unlink-refresh-1", "unlink-refresh-2" };
+    for (int u = 0; u < 2; u++) {
+        if (oauth_auth_code_create(sdb, 1, FIXTURE_CLIENT_ID, u + 1, user_ids[u], codes[u],
+                                   NULL, NULL, 600, code_id) != 0 ||
+            oauth_token_create_refresh(sdb, 1, u + 1, code_id, refresh[u], "read",
+                                       3600, id) != 0) {
+            log_error("Unlink: could not create refresh tokens");
+            goto done;
+        }
+    }
+    log_info("  linked: every token active, the universal client's with no user link (OK)");
+
+    /* 1. Unlink user 1 from client 1: that pair's tokens die, nobody else's */
+    if (rs_client_user_unlink(sdb, 1, user_ids[0]) != 0) {
+        log_error("Unlink: could not unlink user 1 from client 1");
+        goto done;
+    }
+    if (token_live(sdb, "unlink-user-1", 1) != 0 || refresh_revoked(sdb, 1) != 1) {
+        log_error("Unlink: user 1's tokens at client 1 survived the unlink");
+        goto done;
+    }
+    if (token_live(sdb, "unlink-user-2", 1) != 1 || token_live(sdb, "unlink-universal", 1) != 1 ||
+        refresh_revoked(sdb, 2) != 0) {
+        log_error("Unlink: unlinking user 1 from client 1 touched other tokens");
+        goto done;
+    }
+    log_info("  user unlinked: the pair's tokens dead, nobody else's (OK)");
+
+    /* 2. Linked again: nothing comes back */
+    if (rs_client_user_link(sdb, 1, user_ids[0]) != 0 ||
+        token_live(sdb, "unlink-user-1", 1) != 0 || refresh_revoked(sdb, 1) != 1) {
+        log_error("Unlink: linking user 1 again brought their tokens back");
+        goto done;
+    }
+    log_info("  user linked again: nothing comes back (OK)");
+
+    /* 3. A token that escaped the revocation is refused while the link is gone,
+          and it is the link refusing it: linking again lets it through */
+    if (rs_client_user_unlink(sdb, 1, user_ids[0]) != 0 ||
+        db_execute_direct(sdb, "UPDATE access_token SET is_revoked = 0 "
+                               "WHERE client_pin = 1 AND user_account_pin = 1") != 0) {
+        log_error("Unlink: could not set up a token that escaped the revocation");
+        goto done;
+    }
+    if (token_live(sdb, "unlink-user-1", 1) != 0) {
+        log_error("Unlink: a token is active with its user unlinked from its client");
+        goto done;
+    }
+    if (rs_client_user_link(sdb, 1, user_ids[0]) != 0 || token_live(sdb, "unlink-user-1", 1) != 1) {
+        log_error("Unlink: the escaped token was refused by something other than the link");
+        goto done;
+    }
+    log_info("  escaped the revocation: refused while the user is unlinked (OK)");
+
+    /* 4. Unlinking from the universal client revokes nothing */
+    if (rs_client_user_unlink(sdb, 2, user_ids[0]) != 0 ||
+        token_live(sdb, "unlink-universal", 1) != 1) {
+        log_error("Unlink: unlinking a user from a universal client revoked their token");
+        goto done;
+    }
+    log_info("  universal client: unlinking revokes nothing (OK)");
+
+    /* 5. Unlink client 1 from resource server 1: the client's tokens there die,
+          user and machine alike; its token for resource server 2, another
+          client's for resource server 1, and its refresh tokens don't */
+    if (client_resource_server_delete(sdb, 1, -1, FIXTURE_CLIENT_ID, rs_1) != 0) {
+        log_error("Unlink: could not unlink client 1 from resource server 1");
+        goto done;
+    }
+    if (token_live(sdb, "unlink-machine-rs-1", 1) != 0 || token_live(sdb, "unlink-user-2", 1) != 0) {
+        log_error("Unlink: client 1's tokens for resource server 1 survived the unlink");
+        goto done;
+    }
+    if (token_live(sdb, "unlink-machine-rs-2", 2) != 1 ||
+        token_live(sdb, "unlink-universal", 1) != 1 || refresh_revoked(sdb, 2) != 0) {
+        log_error("Unlink: unlinking resource server 1 touched other tokens");
+        goto done;
+    }
+    log_info("  resource server unlinked: the client's tokens there dead, nothing else (OK)");
+
+    /* 6. Linked again: nothing comes back. Unlinked again, with a token that
+          escaped the revocation: refused, until the link returns */
+    if (client_resource_server_create(sdb, 1, -1, FIXTURE_CLIENT_ID, rs_1) != 0 ||
+        token_live(sdb, "unlink-machine-rs-1", 1) != 0) {
+        log_error("Unlink: linking resource server 1 again brought the client's token back");
+        goto done;
+    }
+    if (client_resource_server_delete(sdb, 1, -1, FIXTURE_CLIENT_ID, rs_1) != 0 ||
+        db_execute_direct(sdb, "UPDATE access_token SET is_revoked = 0 "
+                               "WHERE client_pin = 1 AND resource_server_pin = 1 "
+                               "AND user_account_pin IS NULL") != 0) {
+        log_error("Unlink: could not set up a token that escaped the revocation");
+        goto done;
+    }
+    if (token_live(sdb, "unlink-machine-rs-1", 1) != 0) {
+        log_error("Unlink: a token is active with its client unlinked from its server");
+        goto done;
+    }
+    if (client_resource_server_create(sdb, 1, -1, FIXTURE_CLIENT_ID, rs_1) != 0 ||
+        token_live(sdb, "unlink-machine-rs-1", 1) != 1) {
+        log_error("Unlink: the escaped token was refused by something other than the link");
+        goto done;
+    }
+    log_info("  resource server linked again: nothing comes back; an escaped token "
+             "is refused while unlinked (OK)");
+
+    failed = 0;
+
+done:
+    db_disconnect(sdb);
+    if (!failed) {
+        log_info("Unlink revocation tests passed!");
+    }
+    return failed;
+}
+
+#ifdef DB_BACKEND_POSTGRESQL
+
+/* A grant's revocation, in a thread, on a connection of its own: /revoke's, given
+ * a refresh token, or replay detection's, given the grant's first token */
+typedef struct {
+    db_handle_t *db;
+    const char *token;
+    const unsigned char *origin;
+    int rc;
+} revoke_race_t;
+
+static void *revoke_in_thread(void *arg) {
+    revoke_race_t *race = arg;
+    int refresh_count = 0, access_count = 0;
+    race->rc = race->token
+        ? oauth_revoke_token(race->db, race->token, "refresh_token", 1)
+        : oauth_revoke_token_chain(race->db, race->origin, 0, &refresh_count, &access_count);
+    return NULL;
+}
+
+/*
+ * A grant revoked while a refresh of it is in flight. Each statement of a
+ * PostgreSQL transaction reads what was committed when it began, so the
+ * revocation can't see the refresh token and access token the refresh is
+ * making: it waits on the token being exchanged, revokes that once the refresh
+ * commits, and misses the two new ones. They must be dead anyway, from their
+ * first use. Here the refresh is a transaction left open with its tokens made,
+ * so the revocation is sure to wait on it: /revoke's, then replay detection's.
+ *
+ * Returns 0 on success.
+ */
+static int test_pg_revoke_race(const config_t *config) {
+    log_info("=== Grant revocation race tests (PostgreSQL)");
+
+    char conninfo[1024], sql[128];
+    db_handle_t *first = scratch_db_open_shared(config, conninfo, sizeof(conninfo));
+    db_handle_t *second = NULL, *watcher = NULL;
+    if (!first || db_connect(&second, DB_TYPE_POSTGRESQL, conninfo) != 0 ||
+        db_connect(&watcher, DB_TYPE_POSTGRESQL, conninfo) != 0) {
+        log_error("Revoke race: could not open the connections");
+        if (first) db_disconnect(first);
+        if (second) db_disconnect(second);
+        return 1;
+    }
+
+    int failed = 1, running = 0;
+    pthread_t thread;
+    revoke_race_t race = { .db = second, .rc = -1 };
+    int pid = read_int(second, "SELECT pg_backend_pid()");
+
+    /* FIXTURE_ORG_RS_CLIENT as PostgreSQL takes it, and two users linked to the client */
+    if (pid <= 0 || db_execute_direct(first,
+            "INSERT INTO " TBL_ORGANIZATION " (id, code_name, display_name) "
+            "  VALUES ('00000000-0000-0000-0000-000000000001', 'org', 'Org');"
+            "INSERT INTO " TBL_RESOURCE_SERVER " (id, organization_pin, code_name, "
+            "                                     display_name, address) "
+            "  VALUES ('00000000-0000-0000-0000-000000000002', 1, 'rs', 'RS', "
+            "          'https://rs.example');"
+            "INSERT INTO " TBL_CLIENT " (id, organization_pin, code_name, client_type, "
+            "                            grant_type, display_name, access_token_ttl_seconds) "
+            "  VALUES ('00000000-0000-0000-0000-000000000003', 1, 'cl', 'confidential', "
+            "          'authorization_code', 'Client', 3600);"
+            "INSERT INTO " TBL_CLIENT_RESOURCE_SERVER " (organization_pin, client_pin, "
+            "                                            resource_server_pin) VALUES (1, 1, 1);"
+            "INSERT INTO " TBL_USER_ACCOUNT " (id) "
+            "  VALUES ('00000000-0000-0000-0000-000000000004'), "
+            "         ('00000000-0000-0000-0000-000000000005');"
+            "INSERT INTO " TBL_CLIENT_USER " (client_pin, user_account_pin) "
+            "  VALUES (1, 1), (1, 2);") != 0) {
+        log_error("Revoke race: could not insert fixtures");
+        goto done;
+    }
+    const unsigned char user_ids[2][16] = {
+        {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x04},
+        {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x05},
+    };
+    const char *revocation[2] = { "/revoke", "replay detection" };
+    snprintf(sql, sizeof(sql), "SELECT cardinality(pg_blocking_pids(%d))", pid);
+
+    /* A grant for each user: /revoke revokes user 1's, replay detection user 2's */
+    for (int c = 0; c < 2; c++) {
+        char code[32], refresh[32], next[32], access[32], after[32];
+        snprintf(code, sizeof(code), "race-code-%d", c);
+        snprintf(refresh, sizeof(refresh), "race-refresh-%d", c);
+        snprintf(next, sizeof(next), "race-next-%d", c);
+        snprintf(access, sizeof(access), "race-access-%d", c);
+        snprintf(after, sizeof(after), "race-after-%d", c);
+
+        unsigned char code_id[16], origin[16], next_id[16], id[16];
+        oauth_refresh_token_data_t data;
+        if (oauth_auth_code_create(first, 1, FIXTURE_CLIENT_ID, c + 1, user_ids[c], code,
+                                   NULL, NULL, 600, code_id) != 0 ||
+            oauth_token_create_refresh(first, 1, c + 1, code_id, refresh, "read",
+                                       3600, origin) != 0) {
+            log_error("Revoke race: could not make the grant");
+            goto done;
+        }
+
+        /* The refresh as /token makes it: the token exchanged, and the next refresh
+           token and an access token made, not yet committed */
+        if (db_execute_direct(first, "BEGIN") != 0 ||
+            oauth_token_rotate_refresh(first, refresh, next, 3600, &data, next_id) != 0 ||
+            oauth_token_create_access(first, 1, 1, c + 1, NULL, next_id, access, "read",
+                                      3600, id) != 0) {
+            log_error("Revoke race: could not start the refresh");
+            goto done;
+        }
+        race.token = c == 0 ? refresh : NULL;
+        race.origin = c == 0 ? NULL : origin;
+        race.rc = -1;
+        if (pthread_create(&thread, NULL, revoke_in_thread, &race) != 0) {
+            log_error("Revoke race: could not start the revocation");
+            goto done;
+        }
+        running = 1;
+
+        /* Until the revocation waits on the exchanged token, then the refresh commits */
+        int waiting = 0;
+        for (int i = 0; i < 400 && !waiting; i++) {
+            waiting = read_int(watcher, sql) > 0;
+            if (!waiting) pause_ms(25);
+        }
+        if (db_execute_direct(first, "COMMIT") != 0) {
+            log_error("Revoke race: the refresh couldn't commit");
+            goto done;
+        }
+        pthread_join(thread, NULL);
+        running = 0;
+        if (!waiting || race.rc != 0) {
+            log_error("Revoke race (%s): the revocation %s", revocation[c],
+                      waiting ? "failed" : "never waited on the refresh");
+            goto done;
+        }
+
+        /* What the refresh made is dead at its first use */
+        if (oauth_token_rotate_refresh(watcher, next, after, 3600, &data, id) == 0) {
+            log_error("Revoke race (%s): the refresh's new refresh token still exchanges",
+                      revocation[c]);
+            goto done;
+        }
+        if (token_live(watcher, access, 1) != 0) {
+            log_error("Revoke race (%s): the refresh's access token is still live",
+                      revocation[c]);
+            goto done;
+        }
+        log_info("  %s during a refresh: the refresh's new tokens are dead from first use (OK)",
+                 revocation[c]);
+    }
+
+    failed = 0;
+
+done:
+    if (running) {
+        db_execute_direct(first, "ROLLBACK");
+        pthread_join(thread, NULL);
+    }
+    db_disconnect(first);
+    db_disconnect(second);
+    db_disconnect(watcher);
+    if (!failed) {
+        log_info("Grant revocation race tests passed!");
+    }
+    return failed;
+}
+
+#endif
+
+/* User 1's stored password hash */
+static int stored_password(db_handle_t *db, char *out, size_t out_size) {
+    return read_stored_value(db, "SELECT secret_hash FROM user_account WHERE pin = 1",
+                             out, out_size);
+}
+
+/*
+ * A password-reset link, an invitation, an email-verification link and a
+ * recovery code each work once.
+ *
+ * Used once, each is refused after, as are a revoked or expired link, a link
+ * for an inactive account, and a code from a retired set; no refusal changes
+ * the password. Each redemption checks twice: up front, so a dead link costs
+ * no hash, and again in the statements that write, which are the authority: a
+ * redemption racing another passes the first check, and only the second stops
+ * it. From one connection the two can't be told apart, so this must also pass
+ * in a build whose up-front checks have been emptied out.
+ *
+ * Returns 0 on success.
+ */
+static int test_single_use(const config_t *config) {
+    log_info("=== Single-use tests");
+
+    db_handle_t *sdb = open_test_db(config);
+    if (!sdb) {
+        log_error("Single-use: could not open a test database");
+        return 1;
+    }
+
+    int failed = 1;
+
+    /* One user, pin 1, and reset links: good, revoked, expired, and one more good
+       one for when the account is inactive */
+    const char *resets[] = { "single-reset", "single-reset-revoked", "single-reset-expired",
+                             "single-reset-inactive" };
+    if (db_execute_direct(sdb,
+            "INSERT INTO user_account (id) VALUES (x'00000000000000000000000000000004');") != 0) {
+        log_error("Single-use: could not insert the user");
+        goto done;
+    }
+    for (int i = 0; i < 4; i++) {
+        char reset_hash[SHA256_HEX_LENGTH], sql[512];
+        if (crypto_sha256_hex(resets[i], strlen(resets[i]), reset_hash, sizeof(reset_hash)) != 0) {
+            log_error("Single-use: could not hash a reset link");
+            goto done;
+        }
+        snprintf(sql, sizeof(sql),
+            "INSERT INTO password_reset_token "
+            "  (id, user_account_pin, token, issued_at, expected_expiry, is_revoked) "
+            "  VALUES (randomblob(16), 1, '%s', datetime('now'), datetime('now', '%s'), %d);",
+            reset_hash, i == 2 ? "-1 second" : "+1 hour", i == 1);
+        if (db_execute_direct(sdb, sql) != 0) {
+            log_error("Single-use: could not insert a reset link");
+            goto done;
+        }
+    }
+
+    char first[512], second[512], now[512];
+
+    /* 1. A reset link sets the password once; used, revoked or expired, it's
+          refused, and the password stays */
+    if (user_consume_password_reset_token(sdb, resets[0], "first password") != 0 ||
+        stored_password(sdb, first, sizeof(first)) != 0) {
+        log_error("Single-use: a good reset link didn't set the password");
+        goto done;
+    }
+    for (int i = 0; i < 3; i++) {
+        if (user_consume_password_reset_token(sdb, resets[i], "another password") != 1) {
+            log_error("Single-use: %s was accepted", i == 0 ? "a used reset link" : resets[i]);
+            goto done;
+        }
+    }
+    if (stored_password(sdb, now, sizeof(now)) != 0 || strcmp(now, first) != 0) {
+        log_error("Single-use: a refused reset link changed the password");
+        goto done;
+    }
+    log_info("  reset link: works once; used, revoked or expired, refused (OK)");
+
+    /* 2. An invitation, the same */
+    char invite[64], expired_invite[64], expired_hash[SHA256_HEX_LENGTH], sql[256];
+    if (user_create_invitation_token(sdb, 1, 0, 3600, NULL, invite) != 0 ||
+        user_consume_invitation_token(sdb, invite, "second password") != 0 ||
+        stored_password(sdb, second, sizeof(second)) != 0 || strcmp(second, first) == 0) {
+        log_error("Single-use: a good invitation didn't set the password");
+        goto done;
+    }
+    if (user_create_invitation_token(sdb, 1, 0, 3600, NULL, expired_invite) != 0 ||
+        crypto_sha256_hex(expired_invite, strlen(expired_invite),
+                          expired_hash, sizeof(expired_hash)) != 0) {
+        log_error("Single-use: could not create an invitation to expire");
+        goto done;
+    }
+    snprintf(sql, sizeof(sql), "UPDATE invitation_token SET expected_expiry = "
+             "datetime('now', '-1 second') WHERE token = '%s'", expired_hash);
+    if (db_execute_direct(sdb, sql) != 0) {
+        log_error("Single-use: could not expire an invitation");
+        goto done;
+    }
+    if (user_consume_invitation_token(sdb, invite, "another password") != 1 ||
+        user_consume_invitation_token(sdb, expired_invite, "another password") != 1 ||
+        stored_password(sdb, now, sizeof(now)) != 0 || strcmp(now, second) != 0) {
+        log_error("Single-use: a used or expired invitation was accepted");
+        goto done;
+    }
+    log_info("  invitation: works once; used or expired, refused (OK)");
+
+    /* 2b. An email-verification link, the same: good, revoked, expired, and one
+           more good one for when the account is inactive */
+    char verify[4][64];
+    email_verification_result_t verified;
+    if (user_add_email(sdb, 1, "single@example.com") != 0) {
+        log_error("Single-use: could not add an address");
+        goto done;
+    }
+    for (int i = 0; i < 4; i++) {
+        char verify_hash[SHA256_HEX_LENGTH];
+        if (user_create_email_verification_token(sdb, 1, "single@example.com", 3600, NULL,
+                                                 verify[i]) != 0 ||
+            crypto_sha256_hex(verify[i], strlen(verify[i]), verify_hash, sizeof(verify_hash)) != 0) {
+            log_error("Single-use: could not create a verification link");
+            goto done;
+        }
+        snprintf(sql, sizeof(sql), i == 1
+                 ? "UPDATE email_verification_token SET is_revoked = 1 WHERE token = '%s'"
+                 : "UPDATE email_verification_token SET expected_expiry = "
+                   "datetime('now', '-1 second') WHERE token = '%s'", verify_hash);
+        if ((i == 1 || i == 2) && db_execute_direct(sdb, sql) != 0) {
+            log_error("Single-use: could not revoke or expire a verification link");
+            goto done;
+        }
+    }
+    if (user_verify_email_token(sdb, verify[0], &verified) != 0) {
+        log_error("Single-use: a good verification link was refused");
+        goto done;
+    }
+    for (int i = 0; i < 3; i++) {
+        if (user_verify_email_token(sdb, verify[i], &verified) != 1) {
+            log_error("Single-use: a %s verification link was accepted",
+                      i == 0 ? "used" : i == 1 ? "revoked" : "expired");
+            goto done;
+        }
+    }
+    log_info("  verification link: works once; used, revoked or expired, refused (OK)");
+
+    /* 2c. Overlapping re-invitations: each voids only what was issued before it,
+           whichever order the voiding runs in, so the later link still works.
+           Two from the same second both do. */
+    char early[64], late[64], tie_a[64], tie_b[64];
+    invitation_token_lookup_t looked;
+    char *invites[4] = { early, late, tie_a, tie_b };
+    const char *issued[4] = { "-1 hour", "-0 seconds", "-2 hours", "-2 hours" };
+    for (int i = 0; i < 4; i++) {
+        char invite_hash[SHA256_HEX_LENGTH];
+        if (user_create_invitation_token(sdb, 1, 0, 3600, NULL, invites[i]) != 0 ||
+            crypto_sha256_hex(invites[i], strlen(invites[i]), invite_hash, sizeof(invite_hash)) != 0) {
+            log_error("Single-use: could not create an invitation");
+            goto done;
+        }
+        snprintf(sql, sizeof(sql), "UPDATE invitation_token SET issued_at = "
+                 "datetime('now', '%s') WHERE token = '%s'", issued[i], invite_hash);
+        if (db_execute_direct(sdb, sql) != 0) {
+            log_error("Single-use: could not date an invitation");
+            goto done;
+        }
+    }
+    if (user_void_earlier_invitations(sdb, early) != 0 ||
+        user_void_earlier_invitations(sdb, late) != 0 ||
+        user_lookup_invitation_token(sdb, late, &looked) != 0 ||
+        user_lookup_invitation_token(sdb, early, &looked) != 1) {
+        log_error("Single-use: overlapping invitations voided the later one, or kept the earlier");
+        goto done;
+    }
+    if (db_execute_direct(sdb, "UPDATE invitation_token SET is_used = 0 "
+                               "WHERE issued_at < datetime('now', '-90 minutes')") != 0 ||
+        user_void_earlier_invitations(sdb, tie_a) != 0 ||
+        user_void_earlier_invitations(sdb, tie_b) != 0 ||
+        user_lookup_invitation_token(sdb, tie_a, &looked) != 0 ||
+        user_lookup_invitation_token(sdb, tie_b, &looked) != 0) {
+        log_error("Single-use: two invitations issued together voided each other");
+        goto done;
+    }
+    log_info("  overlapping invitations: the later is kept; two at once both are (OK)");
+
+    /* 3. A live link for an account that is inactive, flagged directly, so no
+          sweep has voided the link: refused, and the password stays */
+    char inactive_invite[64];
+    if (user_create_invitation_token(sdb, 1, 0, 3600, NULL, inactive_invite) != 0 ||
+        db_execute_direct(sdb, "UPDATE user_account SET is_active = 0 WHERE pin = 1") != 0) {
+        log_error("Single-use: could not set up the inactive account");
+        goto done;
+    }
+    if (user_consume_password_reset_token(sdb, resets[3], "another password") != 1 ||
+        user_consume_invitation_token(sdb, inactive_invite, "another password") != 1 ||
+        user_verify_email_token(sdb, verify[3], &verified) != 1 ||
+        stored_password(sdb, now, sizeof(now)) != 0 || strcmp(now, second) != 0) {
+        log_error("Single-use: a link for an inactive account was accepted");
+        goto done;
+    }
+    log_info("  inactive account: its live links refused (OK)");
+
+    /* 4. A recovery code works once and the set's other codes still work; once
+          the set is replaced, its unused codes don't */
+    const char *codes[] = { "single-code-1", "single-code-2" };
+    const char *new_codes[] = { "single-code-3" };
+    unsigned char set_id[16];
+    if (recovery_code_set_create(sdb, 1, codes, 2, set_id) != 0) {
+        log_error("Single-use: could not create recovery codes");
+        goto done;
+    }
+    if (recovery_code_verify(sdb, 1, codes[0]) != 1 ||
+        recovery_code_verify(sdb, 1, codes[0]) != 0 ||
+        recovery_code_verify(sdb, 1, "not-a-recovery-code") != 0) {
+        log_error("Single-use: a recovery code didn't work exactly once");
+        goto done;
+    }
+    if (recovery_code_set_create(sdb, 1, new_codes, 1, set_id) != 0 ||
+        recovery_code_verify(sdb, 1, codes[1]) != 0 ||
+        recovery_code_verify(sdb, 1, new_codes[0]) != 1) {
+        log_error("Single-use: a replaced set's code was accepted, or the new set's refused");
+        goto done;
+    }
+    /* Every code of the new set used, and the used ones purged as the cleaner
+       purges them: the set is still active, with nothing left to match */
+    if (db_execute_direct(sdb, "DELETE FROM recovery_code WHERE is_used = 1") != 0 ||
+        recovery_code_verify(sdb, 1, new_codes[0]) != 0) {
+        log_error("Single-use: a set with no codes left didn't answer no match");
+        goto done;
+    }
+    log_info("  recovery code: works once; a replaced set's codes refused; a set with none "
+             "left matches nothing (OK)");
+
+    failed = 0;
+
+done:
+    db_disconnect(sdb);
+    if (!failed) {
+        log_info("Single-use tests passed!");
+    }
+    return failed;
+}
+
+/* A password-reset and a passwordless sign-in link for user pin 1, with known tokens */
+static int plant_links(db_handle_t *db, const char *reset, const char *pwless) {
+    char reset_hash[SHA256_HEX_LENGTH], pwless_hash[SHA256_HEX_LENGTH], sql[1024];
+    if (crypto_sha256_hex(reset, strlen(reset), reset_hash, sizeof(reset_hash)) != 0 ||
+        crypto_sha256_hex(pwless, strlen(pwless), pwless_hash, sizeof(pwless_hash)) != 0) {
+        return -1;
+    }
+    snprintf(sql, sizeof(sql),
+        "INSERT INTO password_reset_token (id, user_account_pin, token, issued_at, expected_expiry) "
+        "  VALUES (randomblob(16), 1, '%s', datetime('now'), datetime('now', '+1 hour'));"
+        "INSERT INTO passwordless_login_token "
+        "  (id, user_account_pin, email_address, token, issued_at, expected_expiry) "
+        "  VALUES (randomblob(16), 1, 'not-read', '%s', datetime('now'), "
+        "          datetime('now', '+10 minutes'));",
+        reset_hash, pwless_hash);
+    return db_execute_direct(db, sql);
+}
+
+/*
+ * Removing an address voids the account's outstanding password-reset and
+ * passwordless sign-in links, as deactivating does: neither is kept by address,
+ * and one emailed to the address removed mustn't still sign anyone in. An address
+ * the account doesn't have changes nothing.
+ *
+ * Returns 0 on success.
+ */
+static int test_email_removal_voids_links(const config_t *config) {
+    log_info("=== Email removal tests");
+
+    db_handle_t *sdb = open_test_db(config);
+    if (!sdb) {
+        log_error("Email removal: could not open a test database");
+        return 1;
+    }
+
+    int failed = 1;
+    unsigned char user_id[16], seen_id[16];
+    long long seen_pin;
+    char return_to[64];
+    if (user_create(sdb, "alice", "alice@example.com", "a password", user_id) != 0 ||
+        db_execute_direct(sdb, "UPDATE user_account SET allow_passwordless_login = 1") != 0 ||
+        plant_links(sdb, "removal-reset-1", "removal-pwless-1") != 0) {
+        log_error("Email removal: could not set up");
+        goto done;
+    }
+    if (user_delete_email(sdb, 1, "nobody@example.com") != 1 ||
+        user_consume_password_reset_token(sdb, "removal-reset-1", "a new password") != 0 ||
+        user_consume_passwordless_login_token(sdb, "removal-pwless-1", &seen_pin, seen_id,
+                                              return_to, sizeof(return_to)) != 0) {
+        log_error("Email removal: removing an address the account doesn't have voided its links");
+        goto done;
+    }
+    if (plant_links(sdb, "removal-reset-2", "removal-pwless-2") != 0 ||
+        user_delete_email(sdb, 1, "Alice@Example.com") != 0 ||
+        user_consume_password_reset_token(sdb, "removal-reset-2", "another password") != 1 ||
+        user_consume_passwordless_login_token(sdb, "removal-pwless-2", &seen_pin, seen_id,
+                                              return_to, sizeof(return_to)) != 1) {
+        log_error("Email removal: a link outstanding when the address was removed still worked");
+        goto done;
+    }
+    log_info("  removing an address voids the account's reset and sign-in links; one it "
+             "doesn't have, nothing (OK)");
+
+    failed = 0;
+
+done:
+    db_disconnect(sdb);
+    if (!failed) {
+        log_info("Email removal tests passed!");
     }
     return failed;
 }
@@ -1116,7 +3628,7 @@ done:
  * revoked key and another org's key are refused. Returns 0 on success.
  */
 static int test_zero_row_writes(const config_t *config) {
-    log_info("\nZero-row write reporting tests");
+    log_info("=== Zero-row write reporting tests");
 
     db_handle_t *sdb = open_test_db(config);
     if (!sdb) {
@@ -1303,12 +3815,12 @@ done:
  * but non-empty blob sqlite3_column_blob returns a live pointer, so a NULL-only
  * guard copies 16 bytes out of a shorter value -- adjacent process memory, into
  * a response. The application never writes such an id; this plants one directly
- * and checks the MFA reads (one of the families fixed together) skip it.
+ * and checks that the MFA reads skip it.
  *
  * Returns 0 on success.
  */
 static int test_short_id_blobs(const config_t *config) {
-    log_info("\nShort id blob tests");
+    log_info("=== Short id blob tests");
 
     db_handle_t *sdb = open_test_db(config);
     if (!sdb) {
@@ -1345,7 +3857,7 @@ static int test_short_id_blobs(const config_t *config) {
        the path that reaches the malformed row.) */
     mfa_method_t one;
     if (mfa_method_get_by_id(sdb, good_id, &one) != 0) {
-        log_error("Short id: well-formed id no longer resolves");
+        log_error("Short id: a well-formed id doesn't resolve");
         goto done;
     }
     log_info("  well-formed id still resolves (OK)");
@@ -1361,329 +3873,94 @@ done:
     return failed;
 }
 
+/* The tests that take no configuration, as the table wants them */
+static int run_instance_lock(const config_t *config) {
+    (void)config;
+    return test_instance_lock();
+}
+
+static int run_hashing_config(const config_t *config) {
+    (void)config;
+    return test_hashing_config();
+}
+
+/* Every test, in order. Those for either backend run on both; the others write
+   SQLite's SQL, and run in the SQLite build. */
+static const struct {
+    int (*run)(const config_t *config);
+    int either_backend;
+} TESTS[] = {
+    { test_storage_at_rest, 0 },
+    { test_credential_lifetimes, 0 },
+    { test_schema_constraints, 0 },
+    { test_history_tables, 1 },
+    { test_drop_history, 1 },
+    { run_instance_lock, 0 },
+    { test_signing_key_cache, 0 },
+    { test_signing_key_encryption, 0 },
+    { test_mfa_management_gate, 0 },
+    { test_mfa_reset, 0 },
+    { test_deactivated_user_tokens, 0 },
+    { test_deactivation_revokes, 0 },
+    { test_unlink_revokes, 0 },
+    { test_encryption_key_check, 0 },
+    { test_encryption_params, 1 },
+    { test_rekey, 1 },
+    { run_hashing_config, 0 },
+    { test_rehash, 0 },
+    { test_single_use, 0 },
+    { test_email_removal_voids_links, 0 },
+    { test_short_id_blobs, 0 },
+    { test_zero_row_writes, 0 },
+    { test_blob_columns, 1 },
+#ifdef DB_BACKEND_POSTGRESQL
+    { test_pg_params_race, 1 },
+    { test_pg_revoke_race, 1 },
+    { test_pg_instance_lock, 1 },
+    { test_pg_unscrubbed, 1 },
+#endif
+};
+
 int main(void) {
     log_init(LOG_INFO);
     log_info("Database Integration Test");
 
-#ifdef DB_BACKEND_POSTGRESQL
-    /* The connection below is only built for SQLite's db_path, and the tests
-       above run on SQLite in memory. The PostgreSQL backend has no runtime
-       tests; saying so beats failing to connect. */
-    log_info("Skipped: test-db runs in the SQLite build only.");
-    return 0;
-#endif
+    if (!scratch_db_available()) return 0;
 
-    /* Load configuration */
-    log_info("Loading configuration...");
+    /* The configuration supplies the schema directory, the encryption key and the
+       hashing settings. Each test opens a database of its own (open_test_db);
+       none of them touches the database auth.conf points at. */
     config_t *config = config_load("auth.conf");
     if (!config) {
         log_error("Failed to load configuration");
         return 1;
     }
 
-    log_info("Configuration loaded:");
-    log_info("  Server: %s:%d (workers=%d)", config->host, config->port, config->workers);
-    log_info("  Database type: %s", config->db_type == DB_TYPE_SQLITE ? "SQLite" : "PostgreSQL");
-    log_info("  Database path: %s", config->db_path ? config->db_path : "(none)");
-    log_info("  Schema dir: %s", config->schema_dir);
-
-    /* Connect to database */
-    log_info("Connecting to database...");
-    db_handle_t *db = NULL;
-    const char *connection_string = config->db_type == DB_TYPE_SQLITE
-        ? config->db_path
-        : ""; /* PostgreSQL connection string not yet implemented */
-
-    int result = db_connect(&db, config->db_type, connection_string);
-    if (result != 0) {
-        log_error("Failed to connect to database");
-        config_free(config);
-        return 1;
-    }
-
-    log_info("Connected successfully");
-
-    /* Initialize schema */
-    log_info("Initializing schema...");
-    const char *owner_role = config->db_owner_role ? config->db_owner_role : config->db_user;
-    result = db_init_schema(db, config->db_type, config->schema_dir, owner_role);
-    if (result < 0) {
-        log_error("Failed to initialize schema");
-        db_disconnect(db);
-        config_free(config);
-        return 1;
-    }
-
-    int fresh_schema = (result == 0);
-    log_info("Schema initialized (%s)", fresh_schema ? "created" : "already existed");
-
-    /* Initialize history tables if enabled */
-    if (config->enable_history_tables) {
-        result = db_init_history_tables(db, config->db_type, fresh_schema);
-        if (result != 0) {
-            log_error("Failed to initialize history tables");
-            db_disconnect(db);
-            config_free(config);
-            return 1;
-        }
-    } else {
-        log_info("History tables disabled in configuration");
-    }
-
-    /* Test query: List all tables */
-    log_info("Testing query...");
-    db_result_t *query_result = NULL;
-#ifdef DB_BACKEND_SQLITE
-    result = db_query(db, &query_result, "SELECT name FROM sqlite_master WHERE type='table';");
-#endif
-#ifdef DB_BACKEND_POSTGRESQL
-    result = db_query(db, &query_result,
-        "SELECT table_schema || '.' || table_name "
-        "FROM information_schema.tables "
-        "WHERE table_schema IN ('keys','security','session','lookup','logging') "
-        "ORDER BY table_schema, table_name;");
-#endif
-    if (result != 0) {
-        log_error("Query failed: %s", db_error(db));
-        db_disconnect(db);
-        config_free(config);
-        return 1;
-    }
-
-    int row_count = db_result_row_count(query_result);
-    int col_count = db_result_column_count(query_result);
-    log_info("Query returned %d rows, %d columns", row_count, col_count);
-
-    /* Print table names */
-    log_info("Tables in database:");
-    for (int i = 0; i < row_count; i++) {
-        const char *table_name = db_result_get(query_result, i, 0);
-        log_info("  - %s", table_name ? table_name : "(null)");
-    }
-
-    db_result_free(query_result);
-
-    /* Test prepared statement: Query grant_type lookup table */
-    log_info("\nTesting prepared statement API...");
-
-    const char *sql =
-        "SELECT grant_type, description "
-        "FROM " TBL_GRANT_TYPE " "
-        "WHERE grant_type = " P"1";
-
-    db_stmt_t *stmt = NULL;
-    result = db_prepare(db, &stmt, sql);
-    if (result != 0) {
-        log_error("Prepare failed: %s", db_error(db));
-        db_disconnect(db);
-        config_free(config);
-        return 1;
-    }
-
-    log_info("Statement prepared successfully");
-
-    /* Test 1: Query for 'authorization_code' */
-    db_bind_text(stmt, 1, "authorization_code", -1);
-
-    result = db_step(stmt);
-    if (result == DB_ROW) {
-        const char *grant_type = db_column_text(stmt, 0);
-        const char *description = db_column_text(stmt, 1);
-        log_info("Found: %s - %s", grant_type, description);
-    } else if (result == DB_DONE) {
-        log_warn("No rows returned for 'authorization_code'");
-    } else {
-        log_error("Step failed: %s", db_error(db));
-        db_finalize(stmt);
-        db_disconnect(db);
-        config_free(config);
-        return 1;
-    }
-
-    /* Test 2: Reset and query for 'client_credentials' */
-    db_reset(stmt);
-    db_bind_text(stmt, 1, "client_credentials", -1);
-
-    result = db_step(stmt);
-    if (result == DB_ROW) {
-        const char *grant_type = db_column_text(stmt, 0);
-        const char *description = db_column_text(stmt, 1);
-        log_info("Found: %s - %s", grant_type, description);
-    } else if (result == DB_DONE) {
-        log_warn("No rows returned for 'client_credentials'");
-    } else {
-        log_error("Step failed: %s", db_error(db));
-        db_finalize(stmt);
-        db_disconnect(db);
-        config_free(config);
-        return 1;
-    }
-
-    /* Test 3: Query for non-existent grant type */
-    db_reset(stmt);
-    db_bind_text(stmt, 1, "nonexistent_grant", -1);
-
-    result = db_step(stmt);
-    if (result == DB_DONE) {
-        log_info("Correctly returned no rows for nonexistent grant type");
-    } else if (result == DB_ROW) {
-        log_error("Unexpectedly found row for nonexistent grant type");
-        db_finalize(stmt);
-        db_disconnect(db);
-        config_free(config);
-        return 1;
-    } else {
-        log_error("Step failed: %s", db_error(db));
-        db_finalize(stmt);
-        db_disconnect(db);
-        config_free(config);
-        return 1;
-    }
-
-    db_finalize(stmt);
-    log_info("Prepared statement tests passed!");
-
-    /* Test bind/column for all parameter types via SELECT passthrough */
-    log_info("\nTesting bind/column types...");
-
-    const char *type_sql =
-        "SELECT " P"1, " P"2, " P"3, " P"4";
-
-    db_stmt_t *type_stmt = NULL;
-    result = db_prepare(db, &type_stmt, type_sql);
-    if (result != 0) {
-        log_error("Prepare type test failed: %s", db_error(db));
-        db_disconnect(db);
-        config_free(config);
-        return 1;
-    }
-
-    /* Bind: int, int64, blob, null */
-    db_bind_int(type_stmt, 1, 7777777);
-    db_bind_int64(type_stmt, 2, 631411200000LL);
-    unsigned char test_blob[] = {0xDA, 0xDA};
-    db_bind_blob(type_stmt, 3, test_blob, sizeof(test_blob));
-    db_bind_null(type_stmt, 4);
-
-    result = db_step(type_stmt);
-    if (result != DB_ROW) {
-        log_error("Type test: expected row, got %d", result);
-        db_finalize(type_stmt);
-        db_disconnect(db);
-        config_free(config);
-        return 1;
-    }
-
-    /* Verify int */
-    int int_val = db_column_int(type_stmt, 0);
-    if (int_val != 7777777) {
-        log_error("Type test: int expected 7777777, got %d", int_val);
-        db_finalize(type_stmt);
-        db_disconnect(db);
-        config_free(config);
-        return 1;
-    }
-    log_info("  int:   %d (OK)", int_val);
-
-    /* Verify int64 */
-    long long int64_val = db_column_int64(type_stmt, 1);
-    if (int64_val != 631411200000LL) {
-        log_error("Type test: int64 expected 631411200000, got %lld", int64_val);
-        db_finalize(type_stmt);
-        db_disconnect(db);
-        config_free(config);
-        return 1;
-    }
-    log_info("  int64: %lld (OK)", int64_val);
-
-    /* Verify blob */
-    const unsigned char *blob_val = db_column_blob(type_stmt, 2);
-    int blob_len = db_column_bytes(type_stmt, 2);
-    if (!blob_val || blob_len != 2 ||
-        blob_val[0] != 0xDA || blob_val[1] != 0xDA) {
-        log_error("Type test: blob mismatch (len=%d)", blob_len);
-        db_finalize(type_stmt);
-        db_disconnect(db);
-        config_free(config);
-        return 1;
-    }
-    log_info("  blob:  0xDADA (%d bytes) (OK)", blob_len);
-
-    /* Verify null */
-    int null_type = db_column_type(type_stmt, 3);
-    if (null_type != DB_NULL) {
-        log_error("Type test: expected NULL type (%d), got %d", DB_NULL, null_type);
-        db_finalize(type_stmt);
-        db_disconnect(db);
-        config_free(config);
-        return 1;
-    }
-    log_info("  null:  (OK)");
-
-    db_finalize(type_stmt);
-    log_info("Bind/column type tests passed!");
-
-    /* Disconnect */
-    log_info("\nDisconnecting...");
-    db_disconnect(db);
-
     /* Field encryption and password hashing, set up as main.c does: usernames and
        signing keys are sealed with the one, passwords and API keys hashed with
-       the other */
+       the other. Hashing is fixed here, whatever auth.conf says, as
+       auth.conf.example has it but with one pass of Argon2: passwords argon2id,
+       machine secrets PBKDF2 at 777 (test_rehash relies on both). */
+    config->secret_hashing_algorithm = PASSWORD_HASH_ARGON2ID;
+    config->secret_hash_min_iterations = config->secret_hash_max_iterations = 1;
+    config->machine_secret_hashing_algorithm = PASSWORD_HASH_PBKDF2_SHA256;
+    config->machine_secret_hash_min_iterations = config->machine_secret_hash_max_iterations = 777;
     if (encrypt_init(config->encryption_key) != 0 || crypto_password_init(config) != 0) {
         log_error("Failed to initialize field encryption or password hashing");
         config_free(config);
         return 1;
     }
 
-    if (test_storage_at_rest(config) != 0 ||
-        test_credential_lifetimes(config) != 0 ||
-        test_schema_constraints(config) != 0) {
-        config_free(config);
-        return 1;
+    for (size_t i = 0; i < sizeof(TESTS) / sizeof(TESTS[0]); i++) {
+#ifdef DB_BACKEND_POSTGRESQL
+        if (!TESTS[i].either_backend) continue;
+#endif
+        if (TESTS[i].run(config) != 0) {
+            config_free(config);
+            return 1;
+        }
     }
 
-    if (test_signing_key_cache(config) != 0) {
-        config_free(config);
-        return 1;
-    }
-
-    if (test_signing_key_encryption(config) != 0) {
-        config_free(config);
-        return 1;
-    }
-
-    if (test_mfa_management_gate(config) != 0) {
-        config_free(config);
-        return 1;
-    }
-
-    if (test_mfa_reset(config) != 0) {
-        config_free(config);
-        return 1;
-    }
-
-    if (test_deactivated_user_tokens(config) != 0) {
-        config_free(config);
-        return 1;
-    }
-
-    if (test_deactivation_revokes(config) != 0) {
-        config_free(config);
-        return 1;
-    }
-
-    if (test_short_id_blobs(config) != 0) {
-        config_free(config);
-        return 1;
-    }
-
-    if (test_zero_row_writes(config) != 0) {
-        config_free(config);
-        return 1;
-    }
-
-    /* Cleanup */
     config_free(config);
 
     log_info("=== Database Integration Test Passed! ===");

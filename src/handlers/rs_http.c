@@ -91,7 +91,7 @@ static HttpResponse *rs_authenticate(const HttpRequest *req,
 
     log_key_usage(out->db, KEY_USAGE_RESOURCE_SERVER, rs_key_pin, operation,
                   http_request_get_client_ip(req, NULL),
-                  http_request_get_header(req, "User-Agent"));
+                  http_request_get_user_agent(req));
 
     return NULL;
 }
@@ -127,6 +127,8 @@ static HttpResponse *rs_error_response(int rc, const char *context) {
     case 1: return response_json_error(403, "User provisioning not enabled");
     case 2: return response_json_error(409, "Ambiguous match: username and email resolve to different users");
     case 3: return response_json_error(403, "User provisioning not enabled");
+    case 4: return response_json_error(400, "username required: this server can't email an "
+                                            "invitation, so an account needs a username");
     default:
         log_error("RS handler error: %s", context);
         return response_json_error(500, "Internal error");
@@ -137,9 +139,7 @@ static HttpResponse *rs_error_response(int rc, const char *context) {
  * Endpoint Handlers
  * ========================================================================== */
 
-HttpResponse *rs_provision_user_handler(const HttpRequest *req,
-                                         const RouteParams *params) {
-    (void)params;
+HttpResponse *rs_provision_user_handler(const HttpRequest *req) {
 
     if (req->method != HTTP_POST)
         return response_method_not_allowed("POST");
@@ -166,16 +166,34 @@ HttpResponse *rs_provision_user_handler(const HttpRequest *req,
         return response_json_error(400, validation_error);
     }
 
+    /* The patterns apply only to an account this creates: values stored before
+       a pattern was set still find theirs */
+    char create_error[256] = "";
+    int creatable =
+        (!username || validate_new_username(username, create_error, sizeof(create_error)) == 0) &&
+        (!email || validate_new_email(email, create_error, sizeof(create_error)) == 0);
+
+    /* Accepting an invitation verifies the address it was sent to, as proof
+     * of control. So when the server can email the link, only the mailbox
+     * gets it: a resource server holding it could verify an address it
+     * doesn't control. A server with no email command configured can't email,
+     * and is treated as a build without email support. */
+    int by_email = 0;
+#ifdef EMAIL_SUPPORT
+    by_email = email && g_config->email_command && g_config->email_command[0];
+#endif
+
     rs_user_info_t info = {0};
     int rc = rs_handler_provision_user(auth.db, auth.rs_pin, username, email,
                                         g_config->invitation_token_ttl_seconds,
                                         http_request_get_client_ip(req, NULL),
-                                        &info);
+                                        by_email, creatable, &info);
 
     if (rc != 0) {
         free(username);
         free(email);
         rs_user_info_free(&info);
+        if (rc == 5) return response_json_error(400, create_error);
         return rs_error_response(rc, "provision_user");
     }
 
@@ -184,35 +202,29 @@ HttpResponse *rs_provision_user_handler(const HttpRequest *req,
     append_user_json(jb, &info);
     jsonbuf_appendf(jb, ",\"created\":%s", info.was_created ? "true" : "false");
 
-    if (info.was_created && info.invitation_token[0]) {
+    if (info.invitation_token[0]) {
         char invite_url[512];
-        if (strcmp(g_config->host, "localhost") == 0) {
-            snprintf(invite_url, sizeof(invite_url),
-                     "http://localhost:%d/accept-invitation?token=%s",
-                     g_config->port, info.invitation_token);
-        } else {
-            snprintf(invite_url, sizeof(invite_url),
-                     "https://%s/accept-invitation?token=%s",
-                     g_config->host, info.invitation_token);
-        }
-
-        jsonbuf_appendf(jb, ",\"invitation\":{\"token\":\"");
-        jsonbuf_append_escaped(jb, info.invitation_token);
-        jsonbuf_appendf(jb, "\",\"url\":\"");
-        jsonbuf_append_escaped(jb, invite_url);
-        jsonbuf_appendf(jb, "\"}");
+        snprintf(invite_url, sizeof(invite_url), "%s/accept-invitation?token=%s",
+                 g_config->public_base_url, info.invitation_token);
 
 #ifdef EMAIL_SUPPORT
-        /* Send invitation email if user has an email */
-        if (email && info.was_created) {
+        /* Handed to the email command or not, it isn't returned; provisioning
+         * the account again sends a fresh one. The account's earlier links are
+         * voided only once this one is on its way, so a hand-off that fails
+         * leaves the user the one they may already have. */
+        if (by_email) {
             char *body_text = template_render("emails/invitation.txt",
                                                "URL", invite_url, NULL);
             char *body_html = template_render("emails/invitation.html",
                                                "URL", invite_url, NULL);
 
-            if (body_text && body_html)
-                email_send(g_config, email, "Set up your account",
-                           body_text, body_html);
+            int sent = body_text && body_html &&
+                       email_send(g_config, email, "Set up your account",
+                                  body_text, body_html) == 0;
+            if (sent && user_void_earlier_invitations(auth.db, info.invitation_token) != 0) {
+                log_error("Invitation emailed, but the account's earlier ones are still valid");
+            }
+            jsonbuf_appendf(jb, ",\"invitation\":{\"emailed\":%s}", sent ? "true" : "false");
 
             if (body_text) OPENSSL_cleanse(body_text, strlen(body_text));
             free(body_text);
@@ -220,6 +232,14 @@ HttpResponse *rs_provision_user_handler(const HttpRequest *req,
             free(body_html);
         }
 #endif
+        /* No address, or no way to email: the resource server delivers it */
+        if (!by_email) {
+            jsonbuf_appendf(jb, ",\"invitation\":{\"emailed\":false,\"token\":\"");
+            jsonbuf_append_escaped(jb, info.invitation_token);
+            jsonbuf_appendf(jb, "\",\"url\":\"");
+            jsonbuf_append_escaped(jb, invite_url);
+            jsonbuf_appendf(jb, "\"}");
+        }
         OPENSSL_cleanse(invite_url, sizeof(invite_url));
     }
 
@@ -231,9 +251,7 @@ HttpResponse *rs_provision_user_handler(const HttpRequest *req,
     return jsonbuf_to_response(jb, 200);
 }
 
-HttpResponse *rs_lookup_user_handler(const HttpRequest *req,
-                                      const RouteParams *params) {
-    (void)params;
+HttpResponse *rs_lookup_user_handler(const HttpRequest *req) {
 
     rs_auth_t auth;
     HttpResponse *err = rs_authenticate(req, "rs_lookup_user", &auth);
@@ -286,9 +304,7 @@ HttpResponse *rs_lookup_user_handler(const HttpRequest *req,
     return jsonbuf_to_response(jb, 200);
 }
 
-HttpResponse *rs_link_client_user_handler(const HttpRequest *req,
-                                            const RouteParams *params) {
-    (void)params;
+HttpResponse *rs_link_client_user_handler(const HttpRequest *req) {
 
     if (req->method != HTTP_POST)
         return response_method_not_allowed("POST");
@@ -330,9 +346,7 @@ HttpResponse *rs_link_client_user_handler(const HttpRequest *req,
     return response_json_ok("{\"message\":\"User linked to client\"}");
 }
 
-HttpResponse *rs_unlink_client_user_handler(const HttpRequest *req,
-                                              const RouteParams *params) {
-    (void)params;
+HttpResponse *rs_unlink_client_user_handler(const HttpRequest *req) {
 
     if (req->method != HTTP_DELETE)
         return response_method_not_allowed("DELETE");
@@ -373,9 +387,7 @@ HttpResponse *rs_unlink_client_user_handler(const HttpRequest *req,
     return response_json_ok("{\"message\":\"User unlinked from client\"}");
 }
 
-HttpResponse *rs_list_client_users_handler(const HttpRequest *req,
-                                             const RouteParams *params) {
-    (void)params;
+HttpResponse *rs_list_client_users_handler(const HttpRequest *req) {
 
     rs_auth_t auth;
     HttpResponse *err = rs_authenticate(req, "rs_list_client_users", &auth);

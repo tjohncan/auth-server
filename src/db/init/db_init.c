@@ -149,7 +149,18 @@ static int schema_exists(db_handle_t *db, db_type_t type) {
 static int enable_sqlite_optimizations(db_handle_t *db) {
     log_info("Enabling SQLite optimizations");
 
-    /* Enable WAL mode for concurrent access (persistent per-file) */
+    /* Incremental vacuum, so the cleaner can give freed pages back to the
+     * filesystem. It has to come first: auto_vacuum can only be chosen before the
+     * database header is written, and switching to WAL writes it, so in the other
+     * order the setting is silently ignored and stays off. */
+    if (db_execute_trusted(db, "PRAGMA auto_vacuum = INCREMENTAL;") != 0) {
+        log_warn("Failed to set auto_vacuum=INCREMENTAL");
+    }
+
+    /* Enable WAL mode for concurrent access (persistent per-file). A maintenance
+     * run relies on it too: an open connection in WAL mode holds a shared lock on
+     * the file, which keeps the run's exclusive lock out while any instance has
+     * the database open (main.c, open_for_maintenance). */
     if (db_execute_trusted(db, "PRAGMA journal_mode = WAL;") != 0) {
         log_error("Failed to enable WAL mode");
         return -1;
@@ -157,10 +168,17 @@ static int enable_sqlite_optimizations(db_handle_t *db) {
 
     /* foreign_keys and synchronous are set per-connection in db_connect() */
 
-    /* Enable incremental vacuum (must be set on empty database before tables) */
-    if (db_execute_trusted(db, "PRAGMA auto_vacuum = INCREMENTAL;") != 0) {
-        log_warn("Failed to set auto_vacuum=INCREMENTAL "
-                 "(may already have tables; cleaner vacuum will be a no-op)");
+    /* Read it back. A database created without it keeps it off, since only a
+     * rebuild can change it once the header exists, and then every cleaner
+     * incremental_vacuum does nothing. */
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, "PRAGMA auto_vacuum") == 0) {
+        if (db_step(stmt) == DB_ROW && db_column_int(stmt, 0) != 2) {
+            log_warn("SQLite auto_vacuum is off for this database, so the cleaner can't "
+                     "return freed space to the filesystem. To turn it on, stop the "
+                     "server and run once: PRAGMA auto_vacuum = INCREMENTAL; VACUUM;");
+        }
+        db_finalize(stmt);
     }
 
     log_info("SQLite optimizations enabled");

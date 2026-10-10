@@ -4,6 +4,7 @@
 #include "db/db_sql.h"
 #include "crypto/random.h"
 #include "crypto/password.h"
+#include "db/queries/secret.h"
 #include "crypto/encrypt.h"
 #include "crypto/hmac.h"
 #include "crypto/sha256.h"
@@ -218,9 +219,9 @@ int user_create(db_handle_t *db, const char *username,
     /* Hash password */
     char salt[PASSWORD_SALT_HEX_MAX_LENGTH];
     int iterations;
-    char hash[PASSWORD_HASH_HEX_MAX_LENGTH];
+    char hash[PASSWORD_HASH_MAX_LENGTH];
 
-    int hash_rc = crypto_password_hash(password, strlen(password),
+    int hash_rc = crypto_password_hash(SECRET_USER, password, strlen(password),
                             salt, sizeof(salt),
                             &iterations,
                             hash, sizeof(hash));
@@ -408,10 +409,7 @@ int user_verify_password(db_handle_t *db, const char *username,
     if (rc != DB_ROW) {
         db_finalize(stmt);
         /* Perform dummy verification to equalize timing (prevents user enumeration) */
-        crypto_password_verify(password, strlen(password),
-                               "00000000000000000000000000000000",
-                               crypto_password_min_iterations(),
-                               "0000000000000000000000000000000000000000000000000000000000000000");
+        crypto_password_verify_dummy(SECRET_USER, password, strlen(password));
         return 0;  /* User not found = invalid password */
     }
 
@@ -438,8 +436,13 @@ int user_verify_password(db_handle_t *db, const char *username,
     db_finalize(stmt);
 
     /* Verify password using crypto module */
-    int valid = crypto_password_verify(password, strlen(password),
-                                       salt, iterations, hash);
+    int rehash = 0;
+    int valid = crypto_password_verify(SECRET_USER, password, strlen(password),
+                                       salt, iterations, hash, &rehash);
+    if (valid == 1 && rehash) {
+        /* Hashed under another method or iteration count than the configured ones */
+        secret_rehash(db, TBL_USER_ACCOUNT, pin, SECRET_USER, password, hash);
+    }
     OPENSSL_cleanse(salt, sizeof(salt));
     OPENSSL_cleanse(hash, sizeof(hash));
 
@@ -456,7 +459,6 @@ int user_verify_password(db_handle_t *db, const char *username,
     return valid;  /* 1 if valid, 0 if invalid, -1 on error */
 }
 
-#ifdef EMAIL_SUPPORT
 int user_verify_password_by_email(db_handle_t *db, const char *email,
                                    const char *password, long long *out_pin,
                                    unsigned char *out_id) {
@@ -496,10 +498,7 @@ int user_verify_password_by_email(db_handle_t *db, const char *email,
     if (rc != DB_ROW) {
         db_finalize(stmt);
         /* Dummy verification to equalize timing */
-        crypto_password_verify(password, strlen(password),
-                               "00000000000000000000000000000000",
-                               crypto_password_min_iterations(),
-                               "0000000000000000000000000000000000000000000000000000000000000000");
+        crypto_password_verify_dummy(SECRET_USER, password, strlen(password));
         return 0;
     }
 
@@ -525,8 +524,13 @@ int user_verify_password_by_email(db_handle_t *db, const char *email,
 
     db_finalize(stmt);
 
-    int valid = crypto_password_verify(password, strlen(password),
-                                       salt, iterations, hash);
+    int rehash = 0;
+    int valid = crypto_password_verify(SECRET_USER, password, strlen(password),
+                                       salt, iterations, hash, &rehash);
+    if (valid == 1 && rehash) {
+        /* Hashed under another method or iteration count than the configured ones */
+        secret_rehash(db, TBL_USER_ACCOUNT, pin, SECRET_USER, password, hash);
+    }
     OPENSSL_cleanse(salt, sizeof(salt));
     OPENSSL_cleanse(hash, sizeof(hash));
 
@@ -541,7 +545,6 @@ int user_verify_password_by_email(db_handle_t *db, const char *email,
 
     return valid;
 }
-#endif /* EMAIL_SUPPORT */
 
 int user_make_org_admin(db_handle_t *db, const unsigned char *user_id,
                         const char *org_code_name) {
@@ -767,7 +770,8 @@ int user_get_emails(db_handle_t *db, long long user_account_pin,
     }
 
     const char *sql =
-        "SELECT email_address, is_primary, is_verified, COUNT(*) OVER() as total_count "
+        "SELECT email_address, is_primary, is_verified, created_at, verified_at, "
+        "COUNT(*) OVER() as total_count "
         "FROM " TBL_USER_EMAIL " "
         "WHERE user_account_pin = " P"1 "
         "ORDER BY is_primary DESC, created_at ASC "
@@ -790,15 +794,20 @@ int user_get_emails(db_handle_t *db, long long user_account_pin,
 
     while (db_step(stmt) == DB_ROW) {
         user_email_t email;
+        memset(&email, 0, sizeof(email));
 
         /* Extract and decrypt email_address */
         const char *encrypted_email = (const char *)db_column_text(stmt, 0);
         int is_primary = db_column_int(stmt, 1);
         int is_verified = db_column_int(stmt, 2);
+        const char *added_at = (const char *)db_column_text(stmt, 3);
+        const char *verified_at = (const char *)db_column_text(stmt, 4);
+        if (added_at) str_copy(email.added_at, sizeof(email.added_at), added_at);
+        if (verified_at) str_copy(email.verified_at, sizeof(email.verified_at), verified_at);
 
         /* Extract total count from first row (same in all rows) */
         if (first_row) {
-            total_count = db_column_int(stmt, 3);
+            total_count = db_column_int(stmt, 5);
             first_row = 0;
         }
 
@@ -984,7 +993,8 @@ int user_delete_email(db_handle_t *db, long long user_account_pin,
     /* Delete the email row */
     const char *sql =
         "DELETE FROM " TBL_USER_EMAIL " "
-        "WHERE user_account_pin = " P"1 AND email_hash = " P"2";
+        "WHERE user_account_pin = " P"1 AND email_hash = " P"2 "
+        "RETURNING pin";
 
     db_stmt_t *stmt = NULL;
     if (db_prepare(db, &stmt, sql) != 0) {
@@ -999,10 +1009,44 @@ int user_delete_email(db_handle_t *db, long long user_account_pin,
     rc = db_step(stmt);
     db_finalize(stmt);
 
-    if (rc != DB_DONE) {
+    if (rc != DB_ROW && rc != DB_DONE) {
         log_error("Failed to delete user_email");
         db_execute_trusted(db, "ROLLBACK");
         return -1;
+    }
+
+    /* With the address gone, a link emailed to it must stop working too: void the
+       account's outstanding sign-in and reset links, as deactivating does. Neither
+       kind is kept by address (a sign-in link's address is sealed), so it's all of
+       them; any still wanted can be asked for again. */
+    if (rc == DB_ROW) {
+        const char *void_links[] = {
+            "UPDATE " TBL_PASSWORD_RESET_TOKEN " "
+            "SET is_revoked = " BOOL_TRUE ", revoked_at = " NOW ", updated_at = " NOW " "
+            "WHERE user_account_pin = " P"1 AND is_used = " BOOL_FALSE
+            " AND is_revoked = " BOOL_FALSE,
+
+            /* No revoked flag: marking it used is what refuses it */
+            "UPDATE " TBL_PASSWORDLESS_LOGIN_TOKEN " "
+            "SET is_used = " BOOL_TRUE ", used_at = " NOW ", updated_at = " NOW " "
+            "WHERE user_account_pin = " P"1 AND is_used = " BOOL_FALSE,
+        };
+        for (size_t i = 0; i < sizeof(void_links) / sizeof(void_links[0]); i++) {
+            db_stmt_t *v_stmt = NULL;
+            if (db_prepare(db, &v_stmt, void_links[i]) != 0) {
+                log_error("Failed to prepare the link cleanup for email delete");
+                db_execute_trusted(db, "ROLLBACK");
+                return -1;
+            }
+            db_bind_int64(v_stmt, 1, user_account_pin);
+            int v_rc = db_step(v_stmt);
+            db_finalize(v_stmt);
+            if (v_rc != DB_DONE) {
+                log_error("Failed to void the account's sign-in and reset links");
+                db_execute_trusted(db, "ROLLBACK");
+                return -1;
+            }
+        }
     }
 
     if (db_execute_trusted(db, "COMMIT") != 0) {
@@ -1011,7 +1055,7 @@ int user_delete_email(db_handle_t *db, long long user_account_pin,
         return -1;
     }
 
-    return 0;
+    return rc == DB_ROW ? 0 : 1;
 }
 
 int user_set_primary_email(db_handle_t *db, long long user_account_pin,
@@ -1126,6 +1170,43 @@ int user_set_primary_email(db_handle_t *db, long long user_account_pin,
     return 0;
 }
 
+/*
+ * A new password, by whichever path, closes the user's sessions still waiting
+ * on MFA, if the user requires it. Such a session was opened with a password
+ * now gone and is only half signed in: all it can do is submit codes, which
+ * count against the user's daily cap. Closing it costs the user nothing.
+ * Fully signed-in sessions stay (see user_change_password in
+ * include/db/queries/user.h). Runs inside the caller's transaction.
+ *
+ * Returns: 0, or -1 on error
+ */
+static int close_mfa_pending_sessions(db_handle_t *db, long long user_account_pin) {
+    const char *sql =
+        "UPDATE " TBL_BROWSER " "
+        "SET is_closed = " BOOL_TRUE ", closed_at = " NOW ", updated_at = " NOW " "
+        "WHERE user_account_pin = " P"1 "
+        "AND is_closed = " BOOL_FALSE " "
+        "AND mfa_completed = " BOOL_FALSE " "
+        "AND EXISTS (SELECT 1 FROM " TBL_USER_ACCOUNT " "
+        "WHERE pin = " P"1 AND require_mfa = " BOOL_TRUE ")";
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        log_error("Failed to prepare the MFA-pending session close");
+        return -1;
+    }
+
+    db_bind_int64(stmt, 1, user_account_pin);
+    int rc = db_step(stmt);
+    db_finalize(stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Failed to close the sessions waiting on MFA");
+        return -1;
+    }
+    return 0;
+}
+
 /* DESIGN DECISION: this deliberately does NOT invalidate existing sessions or
  * refresh tokens. Password change is credential hygiene here, not incident
  * response — see the rationale above user_change_password() in
@@ -1178,8 +1259,8 @@ int user_change_password(db_handle_t *db, long long user_account_pin,
     db_finalize(verify_stmt);
 
     /* Step 2: Verify current password */
-    int valid = crypto_password_verify(current_password, strlen(current_password),
-                                       salt, iterations, hash);
+    int valid = crypto_password_verify(SECRET_USER, current_password, strlen(current_password),
+                                       salt, iterations, hash, NULL);
     OPENSSL_cleanse(salt, sizeof(salt));
     OPENSSL_cleanse(hash, sizeof(hash));
 
@@ -1191,9 +1272,9 @@ int user_change_password(db_handle_t *db, long long user_account_pin,
     /* Step 3: Generate new password hash */
     char new_salt[PASSWORD_SALT_HEX_MAX_LENGTH];
     int new_iterations;
-    char new_hash[PASSWORD_HASH_HEX_MAX_LENGTH];
+    char new_hash[PASSWORD_HASH_MAX_LENGTH];
 
-    int hash_rc = crypto_password_hash(new_password, strlen(new_password),
+    int hash_rc = crypto_password_hash(SECRET_USER, new_password, strlen(new_password),
                             new_salt, sizeof(new_salt),
                             &new_iterations,
                             new_hash, sizeof(new_hash));
@@ -1203,7 +1284,15 @@ int user_change_password(db_handle_t *db, long long user_account_pin,
         return (hash_rc == -2) ? -2 : -1;
     }
 
-    /* Step 4: Update password in database */
+    /* Step 4: Update password in database, and close the sessions the old one
+       left waiting on MFA, together */
+    if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
+        log_error("Failed to begin password change transaction");
+        OPENSSL_cleanse(new_salt, sizeof(new_salt));
+        OPENSSL_cleanse(new_hash, sizeof(new_hash));
+        return -1;
+    }
+
     const char *update_sql =
         "UPDATE " TBL_USER_ACCOUNT " "
         "SET salt = " P"1, "
@@ -1215,6 +1304,7 @@ int user_change_password(db_handle_t *db, long long user_account_pin,
     db_stmt_t *update_stmt = NULL;
     if (db_prepare(db, &update_stmt, update_sql) != 0) {
         log_error("Failed to prepare password update statement");
+        db_execute_trusted(db, "ROLLBACK");
         OPENSSL_cleanse(new_salt, sizeof(new_salt));
         OPENSSL_cleanse(new_hash, sizeof(new_hash));
         return -1;
@@ -1233,6 +1323,18 @@ int user_change_password(db_handle_t *db, long long user_account_pin,
 
     if (rc != DB_DONE) {
         log_error("Failed to update password");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    if (close_mfa_pending_sessions(db, user_account_pin) != 0) {
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    if (db_execute_trusted(db, "COMMIT") != 0) {
+        log_error("Failed to commit the password change");
+        db_execute_trusted(db, "ROLLBACK");
         return -1;
     }
 
@@ -1240,6 +1342,123 @@ int user_change_password(db_handle_t *db, long long user_account_pin,
     bytes_to_hex(user_account_id, 16, user_id_hex, sizeof(user_id_hex));
     log_info("Password changed successfully for user_id=%s", user_id_hex);
     return 1;  /* Success */
+}
+
+int user_set_password(db_handle_t *db, const unsigned char *user_id,
+                      const char *new_password) {
+    if (!db || !user_id || !new_password) {
+        log_error("Invalid arguments to user_set_password");
+        return -1;
+    }
+
+    /* Hashed before the transaction, which on SQLite holds the write lock */
+    char salt[PASSWORD_SALT_HEX_MAX_LENGTH];
+    int iterations;
+    char hash[PASSWORD_HASH_MAX_LENGTH];
+
+    int hash_rc = crypto_password_hash(SECRET_USER, new_password, strlen(new_password),
+                            salt, sizeof(salt),
+                            &iterations,
+                            hash, sizeof(hash));
+    if (hash_rc != 0) {
+        log_error("Failed to hash the password to set");
+        OPENSSL_cleanse(salt, sizeof(salt));
+        return (hash_rc == -2) ? -2 : -1;
+    }
+
+    if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
+        log_error("Failed to begin transaction");
+        OPENSSL_cleanse(salt, sizeof(salt));
+        OPENSSL_cleanse(hash, sizeof(hash));
+        return -1;
+    }
+
+    /* Active or not: a deactivated account's password is the one this is for */
+    const char *update_sql =
+        "UPDATE " TBL_USER_ACCOUNT " "
+        "SET salt = " P"1, "
+        "hash_iterations = " P"2, "
+        "secret_hash = " P"3, "
+        "updated_at = " NOW " "
+        "WHERE id = " P"4 "
+        "RETURNING pin";
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, update_sql) != 0) {
+        log_error("Failed to prepare password update statement");
+        db_execute_trusted(db, "ROLLBACK");
+        OPENSSL_cleanse(salt, sizeof(salt));
+        OPENSSL_cleanse(hash, sizeof(hash));
+        return -1;
+    }
+
+    db_bind_text(stmt, 1, salt, -1);
+    db_bind_int(stmt, 2, iterations);
+    db_bind_text(stmt, 3, hash, -1);
+    db_bind_blob(stmt, 4, user_id, 16);
+
+    int rc = db_step(stmt);
+    long long user_account_pin = rc == DB_ROW ? db_column_int64(stmt, 0) : 0;
+    db_finalize(stmt);
+
+    OPENSSL_cleanse(salt, sizeof(salt));
+    OPENSSL_cleanse(hash, sizeof(hash));
+
+    if (rc != DB_ROW) {
+        db_execute_trusted(db, "ROLLBACK");
+        if (rc == DB_DONE) return 1;  /* No such user */
+        log_error("Failed to set password");
+        return -1;
+    }
+
+    /* A reset link or an invitation still outstanding could set another
+     * password over this one, so they are voided with it */
+    const char *void_steps[] = {
+        "UPDATE " TBL_PASSWORD_RESET_TOKEN " "
+        "SET is_revoked = " BOOL_TRUE ", revoked_at = " NOW ", updated_at = " NOW " "
+        "WHERE user_account_pin = " P"1 AND is_used = " BOOL_FALSE
+        " AND is_revoked = " BOOL_FALSE,
+
+        /* No revoked flag; marking it used is what refuses it */
+        "UPDATE " TBL_INVITATION_TOKEN " "
+        "SET is_used = " BOOL_TRUE ", used_at = " NOW ", updated_at = " NOW " "
+        "WHERE user_account_pin = " P"1 AND is_used = " BOOL_FALSE,
+    };
+
+    for (size_t i = 0; i < sizeof(void_steps) / sizeof(void_steps[0]); i++) {
+        if (db_prepare(db, &stmt, void_steps[i]) != 0) {
+            log_error("Failed to prepare the link voiding statement");
+            db_execute_trusted(db, "ROLLBACK");
+            return -1;
+        }
+
+        db_bind_int64(stmt, 1, user_account_pin);
+
+        rc = db_step(stmt);
+        db_finalize(stmt);
+
+        if (rc != DB_DONE) {
+            log_error("Failed to void the account's reset and invitation links");
+            db_execute_trusted(db, "ROLLBACK");
+            return -1;
+        }
+    }
+
+    if (close_mfa_pending_sessions(db, user_account_pin) != 0) {
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    if (db_execute_trusted(db, "COMMIT") != 0) {
+        log_error("Failed to commit the password");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    char user_id_hex[33];
+    bytes_to_hex(user_id, 16, user_id_hex, sizeof(user_id_hex));
+    log_info("Password set by the operator for user_id=%s", user_id_hex);
+    return 0;
 }
 
 int user_change_username(db_handle_t *db, long long user_account_pin,
@@ -1459,11 +1678,7 @@ int user_create_email_verification_token(db_handle_t *db,
     db_bind_blob(stmt, 1, id, sizeof(id));
     db_bind_text(stmt, 2, token_hash, -1);
     db_bind_text(stmt, 3, ttl_str, -1);
-    if (source_ip) {
-        db_bind_text(stmt, 4, source_ip, -1);
-    } else {
-        db_bind_null(stmt, 4);
-    }
+    db_bind_text_or_null(stmt, 4, source_ip);
     db_bind_int64(stmt, 5, user_account_pin);
     db_bind_text(stmt, 6, email_hash, -1);
 
@@ -1658,12 +1873,17 @@ int user_verify_email_token(db_handle_t *db, const char *token,
         return -1;
     }
 
-    /* Step 2: Mark token as used (RETURNING detects concurrent consumption) */
+    /* Step 2: Mark token as used. This statement is the check, with all of the
+     * lookup's conditions on the link: one voided or expired since the lookup
+     * (a deactivation's sweep, say) isn't used, and RETURNING shows whether this
+     * call is the one that used it. */
     const char *use_sql =
         "UPDATE " TBL_EMAIL_VERIFICATION_TOKEN " "
         "SET is_used = " BOOL_TRUE ", used_at = " NOW ", updated_at = " NOW " "
         "WHERE token = " P"1 "
         "AND is_used = " BOOL_FALSE " "
+        "AND is_revoked = " BOOL_FALSE " "
+        "AND expected_expiry > " NOW " "
         "RETURNING is_used";
 
     db_stmt_t *use_stmt = NULL;
@@ -1682,11 +1902,16 @@ int user_verify_email_token(db_handle_t *db, const char *token,
         return (rc == DB_DONE) ? 1 : -1;
     }
 
-    /* Step 3: Mark email as verified */
+    /* Step 3: Mark email as verified, while its account is active: one
+     * deactivated since the lookup gets nothing verified */
     const char *verify_sql =
         "UPDATE " TBL_USER_EMAIL " "
         "SET is_verified = " BOOL_TRUE ", verified_at = " NOW ", updated_at = " NOW " "
-        "WHERE pin = " P"1";
+        "WHERE pin = " P"1 "
+        "AND user_account_pin = ("
+            "SELECT pin FROM " TBL_USER_ACCOUNT " WHERE pin = " P"2 AND is_active = " BOOL_TRUE
+        ") "
+        "RETURNING pin";
 
     db_stmt_t *verify_stmt = NULL;
     if (db_prepare(db, &verify_stmt, verify_sql) != 0) {
@@ -1696,12 +1921,14 @@ int user_verify_email_token(db_handle_t *db, const char *token,
     }
 
     db_bind_int64(verify_stmt, 1, user_email_pin);
+    db_bind_int64(verify_stmt, 2, user_account_pin);
     rc = db_step(verify_stmt);
     db_finalize(verify_stmt);
 
-    if (rc != DB_DONE) {
-        log_error("Failed to mark email as verified");
+    if (rc != DB_ROW) {
         db_execute_trusted(db, "ROLLBACK");
+        if (rc == DB_DONE) return 1;  /* Deactivated since the lookup */
+        log_error("Failed to mark email as verified");
         return -1;
     }
 
@@ -1868,11 +2095,7 @@ int user_create_password_reset_token(db_handle_t *db, const char *email,
     db_bind_blob(stmt, 1, id, sizeof(id));
     db_bind_text(stmt, 2, token_hash, -1);
     db_bind_text(stmt, 3, ttl_str, -1);
-    if (source_ip) {
-        db_bind_text(stmt, 4, source_ip, -1);
-    } else {
-        db_bind_null(stmt, 4);
-    }
+    db_bind_text_or_null(stmt, 4, source_ip);
     db_bind_text(stmt, 5, email_hash, -1);
 
     int rc = db_step(stmt);
@@ -1982,9 +2205,9 @@ int user_consume_password_reset_token(db_handle_t *db, const char *token,
     /* Step 2: Hash new password */
     char salt[PASSWORD_SALT_HEX_MAX_LENGTH];
     int iterations;
-    char hash[PASSWORD_HASH_HEX_MAX_LENGTH];
+    char hash[PASSWORD_HASH_MAX_LENGTH];
 
-    int hash_rc = crypto_password_hash(new_password, strlen(new_password),
+    int hash_rc = crypto_password_hash(SECRET_USER, new_password, strlen(new_password),
                             salt, sizeof(salt),
                             &iterations,
                             hash, sizeof(hash));
@@ -1994,7 +2217,15 @@ int user_consume_password_reset_token(db_handle_t *db, const char *token,
         return (hash_rc == -2) ? -2 : -1;
     }
 
-    /* Step 3: Transaction — mark token used + update password */
+    /* Step 3: Transaction — mark token used + update password (and close the
+     * sessions the old password left waiting on MFA).
+     *
+     * The lookup above is a fast path: a dead link costs no hash and gets the
+     * right page. These two statements are the authority, each for what it
+     * writes: marking the link used repeats the link's checks, and the password
+     * write requires the account still active. A link used, revoked or expired
+     * since, or an account deactivated since, matches no row, and the reset is
+     * refused and rolled back. */
     if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
         log_error("Failed to begin password reset transaction");
         OPENSSL_cleanse(salt, sizeof(salt));
@@ -2007,6 +2238,8 @@ int user_consume_password_reset_token(db_handle_t *db, const char *token,
         "SET is_used = " BOOL_TRUE ", used_at = " NOW ", updated_at = " NOW " "
         "WHERE token = " P"1 "
         "AND is_used = " BOOL_FALSE " "
+        "AND is_revoked = " BOOL_FALSE " "
+        "AND expected_expiry > " NOW " "
         "RETURNING is_used";
 
     db_stmt_t *use_stmt = NULL;
@@ -2035,7 +2268,8 @@ int user_consume_password_reset_token(db_handle_t *db, const char *token,
         "hash_iterations = " P"2, "
         "secret_hash = " P"3, "
         "updated_at = " NOW " "
-        "WHERE pin = " P"4 AND is_active = " BOOL_TRUE;
+        "WHERE pin = " P"4 AND is_active = " BOOL_TRUE " "
+        "RETURNING pin";
 
     db_stmt_t *update_stmt = NULL;
     if (db_prepare(db, &update_stmt, update_sql) != 0) {
@@ -2057,8 +2291,14 @@ int user_consume_password_reset_token(db_handle_t *db, const char *token,
     OPENSSL_cleanse(salt, sizeof(salt));
     OPENSSL_cleanse(hash, sizeof(hash));
 
-    if (rc != DB_DONE) {
+    if (rc != DB_ROW) {
+        db_execute_trusted(db, "ROLLBACK");
+        if (rc == DB_DONE) return 1;  /* Deactivated since the link was marked used */
         log_error("Failed to update password");
+        return -1;
+    }
+
+    if (close_mfa_pending_sessions(db, user_account_pin) != 0) {
         db_execute_trusted(db, "ROLLBACK");
         return -1;
     }
@@ -2153,11 +2393,7 @@ int user_create_passwordless_login_token(db_handle_t *db, const char *email,
     db_bind_text(stmt, 2, encrypted_email, -1);
     db_bind_text(stmt, 3, token_hash, -1);
     db_bind_text(stmt, 4, ttl_str, -1);
-    if (source_ip) {
-        db_bind_text(stmt, 5, source_ip, -1);
-    } else {
-        db_bind_null(stmt, 5);
-    }
+    db_bind_text_or_null(stmt, 5, source_ip);
     if (return_to && return_to[0]) {
         db_bind_text(stmt, 6, return_to, -1);
     } else {
@@ -2456,25 +2692,34 @@ int user_create_invitation_token(db_handle_t *db,
     char ttl_str[16];
     snprintf(ttl_str, sizeof(ttl_str), "%d", ttl_seconds);
 
+    char token_hash[SHA256_HEX_LENGTH];
+    if (crypto_sha256_hex(token, strlen(token), token_hash, sizeof(token_hash)) != 0) {
+        log_error("Failed to hash invitation token");
+        OPENSSL_cleanse(token, sizeof(token));
+        return -1;
+    }
+
+    /* At most five in an hour per account, as for reset links: provisioning an
+       account that is still pending invites it again, and that mustn't become a
+       way to flood a mailbox */
     const char *sql =
         "INSERT INTO " TBL_INVITATION_TOKEN " "
         "(id, user_account_pin, user_email_pin, token, issued_at, "
         "expected_expiry, source_ip) "
-        "VALUES (" P"1, " P"2, " P"3, " P"4, " NOW ", "
-        INTERVAL_SECONDS(P"5") ", " P"6)";
+        "SELECT " P"1, " P"2, " P"3, " P"4, " NOW ", "
+        INTERVAL_SECONDS(P"5") ", " P"6 "
+        "WHERE NOT EXISTS ("
+            "SELECT 1 FROM " TBL_INVITATION_TOKEN " T "
+            "WHERE T.user_account_pin = " P"2 "
+            "AND T.issued_at > " SECONDS_AGO("3600") " "
+            "LIMIT 1 OFFSET 4"
+        ") "
+        "RETURNING id";
 
     db_stmt_t *stmt = NULL;
     if (db_prepare(db, &stmt, sql) != 0) {
         log_error("Failed to prepare invitation token insert");
         OPENSSL_cleanse(token, sizeof(token));
-        return -1;
-    }
-
-    char token_hash[SHA256_HEX_LENGTH];
-    if (crypto_sha256_hex(token, strlen(token), token_hash, sizeof(token_hash)) != 0) {
-        log_error("Failed to hash invitation token");
-        OPENSSL_cleanse(token, sizeof(token));
-        db_finalize(stmt);
         return -1;
     }
 
@@ -2487,24 +2732,64 @@ int user_create_invitation_token(db_handle_t *db,
     }
     db_bind_text(stmt, 4, token_hash, -1);
     db_bind_text(stmt, 5, ttl_str, -1);
-    if (source_ip) {
-        db_bind_text(stmt, 6, source_ip, -1);
-    } else {
-        db_bind_null(stmt, 6);
-    }
+    db_bind_text_or_null(stmt, 6, source_ip);
 
     int rc = db_step(stmt);
     db_finalize(stmt);
 
-    if (rc == DB_DONE) {
-        memcpy(out_token, token, VERIFICATION_TOKEN_BUF_SIZE);
+    if (rc != DB_ROW) {
         OPENSSL_cleanse(token, sizeof(token));
-        return 0;
+        if (rc == DB_DONE) return 1;  /* Five already this hour */
+        log_error("Failed to insert invitation token");
+        return -1;
     }
 
+    memcpy(out_token, token, VERIFICATION_TOKEN_BUF_SIZE);
     OPENSSL_cleanse(token, sizeof(token));
-    log_error("Failed to insert invitation token");
-    return -1;
+    return 0;
+}
+
+int user_void_earlier_invitations(db_handle_t *db, const char *token) {
+    if (!db || !token) {
+        log_error("Invalid arguments to user_void_earlier_invitations");
+        return -1;
+    }
+
+    char token_hash[SHA256_HEX_LENGTH];
+    if (crypto_sha256_hex(token, strlen(token), token_hash, sizeof(token_hash)) != 0) {
+        log_error("Failed to hash invitation token");
+        return -1;
+    }
+
+    /* Voided as used, which is what refuses them. Only those issued before this
+     * one: two re-invitations that overlap each void the other's link otherwise,
+     * and neither works. This way the later keeps its link, and two issued in the
+     * same second (SQLite's resolution) both keep theirs. */
+    const char *sql =
+        "UPDATE " TBL_INVITATION_TOKEN " "
+        "SET is_used = " BOOL_TRUE ", used_at = " NOW ", updated_at = " NOW " "
+        "WHERE user_account_pin = ("
+            "SELECT user_account_pin FROM " TBL_INVITATION_TOKEN " WHERE token = " P"1"
+        ") AND issued_at < ("
+            "SELECT issued_at FROM " TBL_INVITATION_TOKEN " WHERE token = " P"1"
+        ") AND is_used = " BOOL_FALSE;
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        log_error("Failed to prepare the earlier invitations' voiding");
+        return -1;
+    }
+
+    db_bind_text(stmt, 1, token_hash, -1);
+
+    int rc = db_step(stmt);
+    db_finalize(stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Failed to void the earlier invitations");
+        return -1;
+    }
+    return 0;
 }
 
 int user_lookup_invitation_token(db_handle_t *db, const char *token,
@@ -2675,9 +2960,9 @@ int user_consume_invitation_token(db_handle_t *db, const char *token,
     /* Step 2: Hash new password */
     char salt[PASSWORD_SALT_HEX_MAX_LENGTH];
     int iterations;
-    char hash[PASSWORD_HASH_HEX_MAX_LENGTH];
+    char hash[PASSWORD_HASH_MAX_LENGTH];
 
-    int hash_rc = crypto_password_hash(new_password, strlen(new_password),
+    int hash_rc = crypto_password_hash(SECRET_USER, new_password, strlen(new_password),
                             salt, sizeof(salt),
                             &iterations,
                             hash, sizeof(hash));
@@ -2687,7 +2972,16 @@ int user_consume_invitation_token(db_handle_t *db, const char *token,
         return (hash_rc == -2) ? -2 : -1;
     }
 
-    /* Step 3: Transaction */
+    /* Step 3: Transaction.
+     *
+     * The lookup above is a fast path: a dead link costs no hash and gets the
+     * right page. Marking the link used and setting the password are the
+     * authority, each for what it writes: the first repeats the link's checks,
+     * the second requires the account still active. A link used or expired since
+     * (a deactivation voids it by marking it used), or an account deactivated
+     * since, matches no row, and the redemption is refused and rolled back, email
+     * verification included. So a second redemption racing the first can't set
+     * the password again. */
     if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
         log_error("Failed to begin invitation consume transaction");
         OPENSSL_cleanse(salt, sizeof(salt));
@@ -2700,7 +2994,9 @@ int user_consume_invitation_token(db_handle_t *db, const char *token,
         "UPDATE " TBL_INVITATION_TOKEN " "
         "SET is_used = " BOOL_TRUE ", used_at = " NOW ", updated_at = " NOW " "
         "WHERE token = " P"1 "
-        "AND is_used = " BOOL_FALSE;
+        "AND is_used = " BOOL_FALSE " "
+        "AND expected_expiry > " NOW " "
+        "RETURNING is_used";
 
     db_stmt_t *use_stmt = NULL;
     if (db_prepare(db, &use_stmt, use_sql) != 0) {
@@ -2715,11 +3011,12 @@ int user_consume_invitation_token(db_handle_t *db, const char *token,
     rc = db_step(use_stmt);
     db_finalize(use_stmt);
 
-    if (rc != DB_DONE) {
-        log_error("Failed to mark invitation token as used");
+    if (rc != DB_ROW) {
         db_execute_trusted(db, "ROLLBACK");
         OPENSSL_cleanse(salt, sizeof(salt));
         OPENSSL_cleanse(hash, sizeof(hash));
+        if (rc == DB_DONE) return 1;  /* Used, expired or voided since the lookup */
+        log_error("Failed to mark invitation token as used");
         return -1;
     }
 
@@ -2851,7 +3148,8 @@ int user_consume_invitation_token(db_handle_t *db, const char *token,
         "hash_iterations = " P"2, "
         "secret_hash = " P"3, "
         "updated_at = " NOW " "
-        "WHERE pin = " P"4 AND is_active = " BOOL_TRUE;
+        "WHERE pin = " P"4 AND is_active = " BOOL_TRUE " "
+        "RETURNING pin";
 
     db_stmt_t *update_stmt = NULL;
     if (db_prepare(db, &update_stmt, update_sql) != 0) {
@@ -2873,9 +3171,10 @@ int user_consume_invitation_token(db_handle_t *db, const char *token,
     OPENSSL_cleanse(salt, sizeof(salt));
     OPENSSL_cleanse(hash, sizeof(hash));
 
-    if (rc != DB_DONE) {
-        log_error("Failed to set password for invitation");
+    if (rc != DB_ROW) {
         db_execute_trusted(db, "ROLLBACK");
+        if (rc == DB_DONE) return 1;  /* Deactivated since the link was marked used */
+        log_error("Failed to set password for invitation");
         return -1;
     }
 
@@ -3043,6 +3342,76 @@ int user_find_by_identity(db_handle_t *db, const char *username,
     }
 
     return 1;  /* Not found */
+}
+
+int user_find_pending_by_email(db_handle_t *db, const char *email,
+                               user_identity_t *out_match, long long *out_email_pin) {
+    if (!db || !email || !out_match || !out_email_pin) {
+        log_error("Invalid arguments to user_find_pending_by_email");
+        return -1;
+    }
+
+    memset(out_match, 0, sizeof(*out_match));
+    *out_email_pin = 0;
+
+    char lower_buf[256];
+    str_to_lower(lower_buf, sizeof(lower_buf), email);
+    char hash_hex[HMAC_SHA256_HEX_LENGTH];
+    if (hash_field(lower_buf, hash_hex, sizeof(hash_hex)) != 0) {
+        log_error("Failed to hash email for the pending match");
+        return -1;
+    }
+
+    /* No password yet is what pending means. The oldest, should there be two for
+       one address. */
+    const char *sql =
+        "SELECT U.pin, U.id, U.username, U.is_active, E.pin "
+        "FROM " TBL_USER_EMAIL " E "
+        "JOIN " TBL_USER_ACCOUNT " U ON U.pin = E.user_account_pin "
+        "WHERE E.email_hash = " P"1 AND E.is_verified = " BOOL_FALSE " "
+        "AND U.secret_hash IS NULL "
+        "ORDER BY U.pin "
+        "LIMIT 1";
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        log_error("Failed to prepare the pending account match");
+        return -1;
+    }
+
+    db_bind_text(stmt, 1, hash_hex, -1);
+
+    int rc = db_step(stmt);
+    if (rc != DB_ROW) {
+        db_finalize(stmt);
+        if (rc == DB_DONE) return 1;
+        log_error("Error in the pending account match");
+        return -1;
+    }
+
+    out_match->user_account_pin = db_column_int64(stmt, 0);
+
+    const unsigned char *id_blob = db_column_blob(stmt, 1);
+    if (!id_blob || db_column_bytes(stmt, 1) != 16) {
+        log_error("Malformed user id in the pending account match");
+        db_finalize(stmt);
+        return -1;
+    }
+    memcpy(out_match->user_id, id_blob, 16);
+
+    const char *encrypted = (const char *)db_column_text(stmt, 2);
+    if (encrypted && decrypt_field(encrypted, out_match->username,
+                                   sizeof(out_match->username)) != 0) {
+        log_error("Failed to decrypt username in the pending account match");
+        db_finalize(stmt);
+        return -1;
+    }
+
+    out_match->is_active = db_column_int(stmt, 3);
+    *out_email_pin = db_column_int64(stmt, 4);
+
+    db_finalize(stmt);
+    return 0;
 }
 
 int user_create_no_password(db_handle_t *db, const char *username,
@@ -3300,10 +3669,18 @@ int user_set_active(db_handle_t *db, const unsigned char *user_id, int active) {
      * every session and token the account still held, an attacker's included,
      * MFA-complete sessions and all, and every emailed link still in date. So
      * deactivating also closes the sessions, revokes the refresh and access
-     * tokens, and voids outstanding password-reset, passwordless-login and
-     * invitation links. It does so on every call, which sweeps up whatever an
-     * account deactivated by an older build still holds. */
-    if (!val) {
+     * tokens, and voids outstanding password-reset, passwordless-login,
+     * invitation and email-verification links (an address an attacker added
+     * would otherwise still verify, and then take reset links). It does so on
+     * every call, so deactivating again sweeps up whatever the account still
+     * holds.
+     *
+     * Reactivating sweeps again. An inactive account can't come by any of these
+     * legitimately, so whatever it holds now was created while its deactivation
+     * ran and escaped that sweep: a sign-in that read the account as active an
+     * instant before, say. Activating an account that is already active touches
+     * nothing. */
+    if (!val || !current) {
         const char *revoke_steps[] = {
             "UPDATE " TBL_BROWSER " "
             "SET is_closed = " BOOL_TRUE ", closed_at = " NOW ", updated_at = " NOW " "
@@ -3322,6 +3699,12 @@ int user_set_active(db_handle_t *db, const unsigned char *user_id, int active) {
             "WHERE user_account_pin = " P"1 AND is_used = " BOOL_FALSE
             " AND is_revoked = " BOOL_FALSE,
 
+            "UPDATE " TBL_EMAIL_VERIFICATION_TOKEN " "
+            "SET is_revoked = " BOOL_TRUE ", revoked_at = " NOW ", updated_at = " NOW " "
+            "WHERE user_email_pin IN ("
+                "SELECT pin FROM " TBL_USER_EMAIL " WHERE user_account_pin = " P"1"
+            ") AND is_used = " BOOL_FALSE " AND is_revoked = " BOOL_FALSE,
+
             /* These two have no revoked flag; marking them used is what refuses them */
             "UPDATE " TBL_PASSWORDLESS_LOGIN_TOKEN " "
             "SET is_used = " BOOL_TRUE ", used_at = " NOW ", updated_at = " NOW " "
@@ -3334,7 +3717,7 @@ int user_set_active(db_handle_t *db, const unsigned char *user_id, int active) {
 
         for (size_t i = 0; i < sizeof(revoke_steps) / sizeof(revoke_steps[0]); i++) {
             if (db_prepare(db, &stmt, revoke_steps[i]) != 0) {
-                log_error("Failed to prepare deactivation revoke statement");
+                log_error("Failed to prepare the account sweep");
                 db_execute_trusted(db, "ROLLBACK");
                 return -1;
             }
@@ -3345,7 +3728,7 @@ int user_set_active(db_handle_t *db, const unsigned char *user_id, int active) {
             db_finalize(stmt);
 
             if (rc != DB_DONE) {
-                log_error("Failed to revoke sessions and tokens on deactivation");
+                log_error("Failed to close the account's sessions, tokens and links");
                 db_execute_trusted(db, "ROLLBACK");
                 return -1;
             }

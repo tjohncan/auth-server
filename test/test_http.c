@@ -149,7 +149,7 @@ void test_response_building(void) {
      *
      * A value carrying "\r\n" would close its header line early and let the remainder
      * be read as further headers or as the body — response splitting. Nothing reaches
-     * these setters carrying one today (redirect URIs are control-character validated,
+     * these setters carrying one (redirect URIs are control-character validated,
      * query parameters are percent-encoded), but that is a property of a few call sites
      * rather than of this layer.
      *
@@ -168,7 +168,7 @@ void test_response_building(void) {
     /* unsafe names, both doors */
     http_response_add_header(resp4, "X-Bad-Add\r\nName", "harmless");
     http_response_set_header(resp4, "X-Bad-Set\r\nName", "harmless");
-    /* NULL, both doors — str_dup used to be handed it unchecked */
+    /* NULL, both doors: refused before str_dup sees it */
     http_response_add_header(resp4, "X-Null-Add", NULL);
     http_response_set_header(resp4, "X-Null-Set", NULL);
 
@@ -265,6 +265,31 @@ void test_malformed_requests(void) {
         printf("✓ Unsupported HTTP version rejected\n");
     }
 
+    /* Test 4b: Control characters in the target, which the request log line
+       would print: a bare LF starting a forged line, a tab, ESC, DEL. Encoded,
+       the same bytes are fine */
+    {
+        const char *bad[] = {
+            "GET /x\n[2026-10-05\t12:00:00]\tWARN\t:\tRefresh\ttoken\treplay HTTP/1.0\r\n\r\n",
+            "GET /x\ty HTTP/1.0\r\n\r\n",
+            "GET /x?q=\x1b[2J HTTP/1.0\r\n\r\n",
+            "GET /x\x7f HTTP/1.0\r\n\r\n",
+        };
+        for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            char req[128];
+            snprintf(req, sizeof(req), "%s", bad[i]);
+            HttpRequest parsed = http_request_parse(req, strlen(req));
+            assert(parsed.method == HTTP_UNKNOWN);
+            http_request_cleanup(&parsed);
+        }
+        char ok[] = "GET /x?q=%0A%09%1B HTTP/1.0\r\n\r\n";
+        HttpRequest parsed = http_request_parse(ok, strlen(ok));
+        assert(parsed.method == HTTP_GET);
+        assert(strcmp(parsed.query_string, "q=%0A%09%1B") == 0);
+        http_request_cleanup(&parsed);
+        printf("✓ Control characters in the target rejected; percent-encoded, accepted\n");
+    }
+
     /* Test 5: Excessive headers (over 50 limit) */
     {
         char req[8192];
@@ -299,6 +324,23 @@ void test_malformed_requests(void) {
         assert(strlen(parsed.body) == parsed.body_length);
         http_request_cleanup(&parsed);
         printf("✓ Body truncated to Content-Length\n");
+    }
+
+    /* No Content-Length, no body: the socket layer takes the request as complete at
+     * the blank line, so bytes that came in the same read must not become one, or a
+     * handler would see a body or not depending on how TCP split the request */
+    {
+        char req[] =
+            "POST /api HTTP/1.0\r\n"
+            "Content-Type: application/json\r\n"
+            "\r\n"
+            "{\"code_name\":\"x\"}";
+
+        HttpRequest parsed = http_request_parse(req, strlen(req));
+        assert(parsed.method == HTTP_POST);
+        assert(parsed.body == NULL && parsed.body_length == 0);
+        http_request_cleanup(&parsed);
+        printf("✓ No Content-Length: no body, whatever arrived with the headers\n");
     }
 
     /* Test 7: Garbage input */
@@ -489,6 +531,170 @@ void test_header_end_scan(void) {
     printf("✓ the FIRST delimiter wins when the body contains another\n");
 }
 
+/*
+ * The socket layer's Content-Length scan runs on its read buffer, which has no
+ * terminator, so each case is copied into an exactly-sized heap allocation and
+ * scanned up to the header end, as handle_read does. Under ASan (make
+ * test-sanitized), reading one byte past the block reads outside the allocation.
+ */
+static int scan_exact(const char *raw, size_t *out_length) {
+    size_t len = strlen(raw);
+    char *exact = malloc(len);
+    assert(exact);
+    memcpy(exact, raw, len);
+    size_t header_end = http_find_header_end(exact, len, 0);
+    assert(header_end);
+    int rc = http_scan_content_length(exact, header_end, out_length);
+    free(exact);
+    return rc;
+}
+
+void test_content_length_scan(void) {
+    printf("\n=== Test: Content-Length scan ===\n");
+
+    static const struct {
+        const char *raw;
+        int rc;
+        size_t length;
+        const char *what;
+    } cases[] = {
+        { "POST / HTTP/1.0\r\nContent-Length: 42\r\n\r\n",               0, 42, "a plain value" },
+        { "POST / HTTP/1.0\r\ncontent-length:7\r\n\r\n",                 0, 7,  "lower case, no space" },
+        { "POST / HTTP/1.0\r\nContent-Length: \t 9 \t\r\n\r\n",          0, 9,  "spaces and tabs around the digits" },
+        { "POST / HTTP/1.0\r\nContent-Length: 3\r\nContent-Length: 3\r\n\r\n", 0, 3, "two lines that agree" },
+        { "POST / HTTP/1.0\r\nHost: x\r\n\r\n",                           1, 0,  "no Content-Length" },
+        { "Content-Length: 5 / HTTP/1.0\r\nHost: x\r\n\r\n",             1, 0,  "the request line isn't a header" },
+        { "POST / HTTP/1.0\r\nContent-Length:\r\n\r\n",                  -1, 0, "an empty value" },
+        { "POST / HTTP/1.0\r\nContent-Length: +5\r\n\r\n",               -1, 0, "a sign" },
+        { "POST / HTTP/1.0\r\nContent-Length: -1\r\n\r\n",               -1, 0, "a negative" },
+        { "POST / HTTP/1.0\r\nContent-Length: 5x\r\n\r\n",               -1, 0, "trailing junk" },
+        { "POST / HTTP/1.0\r\nContent-Length: 5 6\r\n\r\n",              -1, 0, "two numbers" },
+        { "POST / HTTP/1.0\r\nContent-Length: 0x10\r\n\r\n",             -1, 0, "hex" },
+        { "POST / HTTP/1.0\r\nContent-Length: 99999999999999999999999\r\n\r\n", -1, 0, "a value too big for size_t" },
+        { "POST / HTTP/1.0\r\nContent-Length: 3\r\nContent-Length: 4\r\n\r\n", -2, 0, "two lines that disagree" },
+    };
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        size_t length = 0;
+        int rc = scan_exact(cases[i].raw, &length);
+        assert(rc == cases[i].rc);
+        if (rc == 0) assert(length == cases[i].length);
+        printf("✓ %s: %d\n", cases[i].what, rc);
+    }
+
+    /* test/fuzz/crashes/http/03: a blank value mustn't send strtol over the CRLFCRLF
+     * into the body, or past the end of the read buffer when the body's digits run
+     * that far. The body here is all digits to the last byte. */
+    {
+        const char *head = "POST /login HTTP/1.0\r\nHost: x\r\nContent-Length: \r\n\r\n";
+        size_t head_len = strlen(head);
+        size_t len = head_len + 4000;
+        char *exact = malloc(len);
+        assert(exact);
+        memcpy(exact, head, head_len);
+        memset(exact + head_len, '7', len - head_len);
+
+        size_t header_end = http_find_header_end(exact, len, 0);
+        assert(header_end == head_len);
+        size_t length = 0;
+        assert(http_scan_content_length(exact, header_end, &length) == -1);
+        free(exact);
+        printf("✓ a blank value followed by a body of digits is invalid, read within the headers\n");
+    }
+
+    /* The parser applies the same rule, so the two layers can't disagree about
+     * where the body ends */
+    {
+        char bad[] = "POST /api HTTP/1.0\r\nContent-Length: 5x\r\n\r\nhello";
+        HttpRequest parsed = http_request_parse(bad, strlen(bad));
+        assert(parsed.method == HTTP_UNKNOWN);
+        http_request_cleanup(&parsed);
+
+        char good[] = "POST /api HTTP/1.0\r\nContent-Length:  5 \r\n\r\nhello!";
+        parsed = http_request_parse(good, strlen(good));
+        assert(parsed.method == HTTP_POST);
+        assert(parsed.body_length == 5 && strcmp(parsed.body, "hello") == 0);
+        http_request_cleanup(&parsed);
+        printf("✓ the parser refuses what the scan refuses, and reads the same length\n");
+    }
+
+    /* A NUL in the header block: the parser would stop at it, short of the
+     * Content-Length (and any Origin or forwarding header) after it, so both
+     * layers refuse it. A NUL in the body is the body's business. */
+    {
+        static const char raw[] = "POST /api HTTP/1.0\r\nFoo: a\0\r\nContent-Length: 5\r\n\r\nhello";
+        size_t len = sizeof(raw) - 1;
+        char *exact = malloc(len);
+        assert(exact);
+        memcpy(exact, raw, len);
+        size_t header_end = http_find_header_end(exact, len, 0);
+        assert(header_end == len - 5);
+        size_t length = 0;
+        assert(http_scan_content_length(exact, header_end, &length) == -3);
+        free(exact);
+
+        char copy[sizeof(raw)];
+        memcpy(copy, raw, sizeof(raw));
+        HttpRequest parsed = http_request_parse(copy, len);
+        assert(parsed.method == HTTP_UNKNOWN);
+        http_request_cleanup(&parsed);
+
+        static const char in_body[] = "POST /api HTTP/1.0\r\nContent-Length: 3\r\n\r\na\0b";
+        char body_copy[sizeof(in_body)];
+        memcpy(body_copy, in_body, sizeof(in_body));
+        header_end = http_find_header_end(body_copy, sizeof(in_body) - 1, 0);
+        assert(http_scan_content_length(body_copy, header_end, &length) == 0 && length == 3);
+        parsed = http_request_parse(body_copy, sizeof(in_body) - 1);
+        assert(parsed.method == HTTP_POST && parsed.body_length == 3);
+        http_request_cleanup(&parsed);
+        printf("✓ a NUL in the header block is refused by the scan and the parser; in the body, not\n");
+    }
+
+    /* A CR or LF outside a CRLF: a line starting with a bare CR ended the parser's
+     * walk short of a Content-Length the scan still framed the request with, so
+     * both refuse such bytes. A line starting with a space or tab (obs-fold), colon
+     * or not, and a name with a space, a tab or another control character in it:
+     * the parser refuses them; the scan, framing by Content-Length alone, reads
+     * nothing in them. */
+    {
+        static const struct { const char *raw; int scan; const char *what; } cases[] = {
+            { "POST /api HTTP/1.0\r\n\rX: y\r\nContent-Length: 1\r\n\r\n{\"a\":1}", -4,
+              "a line starting with a bare CR, before the Content-Length" },
+            { "POST /api HTTP/1.0\r\nX: a\rb\r\nContent-Length: 1\r\n\r\n{", -4,
+              "a bare CR in a value" },
+            { "GET /health HTTP/1.0\r\nUser-Agent: a\nb\r\n\r\n", -4, "a bare LF in a value" },
+            { "GET /health HTTP/1.0\r\nX-A: 1\r\n X-B: 2\r\n\r\n", 1, "a folded line with a colon" },
+            { "GET /health HTTP/1.0\r\nX-A: 1\r\n Transfer-Encoding: chunked\r\n\r\n", 1,
+              "a folded Transfer-Encoding" },
+            { "GET /health HTTP/1.0\r\nX-A: 1\r\n\tfolded\r\n\r\n", 1, "a line folded with a tab" },
+            { "POST /api HTTP/1.0\r\nContent-Length : 1\r\n\r\n{", 1,
+              "a space before a Content-Length's colon" },
+            { "GET /health HTTP/1.0\r\nX-A\t: 1\r\n\r\n", 1, "a tab before a colon" },
+            { "GET /health HTTP/1.0\r\nX\001A: 1\r\n\r\n", 1, "a control character in a name" },
+        };
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+            size_t len = strlen(cases[i].raw);
+            char *exact = malloc(len);
+            assert(exact);
+            memcpy(exact, cases[i].raw, len);
+            size_t header_end = http_find_header_end(exact, len, 0);
+            size_t length = 0;
+            assert(header_end > 0);
+            assert(http_scan_content_length(exact, header_end, &length) == cases[i].scan);
+            free(exact);
+
+            char copy[128];
+            assert(len < sizeof(copy));
+            memcpy(copy, cases[i].raw, len + 1);
+            HttpRequest parsed = http_request_parse(copy, len);
+            assert(parsed.method == HTTP_UNKNOWN);
+            http_request_cleanup(&parsed);
+            printf("✓ %s: refused by %s\n", cases[i].what,
+                   cases[i].scan < 0 ? "the scan and the parser" : "the parser");
+        }
+    }
+}
+
 void test_cross_origin(void) {
     printf("\n=== Test: Cross-origin detection ===\n");
 
@@ -545,6 +751,96 @@ void test_cross_origin(void) {
     printf("✓ Origin with no Host: cross-origin\n");
 }
 
+/* The client address, from the request with these extra header lines */
+static int client_ip_is(const char *headers, const char *expected) {
+    char raw[512];
+    snprintf(raw, sizeof(raw), "GET /x HTTP/1.0\r\n%s\r\n", headers);
+    HttpRequest req = http_request_parse(raw, strlen(raw));
+    assert(req.method == HTTP_GET);
+    const char *ip = http_request_get_client_ip(&req, NULL);
+    int same = expected ? (ip && strcmp(ip, expected) == 0) : ip == NULL;
+    http_request_cleanup(&req);
+    return same;
+}
+
+void test_client_ip(void) {
+    printf("\n=== Test: Client address header ===\n");
+
+    const char *both = "X-Real-IP: 1.1.1.1\r\nX-Forwarded-For: 2.2.2.2, 3.3.3.3\r\n";
+
+    /* Default: X-Real-IP only, never the client-written first X-Forwarded-For entry */
+    assert(http_set_client_ip_header(NULL) == 0);
+    assert(client_ip_is(both, "1.1.1.1"));
+    assert(client_ip_is("X-Forwarded-For: 2.2.2.2, 3.3.3.3\r\n", NULL));
+    printf("✓ x-real-ip: X-Real-IP, and no falling back to X-Forwarded-For\n");
+
+    /* x-forwarded-for: the last entry, the one the nearest proxy appended,
+       whatever X-Real-IP says, from the last of several header lines, trimmed */
+    assert(http_set_client_ip_header("X-Forwarded-For") == 0);
+    assert(client_ip_is(both, "3.3.3.3"));
+    assert(client_ip_is("X-Forwarded-For: 9.9.9.9\r\nX-Forwarded-For: 4.4.4.4,5.5.5.5 \r\n",
+                        "5.5.5.5"));
+    assert(client_ip_is("X-Forwarded-For: 2001:db8::7\r\n", "2001:db8::7"));
+    assert(client_ip_is("X-Real-IP: 1.1.1.1\r\n", NULL));
+    assert(client_ip_is("X-Forwarded-For: 2.2.2.2, \r\n", NULL));
+    printf("✓ x-forwarded-for: the last entry of the last line, X-Real-IP ignored\n");
+
+    assert(http_set_client_ip_header("none") == 0);
+    assert(client_ip_is(both, NULL));
+    printf("✓ none: no address\n");
+
+    assert(http_set_client_ip_header("x-forwarded_for") == -1);
+    assert(client_ip_is(both, NULL));  /* still none: a refused name changes nothing */
+    assert(http_set_client_ip_header(NULL) == 0);
+    printf("✓ an unknown name is refused and changes nothing\n");
+
+    /* Only an address is one: anything else in the header is no address, so
+       nothing a client wrote there gets stored */
+    assert(client_ip_is("X-Real-IP: ::1\r\n", "::1"));
+    assert(client_ip_is("X-Real-IP: not-an-address\r\n", NULL));
+    assert(client_ip_is("X-Real-IP: 1.1.1.1\xff\r\n", NULL));
+    assert(http_set_client_ip_header("x-forwarded-for") == 0);
+    assert(client_ip_is("X-Forwarded-For: 2.2.2.2, evil\r\n", NULL));
+    assert(http_set_client_ip_header(NULL) == 0);
+    printf("✓ a header value that isn't an address gives none\n");
+}
+
+/* The stored User-Agent of a request with this one; NULL value for none */
+static int user_agent_is(const char *value, const char *expected) {
+    char raw[1200];
+    if (value) {
+        snprintf(raw, sizeof(raw), "GET /x HTTP/1.0\r\nUser-Agent: %s\r\n\r\n", value);
+    } else {
+        snprintf(raw, sizeof(raw), "GET /x HTTP/1.0\r\n\r\n");
+    }
+    HttpRequest req = http_request_parse(raw, strlen(raw));
+    assert(req.method == HTTP_GET);
+    const char *ua = http_request_get_user_agent(&req);
+    int same = expected ? (ua && strcmp(ua, expected) == 0) : ua == NULL;
+    http_request_cleanup(&req);
+    return same;
+}
+
+void test_user_agent(void) {
+    printf("\n=== Test: User-Agent, as stored ===\n");
+
+    assert(user_agent_is("Mozilla/5.0", "Mozilla/5.0"));
+    assert(user_agent_is("Mozilla/5.0 \xff", "Mozilla/5.0 ?"));
+    assert(user_agent_is(NULL, NULL));
+
+    char long_ua[700], expected[600];
+    memset(long_ua, 'a', 600);
+    long_ua[600] = '\0';
+    memset(expected, 'a', 512);
+    expected[512] = '\0';
+    assert(user_agent_is(long_ua, expected));
+    memset(long_ua, 'a', 511);
+    memcpy(long_ua + 511, "\xc3\xa9", 3);
+    expected[511] = '\0';
+    assert(user_agent_is(long_ua, expected));
+    printf("✓ well-formed UTF-8, at most 512 bytes, never a character split\n");
+}
+
 int main(void) {
     log_init(LOG_INFO);
     log_info("HTTP Parser Test Suite");
@@ -554,7 +850,10 @@ int main(void) {
     test_real_world_request();
     test_malformed_requests();
     test_header_end_scan();
+    test_content_length_scan();
     test_cross_origin();
+    test_client_ip();
+    test_user_agent();
 
     printf("\n=== All Tests Passed! ===\n\n");
 

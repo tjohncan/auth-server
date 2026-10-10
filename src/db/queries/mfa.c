@@ -153,18 +153,33 @@ int mfa_method_get_by_id(db_handle_t *db,
         return -1;
     }
 
+    /* Rate limited: 5 failures in the last minute on this method, or 10 in the
+     * last day across all of the user's methods. Three codes in a million are
+     * valid at any moment (the current step and one either side), so 5 a minute
+     * alone let someone with the password guess 7,200 times a day: about 2% a
+     * day, even odds within a month. 10 a day is about 1% a year. A successful
+     * code doesn't reset the day's count, and the operator's MFA reset (new
+     * methods, new pins) clears it. */
     const char *sql =
-        "SELECT id, pin, user_account_pin, mfa_method, display_name, secret, "
-        "       is_confirmed, confirmed_at, "
+        "SELECT M.id, M.pin, M.user_account_pin, M.mfa_method, M.display_name, M.secret, "
+        "       M.is_confirmed, M.confirmed_at, "
         "       EXISTS ("
         "           SELECT 1 FROM " TBL_USER_MFA_USAGE " "
-        "           WHERE user_mfa_pin = " TBL_USER_MFA ".pin "
+        "           WHERE user_mfa_pin = M.pin "
         "           AND success = " BOOL_FALSE " "
         "           AND submitted_at > " SECONDS_AGO("60") " "
         "           LIMIT 1 OFFSET 4"
+        "       ) OR EXISTS ("
+        "           SELECT 1 FROM " TBL_USER_MFA_USAGE " "
+        "           WHERE user_mfa_pin IN ("
+        "               SELECT pin FROM " TBL_USER_MFA " WHERE user_account_pin = M.user_account_pin"
+        "           ) "
+        "           AND success = " BOOL_FALSE " "
+        "           AND submitted_at > " SECONDS_AGO("86400") " "
+        "           LIMIT 1 OFFSET 9"
         "       ) AS is_rate_limited "
-        "FROM " TBL_USER_MFA " "
-        "WHERE id = " P"1 "
+        "FROM " TBL_USER_MFA " M "
+        "WHERE M.id = " P"1 "
         "LIMIT 1";
 
     db_stmt_t *stmt = NULL;
@@ -523,7 +538,10 @@ int recovery_code_set_create(db_handle_t *db,
     bytes_to_hex(salt_bytes, sizeof(salt_bytes), salt_hex, sizeof(salt_hex));
     OPENSSL_cleanse(salt_bytes, sizeof(salt_bytes));
 
-    int hash_iterations = crypto_password_min_iterations();
+    /* Machine secrets, one method, salt and iteration count for the whole set:
+       a code is found by hashing what's submitted as the set's codes were */
+    const char *method = crypto_password_method(SECRET_MACHINE);
+    int hash_iterations = crypto_password_min_iterations(SECRET_MACHINE);
 
     if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
         log_error("Failed to begin transaction");
@@ -617,8 +635,8 @@ int recovery_code_set_create(db_handle_t *db,
             return -1;
         }
 
-        char hash_hex[PASSWORD_HASH_HEX_MAX_LENGTH];
-        if (crypto_password_hash_with_salt(plaintext, plaintext_len,
+        char hash_hex[PASSWORD_HASH_MAX_LENGTH];
+        if (crypto_password_hash_with_salt(method, plaintext, plaintext_len,
                                          salt_hex, hash_iterations,
                                          hash_hex, sizeof(hash_hex)) != 0) {
             log_error("Failed to hash recovery code");
@@ -671,10 +689,15 @@ int recovery_code_set_get_active(db_handle_t *db,
         return -1;
     }
 
+    /* The set's method is its codes' label: they all carry the same one. It's
+       read from an unused code, the only kind that can match; with none left,
+       nothing can */
     const char *sql =
-        "SELECT id, user_account_pin, salt, hash_iterations, is_active, generated_at "
-        "FROM " TBL_RECOVERY_CODE_SET " "
-        "WHERE user_account_pin = " P"1 AND is_active = " BOOL_TRUE " "
+        "SELECT S.id, S.user_account_pin, S.salt, S.hash_iterations, S.is_active, S.generated_at, "
+        "(SELECT C.secret_hash FROM " TBL_RECOVERY_CODE " C "
+        " WHERE C.recovery_code_set_pin = S.pin AND C.is_used = " BOOL_FALSE " LIMIT 1) "
+        "FROM " TBL_RECOVERY_CODE_SET " S "
+        "WHERE S.user_account_pin = " P"1 AND S.is_active = " BOOL_TRUE " "
         "LIMIT 1";
 
     db_stmt_t *stmt = NULL;
@@ -706,6 +729,13 @@ int recovery_code_set_get_active(db_handle_t *db,
 
         const char *generated_at = db_column_text(stmt, 5);
         str_copy(out_set->generated_at, sizeof(out_set->generated_at), generated_at);
+
+        const char *code_hash = db_column_text(stmt, 6);
+        out_set->codes_left = code_hash != NULL;
+        if (crypto_password_hash_method(code_hash, out_set->method,
+                                        sizeof(out_set->method)) != 0) {
+            out_set->method[0] = '\0';
+        }
 
         db_finalize(stmt);
         return 0;
@@ -739,10 +769,22 @@ int recovery_code_verify(db_handle_t *db,
         log_debug("No active recovery code set found");
         return 0;  /* Invalid - no active set */
     }
+    if (!set.codes_left) {
+        log_debug("Every code of the active recovery code set is used");
+        OPENSSL_cleanse(&set, sizeof(set));
+        return 0;
+    }
 
-    /* Hash the provided code with the set's salt */
-    char hash_hex[PASSWORD_HASH_HEX_MAX_LENGTH];
-    if (crypto_password_hash_with_salt(code, strlen(code),
+    /* Hash the provided code as the set's codes were: its method, salt and
+       iterations */
+    if (!set.method[0]) {
+        log_error("The active recovery code set's hashes don't start with the method that "
+                  "made them (argon2id$ or pbkdf2-sha256$), so no code can be checked");
+        OPENSSL_cleanse(&set, sizeof(set));
+        return -1;
+    }
+    char hash_hex[PASSWORD_HASH_MAX_LENGTH];
+    if (crypto_password_hash_with_salt(set.method, code, strlen(code),
                                      set.salt, set.hash_iterations,
                                      hash_hex, sizeof(hash_hex)) != 0) {
         log_error("Failed to hash recovery code for verification");
@@ -750,78 +792,46 @@ int recovery_code_verify(db_handle_t *db,
         return -1;
     }
 
-    /* Begin transaction (need to check and mark as used atomically) */
-    if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
-        log_error("Failed to begin transaction");
-        OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
-        return -1;
-    }
-
-    const char *select_sql =
-        "SELECT rc.pin "
-        "FROM " TBL_RECOVERY_CODE " rc "
-        "INNER JOIN " TBL_RECOVERY_CODE_SET " rcs ON rc.recovery_code_set_pin = rcs.pin "
-        "WHERE rcs.id = " P"1 "
-        "  AND rc.secret_hash = " P"2 "
-        "  AND rc.is_used = " BOOL_FALSE " "
-        "LIMIT 1";
-
-    db_stmt_t *select_stmt = NULL;
-    if (db_prepare(db, &select_stmt, select_sql) != 0) {
-        log_error("Failed to prepare recovery code select");
-        db_execute_trusted(db, "ROLLBACK");
-        OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
-        return -1;
-    }
-
-    db_bind_blob(select_stmt, 1, set.id, 16);
-    db_bind_text(select_stmt, 2, hash_hex, -1);
-    OPENSSL_cleanse(&set, sizeof(set));
-
-    int rc = db_step(select_stmt);
-
-    if (rc != DB_ROW) {
-        db_finalize(select_stmt);
-        db_execute_trusted(db, "ROLLBACK");
-        OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
-        log_debug("Recovery code not found or already used");
-        return 0;  /* Invalid */
-    }
-
-    long long code_pin = db_column_int64(select_stmt, 0);
-    db_finalize(select_stmt);
-    OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
-
-    /* Mark code as used */
-    const char *update_sql =
+    /* Check and use in one statement: it marks the matching code used only if
+     * the code is still unused and its set still active, and its RETURNING row
+     * is the verdict. Of two submissions of one code, the second matches
+     * nothing: SQLite runs them one at a time, and on PostgreSQL the second
+     * waits on the first's row lock and then finds the code used. */
+    const char *use_sql =
         "UPDATE " TBL_RECOVERY_CODE " "
         "SET is_used = " BOOL_TRUE ", "
         "    used_at = " NOW ", "
         "    updated_at = " NOW " "
-        "WHERE pin = " P"1 AND is_used = " BOOL_FALSE;
+        "WHERE recovery_code_set_pin = ("
+        "    SELECT pin FROM " TBL_RECOVERY_CODE_SET " "
+        "    WHERE id = " P"1 AND is_active = " BOOL_TRUE
+        ") "
+        "AND secret_hash = " P"2 "
+        "AND is_used = " BOOL_FALSE " "
+        "RETURNING pin";
 
-    db_stmt_t *update_stmt = NULL;
-    if (db_prepare(db, &update_stmt, update_sql) != 0) {
-        log_error("Failed to prepare recovery code update");
-        db_execute_trusted(db, "ROLLBACK");
+    db_stmt_t *use_stmt = NULL;
+    if (db_prepare(db, &use_stmt, use_sql) != 0) {
+        log_error("Failed to prepare recovery code use");
+        OPENSSL_cleanse(&set, sizeof(set));
+        OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
         return -1;
     }
 
-    db_bind_int64(update_stmt, 1, code_pin);
+    db_bind_blob(use_stmt, 1, set.id, 16);
+    db_bind_text(use_stmt, 2, hash_hex, -1);
+    OPENSSL_cleanse(&set, sizeof(set));
 
-    rc = db_step(update_stmt);
-    db_finalize(update_stmt);
+    int rc = db_step(use_stmt);
+    db_finalize(use_stmt);
+    OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
 
-    if (rc != DB_DONE) {
-        log_error("Failed to mark recovery code as used");
-        db_execute_trusted(db, "ROLLBACK");
-        return -1;
+    if (rc == DB_DONE) {
+        log_debug("Recovery code not found or already used");
+        return 0;  /* Invalid */
     }
-
-    /* Commit transaction */
-    if (db_execute_trusted(db, "COMMIT") != 0) {
-        log_error("Failed to commit transaction");
-        db_execute_trusted(db, "ROLLBACK");
+    if (rc != DB_ROW) {
+        log_error("Failed to use recovery code");
         return -1;
     }
 
@@ -1094,14 +1104,14 @@ int mfa_reset_user(db_handle_t *db, const unsigned char *user_id) {
  * Logging
  * ========================================================================== */
 
-void mfa_log_usage(db_handle_t *db,
-                   long long user_mfa_pin,
-                   int success,
-                   const char *source_ip,
-                   const char *user_agent) {
+int mfa_log_usage(db_handle_t *db,
+                  long long user_mfa_pin,
+                  int success,
+                  const char *source_ip,
+                  const char *user_agent) {
     if (!db) {
         log_warn("mfa_log_usage: no db connection");
-        return;
+        return -1;
     }
 
     const char *sql =
@@ -1112,17 +1122,13 @@ void mfa_log_usage(db_handle_t *db,
     db_stmt_t *stmt = NULL;
     if (db_prepare(db, &stmt, sql) != 0) {
         log_warn("mfa_log_usage: failed to prepare statement");
-        return;
+        return -1;
     }
 
     db_bind_int64(stmt, 1, user_mfa_pin);
     db_bind_int(stmt, 2, success ? 1 : 0);
 
-    if (source_ip) {
-        db_bind_text(stmt, 3, source_ip, -1);
-    } else {
-        db_bind_null(stmt, 3);
-    }
+    db_bind_text_or_null(stmt, 3, source_ip);
 
     if (user_agent) {
         int ua_len = (int)strlen(user_agent);
@@ -1137,5 +1143,7 @@ void mfa_log_usage(db_handle_t *db,
 
     if (rc != DB_DONE) {
         log_warn("mfa_log_usage: failed to insert");
+        return -1;
     }
+    return 0;
 }

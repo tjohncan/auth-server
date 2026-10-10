@@ -19,6 +19,12 @@
 /* Maximum number of tables we can monitor */
 #define MAX_TABLES 64
 
+/* While a table's batches come back full, the cleaner stays on it for up to this
+ * long per visit, pausing between batches so that on SQLite a worker waiting for
+ * the write lock gets it. */
+#define PURGE_BUDGET_MS 2000
+#define PURGE_PAUSE_MS 20
+
 /* Hardcoded retention periods (days) - not configurable */
 #define RETENTION_AUTH_CODE_DAYS 1           /* 24 hours */
 #define RETENTION_PASSWORDLESS_TOKEN_DAYS 1  /* 24 hours */
@@ -50,6 +56,16 @@ static pthread_mutex_t g_cleaner_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_cleaner_cond = PTHREAD_COND_INITIALIZER;
 static int g_cleaner_stop_flag = 0;
 
+/* Whether one more task fits. A table left out is never purged, and history
+ * tables are the ones retention exists to bound, so that's an error, not a
+ * silent skip. */
+static int cleaner_has_room(const char *table_name) {
+    if (g_num_active_cleaners < MAX_TABLES) return 1;
+    log_error("Cleaner: no room for %s past MAX_TABLES (%d), so it will never be purged; "
+              "raise MAX_TABLES in src/db/cleaner.c", table_name, MAX_TABLES);
+    return 0;
+}
+
 /*
  * Default config values
  */
@@ -73,6 +89,7 @@ void cleaner_config_defaults(cleaner_config_t *config) {
 void cleaner_config_from_main_config(cleaner_config_t *cleaner_cfg,
                                       const config_t *main_cfg) {
     cleaner_cfg->db_type = main_cfg->db_type;
+    cleaner_cfg->session_hook = NULL;  /* main sets it for PostgreSQL */
     cleaner_cfg->enabled = main_cfg->cleaner_enabled;
     cleaner_cfg->interval_seconds = main_cfg->cleaner_interval_seconds;
     cleaner_cfg->batch_size = main_cfg->cleaner_batch_size;
@@ -210,7 +227,7 @@ static void discover_history_tables(db_handle_t *db, cleaner_config_t *config) {
 
     while (db_step(stmt) == DB_ROW) {
         const char *table_name = (const char *)db_column_text(stmt, 0);
-        if (table_name && g_num_active_cleaners < MAX_TABLES) {
+        if (table_name && cleaner_has_room(table_name)) {
             char *name_copy = str_dup(table_name);
             if (name_copy) {
                 g_active_cleaners[g_num_active_cleaners++] = (table_cleaner_t){
@@ -245,7 +262,7 @@ static void discover_history_tables(db_handle_t *db, cleaner_config_t *config) {
 
     while (db_step(stmt) == DB_ROW) {
         const char *full_table_name = (const char *)db_column_text(stmt, 0);
-        if (full_table_name && g_num_active_cleaners < MAX_TABLES) {
+        if (full_table_name && cleaner_has_room(full_table_name)) {
             char *name_copy = str_dup(full_table_name);
             if (name_copy) {
                 g_active_cleaners[g_num_active_cleaners++] = (table_cleaner_t){
@@ -298,7 +315,8 @@ static int build_purge_sql(char *buf, size_t bufsize, table_cleaner_t *cleaner, 
     /* Unified query for both backends (DAYS_AGO macro handles the difference) */
     snprintf(buf, bufsize,
         "DELETE FROM %s WHERE %s IN ("
-        "SELECT %s FROM %s WHERE %s < " DAYS_AGO("%s") " %s LIMIT %d)",
+        "SELECT %s FROM %s WHERE %s < " DAYS_AGO("%s") " %s LIMIT %d) "
+        "RETURNING 1",
         cleaner->table_name, cleaner->pk_column,
         cleaner->pk_column, cleaner->table_name,
         cleaner->timestamp_column, days_str,
@@ -331,7 +349,7 @@ static int check_table(db_handle_t *db, table_cleaner_t *cleaner) {
 
 /*
  * Purge one batch of old rows
- * Returns 0 on success, -1 on error
+ * Returns the number deleted (at most batch_size), or -1 on error
  */
 static int purge_batch(db_handle_t *db, table_cleaner_t *cleaner, int batch_size) {
     char sql[1024];
@@ -339,12 +357,24 @@ static int purge_batch(db_handle_t *db, table_cleaner_t *cleaner, int batch_size
         return -1;
     }
 
-    if (db_execute_direct(db, sql) != 0) {
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        log_warn("Cleaner: failed to prepare the purge of %s", cleaner->table_name);
+        return -1;
+    }
+
+    /* One row back per row deleted */
+    int deleted = 0;
+    int rc;
+    while ((rc = db_step(stmt)) == DB_ROW) deleted++;
+    db_finalize(stmt);
+
+    if (rc != DB_DONE) {
         log_warn("Cleaner: failed to purge from %s", cleaner->table_name);
         return -1;
     }
 
-    return 0;
+    return deleted;
 }
 
 /*
@@ -372,6 +402,50 @@ static void vacuum_table(db_handle_t *db, cleaner_config_t *config,
         }
     }
 #endif
+}
+
+static long long monotonic_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/*
+ * Purge a table that has work: batch after batch while they come back full,
+ * within PURGE_BUDGET_MS, then vacuum once. One batch per visit would cap each
+ * table at batch_size rows per rotation through every task, and a table filling
+ * faster than that would grow for good.
+ *
+ * Returns the number of batches run
+ */
+static int purge_table(db_handle_t *db, cleaner_config_t *config, table_cleaner_t *cleaner) {
+    long long started = monotonic_ms();
+    int batches = 0;
+    int out_of_budget = 0;
+
+    for (;;) {
+        int deleted = purge_batch(db, cleaner, config->batch_size);
+        if (deleted < 0) break;
+        batches++;
+        if (deleted < config->batch_size || cleaner_should_stop()) break;
+        if (monotonic_ms() - started >= PURGE_BUDGET_MS) {
+            out_of_budget = 1;
+            break;
+        }
+        struct timespec pause = { 0, PURGE_PAUSE_MS * 1000000L };
+        nanosleep(&pause, NULL);
+    }
+
+    if (out_of_budget && check_table(db, cleaner) == 1) {
+        log_warn("Cleaner: %s still has rows past retention after %d batches of %d "
+                 "this visit; if this keeps happening, it fills faster than it is purged",
+                 cleaner->description, batches, config->batch_size);
+    }
+
+    if (batches > 0) {
+        vacuum_table(db, config, cleaner);
+    }
+    return batches;
 }
 
 /*
@@ -450,7 +524,7 @@ static void cleaner_init(db_handle_t *db, cleaner_config_t *config) {
     /* Filter: only include tables that exist */
     for (int i = 0; i < num_all; i++) {
         if (table_exists(db, all_possible[i].table_name)) {
-            if (g_num_active_cleaners < MAX_TABLES) {
+            if (cleaner_has_room(all_possible[i].table_name)) {
                 g_active_cleaners[g_num_active_cleaners++] = all_possible[i];
                 log_info("Cleaner: monitoring %s (retention: %d days)",
                          all_possible[i].description, all_possible[i].retention_days);
@@ -478,6 +552,17 @@ static void* cleaner_thread_main(void *arg) {
     db_handle_t *db = NULL;
     if (db_connect(&db, config->db_type, config->connection_string) != 0) {
         log_error("Cleaner: failed to create database connection");
+        if (config->connection_string)
+            OPENSSL_cleanse((char *)config->connection_string, strlen(config->connection_string));
+        free((char *)config->connection_string);
+        free(config);
+        return NULL;
+    }
+
+    /* PostgreSQL: the instance lock, as every serving connection holds it */
+    if (config->session_hook && db_set_session_hook(db, config->session_hook) != 0) {
+        log_error("Cleaner: its connection couldn't take the instance lock");
+        db_disconnect(db);
         if (config->connection_string)
             OPENSSL_cleanse((char *)config->connection_string, strlen(config->connection_string));
         free((char *)config->connection_string);
@@ -529,19 +614,16 @@ static void* cleaner_thread_main(void *arg) {
         int has_work = check_table(db, cleaner);
 
         if (has_work == 1) {
-            /* Step 2: Purge small batch */
-            if (purge_batch(db, cleaner, config->batch_size) == 0) {
-                log_debug("Cleaner: purged batch from %s", cleaner->description);
-                total_purged++;
-
-                /* Step 3: Vacuum (reclaim space) */
-                vacuum_table(db, config, cleaner);
-            }
+            /* Step 2: Purge, while batches come back full, then vacuum */
+            int batches = purge_table(db, config, cleaner);
+            log_debug("Cleaner: purged %d batch%s from %s",
+                      batches, batches == 1 ? "" : "es", cleaner->description);
+            total_purged += batches;
         } else if (has_work < 0) {
             log_warn("Cleaner: check failed for %s", cleaner->description);
         }
 
-        /* Step 4: Move to next table */
+        /* Step 3: Move to next table */
         current_idx = (current_idx + 1) % g_num_active_cleaners;
         if (current_idx == 0) iteration++;
 
@@ -555,7 +637,7 @@ static void* cleaner_thread_main(void *arg) {
             last_stats_time = now;
         }
 
-        /* Step 5: Interruptible sleep */
+        /* Step 4: Interruptible sleep */
         if (cleaner_wait(config->interval_seconds)) {
             break;  /* Stop flag set */
         }

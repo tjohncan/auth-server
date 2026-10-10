@@ -43,6 +43,21 @@ create table access_token_signing (
 , constraint uix_access_token_signing_singleton unique(singleton)
 );
 
+-- How encryption_key is stretched before the field keys are derived from it:
+-- the method, its iterations and a salt of this deployment's own. Written at
+-- the first start and by --rekey; a database without the row derives the keys
+-- by HKDF alone. No pin, so no history.
+create table encryption_params (
+  singleton integer not null default 1
+, method text not null
+, iterations integer not null
+, salt text not null
+, created_at text not null default (datetime('now'))
+
+, constraint ck_encryption_params_singleton check(singleton = 1)
+, constraint uix_encryption_params_singleton unique(singleton)
+);
+
 -- ============================================================================
 -- SECURITY - Organizations, clients, resource servers, and users
 -- ============================================================================
@@ -786,8 +801,8 @@ create index idx_recovery_code_set_cleanup
 -- INDEXES - Finding a user's or a client's rows
 -- ============================================================================
 -- Deactivating a user closes their sessions and revokes their tokens and
--- emailed links, finding the rows by user, and none of these tables was indexed
--- that way, so each of those updates read the whole table. (user, client) also
+-- emailed links, finding the rows by user: without these indexes, each of those
+-- updates reads the whole table. (user, client) also
 -- serves a user's rows for one client, and (client, resource server) a client's
 -- access tokens for one resource server: the lookups revoking on unlink needs.
 -- password_reset_token and passwordless_login_token are already covered by

@@ -187,7 +187,7 @@ static HttpResponse *authenticate_token_client(db_handle_t *db,
 
     log_key_usage(db, KEY_USAGE_CLIENT, key_pin, operation,
                   http_request_get_client_ip(req, NULL),
-                  http_request_get_header(req, "User-Agent"));
+                  http_request_get_user_agent(req));
     return NULL;
 }
 
@@ -217,8 +217,7 @@ static HttpResponse *authenticate_token_client(db_handle_t *db,
  *   400 Bad Request / 401 Unauthorized
  *   {"error":"invalid_grant","error_description":"..."}
  */
-HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *token_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/x-www-form-urlencoded");
     if (ct_err) return ct_err;
 
@@ -461,7 +460,7 @@ HttpResponse *token_handler(const HttpRequest *req, const RouteParams *params) {
 
         /* Get source IP and user agent for audit logging */
         const char *source_ip = http_request_get_client_ip(req, NULL);
-        const char *user_agent = http_request_get_header(req, "User-Agent");
+        const char *user_agent = http_request_get_user_agent(req);
 
         oauth_token_response_t token_resp;
         int rc = oauth_client_credentials(db, client_id, client_key_id, client_secret,
@@ -538,8 +537,8 @@ static int build_error_redirect(const char *redirect_uri,
      * encoded_state is sized so the ENCODING can never silently truncate: percent-
      * encoding expands up to 3x, and state reaches us from a 512-byte decode buffer
      * (see the /authorize handler), so 3 * 512 + 1 is the smallest size that always
-     * holds it. At 512 a long state of mostly-reserved characters lost its tail here,
-     * and the client then reported a CSRF state mismatch for what was really a length
+     * holds it. Any less, and a long state of mostly-reserved characters loses its tail
+     * here, and the client reports a CSRF state mismatch for what is really a length
      * problem. Whether the ASSEMBLED location fits is a separate question, and one
      * str_appendf answers explicitly below rather than by truncating. */
     char encoded_error[128];
@@ -611,8 +610,7 @@ static int build_error_redirect(const char *redirect_uri,
  *   400 Bad Request
  *   {"error":"invalid_request","error_description":"..."}
  */
-HttpResponse *authorize_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *authorize_handler(const HttpRequest *req) {
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -896,8 +894,7 @@ HttpResponse *authorize_handler(const HttpRequest *req, const RouteParams *param
      *
      * str_url_encode() terminates its buffer even when it returns -1, so dropping that
      * return does not read garbage — it hands the client a *truncated* authorization
-     * code, which /token can never redeem. That is the same silent-truncation failure
-     * S1 fixed one layer down, so fail loudly here instead. */
+     * code, which /token can never redeem. Fail loudly here instead. */
     char encoded_code[2048];
     char encoded_state[1537];  /* 3 * the 512-byte state buffer; see build_error_redirect */
     encoded_state[0] = '\0';
@@ -1064,9 +1061,8 @@ static int ec_public_key_to_jwk(const char *pem_public_key,
  *     ]
  *   }
  */
-HttpResponse *jwks_handler(const HttpRequest *req, const RouteParams *params) {
+HttpResponse *jwks_handler(const HttpRequest *req) {
     (void)req;
-    (void)params;
 
     /* Serve from thread-local cache if fresh */
     time_t now = time(NULL);
@@ -1199,11 +1195,11 @@ HttpResponse *jwks_handler(const HttpRequest *req, const RouteParams *params) {
  *   Body: token=<token>&token_type_hint=<hint>&client_id=<uuid>&client_key_id=<uuid>&client_secret=<secret>
  *
  * Response:
- *   200 OK (always, even if token is invalid or already revoked)
+ *   200 OK, even if token is invalid or already revoked
  *   Per RFC 7009: prevents information disclosure to unauthorized parties
+ *   503 if the revocation couldn't be completed (the token may still be live)
  */
-HttpResponse *revoke_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *revoke_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/x-www-form-urlencoded");
     if (ct_err) return ct_err;
 
@@ -1290,9 +1286,12 @@ HttpResponse *revoke_handler(const HttpRequest *req, const RouteParams *params) 
     cleanse_free(token);
     free(token_type_hint);
 
+    /* A revocation that didn't complete is no 200: the client would take the logout
+     * as done. RFC 7009 Section 2.2.1 has 503 for this, and the client must then
+     * assume the token still exists and may retry. */
     if (revoke_result != 0) {
         log_error("Error during token revocation");
-        /* Still return 200 OK per RFC 7009 */
+        return response_json_error(503, "Service unavailable");
     }
 
     /* RFC 7009: The authorization server responds with HTTP status code 200
@@ -1330,8 +1329,7 @@ HttpResponse *revoke_handler(const HttpRequest *req, const RouteParams *params) 
  * Response (inactive token):
  *   {"active": false}
  */
-HttpResponse *introspect_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *introspect_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/x-www-form-urlencoded");
     if (ct_err) return ct_err;
 
@@ -1415,7 +1413,7 @@ HttpResponse *introspect_handler(const HttpRequest *req, const RouteParams *para
 
     log_key_usage(db, KEY_USAGE_RESOURCE_SERVER, rs_key_pin, "introspect",
                   http_request_get_client_ip(req, NULL),
-                  http_request_get_header(req, "User-Agent"));
+                  http_request_get_user_agent(req));
 
     /* Introspect the token */
     int active;
@@ -1513,8 +1511,7 @@ HttpResponse *introspect_handler(const HttpRequest *req, const RouteParams *para
  * Response (error):
  *   401 Unauthorized (missing/invalid/expired token)
  */
-HttpResponse *userinfo_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *userinfo_handler(const HttpRequest *req) {
 
     /* Extract Bearer token from Authorization header */
     const char *auth_header = http_request_get_header(req, "Authorization");

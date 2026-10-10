@@ -171,4 +171,21 @@ int signing_key_active_kid(const signing_key_t *key, const char *active_private,
  */
 void signing_key_thread_cleanup(void);
 
+/*
+ * Check encryption_key against what the database already holds, at startup
+ *
+ * Opens a username, else an email address: one that won't open means the key
+ * isn't the one that sealed the database, which would otherwise show up later as
+ * failed sign-ins and token issuance. Then every stored signing key, current and
+ * prior: one that won't open under a key that opens the users was sealed under
+ * another key (rows copied in from another deployment), and the fix is to delete
+ * the signing rows, not to look for another key. A signing key in the older
+ * plaintext format is passed over. A fresh database holds nothing, and passes.
+ *
+ * Returns: 0 if everything opens or there is nothing to open, -1 if the user
+ *          data won't open or on error, -2 if a signing key won't (logged, with
+ *          the fix)
+ */
+int signing_key_check_encryption_key(db_handle_t *db);
+
 #endif /* CRYPTO_SIGNING_KEYS_H */

@@ -1,3 +1,6 @@
+/* lstat */
+#define _POSIX_C_SOURCE 200809L
+
 #include "util/config.h"
 #include "util/log.h"
 #include "util/str.h"
@@ -7,6 +10,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
+#include <sys/stat.h>
 #include <openssl/crypto.h>
 
 /* Email defaults */
@@ -23,6 +27,8 @@
 /* Default values */
 #define DEFAULT_HOST "localhost"
 #define DEFAULT_PORT 8080
+#define DEFAULT_ADMIN_SOCKET "./data/admin.sock"
+#define DEFAULT_ADMIN_SOCKET_MODE 0600
 #define DEFAULT_WORKERS 0  /* 0 = auto-detect */
 #define DEFAULT_DB_TYPE DB_TYPE_SQLITE
 #define DEFAULT_DB_PATH "./data/auth.db"
@@ -172,6 +178,31 @@ static void set_config_value(config_t *config, const char *key, const char *valu
         } else {
             config->port = port;
         }
+    } else if (strcmp(key, "admin_port") == 0) {
+        int port = 0;
+        if (parse_int(value, &port) != 0 || port < 0 || port > 65535) {
+            log_warn("Invalid admin_port value '%s', must be 1-65535 (0: none). Keeping current: %d",
+                     value, config->admin_port);
+        } else {
+            config->admin_port = port;
+        }
+    } else if (strcmp(key, "admin_socket") == 0) {
+        new_value = str_dup(value);
+        if (new_value) {
+            free(config->admin_socket);
+            config->admin_socket = new_value;
+        } else {
+            log_error("Failed to allocate memory for admin_socket");
+        }
+    } else if (strcmp(key, "admin_socket_mode") == 0) {
+        char *end = NULL;
+        long mode = strtol(value, &end, 8);
+        if (!*value || *end || mode < 0 || mode > 0777) {
+            log_warn("Invalid admin_socket_mode '%s', must be octal like 0600 or 0660. Keeping "
+                     "current: %04o", value, config->admin_socket_mode);
+        } else {
+            config->admin_socket_mode = (int)mode;
+        }
     } else if (strcmp(key, "server_workers") == 0) {
         int workers = -1;
         if (parse_int(value, &workers) != 0 || workers < 0) {
@@ -195,6 +226,22 @@ static void set_config_value(config_t *config, const char *key, const char *valu
         } else {
             log_error("Failed to allocate memory for server_port_env");
         }
+    } else if (strcmp(key, "admin_port_env") == 0) {
+        new_value = str_dup(value);
+        if (new_value) {
+            free(config->admin_port_env);
+            config->admin_port_env = new_value;
+        } else {
+            log_error("Failed to allocate memory for admin_port_env");
+        }
+    } else if (strcmp(key, "admin_socket_env") == 0) {
+        new_value = str_dup(value);
+        if (new_value) {
+            free(config->admin_socket_env);
+            config->admin_socket_env = new_value;
+        } else {
+            log_error("Failed to allocate memory for admin_socket_env");
+        }
     } else if (strcmp(key, "mothership_url") == 0) {
         new_value = str_dup(value);
         if (new_value) {
@@ -210,6 +257,32 @@ static void set_config_value(config_t *config, const char *key, const char *valu
             config->mothership_url_env = new_value;
         } else {
             log_error("Failed to allocate memory for mothership_url_env");
+        }
+    } else if (strcmp(key, "client_ip_header") == 0) {
+        /* Checked at startup by http_set_client_ip_header, which refuses a typo */
+        new_value = str_dup(value);
+        if (new_value) {
+            free(config->client_ip_header);
+            config->client_ip_header = new_value;
+        } else {
+            log_error("Failed to allocate memory for client_ip_header");
+        }
+    } else if (strcmp(key, "username_pattern") == 0 || strcmp(key, "email_pattern") == 0 ||
+               strcmp(key, "code_name_pattern") == 0 || strcmp(key, "password_pattern") == 0 ||
+               strcmp(key, "machine_secret_pattern") == 0) {
+        /* Compiled at startup by validation_init, which refuses one that won't;
+           an empty value means none */
+        char **slot = key[0] == 'u' ? &config->username_pattern
+                    : key[0] == 'e' ? &config->email_pattern
+                    : key[0] == 'c' ? &config->code_name_pattern
+                    : key[0] == 'p' ? &config->password_pattern
+                    : &config->machine_secret_pattern;
+        new_value = str_dup(value);
+        if (new_value) {
+            free(*slot);
+            *slot = new_value;
+        } else {
+            log_error("Failed to allocate memory for %s", key);
         }
     }
     /* Database settings */
@@ -396,6 +469,28 @@ static void set_config_value(config_t *config, const char *key, const char *valu
         } else {
             config->secret_hash_max_iterations = iterations;
         }
+    } else if (strcmp(key, "machine_secret_hashing_algorithm") == 0) {
+        if (strcmp(value, "argon2id") == 0) {
+            config->machine_secret_hashing_algorithm = PASSWORD_HASH_ARGON2ID;
+        } else if (strcmp(value, "pbkdf2-sha256") == 0) {
+            config->machine_secret_hashing_algorithm = PASSWORD_HASH_PBKDF2_SHA256;
+        } else {
+            log_warn("Unknown machine_secret_hashing_algorithm '%s', keeping current value", value);
+        }
+    } else if (strcmp(key, "machine_secret_hash_min_iterations") == 0) {
+        int iterations = 0;
+        if (parse_int(value, &iterations) != 0 || iterations < 1) {
+            log_warn("Invalid machine_secret_hash_min_iterations '%s', must be >= 1", value);
+        } else {
+            config->machine_secret_hash_min_iterations = iterations;
+        }
+    } else if (strcmp(key, "machine_secret_hash_max_iterations") == 0) {
+        int iterations = 0;
+        if (parse_int(value, &iterations) != 0 || iterations < 1) {
+            log_warn("Invalid machine_secret_hash_max_iterations '%s', must be >= 1", value);
+        } else {
+            config->machine_secret_hash_max_iterations = iterations;
+        }
     }
 
     /* Password policy */
@@ -406,6 +501,15 @@ static void set_config_value(config_t *config, const char *key, const char *valu
                     value, config->password_min_length);
         } else {
             config->password_min_length = len;
+        }
+    } else if (strcmp(key, "strict") == 0) {
+        if (strcmp(value, "true") == 0 || strcmp(value, "1") == 0) {
+            config->strict = 1;
+        } else if (strcmp(value, "false") == 0 || strcmp(value, "0") == 0) {
+            config->strict = 0;
+        } else {
+            log_warn("Invalid strict value '%s', must be true/false or 1/0. Keeping current: %d",
+                    value, config->strict);
         }
     }
 
@@ -548,6 +652,25 @@ static void set_config_value(config_t *config, const char *key, const char *valu
         } else {
             log_error("Failed to allocate memory for encryption_key_env");
         }
+    } else if (strcmp(key, "encryption_key_previous") == 0) {
+        new_value = str_dup(value);
+        if (new_value) {
+            if (config->encryption_key_previous) {
+                OPENSSL_cleanse(config->encryption_key_previous, strlen(config->encryption_key_previous));
+            }
+            free(config->encryption_key_previous);
+            config->encryption_key_previous = new_value;
+        } else {
+            log_error("Failed to allocate memory for encryption_key_previous");
+        }
+    } else if (strcmp(key, "encryption_key_previous_env") == 0) {
+        new_value = str_dup(value);
+        if (new_value) {
+            free(config->encryption_key_previous_env);
+            config->encryption_key_previous_env = new_value;
+        } else {
+            log_error("Failed to allocate memory for encryption_key_previous_env");
+        }
     }
 
     /* Logging settings */
@@ -679,6 +802,34 @@ static void apply_env_overrides(config_t *config) {
         }
     }
 
+    /* ADMIN_PORT */
+    env_var_name = config->admin_port_env ? config->admin_port_env : "AUTH_ADMIN_PORT";
+    env_value = getenv(env_var_name);
+    if (env_value) {
+        int port = -1;
+        parse_int(env_value, &port);
+        if (port >= 0 && port <= 65535) {
+            config->admin_port = port;
+            log_info("Config override from %s: %d", env_var_name, port);
+        } else {
+            log_warn("Invalid port in %s: %s", env_var_name, env_value);
+        }
+    }
+
+    /* ADMIN_SOCKET */
+    env_var_name = config->admin_socket_env ? config->admin_socket_env : "AUTH_ADMIN_SOCKET";
+    env_value = getenv(env_var_name);
+    if (env_value) {
+        char *new_value = str_dup(env_value);
+        if (new_value) {
+            free(config->admin_socket);
+            config->admin_socket = new_value;
+            log_info("Config override from %s: %s", env_var_name, env_value);
+        } else {
+            log_error("Failed to allocate memory for %s override", env_var_name);
+        }
+    }
+
     /* DB_TYPE: Use custom env var name if specified, else default AUTH_DB_TYPE */
     env_var_name = config->db_type_env ? config->db_type_env : "AUTH_DB_TYPE";
     env_value = getenv(env_var_name);
@@ -796,6 +947,24 @@ static void apply_env_overrides(config_t *config) {
         }
     }
 
+    /* ENCRYPTION_KEY_PREVIOUS */
+    env_var_name = config->encryption_key_previous_env ? config->encryption_key_previous_env
+                                                       : "AUTH_ENCRYPTION_KEY_PREVIOUS";
+    env_value = getenv(env_var_name);
+    if (env_value) {
+        char *new_value = str_dup(env_value);
+        if (new_value) {
+            if (config->encryption_key_previous) {
+                OPENSSL_cleanse(config->encryption_key_previous, strlen(config->encryption_key_previous));
+            }
+            free(config->encryption_key_previous);
+            config->encryption_key_previous = new_value;
+            log_info("Config override from %s: [REDACTED]", env_var_name);
+        } else {
+            log_error("Failed to allocate memory for %s override", env_var_name);
+        }
+    }
+
     /* MOTHERSHIP_URL */
     env_var_name = config->mothership_url_env ? config->mothership_url_env : "AUTH_MOTHERSHIP_URL";
     env_value = getenv(env_var_name);
@@ -817,6 +986,18 @@ static void apply_env_overrides(config_t *config) {
         /* Parse string to enum immediately, don't store string */
         config->log_level = parse_log_level(env_value);
         log_info("Config override from %s: %s", env_var_name, env_value);
+    }
+
+    /* STRICT */
+    env_value = getenv("AUTH_STRICT");
+    if (env_value) {
+        if (strcmp(env_value, "true") == 0 || strcmp(env_value, "1") == 0) {
+            config->strict = 1;
+            log_info("Config override from AUTH_STRICT: on");
+        } else if (strcmp(env_value, "false") == 0 || strcmp(env_value, "0") == 0) {
+            config->strict = 0;
+            log_info("Config override from AUTH_STRICT: off");
+        }
     }
 
     /* CLEANER_ENABLED */
@@ -992,6 +1173,24 @@ static void apply_env_overrides(config_t *config) {
     }
 }
 
+/*
+ * Derive public_base_url (see config.h) once host and port are final. localhost
+ * is a development setup reached directly, so http and the listen port; any other
+ * host is reached through the TLS-terminating proxy, on the default port.
+ */
+static int set_public_base_url(config_t *config) {
+    size_t size = sizeof(config->public_base_url);
+    int n = strcmp(config->host, "localhost") == 0
+        ? snprintf(config->public_base_url, size, "http://localhost:%d", config->port)
+        : snprintf(config->public_base_url, size, "https://%s", config->host);
+    if (n < 0 || (size_t)n >= size) {
+        log_error("server_host is too long: the server's public address, https:// and "
+                  "the host, may be at most %d characters", PUBLIC_BASE_URL_MAX);
+        return -1;
+    }
+    return 0;
+}
+
 config_t *config_load(const char *config_file) {
     /* Allocate config with defaults */
     config_t *config = calloc(1, sizeof(config_t));
@@ -1009,6 +1208,14 @@ config_t *config_load(const char *config_file) {
     }
 
     config->port = DEFAULT_PORT;
+    config->admin_port = 0;  /* the admin API on loopback TCP only when asked */
+    config->admin_socket = str_dup(DEFAULT_ADMIN_SOCKET);
+    config->admin_socket_mode = DEFAULT_ADMIN_SOCKET_MODE;
+    if (!config->admin_socket) {
+        log_error("Failed to allocate default admin_socket");
+        config_free(config);
+        return NULL;
+    }
     config->workers = DEFAULT_WORKERS;
     config->db_type = DEFAULT_DB_TYPE;
 
@@ -1035,8 +1242,12 @@ config_t *config_load(const char *config_file) {
     config->db_password_env = NULL;
     config->db_owner_role_env = NULL;
     config->encryption_key_env = NULL;
+    config->encryption_key_previous_env = NULL;
+    config->encryption_key_previous = NULL;
     config->server_host_env = NULL;
     config->server_port_env = NULL;
+    config->admin_port_env = NULL;
+    config->admin_socket_env = NULL;
     config->mothership_url_env = NULL;
     config->mothership_url = NULL;
 
@@ -1052,7 +1263,11 @@ config_t *config_load(const char *config_file) {
     config->secret_hashing_algorithm = PASSWORD_HASH_ARGON2ID;  /* Default to Argon2id */
     config->secret_hash_min_iterations = 4;                     /* Default constant iterations */
     config->secret_hash_max_iterations = 4;
+    config->machine_secret_hashing_algorithm = PASSWORD_HASH_UNSET;  /* the above, unless set */
+    config->machine_secret_hash_min_iterations = 0;
+    config->machine_secret_hash_max_iterations = 0;
     config->password_min_length = 1;
+    config->strict = 0;
 
     /* OAuth2 token limits */
     config->max_access_token_ttl_seconds = DEFAULT_MAX_ACCESS_TOKEN_TTL_SECONDS;
@@ -1103,8 +1318,41 @@ config_t *config_load(const char *config_file) {
     config->email_from_name_env = NULL;
 #endif
 
-    /* Try to open config file */
+    /* Try to open config file. Without one, the defaults and the environment
+       variables configure the server, and everything after the parse applies
+       to them just the same. */
+    /* A directory where the file should be reads as nothing, and the server would
+       run on its defaults, the published encryption_key among them: Docker makes
+       one when a bind mount's source is missing */
+    struct stat config_stat;
+    if (stat(config_file, &config_stat) == 0 && S_ISDIR(config_stat.st_mode)) {
+        log_error("Config file '%s' is a directory, not a file. A Docker bind mount whose "
+                  "source was missing makes one: put a configured copy of auth.conf.example "
+                  "there instead, then start again.", config_file);
+        config_free(config);
+        return NULL;
+    }
     FILE *file = fopen(config_file, "r");
+    int open_errno = errno;
+    struct stat link_stat;
+    if (!file && open_errno == ENOENT && lstat(config_file, &link_stat) == 0) {
+        /* A link to a file that isn't there (one kept elsewhere, not mounted yet):
+           a config was meant, so the defaults won't do */
+        log_error("Config file '%s' is a link to a file that isn't there. Make it point at a "
+                  "configured auth.conf, or remove it to run on the defaults and the "
+                  "environment.", config_file);
+        config_free(config);
+        return NULL;
+    }
+    errno = open_errno;
+    if (!file && errno != ENOENT) {
+        /* There but unreadable (another user's, say): running on the defaults
+           instead would run on the published encryption_key */
+        log_error("Can't read config file '%s': %s. Make it readable by the user the server "
+                  "runs as.", config_file, strerror(errno));
+        config_free(config);
+        return NULL;
+    }
     if (!file) {
         /* Check if an example file exists and hint to the user */
         char example_path[512];
@@ -1112,73 +1360,106 @@ config_t *config_load(const char *config_file) {
         FILE *example = fopen(example_path, "r");
         if (example) {
             fclose(example);
-            log_warn("Config file '%s' not found — copy '%s' to '%s' and customize it",
+            log_warn("Config file '%s' not found: copy '%s' to '%s' and customize it",
                      config_file, example_path, config_file);
         } else {
             log_warn("Config file '%s' not found, using defaults", config_file);
         }
-        apply_env_overrides(config);
-        return config;
-    }
+    } else {
+        log_info("Loading config from '%s'", config_file);
 
-    log_info("Loading config from '%s'", config_file);
+        /* Parse config file */
+        char line[MAX_LINE_LENGTH];
+        char key[128], value[MAX_LINE_LENGTH];
+        int line_num = 0;
 
-    /* Parse config file */
-    char line[MAX_LINE_LENGTH];
-    char key[128], value[MAX_LINE_LENGTH];
-    int line_num = 0;
+        while (fgets(line, sizeof(line), file)) {
+            line_num++;
 
-    while (fgets(line, sizeof(line), file)) {
-        line_num++;
+            /* Remove newline */
+            size_t len = strlen(line);
+            if (len > 0 && line[len - 1] == '\n') line[--len] = '\0';
+            if (len > 0 && line[len - 1] == '\r') line[--len] = '\0';
 
-        /* Remove newline */
-        size_t len = strlen(line);
-        if (len > 0 && line[len - 1] == '\n') line[--len] = '\0';
-        if (len > 0 && line[len - 1] == '\r') line[--len] = '\0';
+            /* Trim whitespace */
+            trim(line);
 
-        /* Trim whitespace */
-        trim(line);
+            /* Skip empty lines and comments */
+            if (line[0] == '\0' || line[0] == '#' || line[0] == ';') {
+                continue;
+            }
 
-        /* Skip empty lines and comments */
-        if (line[0] == '\0' || line[0] == '#' || line[0] == ';') {
-            continue;
+            /* Parse key=value */
+            if (parse_key_value(line, key, sizeof(key), value, sizeof(value)) == 0) {
+                set_config_value(config, key, value);
+            } else {
+                log_warn("Line %d: Invalid line format", line_num);
+            }
         }
 
-        /* Parse key=value */
-        if (parse_key_value(line, key, sizeof(key), value, sizeof(value)) == 0) {
-            set_config_value(config, key, value);
-        } else {
-            log_warn("Line %d: Invalid line format", line_num);
+        int read_failed = ferror(file);
+        fclose(file);
+
+        /* Cleanse parse buffers (may contain db_password or encryption_key) */
+        OPENSSL_cleanse(line, sizeof(line));
+        OPENSSL_cleanse(value, sizeof(value));
+        OPENSSL_cleanse(key, sizeof(key));
+
+        /* Read only in part: refuse, rather than run on what was read */
+        if (read_failed) {
+            log_error("Failed to read config file '%s'", config_file);
+            config_free(config);
+            return NULL;
         }
     }
-
-    fclose(file);
-
-    /* Cleanse parse buffers (may contain db_password or encryption_key) */
-    OPENSSL_cleanse(line, sizeof(line));
-    OPENSSL_cleanse(value, sizeof(value));
-    OPENSSL_cleanse(key, sizeof(key));
 
     /* Apply environment variable overrides */
     apply_env_overrides(config);
 
-    /* Validate password hashing iterations */
-    if (config->secret_hash_max_iterations < config->secret_hash_min_iterations) {
-        log_warn("secret_hash_max_iterations (%d) < secret_hash_min_iterations (%d). "
-                "Setting max = min.",
-                config->secret_hash_max_iterations, config->secret_hash_min_iterations);
-        config->secret_hash_max_iterations = config->secret_hash_min_iterations;
-    }
-
-    /* Algorithm-specific iteration limits */
-    int algo_max = (config->secret_hashing_algorithm == PASSWORD_HASH_ARGON2ID) ? 20 : 10000000;
-    if (config->secret_hash_max_iterations > algo_max) {
-        log_error("secret_hash_max_iterations (%d) exceeds maximum for %s (%d)",
-                config->secret_hash_max_iterations,
-                config->secret_hashing_algorithm == PASSWORD_HASH_ARGON2ID ? "argon2id" : "pbkdf2-sha256",
-                algo_max);
+    if (set_public_base_url(config) != 0) {
         config_free(config);
         return NULL;
+    }
+
+    /* Machine secrets: each setting left out takes the password setting's value,
+       so an auth.conf without them hashes machine secrets as it hashes passwords */
+    if (config->machine_secret_hashing_algorithm == PASSWORD_HASH_UNSET) {
+        config->machine_secret_hashing_algorithm = config->secret_hashing_algorithm;
+    }
+    if (config->machine_secret_hash_min_iterations == 0) {
+        config->machine_secret_hash_min_iterations = config->secret_hash_min_iterations;
+    }
+    if (config->machine_secret_hash_max_iterations == 0) {
+        config->machine_secret_hash_max_iterations = config->secret_hash_max_iterations;
+    }
+
+    /* Validate each kind's iterations: max at least min, and within the
+       algorithm's limit */
+    struct {
+        const char *prefix;
+        password_hash_algorithm_t algorithm;
+        int *min, *max;
+    } kinds[] = {
+        { "secret", config->secret_hashing_algorithm,
+          &config->secret_hash_min_iterations, &config->secret_hash_max_iterations },
+        { "machine_secret", config->machine_secret_hashing_algorithm,
+          &config->machine_secret_hash_min_iterations, &config->machine_secret_hash_max_iterations },
+    };
+    for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+        if (*kinds[i].max < *kinds[i].min) {
+            log_warn("%s_hash_max_iterations (%d) < %s_hash_min_iterations (%d). Setting max = min.",
+                     kinds[i].prefix, *kinds[i].max, kinds[i].prefix, *kinds[i].min);
+            *kinds[i].max = *kinds[i].min;
+        }
+        int argon2 = kinds[i].algorithm == PASSWORD_HASH_ARGON2ID;
+        int algo_max = argon2 ? 20 : 10000000;
+        if (*kinds[i].max > algo_max) {
+            log_error("%s_hash_max_iterations (%d) exceeds maximum for %s (%d)",
+                      kinds[i].prefix, *kinds[i].max, argon2 ? "argon2id" : "pbkdf2-sha256",
+                      algo_max);
+            config_free(config);
+            return NULL;
+        }
     }
 
     log_info("Configuration loaded successfully");
@@ -1207,6 +1488,26 @@ static int pg_quote_append(char *dst, size_t dst_size, size_t pos, const char *v
     dst[i++] = '\'';
     dst[i] = '\0';
     return (int)(i - pos);
+}
+
+int config_check_weak_defaults(const config_t *config) {
+    int weak = 0;
+    if (strcmp(config->encryption_key, "customize_me") == 0) {
+        weak = 1;
+        if (config->strict) {
+            log_error("strict: encryption_key is the shipped default, customize_me, which anyone "
+                      "can read: set encryption_key in auth.conf, or AUTH_ENCRYPTION_KEY");
+        } else {
+            log_warn("Using default encryption key: set encryption_key in auth.conf or "
+                     "AUTH_ENCRYPTION_KEY env");
+        }
+    }
+    if (config->strict && config->password_min_length < STRICT_PASSWORD_MIN_LENGTH) {
+        weak = 1;
+        log_error("strict: password_min_length is %d, under %d", config->password_min_length,
+                  STRICT_PASSWORD_MIN_LENGTH);
+    }
+    return config->strict && weak ? -1 : 0;
 }
 
 int config_build_pg_connection_string(const config_t *config, char *out, size_t out_size) {
@@ -1260,6 +1561,9 @@ void config_free(config_t *config) {
     if (config->encryption_key) {
         OPENSSL_cleanse(config->encryption_key, strlen(config->encryption_key));
     }
+    if (config->encryption_key_previous) {
+        OPENSSL_cleanse(config->encryption_key_previous, strlen(config->encryption_key_previous));
+    }
 
     free(config->db_password);
     free(config->schema_dir);
@@ -1273,13 +1577,24 @@ void config_free(config_t *config) {
     free(config->db_password_env);
     free(config->db_owner_role_env);
     free(config->encryption_key_env);
+    free(config->encryption_key_previous_env);
     free(config->log_level_env);
     free(config->server_host_env);
     free(config->server_port_env);
+    free(config->admin_port_env);
+    free(config->admin_socket_env);
+    free(config->admin_socket);
     free(config->mothership_url_env);
     free(config->mothership_url);
+    free(config->client_ip_header);
+    free(config->username_pattern);
+    free(config->email_pattern);
+    free(config->code_name_pattern);
+    free(config->password_pattern);
+    free(config->machine_secret_pattern);
 
     free(config->encryption_key);
+    free(config->encryption_key_previous);
 
 #ifdef EMAIL_SUPPORT
     free(config->email_command);

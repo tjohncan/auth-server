@@ -33,8 +33,8 @@ void jwt_set_clock_skew_seconds(int seconds) {
  *
  *   1. The escaped form does not fit output_len. json_escape() cannot report
  *      this itself — it clamps to the destination and so always returns a count
- *      below its own dst_size, which made the previous `written < output_len`
- *      test true for every possible input. json_escaped_len() measures first.
+ *      below its own dst_size, so a `written < output_len` test would pass
+ *      every input. json_escaped_len() measures first.
  *
  *   2. The value contains a control byte that json_escape() renders as \u00XX,
  *      \b or \f. json_unescape_string() below reads only \" \\ \/ \n \r \t and
@@ -186,9 +186,10 @@ static int parse_json_string(const char *json, const char *key, char *out, size_
      * index that never exceeds its read index — every escape sequence is >= 2 bytes and
      * yields 1 — so it can only ever overwrite bytes it has already consumed.
      *
-     * This replaces a fixed char[JWT_MAX_CLAIM_VALUE_LENGTH] staging buffer that capped
-     * every claim at 255 bytes no matter what the caller could hold, silently truncating
-     * auth_request_claims_t.redirect_uri (char[512]) to an undecodable code. */
+     * Staging in the caller's buffer is what lets a claim be as long as the caller can
+     * hold: a fixed char[JWT_MAX_CLAIM_VALUE_LENGTH] would cap every claim at 255 bytes
+     * and cut auth_request_claims_t.redirect_uri (char[512]) short, into a code that
+     * never decodes. */
     memcpy(out, start, len);
     out[len] = '\0';
 
@@ -914,7 +915,7 @@ static int build_auth_request_payload_json(const auth_request_claims_t *claims,
     char esc_scope[JWT_MAX_CLAIM_VALUE_LENGTH * 2];
     char esc_code_challenge[256];
     char esc_code_challenge_method[32];
-    char esc_nonce[66];  /* 2 x nonce[33]; 64 was a byte short of the worst case */
+    char esc_nonce[66];  /* 2 x nonce[33]: every byte escaped, and the NUL */
 
     if (json_escape_string(claims->redirect_uri, esc_redirect_uri, sizeof(esc_redirect_uri)) != 0 ||
         json_escape_string(claims->scope, esc_scope, sizeof(esc_scope)) != 0 ||

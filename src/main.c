@@ -19,13 +19,25 @@
 #include "handlers.h"
 #include "util/str.h"
 #include "util/template.h"
+#include "util/validation.h"
+#include "db/instance_lock.h"
+#include "db/maintenance.h"
+#include "db/encryption_params.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <signal.h>
 #include <stdbool.h>
+#include <stdatomic.h>
+#include <errno.h>
 #include <sys/types.h>
+#include <sys/resource.h>
+#include <sys/time.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <openssl/crypto.h>
 
 static void worker_thread_cleanup(void) {
@@ -36,6 +48,325 @@ static void worker_thread_cleanup(void) {
 static EventLoopPool * volatile global_pool = NULL;
 static pthread_t cleaner_thread;
 static bool cleaner_started = false;
+
+/* ============================================================================
+ * The instance lock (db/instance_lock.h): held shared while the server runs
+ * ============================================================================ */
+
+static int g_lock_fd = -1;               /* SQLite: the lock file */
+static atomic_bool g_lock_lost = false;  /* a maintenance run took it: exit 1 */
+
+/* How the database stretched encryption_key when this process derived its field
+   keys (init_field_keys): encryption_params_get_or_make's answer, and the row.
+   Set before any worker or the cleaner starts. */
+static bool g_keys_derived = false;
+static int g_keys_have;
+static encrypt_params_t g_keys_params;
+
+/* Are two statements on this connection served by one PostgreSQL backend? A
+   transaction-pooling proxy may hand each to another, where this session's
+   lock isn't. It can miss a proxy that happens to repeat a backend, never a
+   direct connection. 1, 0, or -1 on error. */
+static int same_backend(db_handle_t *db) {
+    db_result_t *a = NULL, *b = NULL;
+    int rc = -1;
+    if (db_query(db, &a, "%s", "SELECT pg_backend_pid()") == 0 &&
+        db_query(db, &b, "%s", "SELECT pg_backend_pid()") == 0 &&
+        db_result_row_count(a) == 1 && db_result_row_count(b) == 1) {
+        const char *pa = db_result_get(a, 0, 0), *pb = db_result_get(b, 0, 0);
+        rc = pa && pb && strcmp(pa, pb) == 0;
+    }
+    db_result_free(a);
+    db_result_free(b);
+    return rc;
+}
+
+/*
+ * The shared lock on a PostgreSQL connection that serves, as its session hook
+ * (db_set_session_hook): taken when it connects, and again after every
+ * reconnect before it runs anything else, since PostgreSQL drops a session's
+ * lock with the session (a restart, say). So no connection serves without it,
+ * and a maintenance run can't start while one does. One that finds a run
+ * holding it stops the instance: what it would serve with is being replaced.
+ */
+static int hold_instance_lock(db_handle_t *db) {
+    int rc = instance_lock_pg(db, 0);
+    if (rc == 1) {
+        log_error("A maintenance run holds the database: this instance stops, since what it "
+                  "serves with is being replaced. Start it after the run.");
+        atomic_store(&g_lock_lost, true);
+        if (global_pool) event_loop_pool_stop((EventLoopPool *)global_pool);
+        return 1;
+    }
+    if (rc != 0) return -1;
+    if (same_backend(db) != 1) {
+        log_error("This connection's statements don't reach one PostgreSQL session (a "
+                  "transaction-pooling proxy?), so it can't hold the instance lock: connect "
+                  "the server to PostgreSQL directly");
+        return -1;
+    }
+    /* A run that came and went while this connection's session was gone (a
+       PostgreSQL restart, say) left the lock free, so taking it shows nothing. A
+       re-key leaves the encryption_params row changed, and then the field keys
+       this instance holds are the old ones. */
+    if (g_keys_derived) {
+        int same = encryption_params_unchanged(db, g_keys_have, &g_keys_params);
+        if (same == 0) {
+            log_error("The database was re-keyed while this instance's connections were down "
+                      "(after a PostgreSQL restart, say): this instance stops, since its field "
+                      "keys are the old ones. Start it with the new encryption_key.");
+            atomic_store(&g_lock_lost, true);
+            if (global_pool) event_loop_pool_stop((EventLoopPool *)global_pool);
+            return 1;
+        }
+        if (same != 1) return -1;
+    }
+    return 0;
+}
+
+/* SQLite: take the shared lock before the database is touched. Returns 0; 1 if
+   a maintenance run holds it (logged); -1 on error. (PostgreSQL connections
+   take theirs as they connect: hold_instance_lock.) */
+static int instance_lock_take_shared(const config_t *config) {
+    char path[1100];
+    if (instance_lock_path(config->db_path, path, sizeof(path)) != 0) return 0;  /* in memory */
+    int rc = instance_lock_file(path, 0, &g_lock_fd);
+    if (rc == 1) {
+        log_error("A maintenance run holds %s: start after it finishes", path);
+    }
+    return rc;
+}
+
+static void instance_lock_release_all(void) {
+    instance_lock_file_release(g_lock_fd);
+    g_lock_fd = -1;
+}
+
+/* ============================================================================
+ * Maintenance modes
+ * ============================================================================ */
+
+/*
+ * A maintenance run's connection, with every instance stopped, which the
+ * exclusive instance lock makes sure of. Returns 0, or 1 (logged).
+ */
+static int open_for_maintenance(const config_t *config, const char *connection_string,
+                                db_handle_t **db, int *lock_fd) {
+    *db = NULL;
+    *lock_fd = -1;
+
+    if (config->db_type == DB_TYPE_SQLITE) {
+        char path[1100];
+        if (instance_lock_path(config->db_path, path, sizeof(path)) != 0 ||
+            access(config->db_path, F_OK) != 0) {
+            log_error("No database at %s", config->db_path);
+            return 1;
+        }
+        int rc = instance_lock_file(path, 1, lock_fd);
+        if (rc != 0) {
+            if (rc == 1) {
+                char who[64];
+                if (instance_lock_file_user(path, who, sizeof(who)) <= 0) {
+                    snprintf(who, sizeof(who), "a process");
+                }
+                log_error("An instance is running on this database, or another maintenance "
+                          "run is: %s holds %s. Stop every instance first. The lock file is "
+                          "never stale (the lock goes with its holder), and removing it doesn't "
+                          "help: a run also refuses while anything has the database open.",
+                          who, path);
+            }
+            return 1;
+        }
+        /* A lock file removed while an instance held it frees nothing, but this run
+           locked a new one: no other process may have the database open either. This
+           names one this run can see; SQLite's own lock, below, refuses the rest. */
+        char user[64];
+        if (instance_lock_file_user(config->db_path, user, sizeof(user)) > 0) {
+            log_error("%s has %s open: a maintenance run needs the database to itself. Stop it, "
+                      "and every instance, first.", user, config->db_path);
+            instance_lock_file_release(*lock_fd);
+            *lock_fd = -1;
+            return 1;
+        }
+    }
+
+    if (db_connect(db, config->db_type, connection_string) != 0) {
+        log_error("Can't connect to the database");
+        instance_lock_file_release(*lock_fd);
+        *lock_fd = -1;
+        return 1;
+    }
+
+    /* SQLite's own lock on the database file, the kernel's, which a connection
+       still open anywhere refuses: in WAL mode, which every instance sets as it
+       starts (db_init.c), an open connection holds a shared lock on the file.
+       That reaches one in another container (docker compose run starts one) or
+       under another user, whatever became of the lock file. In exclusive
+       locking mode it's held until the run disconnects, so an instance started
+       mid-run can't use the database before the run is over. */
+    if (config->db_type == DB_TYPE_SQLITE &&
+        (db_execute_trusted(*db, "PRAGMA locking_mode = EXCLUSIVE") != 0 ||
+         db_execute_trusted(*db, "BEGIN EXCLUSIVE") != 0 ||
+         db_execute_trusted(*db, "COMMIT") != 0)) {
+        log_error("%s is open elsewhere: an instance (here, or in another container), or another "
+                  "program. A maintenance run needs the database to itself: stop every instance "
+                  "first.", config->db_path);
+        db_disconnect(*db);
+        *db = NULL;
+        instance_lock_file_release(*lock_fd);
+        *lock_fd = -1;
+        return 1;
+    }
+
+    if (config->db_type != DB_TYPE_SQLITE) {
+        int rc = instance_lock_pg(*db, 1);
+        if (rc != 0) {
+            if (rc == 1) {
+                log_error("An instance is running on this database, or another maintenance "
+                          "run is: stop every instance first");
+            }
+            db_disconnect(*db);
+            *db = NULL;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void close_after_maintenance(db_handle_t *db, int lock_fd) {
+    db_disconnect(db);
+    instance_lock_file_release(lock_fd);
+}
+
+/* ./auth-server --drophistory (db/maintenance.h) */
+static int run_drophistory(const config_t *config, const char *connection_string) {
+    db_handle_t *db;
+    int lock_fd;
+    if (open_for_maintenance(config, connection_string, &db, &lock_fd) != 0) return 1;
+
+    drophistory_report_t report;
+    int rc = maintenance_drop_history(db, config->db_type, config->enable_history_tables, &report);
+    if (rc != -1) {
+        printf("Dropped %d history table%s and %d %s that filled them.\n",
+               report.tables_dropped, report.tables_dropped == 1 ? "" : "s",
+               report.triggers_dropped,
+               config->db_type == DB_TYPE_SQLITE ? "triggers" : "trigger functions");
+        printf(report.rebuilt
+               ? "enable_history_tables is on: empty history tables and triggers were made again.\n"
+               : "enable_history_tables is off: no history was made again.\n");
+        printf("WAL archives, replicas and backups still hold what history held.\n");
+    }
+
+    close_after_maintenance(db, lock_fd);
+    return rc == 0 ? 0 : 1;
+}
+
+/* The method new stretching parameters use: the one user secrets are hashed with */
+static const char *stretch_method(const config_t *config) {
+    return config->secret_hashing_algorithm == PASSWORD_HASH_PBKDF2_SHA256
+           ? "pbkdf2-sha256" : "argon2id";
+}
+
+/*
+ * ./auth-server --rekey (db/maintenance.h): everything sealed under
+ * encryption_key_previous, as the database stretches it now, is sealed again
+ * under encryption_key, stretched with the configured method and a fresh salt.
+ * The same passphrase in both re-keys too: that's how a database made before
+ * stretching gets it, or a new method or iteration count takes effect.
+ */
+static int run_rekey(const config_t *config, const char *connection_string) {
+    if (!config->encryption_key_previous || !*config->encryption_key_previous) {
+        log_error("--rekey needs the passphrase the data is sealed under now, in "
+                  "encryption_key_previous (or AUTH_ENCRYPTION_KEY_PREVIOUS), and the new one in "
+                  "encryption_key. To keep the passphrase and change only how it's stretched, "
+                  "give the same one in both.");
+        return 1;
+    }
+    if (strcmp(config->encryption_key, "customize_me") == 0) {
+        if (config->strict) {
+            log_error("strict: encryption_key is the shipped default, customize_me: re-sealing "
+                      "under it would seal everything under a published key");
+            return 1;
+        }
+        log_warn("encryption_key is the shipped default: this re-seals everything under a "
+                 "published key");
+    }
+
+    db_handle_t *db;
+    int lock_fd;
+    if (open_for_maintenance(config, connection_string, &db, &lock_fd) != 0) return 1;
+
+    int status = 1;
+    encrypt_params_t old_params, new_params;
+    encrypt_keys_t old_keys, new_keys;
+    memset(&old_keys, 0, sizeof(old_keys));
+    memset(&new_keys, 0, sizeof(new_keys));
+
+    /* The new stretch is recorded in the database, so its table must be there */
+    int exists = encryption_params_table_exists(db);
+    if (exists != 1) {
+        if (exists == 0) {
+            log_error("No encryption_params table: create it first, as schema.sql defines it "
+                      "(sql/postgresql/ or sql/sqlite/)");
+        }
+        goto done;
+    }
+
+    /* The keys the data is sealed under: the previous passphrase, as the database
+       stretches it (HKDF alone without a row) */
+    int have = encryption_params_load(db, &old_params);
+    if (have == -1 ||
+        encrypt_derive_keys(config->encryption_key_previous, have == 0 ? &old_params : NULL,
+                            &old_keys) != 0) {
+        goto done;
+    }
+
+    if (encrypt_params_new(stretch_method(config), config->secret_hash_max_iterations,
+                           &new_params) != 0 ||
+        encrypt_derive_keys(config->encryption_key, &new_params, &new_keys) != 0) {
+        goto done;
+    }
+
+    rekey_report_t report;
+    int rc = maintenance_rekey(db, config->db_type, &old_keys, &new_keys, &new_params, &report);
+    if (rc != -1) {
+        printf("Re-sealed under encryption_key, stretched with %s (%d iteration%s):\n",
+               new_params.method, new_params.iterations, new_params.iterations == 1 ? "" : "s");
+        printf("  %d username%s, %d address%s, %d passwordless sign-in link%s, "
+               "%d TOTP secret%s, %d signing key%s\n",
+               report.usernames, report.usernames == 1 ? "" : "s",
+               report.addresses, report.addresses == 1 ? "" : "es",
+               report.passwordless, report.passwordless == 1 ? "" : "s",
+               report.mfa_secrets, report.mfa_secrets == 1 ? "" : "s",
+               report.signing_keys, report.signing_keys == 1 ? "" : "s");
+        if (report.history_tables > 0) {
+            printf("History made before the re-key is still sealed under the old key, in %d "
+                   "table%s: run ./auth-server --drophistory next to remove it.\n",
+                   report.history_tables, report.history_tables == 1 ? "" : "s");
+        }
+        if (rc == -2) {
+            printf("NOT SCRUBBED: the replaced values are still in the database's files (the "
+                   "error above says how to finish it).\n");
+        }
+        if (config->db_type == DB_TYPE_SQLITE) {
+            printf("Backups made before this, and any copy of the database or its -wal file "
+                   "from before it ended, still hold the old-key values.\n");
+        } else {
+            printf("Backups made before this still hold the old-key values, and so does the WAL "
+                   "up to its end, this run's own included: archived, on replicas, and in pg_wal "
+                   "until it's overwritten (sql/README.md).\n");
+        }
+        printf("Start every instance with the new encryption_key, and remove "
+               "encryption_key_previous.\n");
+    }
+    status = rc == 0 ? 0 : 1;
+
+done:
+    OPENSSL_cleanse(&old_keys, sizeof(old_keys));
+    OPENSSL_cleanse(&new_keys, sizeof(new_keys));
+    close_after_maintenance(db, lock_fd);
+    return status;
+}
 
 /* Global context for HTTP handlers */
 const config_t *g_config = NULL;
@@ -109,8 +440,9 @@ static int router_request_handler(Connection *conn,
 
     HttpRequest req = http_request_parse(request_copy, request_len);
 
-    /* Copy remote IP from connection for localhost validation */
+    /* Copy remote IP and listener from connection for localhost validation */
     str_copy(req.remote_ip, sizeof(req.remote_ip), conn->remote_ip);
+    req.admin_listener = conn->admin_listener;
 
     if (req.method == HTTP_UNKNOWN) {
         log_warn("[Connection %lu] Failed to parse HTTP request", conn->connection_id);
@@ -162,13 +494,319 @@ static int router_request_handler(Connection *conn,
     return 0;
 }
 
-int main(void) {
-    log_init(LOG_INFO);
-    log_info("=== Auth Server Starting ===");
+/*
+ * The process's field keys: encryption_key stretched as the database's
+ * encryption_params row says, then HKDF. A database with nothing sealed yet gets
+ * its row now, with the method user secrets are hashed with and their most
+ * iterations, so it's stretched from the start. One with values sealed and no
+ * row keeps HKDF alone until --rekey adds the stretch.
+ * Returns 0, or -1 (logged).
+ */
+static int init_field_keys(db_handle_t *db, const config_t *config) {
+    encrypt_params_t params;
+    int have = encryption_params_get_or_make(db, stretch_method(config),
+                                             config->secret_hash_max_iterations, &params);
+    if (have == -1) return -1;
 
-    /* Install signal handlers */
-    setup_signal_handlers();
-    log_info("Signal handlers installed");
+    encrypt_keys_t keys;
+    if (encrypt_derive_keys(config->encryption_key, have == 0 ? &params : NULL, &keys) != 0) {
+        log_error("Failed to derive the field keys from encryption_key");
+        return -1;
+    }
+    encrypt_init_keys(&keys);
+    OPENSSL_cleanse(&keys, sizeof(keys));
+    g_keys_have = have;
+    if (have == 0) g_keys_params = params;
+    g_keys_derived = true;
+
+    if (have == 0) {
+        log_info("Field encryption initialized (encryption_key stretched with %s, %d iterations)",
+                 params.method, params.iterations);
+    } else {
+        log_warn("encryption_key is used without stretching (no encryption_params row): with "
+                 "every instance stopped, ./auth-server --rekey adds it (sql/README.md)");
+    }
+    return 0;
+}
+
+/*
+ * The connection string db_connect takes: the SQLite path, or one built for
+ * PostgreSQL in pg_buf. Returns 0, or -1 (logged).
+ */
+static int connection_string_for(const config_t *config, char *pg_buf, size_t pg_size,
+                                 const char **out) {
+    if (config->db_type == DB_TYPE_SQLITE) {
+        *out = config->db_path;
+        return 0;
+    }
+    if (!config->db_host || !config->db_name || !config->db_user || !config->db_password) {
+        log_error("PostgreSQL requires db_host, db_name, db_user, and db_password");
+        return -1;
+    }
+    if (config_build_pg_connection_string(config, pg_buf, pg_size) != 0) {
+        log_error("PostgreSQL connection string too long");
+        return -1;
+    }
+    *out = pg_buf;
+    return 0;
+}
+
+/* The admin socket auth.conf names, or NULL for none */
+static const char *admin_socket_of(const config_t *config) {
+    return config->admin_socket && config->admin_socket[0] ? config->admin_socket : NULL;
+}
+
+/* A worker's connections on the public port at most, where descriptors allow */
+#define CONNECTIONS_PER_WORKER 1024
+
+/*
+ * The connections each worker may hold on the public port, sized so that limit is
+ * reached before the process runs out of descriptors. Past that, every listener's
+ * accept fails alike, the admin listener's included, and a flood on the public port
+ * would lock the operator out of the admin API they'd answer it with. The soft
+ * descriptor limit is raised first, within the hard one, as far as the workers can
+ * use. A reserve is kept back for the admin listener's connections, the database's,
+ * each worker's listener and epoll instance, a file a request reads, an email's pipe.
+ * Returns the limit per worker, or 0 if descriptors are too few to serve with
+ * (logged).
+ */
+static int connections_per_worker(int workers) {
+    rlim_t reserve = 64 + 8 * (rlim_t)workers;
+    rlim_t wanted = reserve + (rlim_t)workers * CONNECTIONS_PER_WORKER;
+
+    struct rlimit limit;
+    if (getrlimit(RLIMIT_NOFILE, &limit) != 0) {
+        log_error("getrlimit(RLIMIT_NOFILE) failed: %s", strerror(errno));
+        return 0;
+    }
+    if (limit.rlim_cur != RLIM_INFINITY && limit.rlim_cur < wanted) {
+        struct rlimit raised = limit;
+        raised.rlim_cur = limit.rlim_max != RLIM_INFINITY && limit.rlim_max < wanted
+                          ? limit.rlim_max : wanted;
+        if (setrlimit(RLIMIT_NOFILE, &raised) == 0) {
+            limit = raised;
+        }
+    }
+
+    rlim_t usable = limit.rlim_cur == RLIM_INFINITY ? wanted : limit.rlim_cur;
+    rlim_t per_worker = usable > reserve ? (usable - reserve) / (rlim_t)workers : 0;
+    if (per_worker > CONNECTIONS_PER_WORKER) {
+        per_worker = CONNECTIONS_PER_WORKER;
+    }
+    if (per_worker < 16) {
+        log_error("The descriptor limit (%llu) leaves too few for %d workers: raise it (ulimit "
+                  "-n, or LimitNOFILE= in a systemd unit), or set fewer server_workers",
+                  (unsigned long long)usable, workers);
+        return 0;
+    }
+    log_info("Descriptor limit %llu: up to %llu connections a worker, %llu kept back for the "
+             "admin listener and the rest", (unsigned long long)usable,
+             (unsigned long long)per_worker, (unsigned long long)reserve);
+    if (per_worker < CONNECTIONS_PER_WORKER) {
+        log_warn("The descriptor limit allows fewer connections than the %d a worker takes at "
+                 "most: raise it (ulimit -n, or LimitNOFILE= in a systemd unit) for more",
+                 CONNECTIONS_PER_WORKER);
+    }
+    return (int)per_worker;
+}
+
+/*
+ * ./auth-server --admin METHOD PATH [BODY | -]: one call to this server's admin
+ * API, on the admin socket auth.conf names, else its admin_port, printing the
+ * answer's body. BODY is JSON; "-" reads it from standard input, which keeps a
+ * password out of the process list. Exits 0 for a 2xx answer, 1 for any other
+ * (its status on standard error), 2 if the call couldn't be made.
+ */
+static int run_admin_client(const config_t *config, const char *method, const char *path,
+                            const char *body_arg) {
+    for (const char *c = method; *c; c++) {
+        if (*c < 'A' || *c > 'Z') {
+            fprintf(stderr, "--admin: the method is a word like GET or POST\n");
+            return 2;
+        }
+    }
+    for (const char *c = path; *c; c++) {
+        if ((unsigned char)*c <= ' ' || *c == 0x7f) {
+            fprintf(stderr, "--admin: the path can't hold spaces or control characters\n");
+            return 2;
+        }
+    }
+    if (path[0] != '/') {
+        fprintf(stderr, "--admin: the path starts with /, as in /api/admin/bootstrap\n");
+        return 2;
+    }
+
+    /* The body: the argument, or standard input for "-" */
+    char *body = NULL;
+    size_t body_len = 0;
+    if (body_arg && strcmp(body_arg, "-") == 0) {
+        size_t capacity = 4096;
+        body = malloc(capacity);
+        size_t n;
+        while (body && (n = fread(body + body_len, 1, capacity - body_len, stdin)) > 0) {
+            body_len += n;
+            if (body_len == capacity) {
+                if (capacity >= 1024 * 1024) {
+                    fprintf(stderr, "--admin: the body is over 1 MiB\n");
+                    OPENSSL_cleanse(body, body_len);
+                    free(body);
+                    return 2;
+                }
+                char *grown = realloc(body, capacity * 2);
+                if (!grown) break;
+                body = grown;
+                capacity *= 2;
+            }
+        }
+        if (!body) {
+            fprintf(stderr, "--admin: out of memory\n");
+            return 2;
+        }
+    } else if (body_arg) {
+        body_len = strlen(body_arg);
+        body = malloc(body_len + 1);
+        if (!body) return 2;
+        memcpy(body, body_arg, body_len);
+    }
+
+    /* The admin socket, else loopback TCP on admin_port */
+    const char *socket_path = admin_socket_of(config);
+    int fd = -1;
+    char reason[1100];
+    if (socket_path && !admin_socket_dir_private(socket_path, 0, reason, sizeof(reason))) {
+        fprintf(stderr, "--admin: the call isn't sent: %s, so whoever answers on %s may not be "
+                        "this server\n", reason, socket_path);
+    } else if (socket_path) {
+        struct sockaddr_un addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sun_family = AF_UNIX;
+        if (strlen(socket_path) < sizeof(addr.sun_path)) {
+            memcpy(addr.sun_path, socket_path, strlen(socket_path) + 1);
+            fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+            if (fd >= 0 && connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+                fprintf(stderr, "--admin: can't connect to %s: %s\n", socket_path, strerror(errno));
+                close(fd);
+                fd = -1;
+            }
+        }
+    } else if (config->admin_port > 0) {
+        struct sockaddr_in addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_port = htons((uint16_t)config->admin_port);
+        fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        if (fd >= 0 && connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+            fprintf(stderr, "--admin: can't connect to 127.0.0.1:%d: %s\n", config->admin_port,
+                    strerror(errno));
+            close(fd);
+            fd = -1;
+        }
+    } else {
+        fprintf(stderr, "--admin: auth.conf has no admin_socket and no admin_port\n");
+    }
+    if (fd < 0) {
+        if (body) OPENSSL_cleanse(body, body_len);
+        free(body);
+        return 2;
+    }
+    struct timeval timeout = { .tv_sec = 35, .tv_usec = 0 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+
+    /* One HTTP/1.0 request, as the admin listener takes it */
+    char head[1024];
+    int head_len = body
+        ? snprintf(head, sizeof(head), "%s %s HTTP/1.0\r\nHost: localhost\r\n"
+                   "User-Agent: auth-server --admin\r\nContent-Type: application/json\r\n"
+                   "Content-Length: %zu\r\n\r\n", method, path, body_len)
+        : snprintf(head, sizeof(head), "%s %s HTTP/1.0\r\nHost: localhost\r\n"
+                   "User-Agent: auth-server --admin\r\n\r\n", method, path);
+    int sent = head_len > 0 && (size_t)head_len < sizeof(head) &&
+               send(fd, head, (size_t)head_len, MSG_NOSIGNAL) == head_len;
+    for (size_t off = 0; sent && off < body_len; ) {
+        ssize_t n = send(fd, body + off, body_len - off, MSG_NOSIGNAL);
+        if (n <= 0) sent = 0;
+        else off += (size_t)n;
+    }
+    if (body) OPENSSL_cleanse(body, body_len);
+    free(body);
+    if (!sent) {
+        fprintf(stderr, "--admin: sending the request failed: %s\n", strerror(errno));
+        close(fd);
+        return 2;
+    }
+
+    /* The answer, to the end: the server closes after one */
+    size_t capacity = 16384, len = 0;
+    char *answer = malloc(capacity + 1);
+    ssize_t n;
+    while (answer && (n = recv(fd, answer + len, capacity - len, 0)) > 0) {
+        len += (size_t)n;
+        if (len == capacity) {
+            char *grown = realloc(answer, capacity * 2 + 1);
+            if (!grown) break;
+            answer = grown;
+            capacity *= 2;
+        }
+    }
+    close(fd);
+    if (!answer) return 2;
+    answer[len] = '\0';
+
+    int status = 0;
+    const char *body_start = strstr(answer, "\r\n\r\n");
+    if (sscanf(answer, "HTTP/1.%*d %d", &status) != 1 || !body_start) {
+        fprintf(stderr, "--admin: no answer from the server\n");
+        free(answer);
+        return 2;
+    }
+    body_start += 4;
+    fputs(body_start, stdout);
+    if (*body_start && body_start[strlen(body_start) - 1] != '\n') fputc('\n', stdout);
+    free(answer);
+    if (status < 200 || status > 299) {
+        fprintf(stderr, "HTTP %d\n", status);
+        return 1;
+    }
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    /* No arguments serves. One maintenance mode runs once and exits, and so does
+       one admin call. */
+    const char *mode = argc == 2 ? argv[1] : NULL;
+    bool drophistory = mode && strcmp(mode, "--drophistory") == 0;
+    bool rekey = mode && strcmp(mode, "--rekey") == 0;
+    bool admin = (argc == 4 || argc == 5) && strcmp(argv[1], "--admin") == 0;
+    if (argc > 1 && !drophistory && !rekey && !admin) {
+        fprintf(stderr, "Usage: %s [--drophistory | --rekey | --admin METHOD PATH [BODY | -]]\n"
+                        "  (no argument)    serve, configured by ./auth.conf\n"
+                        "  --drophistory    remove every history table and its triggers, making\n"
+                        "                   them again if enable_history_tables is on\n"
+                        "  --rekey          seal everything sealed under encryption_key_previous\n"
+                        "                   again under encryption_key\n"
+                        "  Every instance must be stopped before either.\n"
+                        "  --admin          call this server's admin API (its admin_socket, else\n"
+                        "                   admin_port) and print the answer; BODY is JSON, and\n"
+                        "                   - reads it from standard input\n",
+                argv[0]);
+        return 2;
+    }
+
+    /* An admin call prints the answer alone: only warnings and errors are logged */
+    if (admin) {
+        log_init(LOG_WARN);
+        config_t *config = config_load("auth.conf");
+        if (!config) return 2;
+        int rc = run_admin_client(config, argv[2], argv[3], argc == 5 ? argv[4] : NULL);
+        config_free(config);
+        return rc;
+    }
+
+    log_init(LOG_INFO);
+    log_info(drophistory ? "=== Auth Server: --drophistory ===" :
+             rekey ? "=== Auth Server: --rekey ===" : "=== Auth Server Starting ===");
 
     /* Load configuration */
     log_info("Loading configuration...");
@@ -180,6 +818,30 @@ int main(void) {
 
     /* Apply configured log level (parsed from config file / env var) */
     log_init(config->log_level);
+
+    if (drophistory || rekey) {
+        char pg_buf[512];
+        const char *connection_string;
+        int rc = connection_string_for(config, pg_buf, sizeof(pg_buf), &connection_string) != 0 ? 1
+                 : drophistory ? run_drophistory(config, connection_string)
+                 : run_rekey(config, connection_string);
+        OPENSSL_cleanse(pg_buf, sizeof(pg_buf));
+        config_free(config);
+        return rc;
+    }
+
+    /* Serving only. A maintenance run above keeps the default dispositions, so
+       Ctrl-C or SIGTERM stops it: its changes are one transaction, and a run
+       stopped part way is finished by running it again (sql/README.md). */
+    setup_signal_handlers();
+    log_info("Signal handlers installed");
+
+    /* Only --rekey reads it: a server has no use for the old passphrase */
+    if (config->encryption_key_previous) {
+        log_warn("encryption_key_previous is set, and only --rekey reads it: remove it once "
+                 "the re-key is done");
+        OPENSSL_cleanse(config->encryption_key_previous, strlen(config->encryption_key_previous));
+    }
 
     /* An access token must stay verifiable for its whole life. Signing keeps the
      * current and prior ES256 keys; after a rotation the old key still signs for
@@ -196,9 +858,56 @@ int main(void) {
 
     log_info("Configuration loaded:");
     log_info("  Server: %s:%d (workers=%d)", config->host, config->port, config->workers);
+
+    /* The admin API: on a Unix socket, which only who its mode lets in can open,
+       and on loopback TCP too where admin_port asks for it. A port of its own:
+       sharing the public one, loopback traffic to the public port (a proxy on
+       the same host, say) would land on the admin listener. */
+    if (config->admin_port > 0 && config->admin_port == config->port) {
+        log_error("admin_port and server_port are both %d: the admin API needs a port of its own",
+                  config->port);
+        config_free(config);
+        return 1;
+    }
+    if (admin_socket_of(config)) {
+        log_info("  Admin API: %s (mode %04o)", config->admin_socket, config->admin_socket_mode);
+    }
+    if (config->admin_port > 0) {
+        log_info("  Admin API: 127.0.0.1:%d (and [::1] where present), loopback only",
+                 config->admin_port);
+    }
+    if (!admin_socket_of(config) && config->admin_port <= 0) {
+        log_info("  Admin API: off (no admin_socket, no admin_port)");
+    }
     log_info("  Database: %s", config->db_type == DB_TYPE_SQLITE ? "SQLite" : "PostgreSQL");
     if (config->db_type == DB_TYPE_SQLITE) {
         log_info("  DB Path: %s", config->db_path);
+    }
+
+    /* Where the client's address comes from. A typo refuses to start rather than
+       quietly falling back, which behind a load balancer would record whatever
+       address each client chose to send. */
+    if (http_set_client_ip_header(config->client_ip_header) != 0) {
+        log_error("Unknown client_ip_header '%s': use x-real-ip, x-forwarded-for or none",
+                  config->client_ip_header);
+        config_free(config);
+        return 1;
+    }
+    log_info("  Client address from: %s",
+             config->client_ip_header ? config->client_ip_header : "x-real-ip");
+
+    /* The patterns new usernames, addresses, code names and secrets must match.
+       One that won't compile refuses to start, naming the setting. */
+    validation_patterns_t patterns = {
+        .username = config->username_pattern,
+        .email = config->email_pattern,
+        .code_name = config->code_name_pattern,
+        .password = config->password_pattern,
+        .machine_secret = config->machine_secret_pattern,
+    };
+    if (validation_init(&patterns) != 0) {
+        config_free(config);
+        return 1;
     }
 
     /* Initialize password hashing module */
@@ -213,25 +922,24 @@ int main(void) {
     jwt_set_clock_skew_seconds(config->jwt_clock_skew_seconds);
     log_info("JWT clock skew tolerance: %d seconds", config->jwt_clock_skew_seconds);
 
-    /* DESIGN DECISION: the default encryption key warns; it does not refuse to boot.
-     * Field encryption's threat model is bounded and stated — keep PII out of plain
-     * view of whoever is reading the database — not defeat an attacker holding the
-     * database *and* the config. The default key is public on purpose: a fresh clone
-     * has to build and run, or nobody gets far enough to evaluate the project. Taxing
-     * every newcomer to protect a deployer who ignored both a startup warning and a
-     * documented config line is the wrong trade. The same philosophy governs the other
-     * permissive defaults, notably password_min_length (ships at 1). Policy is the
-     * deployer's call; this server ships ready to run, not ready to ship. Revisit if
-     * we add a strict/production mode that refuses known-default secrets. */
-    if (strcmp(config->encryption_key, "customize_me") == 0) {
-        log_warn("Using default encryption key — set encryption_key in auth.conf or AUTH_ENCRYPTION_KEY env");
-    }
-    if (encrypt_init(config->encryption_key) != 0) {
-        log_error("Failed to initialize MFA encryption");
+    /* DESIGN DECISION: the defaults fit only for trying the server out don't stop it
+     * starting unless strict is set. Field encryption's threat model is bounded and
+     * stated — keep PII out of plain view of whoever is reading the database — not
+     * defeat an attacker holding the database *and* the config. The default key is
+     * public on purpose: a fresh clone has to build and run, or nobody gets far enough
+     * to evaluate the project. Taxing every newcomer to protect a deployer who ignored
+     * both a startup warning and a documented config line is the wrong trade, so the
+     * key only warns, and password_min_length ships at 1. This server ships ready to
+     * run, not ready to ship: strict is how a deployment says it's the latter, and
+     * then both refuse the start (config_check_weak_defaults). */
+    if (config_check_weak_defaults(config) != 0) {
+        log_error("strict is set, so the server won't start on those: set them, or turn "
+                  "strict off to try the server out");
         config_free(config);
         return 1;
     }
-    OPENSSL_cleanse(config->encryption_key, strlen(config->encryption_key));
+    /* The field keys themselves are derived once the database is open: how the
+       key is stretched is recorded there (init_field_keys) */
 
     /* Determine number of workers (auto-detect if config specifies 0) */
     int num_workers = config->workers;
@@ -244,27 +952,31 @@ int main(void) {
         #endif
         log_info("Auto-detected %d CPU cores for workers", num_workers);
     }
+    int max_connections = connections_per_worker(num_workers);
+    if (max_connections == 0) {
+        encrypt_cleanup();
+        config_free(config);
+        return 1;
+    }
 
     /* Initialize database pool */
     log_info("Initializing database pool...");
     char pg_conn_str[512];
     const char *connection_string;
-    if (config->db_type == DB_TYPE_SQLITE) {
-        connection_string = config->db_path;
-    } else {
-        if (!config->db_host || !config->db_name || !config->db_user || !config->db_password) {
-            log_error("PostgreSQL requires db_host, db_name, db_user, and db_password");
-            encrypt_cleanup();
-            config_free(config);
-            return 1;
-        }
-        if (config_build_pg_connection_string(config, pg_conn_str, sizeof(pg_conn_str)) != 0) {
-            log_error("PostgreSQL connection string too long");
-            encrypt_cleanup();
-            config_free(config);
-            return 1;
-        }
-        connection_string = pg_conn_str;
+    if (connection_string_for(config, pg_conn_str, sizeof(pg_conn_str), &connection_string) != 0) {
+        encrypt_cleanup();
+        config_free(config);
+        return 1;
+    }
+
+    /* The instance lock, held shared until exit, before anything touches the
+       database: a maintenance run in progress refuses this start. SQLite: the
+       lock file, now. PostgreSQL: every pool connection, as soon as it's made. */
+    if (config->db_type == DB_TYPE_SQLITE && instance_lock_take_shared(config) != 0) {
+        instance_lock_release_all();
+        encrypt_cleanup();
+        config_free(config);
+        return 1;
     }
 
     if (db_pool_init(num_workers, config->db_type, connection_string) != 0) {
@@ -272,6 +984,18 @@ int main(void) {
         encrypt_cleanup();
         config_free(config);
         return 1;
+    }
+    if (config->db_type != DB_TYPE_SQLITE) {
+        for (int i = 0; i < num_workers; i++) {
+            int rc = db_set_session_hook(db_pool_get_connection_by_index(i), hold_instance_lock);
+            if (rc != 0) {
+                if (rc == 1) log_error("A maintenance run holds the database: start after it finishes");
+                db_pool_shutdown();
+                encrypt_cleanup();
+                config_free(config);
+                return 1;
+            }
+        }
     }
     if (config->db_password) {
         OPENSSL_cleanse(config->db_password, strlen(config->db_password));
@@ -298,6 +1022,15 @@ int main(void) {
         return 1;
     }
 
+    /* The field keys, from encryption_key as the database stretches it */
+    int keys_rc = init_field_keys(setup_db, config);
+    OPENSSL_cleanse(config->encryption_key, strlen(config->encryption_key));
+    if (keys_rc != 0) {
+        db_pool_shutdown();
+        config_free(config);
+        return 1;
+    }
+
     /* Initialize history tables if enabled */
     if (config->enable_history_tables) {
         if (db_init_history_tables(setup_db, config->db_type, schema_rc == 0) != 0) {
@@ -311,10 +1044,25 @@ int main(void) {
         log_info("History tables disabled in configuration");
     }
 
+    /* The wrong encryption_key, or signing keys sealed under another, stops the
+       server here, rather than showing up as failed sign-ins and token issuance
+       once it's serving */
+    int key_check = signing_key_check_encryption_key(setup_db);
+    if (key_check != 0) {
+        log_error(key_check == -2
+                  ? "Refusing to start: the stored signing keys don't open under encryption_key"
+                  : "Refusing to start: encryption_key does not match the database");
+        db_pool_shutdown();
+        encrypt_cleanup();
+        config_free(config);
+        return 1;
+    }
+
     /* Start cleaner thread */
     cleaner_config_t cleaner_cfg;
     cleaner_config_from_main_config(&cleaner_cfg, config);
     cleaner_cfg.connection_string = connection_string;
+    if (config->db_type != DB_TYPE_SQLITE) cleaner_cfg.session_hook = hold_instance_lock;
     if (cleaner_start(&cleaner_cfg, &cleaner_thread) != 0) {
         log_error("Failed to start cleaner thread");
         db_pool_shutdown();
@@ -344,102 +1092,7 @@ int main(void) {
     }
 
     /* Register API routes */
-    router_add(router, HTTP_GET, "/", index_handler);
-    router_add(router, HTTP_GET, "/health", health_handler);
-    router_add(router, HTTP_POST, "/api/admin/bootstrap", admin_bootstrap_handler);
-    router_add(router, HTTP_POST, "/api/admin/organizations", admin_create_organization_handler);
-    router_add(router, HTTP_POST, "/api/admin/users", admin_create_user_handler);
-    router_add(router, HTTP_POST, "/api/admin/org-admins", admin_make_org_admin_handler);
-    router_add(router, HTTP_GET, "/api/admin/list-all-organizations", admin_list_all_organizations_handler);
-    router_add(router, HTTP_POST, "/api/admin/organization-keys", admin_create_organization_key_handler);
-
-    /* Dual-auth endpoints (localhost OR org key) */
-    router_add(router, HTTP_GET, "/api/admin/organization-keys", admin_list_organization_keys_handler);
-    router_add(router, HTTP_DELETE, "/api/admin/organization-keys", admin_revoke_organization_key_handler);
-
-    /* Authenticated org-admin endpoints */
-    router_add(router, HTTP_GET, "/api/admin/organizations", admin_get_organizations_handler);
-    router_add(router, HTTP_PUT, "/api/admin/organizations", admin_update_organization_handler);
-    router_add(router, HTTP_GET, "/api/admin/resource-servers", admin_get_resource_servers_handler);
-    router_add(router, HTTP_POST, "/api/admin/resource-servers", admin_create_resource_server_handler);
-    router_add(router, HTTP_PUT, "/api/admin/resource-servers", admin_update_resource_server_handler);
-    router_add(router, HTTP_GET, "/api/admin/clients", admin_get_clients_handler);
-    router_add(router, HTTP_POST, "/api/admin/clients", admin_create_client_handler);
-    router_add(router, HTTP_PUT, "/api/admin/clients", admin_update_client_handler);
-    router_add(router, HTTP_GET, "/api/admin/client-redirect-uris", admin_get_client_redirect_uris_handler);
-    router_add(router, HTTP_POST, "/api/admin/client-redirect-uris", admin_create_client_redirect_uri_handler);
-    router_add(router, HTTP_DELETE, "/api/admin/client-redirect-uris", admin_delete_client_redirect_uri_handler);
-    router_add(router, HTTP_GET, "/api/admin/client-resource-servers", admin_get_client_resource_servers_handler);
-    router_add(router, HTTP_GET, "/api/admin/resource-server-clients", admin_get_resource_server_clients_handler);
-    router_add(router, HTTP_POST, "/api/admin/client-resource-servers", admin_create_client_resource_server_link_handler);
-    router_add(router, HTTP_DELETE, "/api/admin/client-resource-servers", admin_delete_client_resource_server_link_handler);
-    router_add(router, HTTP_POST, "/api/admin/resource-server-keys", admin_create_resource_server_key_handler);
-    router_add(router, HTTP_GET, "/api/admin/resource-server-keys", admin_get_resource_server_keys_handler);
-    router_add(router, HTTP_DELETE, "/api/admin/resource-server-keys", admin_delete_resource_server_key_handler);
-    router_add(router, HTTP_POST, "/api/admin/client-keys", admin_create_client_key_handler);
-    router_add(router, HTTP_GET, "/api/admin/client-keys", admin_get_client_keys_handler);
-    router_add(router, HTTP_DELETE, "/api/admin/client-keys", admin_delete_client_key_handler);
-
-    /* User activate/deactivate (localhost-only) */
-    router_add(router, HTTP_POST, "/api/admin/users/activate", server_activate_user_handler);
-    router_add(router, HTTP_POST, "/api/admin/users/deactivate", server_deactivate_user_handler);
-    router_add(router, HTTP_POST, "/api/admin/users/reset-mfa", server_reset_user_mfa_handler);
-
-    router_add(router, HTTP_POST, "/login", login_handler);
-    router_add(router, HTTP_GET, "/api/user/management-setups", management_setups_handler);
-    router_add(router, HTTP_GET, "/api/user/profile", profile_handler);
-    router_add(router, HTTP_GET, "/api/user/emails", emails_handler);
-    router_add(router, HTTP_POST, "/api/user/emails", add_email_handler);
-    router_add(router, HTTP_DELETE, "/api/user/emails", delete_email_handler);
-    router_add(router, HTTP_POST, "/api/user/emails/set-primary", set_primary_email_handler);
-#ifdef EMAIL_SUPPORT
-    router_add(router, HTTP_POST, "/email-verification-token", create_email_verification_token_handler);
-    router_add(router, HTTP_GET, "/verify-email", verify_email_page_handler);
-    router_add(router, HTTP_POST, "/verify-email", verify_email_handler);
-    router_add(router, HTTP_GET, "/request-password-reset", request_password_reset_page_handler);
-    router_add(router, HTTP_POST, "/request-password-reset", request_password_reset_handler);
-    router_add(router, HTTP_GET, "/reset-password", reset_password_page_handler);
-    router_add(router, HTTP_POST, "/reset-password", reset_password_handler);
-    router_add(router, HTTP_GET, "/request-passwordless-login", request_passwordless_login_page_handler);
-    router_add(router, HTTP_POST, "/request-passwordless-login", request_passwordless_login_handler);
-    router_add(router, HTTP_GET, "/passwordless-login", passwordless_login_page_handler);
-    router_add(router, HTTP_POST, "/passwordless-login", passwordless_login_handler);
-    router_add(router, HTTP_POST, "/api/user/passwordless-login", passwordless_login_toggle_handler);
-#endif
-    router_add(router, HTTP_POST, "/api/user/password", change_password_handler);
-    router_add(router, HTTP_POST, "/api/user/username", change_username_handler);
-    router_add(router, HTTP_POST, "/logout", logout_handler);
-
-    /* MFA endpoints */
-    router_add(router, HTTP_POST, "/api/user/mfa/totp/setup", mfa_totp_setup_handler);
-    router_add(router, HTTP_POST, "/api/user/mfa/totp/confirm", mfa_totp_confirm_handler);
-    router_add(router, HTTP_POST, "/api/user/mfa/verify", mfa_verify_handler);
-    router_add(router, HTTP_POST, "/api/user/mfa/recover", mfa_recover_handler);
-    router_add(router, HTTP_GET, "/api/user/mfa/methods", mfa_list_methods_handler);
-    router_add(router, HTTP_DELETE, "/api/user/mfa/methods", mfa_delete_method_handler);
-    router_add(router, HTTP_POST, "/api/user/mfa/recovery-codes/regenerate", mfa_regenerate_recovery_codes_handler);
-    router_add(router, HTTP_POST, "/api/user/mfa/require", mfa_set_require_handler);
-    router_add(router, HTTP_GET, "/authorize", authorize_handler);
-    router_add(router, HTTP_POST, "/token", token_handler);
-    router_add(router, HTTP_POST, "/revoke", revoke_handler);
-    router_add(router, HTTP_POST, "/introspect", introspect_handler);
-    router_add(router, HTTP_GET, "/.well-known/jwks.json", jwks_handler);
-    router_add(router, HTTP_GET, "/userinfo", userinfo_handler);
-
-    /* Invitation endpoints */
-    router_add(router, HTTP_GET, "/accept-invitation", accept_invitation_page_handler);
-    router_add(router, HTTP_POST, "/accept-invitation", accept_invitation_handler);
-
-    /* RS user provisioning API */
-    router_add(router, HTTP_POST, "/api/rs/users", rs_provision_user_handler);
-    router_add(router, HTTP_GET, "/api/rs/users", rs_lookup_user_handler);
-    router_add(router, HTTP_POST, "/api/rs/client-users", rs_link_client_user_handler);
-    router_add(router, HTTP_DELETE, "/api/rs/client-users", rs_unlink_client_user_handler);
-    router_add(router, HTTP_GET, "/api/rs/client-users", rs_list_client_users_handler);
-
-    /* POST aliases for GET endpoints (browsers cannot send GET with JSON body) */
-    router_add(router, HTTP_POST, "/api/rs/users/lookup", rs_lookup_user_handler);
-    router_add(router, HTTP_POST, "/api/rs/client-users/list", rs_list_client_users_handler);
+    register_routes(router);
 
     /* Every CORS path must be a route, or the header silently never appears */
     if (router_validate_cors_paths(router) != 0) {
@@ -461,10 +1114,13 @@ int main(void) {
     EventLoopConfig event_config = {
         .num_workers = num_workers,
         .port = config->port,
+        .admin_port = config->admin_port,
+        .admin_socket = admin_socket_of(config),
+        .admin_socket_mode = config->admin_socket_mode,
         .backlog = 128,
         .max_request_size = 1024 * 1024,
         .connection_timeout_ms = 30000,
-        .max_connections_per_worker = 1024,
+        .max_connections_per_worker = max_connections,
         .handler = router_request_handler,
         .handler_context = router,
         .on_worker_exit = worker_thread_cleanup
@@ -493,7 +1149,7 @@ int main(void) {
     global_pool = pool;
 
     /* Start event loop (blocks until shutdown signal) */
-    event_loop_pool_start(pool);
+    int serve_rc = event_loop_pool_start(pool);
 
     /* Cleanup */
     log_info("Shutting down...");
@@ -510,11 +1166,13 @@ int main(void) {
 
     static_files_cleanup();
     template_cleanup();
+    validation_cleanup();
     db_pool_shutdown();
+    instance_lock_release_all();
     encrypt_cleanup();
     crypto_hmac_cleanup();
     config_free(config);
 
     log_info("=== Auth Server Stopped ===");
-    return 0;
+    return (serve_rc != 0 || atomic_load(&g_lock_lost)) ? 1 : 0;
 }

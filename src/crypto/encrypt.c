@@ -1,11 +1,15 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "crypto/encrypt.h"
+#include "crypto/argon2.h"
+#include "crypto/pbkdf2.h"
 #include "crypto/hmac.h"
 #include "crypto/random.h"
+#include "util/data.h"
 #include "util/log.h"
 #include <openssl/evp.h>
 #include <openssl/crypto.h>
+#include <stdio.h>
 #include <string.h>
 
 /* AES-256-GCM parameters */
@@ -18,9 +22,8 @@ static const unsigned char HKDF_SALT[] = "auth-server-encryption-v1";
 static const unsigned char HKDF_INFO_AES[] = "aes256gcm";
 static const unsigned char HKDF_INFO_HMAC[] = "hmac-sha256";
 
-/* Derived keys held in static memory after init */
-static unsigned char derived_key[AES_KEY_LENGTH];
-static unsigned char hmac_key[AES_KEY_LENGTH];
+/* The process's field keys, after init */
+static encrypt_keys_t g_keys;
 static int key_initialized = 0;
 
 /* HKDF-Expand: derive a 32-byte key from PRK + info (single round) */
@@ -47,60 +50,107 @@ static int hkdf_derive(const unsigned char *prk, size_t prk_len,
     return 0;
 }
 
-int encrypt_init(const char *passphrase) {
-    if (!passphrase || !*passphrase) {
+int encrypt_params_new(const char *method, int iterations, encrypt_params_t *out) {
+    if (!method || !out || iterations < 1 ||
+        (strcmp(method, "argon2id") != 0 && strcmp(method, "pbkdf2-sha256") != 0)) {
+        log_error("Invalid stretching parameters");
+        return -1;
+    }
+    unsigned char salt[16];
+    if (crypto_random_bytes(salt, sizeof(salt)) != 0) {
+        log_error("Failed to generate the stretching salt");
+        return -1;
+    }
+    memset(out, 0, sizeof(*out));
+    snprintf(out->method, sizeof(out->method), "%s", method);
+    out->iterations = iterations;
+    bytes_to_hex(salt, sizeof(salt), out->salt, sizeof(out->salt));
+    return 0;
+}
+
+int encrypt_derive_keys(const char *passphrase, const encrypt_params_t *params,
+                        encrypt_keys_t *out) {
+    if (!passphrase || !*passphrase || !out) {
         log_error("Encryption passphrase is empty");
         return -1;
     }
 
-    /* HKDF-Extract: PRK = HMAC-SHA256(salt, passphrase) */
+    /* The keying material: the passphrase, stretched where the database says how,
+       which makes each guess at it cost one hash under the method */
+    const unsigned char *ikm = (const unsigned char *)passphrase;
+    size_t ikm_len = strlen(passphrase);
+    unsigned char stretched[32];
+    if (params) {
+        char hex[65];
+        int rc = -1;
+        if (strcmp(params->method, "argon2id") == 0) {
+            rc = crypto_argon2_hash_with_salt(passphrase, strlen(passphrase), params->salt,
+                                              params->iterations, hex, sizeof(hex));
+        } else if (strcmp(params->method, "pbkdf2-sha256") == 0) {
+            rc = crypto_pbkdf2_hash_with_salt(passphrase, strlen(passphrase), params->salt,
+                                              params->iterations, hex, sizeof(hex));
+        } else {
+            log_error("Unknown stretching method '%s'", params->method);
+        }
+        if (rc != 0 || hex_to_bytes(hex, stretched, sizeof(stretched)) != 0) {
+            OPENSSL_cleanse(hex, sizeof(hex));
+            OPENSSL_cleanse(stretched, sizeof(stretched));
+            log_error("Failed to stretch the encryption passphrase");
+            return -1;
+        }
+        OPENSSL_cleanse(hex, sizeof(hex));
+        ikm = stretched;
+        ikm_len = sizeof(stretched);
+    }
+
+    /* HKDF-Extract: PRK = HMAC-SHA256(salt, keying material) */
     unsigned char prk[HMAC_SHA256_LENGTH];
-    if (crypto_hmac_sha256(HKDF_SALT, sizeof(HKDF_SALT) - 1,
-                           (const unsigned char *)passphrase, strlen(passphrase),
-                           prk, sizeof(prk)) != 0) {
+    int rc = crypto_hmac_sha256(HKDF_SALT, sizeof(HKDF_SALT) - 1, ikm, ikm_len,
+                                prk, sizeof(prk));
+    OPENSSL_cleanse(stretched, sizeof(stretched));
+    if (rc != 0) {
         log_error("HKDF extract failed");
         return -1;
     }
 
-    /* HKDF-Expand: derive AES key */
-    if (hkdf_derive(prk, sizeof(prk),
-                    HKDF_INFO_AES, sizeof(HKDF_INFO_AES) - 1,
-                    derived_key, sizeof(derived_key)) != 0) {
+    /* HKDF-Expand: the AES key, then the HMAC key */
+    if (hkdf_derive(prk, sizeof(prk), HKDF_INFO_AES, sizeof(HKDF_INFO_AES) - 1,
+                    out->aes, sizeof(out->aes)) != 0 ||
+        hkdf_derive(prk, sizeof(prk), HKDF_INFO_HMAC, sizeof(HKDF_INFO_HMAC) - 1,
+                    out->hmac, sizeof(out->hmac)) != 0) {
         OPENSSL_cleanse(prk, sizeof(prk));
-        log_error("HKDF expand (AES) failed");
-        return -1;
-    }
-
-    /* HKDF-Expand: derive HMAC key */
-    if (hkdf_derive(prk, sizeof(prk),
-                    HKDF_INFO_HMAC, sizeof(HKDF_INFO_HMAC) - 1,
-                    hmac_key, sizeof(hmac_key)) != 0) {
-        OPENSSL_cleanse(prk, sizeof(prk));
-        OPENSSL_cleanse(derived_key, sizeof(derived_key));
-        log_error("HKDF expand (HMAC) failed");
+        OPENSSL_cleanse(out, sizeof(*out));
+        log_error("HKDF expand failed");
         return -1;
     }
 
     OPENSSL_cleanse(prk, sizeof(prk));
+    return 0;
+}
+
+void encrypt_init_keys(const encrypt_keys_t *keys) {
+    memcpy(&g_keys, keys, sizeof(g_keys));
     key_initialized = 1;
+}
+
+int encrypt_init(const char *passphrase) {
+    encrypt_keys_t keys;
+    if (encrypt_derive_keys(passphrase, NULL, &keys) != 0) return -1;
+    encrypt_init_keys(&keys);
+    OPENSSL_cleanse(&keys, sizeof(keys));
     log_info("Field encryption initialized");
     return 0;
 }
 
 void encrypt_cleanup(void) {
-    OPENSSL_cleanse(derived_key, sizeof(derived_key));
-    OPENSSL_cleanse(hmac_key, sizeof(hmac_key));
+    OPENSSL_cleanse(&g_keys, sizeof(g_keys));
     key_initialized = 0;
 }
 
-int encrypt_field(const char *plaintext, char *out_buf, size_t buf_size) {
-    if (!plaintext || !out_buf) {
+int encrypt_field_with(const encrypt_keys_t *keys, const char *plaintext,
+                       char *out_buf, size_t buf_size) {
+    if (!keys || !plaintext || !out_buf) {
         log_error("Invalid arguments to encrypt_field");
-        return -1;
-    }
-
-    if (!key_initialized) {
-        log_error("Encryption not initialized");
         return -1;
     }
 
@@ -128,6 +178,7 @@ int encrypt_field(const char *plaintext, char *out_buf, size_t buf_size) {
     int ret = -1;
     unsigned char ciphertext[ENCRYPT_FIELD_MAX_LENGTH];
     unsigned char tag[GCM_TAG_LENGTH];
+    unsigned char packed[512];
     int ciphertext_len = 0;
     int len = 0;
 
@@ -141,7 +192,7 @@ int encrypt_field(const char *plaintext, char *out_buf, size_t buf_size) {
         goto cleanup;
     }
 
-    if (EVP_EncryptInit_ex(ctx, NULL, NULL, derived_key, iv) != 1) {
+    if (EVP_EncryptInit_ex(ctx, NULL, NULL, keys->aes, iv) != 1) {
         log_error("EVP_EncryptInit_ex (key/iv) failed");
         goto cleanup;
     }
@@ -166,7 +217,6 @@ int encrypt_field(const char *plaintext, char *out_buf, size_t buf_size) {
 
     /* Pack IV || ciphertext || tag into a single buffer */
     size_t packed_len = GCM_IV_LENGTH + (size_t)ciphertext_len + GCM_TAG_LENGTH;
-    unsigned char packed[512];
     if (packed_len > sizeof(packed)) {
         log_error("Packed ciphertext too large");
         goto cleanup;
@@ -192,14 +242,10 @@ cleanup:
     return ret;
 }
 
-int decrypt_field(const char *encrypted, char *out_plaintext, size_t plaintext_size) {
-    if (!encrypted || !out_plaintext) {
+int decrypt_field_with(const encrypt_keys_t *keys, const char *encrypted,
+                       char *out_plaintext, size_t plaintext_size) {
+    if (!keys || !encrypted || !out_plaintext) {
         log_error("Invalid arguments to decrypt_field");
-        return -1;
-    }
-
-    if (!key_initialized) {
-        log_error("Encryption not initialized");
         return -1;
     }
 
@@ -251,7 +297,7 @@ int decrypt_field(const char *encrypted, char *out_plaintext, size_t plaintext_s
         goto cleanup;
     }
 
-    if (EVP_DecryptInit_ex(ctx, NULL, NULL, derived_key, iv) != 1) {
+    if (EVP_DecryptInit_ex(ctx, NULL, NULL, keys->aes, iv) != 1) {
         log_error("EVP_DecryptInit_ex (key/iv) failed");
         goto cleanup;
     }
@@ -289,14 +335,10 @@ cleanup:
     return ret;
 }
 
-int hash_field(const char *plaintext, char *out_hex, size_t hex_size) {
-    if (!plaintext || !out_hex) {
+int hash_field_with(const encrypt_keys_t *keys, const char *plaintext,
+                    char *out_hex, size_t hex_size) {
+    if (!keys || !plaintext || !out_hex) {
         log_error("Invalid arguments to hash_field");
-        return -1;
-    }
-
-    if (!key_initialized) {
-        log_error("Encryption not initialized");
         return -1;
     }
 
@@ -306,7 +348,31 @@ int hash_field(const char *plaintext, char *out_hex, size_t hex_size) {
         return -1;
     }
 
-    return crypto_hmac_sha256_hex(hmac_key, sizeof(hmac_key),
+    return crypto_hmac_sha256_hex(keys->hmac, sizeof(keys->hmac),
                                   (const unsigned char *)plaintext, strlen(plaintext),
                                   out_hex, hex_size);
+}
+
+int encrypt_field(const char *plaintext, char *out_buf, size_t buf_size) {
+    if (!key_initialized) {
+        log_error("Encryption not initialized");
+        return -1;
+    }
+    return encrypt_field_with(&g_keys, plaintext, out_buf, buf_size);
+}
+
+int decrypt_field(const char *encrypted, char *out_plaintext, size_t plaintext_size) {
+    if (!key_initialized) {
+        log_error("Encryption not initialized");
+        return -1;
+    }
+    return decrypt_field_with(&g_keys, encrypted, out_plaintext, plaintext_size);
+}
+
+int hash_field(const char *plaintext, char *out_hex, size_t hex_size) {
+    if (!key_initialized) {
+        log_error("Encryption not initialized");
+        return -1;
+    }
+    return hash_field_with(&g_keys, plaintext, out_hex, hex_size);
 }

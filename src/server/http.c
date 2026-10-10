@@ -9,6 +9,7 @@
 #include <strings.h>  /* for strcasecmp */
 #include <stdlib.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <ctype.h>
 #include <stdbool.h>
 #include <arpa/inet.h>  /* for INET6_ADDRSTRLEN */
@@ -87,6 +88,15 @@ static bool parse_request_line(char *line, HttpRequest *req) {
     if (!space2) return false;
     *space2 = '\0';  /* Null-terminate path */
 
+    /* No control characters or DEL in the target (RFC 7230's request-target has
+     * none; a client percent-encodes them). Lines split only at CRLF, so a bare LF
+     * here would reach the request log line and start a forged one. The method
+     * needs no such check: only exact names parse, and a request whose method
+     * doesn't is refused before anything logs it. */
+    for (const char *c = path_start; *c; c++) {
+        if ((unsigned char)*c < 0x21 || *c == 0x7F) return false;
+    }
+
     /* Split path and query string */
     char *question = strchr(path_start, '?');
     if (question) {
@@ -114,12 +124,21 @@ static bool parse_request_line(char *line, HttpRequest *req) {
 /*
  * Parse a single header line: "Name: Value\r\n"
  *
+ * A name with a space, a tab or another control character in it is refused, as
+ * nginx refuses it. A space before the colon is the 400 RFC 9112 §5.1 requires:
+ * front ends have read "Name :" both as Name and as a header of its own. Other
+ * characters outside RFC 9110's token are left alone.
+ *
  * Modifies buffer in place.
  */
 static bool parse_header_line(char *line, HttpHeader *header) {
     /* Find colon */
     char *colon = strchr(line, ':');
     if (!colon) return false;
+
+    for (const char *c = line; c < colon; c++) {
+        if ((unsigned char)*c < 0x21 || *c == 0x7F) return false;
+    }
 
     *colon = '\0';  /* Null-terminate name */
     header->name = line;
@@ -134,6 +153,60 @@ static bool parse_header_line(char *line, HttpHeader *header) {
 
     header->value = value;
     return true;
+}
+
+/*
+ * Parse a Content-Length value: one or more ASCII digits, optionally surrounded by
+ * spaces or tabs (RFC 7230 §3.3.2, §3.2.3). Anything else is invalid: an empty
+ * value, a sign, a second number, trailing junk, or a value too large for size_t.
+ *
+ * Reads exactly `len` bytes and no further. The socket layer calls this on its read
+ * buffer, which is not NUL-terminated; strtol, which skips any leading whitespace
+ * including CR and LF and stops only at a non-digit, would run on into the body.
+ *
+ * Returns 0 with *out set, or -1 if the value is invalid.
+ */
+static int parse_content_length_value(const char *value, size_t len, size_t *out) {
+    size_t i = 0;
+    while (i < len && (value[i] == ' ' || value[i] == '\t')) i++;
+
+    size_t n = 0;
+    size_t digits = 0;
+    while (i < len && value[i] >= '0' && value[i] <= '9') {
+        size_t d = (size_t)(value[i] - '0');
+        if (n > (SIZE_MAX - d) / 10) return -1;
+        n = n * 10 + d;
+        digits++;
+        i++;
+    }
+    if (digits == 0) return -1;
+
+    while (i < len && (value[i] == ' ' || value[i] == '\t')) i++;
+    if (i != len) return -1;
+
+    *out = n;
+    return 0;
+}
+
+/*
+ * The bytes a header block (request line, header lines, blank line) may not hold,
+ * checked by both layers before either reads it. The socket layer frames a request
+ * from its lines (http_scan_content_length) and the parser interprets them, each
+ * walking lines its own way: a NUL ends the parser's lines as C strings, and a line
+ * starting with a bare CR ends its walk, while the scan reads on to the blank line.
+ * Past either, the two read different headers, a Content-Length among them. So a
+ * NUL, a CR not followed by LF and an LF not preceded by CR are refused, as RFC 9110
+ * §5.5 and RFC 9112 §2.2 have a recipient do.
+ *
+ * Returns 0, -3 for a NUL, or -4 for a bare CR or LF.
+ */
+static int header_block_bytes(const char *block, size_t len) {
+    for (size_t i = 0; i < len; i++) {
+        if (block[i] == '\0') return -3;
+        if (block[i] == '\r' && (i + 1 == len || block[i + 1] != '\n')) return -4;
+        if (block[i] == '\n' && (i == 0 || block[i - 1] != '\r')) return -4;
+    }
+    return 0;
 }
 
 /*
@@ -152,6 +225,14 @@ HttpRequest http_request_parse(char *raw, size_t length) {
     char *body_start = find_header_end(raw, length);
     if (!body_start) {
         /* Incomplete request or malformed */
+        req.method = HTTP_UNKNOWN;
+        return req;
+    }
+
+    /* No NUL, and no CR or LF outside a CRLF, in the header block: past one, the
+     * walks below would read other lines than the socket layer framed the request
+     * with (header_block_bytes). The socket layer refuses the same. */
+    if (header_block_bytes(raw, (size_t)(body_start - raw)) != 0) {
         req.method = HTTP_UNKNOWN;
         return req;
     }
@@ -213,8 +294,15 @@ HttpRequest http_request_parse(char *raw, size_t length) {
             char *next = crlf ? crlf + 2 : NULL;
             if (crlf) *crlf = '\0';
 
-            if (!parse_header_line(line, &req.headers[req.header_count])) {
-                /* Header line with no colon — malformed (RFC 7230 §3.2.4). Reject the
+            /* A line that starts with a space or tab continues the one before it
+             * (obs-fold, RFC 9112 §5.2): one front end unfolds it into that header's
+             * value, another reads it as a header of its own, a folded
+             * Transfer-Encoding included. Refused, colon or not, with the 400 the RFC
+             * asks for. */
+            if (*line == ' ' || *line == '\t' ||
+                !parse_header_line(line, &req.headers[req.header_count])) {
+                /* Header line with no colon, or a name parse_header_line() refuses —
+                 * malformed (RFC 7230 §3.2.4, RFC 9112 §5.1). Reject the
                  * request rather than skip the line. Request framing is already fixed at
                  * the socket layer (event_loop.c); this is header-interpretation hygiene:
                  * a proxy that folds or accepts such a line while the origin ignores it is
@@ -232,25 +320,30 @@ HttpRequest http_request_parse(char *raw, size_t length) {
         }
     }
 
-    /* Body (if present) */
+    /* Content-Length, read by the rule the socket layer framed the request with
+     * (http_scan_content_length). An invalid value makes the framing invalid, and
+     * RFC 7230 §3.3.3 has a server reject such a request rather than guess, so the
+     * parser refuses it too instead of falling back to whatever bytes arrived. */
+    const char *content_length_str = http_request_get_header(&req, "Content-Length");
+    size_t declared_length = 0;
+    if (content_length_str &&
+        parse_content_length_value(content_length_str, strlen(content_length_str),
+                                   &declared_length) != 0) {
+        req.method = HTTP_UNKNOWN;
+        return req;
+    }
+
+    /* Body: what Content-Length framed, as the socket layer read it. With none
+     * there is no body (RFC 9112 §6.3), whatever bytes came in the same read as
+     * the headers: the socket layer took the request as complete at the blank
+     * line, and taking them would make the body depend on how TCP split it. */
     size_t body_offset = body_start - raw;
-    if (body_offset < length) {
+    if (content_length_str && body_offset < length) {
         req.body = body_start;
         req.body_length = length - body_offset;
 
-        /* Check Content-Length header */
-        const char *content_length_str = http_request_get_header(&req, "Content-Length");
-        if (content_length_str) {
-            char *endptr;
-            long declared_length = strtol(content_length_str, &endptr, 10);
-
-            /* Validate: at least one digit parsed, no junk after, non-negative */
-            if (endptr > content_length_str && *endptr == '\0' && declared_length >= 0) {
-                if (req.body_length > (size_t)declared_length) {
-                    req.body_length = (size_t)declared_length;
-                }
-            }
-            /* If parse failed, ignore Content-Length (use actual body_length) */
+        if (req.body_length > declared_length) {
+            req.body_length = declared_length;
         }
 
         /* Content-Length is authoritative, so terminate the body at it. Without this the
@@ -313,39 +406,76 @@ int http_request_is_cross_origin(const HttpRequest *req) {
     return strcasecmp(sep + 3, host) != 0;
 }
 
+/* Which header carries the client's address; see http_set_client_ip_header.
+ * Set once at startup, before the workers start, and only read after. */
+static enum {
+    CLIENT_IP_X_REAL_IP,
+    CLIENT_IP_X_FORWARDED_FOR,
+    CLIENT_IP_NONE
+} g_client_ip_header = CLIENT_IP_X_REAL_IP;
+
+int http_set_client_ip_header(const char *name) {
+    if (!name || strcasecmp(name, "x-real-ip") == 0) {
+        g_client_ip_header = CLIENT_IP_X_REAL_IP;
+    } else if (strcasecmp(name, "x-forwarded-for") == 0) {
+        g_client_ip_header = CLIENT_IP_X_FORWARDED_FOR;
+    } else if (strcasecmp(name, "none") == 0) {
+        g_client_ip_header = CLIENT_IP_NONE;
+    } else {
+        return -1;
+    }
+    return 0;
+}
+
+/* An address as inet_pton reads one, IPv4 or IPv6: what a proxy's header holds,
+   and nothing a client could put there to be stored instead */
+static bool is_ip_address(const char *text) {
+    unsigned char addr[sizeof(struct in6_addr)];
+    return inet_pton(AF_INET, text, addr) == 1 || inet_pton(AF_INET6, text, addr) == 1;
+}
+
+const char *http_request_get_user_agent(const HttpRequest *req) {
+    const char *user_agent = http_request_get_header(req, "User-Agent");
+    if (!user_agent) return NULL;
+    static __thread char stored[512 + 1];
+    str_utf8_sanitize(stored, sizeof(stored), user_agent);
+    return stored;
+}
+
 const char *http_request_get_client_ip(const HttpRequest *req, const char *socket_ip) {
-    /* Check X-Real-IP first (single IP from trusted reverse proxy).
-     * This server must sit behind a trusted reverse proxy in any real deployment, for TLS. */
-    const char *real_ip = http_request_get_header(req, "X-Real-IP");
-    if (real_ip && real_ip[0] != '\0') {
-        return real_ip;
+    /* X-Real-IP, as the shipped nginx sets it: overwritten with the real peer. No
+     * falling back to X-Forwarded-For when it's absent, since its first entry is
+     * whatever the client sent. */
+    if (g_client_ip_header == CLIENT_IP_X_REAL_IP) {
+        const char *real_ip = http_request_get_header(req, "X-Real-IP");
+        return (real_ip && is_ip_address(real_ip)) ? real_ip : socket_ip;
     }
 
-    /* Check X-Forwarded-For (comma-separated chain from trusted reverse proxy)
-     * Format: "client_ip, proxy1_ip, proxy2_ip"
-     * Extract only the first IP (the original client) for consistency */
-    const char *forwarded = http_request_get_header(req, "X-Forwarded-For");
-    if (forwarded && forwarded[0] != '\0') {
-        /* Thread-local buffer for extracted IP (one per thread, no contention) */
-        static __thread char first_ip[INET6_ADDRSTRLEN];
-
-        const char *comma = strchr(forwarded, ',');
-        size_t len = comma ? (size_t)(comma - forwarded) : strlen(forwarded);
-
-        /* Clamp to buffer size */
-        if (len >= sizeof(first_ip)) {
-            len = sizeof(first_ip) - 1;
+    /* The last X-Forwarded-For entry: the address the nearest proxy appended to
+     * whatever chain the client sent. A proxy that adds its own header line
+     * instead of appending is covered by taking the last line. */
+    if (g_client_ip_header == CLIENT_IP_X_FORWARDED_FOR) {
+        const char *forwarded = NULL;
+        for (int i = 0; i < req->header_count; i++) {
+            if (req->headers[i].name && strcasecmp(req->headers[i].name, "X-Forwarded-For") == 0) {
+                forwarded = req->headers[i].value;
+            }
         }
+        if (!forwarded) return socket_ip;
 
-        memcpy(first_ip, forwarded, len);
-        first_ip[len] = '\0';
+        const char *comma = strrchr(forwarded, ',');
+        const char *last = comma ? comma + 1 : forwarded;
+        while (*last == ' ' || *last == '\t') last++;
+        size_t len = strlen(last);
+        while (len > 0 && (last[len - 1] == ' ' || last[len - 1] == '\t')) len--;
+        if (len == 0) return socket_ip;
 
-        /* Trim trailing whitespace (leading space rare in first position) */
-        while (len > 0 && (first_ip[len-1] == ' ' || first_ip[len-1] == '\t')) {
-            first_ip[--len] = '\0';
-        }
-
-        return first_ip;
+        /* Thread-local buffer for the extracted address (one per thread) */
+        static __thread char last_ip[INET6_ADDRSTRLEN];
+        if (len >= sizeof(last_ip)) len = sizeof(last_ip) - 1;
+        memcpy(last_ip, last, len);
+        last_ip[len] = '\0';
+        return is_ip_address(last_ip) ? last_ip : socket_ip;
     }
 
     /* DESIGN DECISION: no proxy header means no client IP, and we do NOT substitute
@@ -388,16 +518,73 @@ size_t http_find_header_end(const char *buffer, size_t length, size_t already_sc
     size_t from = already_scanned > 3 ? already_scanned - 3 : 0;
 
     /* Redundant since the guard above forces already_scanned < length, which
-       already bounds from at length - 4. It was load-bearing while that guard
-       was `>` rather than `>=`: already_scanned == length gave from = length - 3
-       and this is what kept memmem in bounds. Kept so that relaxing the guard
-       cannot reintroduce an over-read. */
+       already bounds from at length - 4. With `>` there rather than `>=`,
+       already_scanned == length would give from = length - 3, and this is what
+       would keep memmem in bounds: it stays so that relaxing the guard can't
+       introduce an over-read. */
     if (from > length - 4) {
         from = length - 4;
     }
 
     const char *end = memmem(buffer + from, length - from, "\r\n\r\n", 4);
     return end ? (size_t)(end - buffer) + 4 : 0;
+}
+
+int http_scan_content_length(const char *headers, size_t header_len, size_t *out_length) {
+    if (!headers || !out_length) {
+        return -1;
+    }
+
+    const char *end = headers + header_len;
+
+    /* A NUL, or a CR or LF outside a CRLF, past which the parser would read other
+       lines than this does (header_block_bytes) */
+    int bytes = header_block_bytes(headers, header_len);
+    if (bytes != 0) {
+        return bytes;
+    }
+
+    /* Header lines begin after the request line */
+    const char *p = memmem(headers, header_len, "\r\n", 2);
+    if (!p) {
+        return 1;
+    }
+    p += 2;
+
+    bool found = false;
+    size_t first_value = 0;
+
+    while (p < end) {
+        const char *line_end = memmem(p, (size_t)(end - p), "\r\n", 2);
+        if (!line_end) break;
+        size_t line_len = (size_t)(line_end - p);
+
+        /* ">= 15", not "> 15": a bare "Content-Length:" with nothing after it is an
+           invalid value, not an absent header */
+        if (line_len >= 15 && strncasecmp(p, "Content-Length:", 15) == 0) {
+            size_t value;
+            if (parse_content_length_value(p + 15, line_len - 15, &value) != 0) {
+                return -1;
+            }
+            if (!found) {
+                first_value = value;
+                found = true;
+            } else if (value != first_value) {
+                /* Two lengths: which one frames the request is exactly what a
+                   smuggling attempt wants the two ends of a proxy to disagree on */
+                return -2;
+            }
+        }
+
+        p = line_end + 2;
+    }
+
+    if (!found) {
+        return 1;
+    }
+
+    *out_length = first_value;
+    return 0;
 }
 
 /* ============================================================================
@@ -540,11 +727,11 @@ void http_response_free(HttpResponse *resp) {
 /*
  * A CR or LF anywhere in a header field would terminate the line early during
  * serialization, letting the remainder be read as further headers or as the body —
- * response splitting. Everything reaching these setters today is already
+ * response splitting. Everything that reaches these setters is already
  * control-character-checked (validate_url_field) or percent-encoded (str_url_encode)
  * upstream, but that is a property of a handful of call sites rather than of this
  * layer, and it has to be re-verified by hand every time a header is added. Enforce it
- * once, here, so no call site can reintroduce it.
+ * once, here, so no call site can introduce it.
  *
  * Also rejects NULL, which str_dup() below would otherwise be handed.
  */

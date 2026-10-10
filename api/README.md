@@ -9,6 +9,20 @@ UTF-16 surrogate, a malformed or unknown escape) is refused with
 well-formed UTF-8, as JSON has to be, is refused the same way, with
 `400 {"error": "Request body is not valid UTF-8"}`.
 
+A new username, email address or code name must match the server's pattern for it, set in
+auth.conf (`username_pattern`, `email_pattern`, `code_name_pattern`). By default:
+- Usernames and code names are letters, digits and `. _ + -`, with no dot first, last or doubled.
+- Addresses take one conservative real-world shape, like `name@example.com`.
+
+A password, or a secret supplied for a key, must match `password_pattern` or
+`machine_secret_pattern`. Those have no default pattern, though `auth.conf.example` asks 32
+characters of a supplied secret. A value that doesn't match answers `400`, naming the rule.
+
+Patterns apply only when a value is created or set. A username or address stored before a
+pattern was set or changed still signs in, is still found by provisioning, and still gets reset
+and passwordless links. Every value is also checked for length, control characters and
+well-formed UTF-8.
+
 ## Table of Contents
 
 1. [Admin API (Localhost-Only)](#admin-api-localhost-only)
@@ -40,21 +54,44 @@ Returns server status. No authentication required.
 
 ## Admin API (Localhost-Only)
 
-Administrative endpoints for initial setup and tenant management. 
-**Only accessible from localhost** (127.0.0.1 / ::1).
+Administrative endpoints for initial setup and tenant management.
+**Served only on the admin listener**: a Unix socket (`admin_socket`, default
+`./data/admin.sock`, mode 0600), and loopback TCP as well where `admin_port` is set
+(127.0.0.1, and ::1 where the host has it). The public port (`server_port`) refuses them with
+`403 Forbidden`, however local the request.
 
-All endpoints reject connections from non-localhost IPs with `403 Forbidden`.
+The examples call them with the server's own client, run from the server's directory as its
+user. It reads `auth.conf` for the socket (else the port), sends the JSON body from standard
+input with `-` (which keeps a password out of the process list), and prints the answer:
+
+```bash
+./auth-server --admin METHOD PATH [JSON | -]
+```
+
+It exits 0 for a 2xx answer, 1 for any other (its status on standard error), and 2 if the call
+couldn't be made. curl works as well:
+`curl --unix-socket ./data/admin.sock -H 'Content-Type: application/json' -d @body.json http://localhost/api/admin/...`
 
 ### Security Model
 
-- **Access Control**: IP-based (localhost only)
-- **Behind a proxy on the same host**: a request counts as local when it comes from 127.0.0.1
-  or ::1 and carries neither `X-Real-IP` nor `X-Forwarded-For`. A proxy on the same machine
-  must add one of those to everything it forwards (the shipped nginx config sets `X-Real-IP`),
-  or every request it passes on looks local.
-- **Use Case**: Shell access to server host = trusted admin
-- **Transport**: HTTP acceptable (localhost loopback)
-- **Audience**: Server administrators via curl/scripts
+- **Access Control**: a listener of their own. On the socket, its file's mode decides who may
+  connect: 0600 (the default) lets in the server's own user and root, 0660 its group too
+  (`admin_socket_mode`), and each connection's uid is logged. A TCP port lets in any process
+  on the host, whichever user runs it: set `admin_port` only where that's acceptable. Nothing a
+  proxy forwards to the public port reaches these endpoints.
+- **No proxies**: a request carrying `X-Real-IP` or `X-Forwarded-For` is refused, in case a
+  proxy is ever pointed at the admin listener by mistake. Don't publish or forward an admin
+  port.
+- **Not from a browser**: a request whose `Host` isn't `localhost`, `127.0.0.1` or `[::1]`
+  (any port), or that carries `Origin` or any `Sec-Fetch-*` header, is refused. A web page in
+  a browser that can reach the port over loopback (one on the server, or behind an `ssh -L`
+  tunnel) could otherwise use these endpoints, by DNS rebinding even reading the answers.
+  That matters on a TCP port: no browser can open a Unix socket. `./auth-server --admin`,
+  curl and wget send none of those headers.
+- **Use Case**: Shell access to the server host, as the server's user (or root, or the
+  socket's group) = trusted admin
+- **Transport**: HTTP acceptable (a Unix socket, or localhost loopback)
+- **Audience**: Server administrators via `./auth-server --admin`, curl or scripts
 
 ---
 
@@ -94,9 +131,9 @@ Bootstrap the authentication system with initial organization and management UI.
 
 **Error Responses**:
 
-- **403 Forbidden** (not from localhost):
+- **403 Forbidden** (not on the admin listener, or not from this host):
 ```json
-{"error": "Admin endpoints only accessible from localhost"}
+{"error": "Admin endpoints are served only on the admin listener, from this host"}
 ```
 
 - **409 Conflict** (organization exists):
@@ -111,12 +148,16 @@ Bootstrap the authentication system with initial organization and management UI.
 
 **Creates**:
 1. Organization (with provided/default code_name)
-2. Resource Server (code_name: "management_api", address: "http://localhost:PORT/api")
+2. Resource Server (code_name: "management_api", address: "<public base URL>/api")
 3. Client (code_name: "management_ui", type: "public", grant: "authorization_code", universal: true)
-4. Redirect URI ("http://localhost:PORT/callback")
+4. Redirect URI ("<public base URL>/callback")
 5. Client-Resource-Server link (management_ui can access management_api)
 6. User account with hashed password
 7. Organization admin privilege for user
+
+The public base URL comes from `server_host` and `server_port`: `http://localhost:PORT` while
+`server_host` is `localhost`, `https://HOST` otherwise. Set `server_host` before bootstrapping,
+since bootstrap can't be re-run to change these.
 
 The management UI client is created with `require_mfa` off, and should stay that way: the
 console is where users enroll their first MFA method, and `/authorize` turns away a user
@@ -128,12 +169,12 @@ calls, which authenticate by session cookie.
 
 **Example**:
 ```bash
-curl -X POST http://localhost:8080/api/admin/bootstrap \
-  -H "Content-Type: application/json" \
-  -d '{
-    "username": "admin",
-    "password": "MySecurePassword123!"
-  }'
+./auth-server --admin POST /api/admin/bootstrap - <<'EOF'
+{
+  "username": "admin",
+  "password": "MySecurePassword123!"
+}
+EOF
 ```
 
 ---
@@ -173,7 +214,7 @@ Create a new organization (tenant).
 
 **Error Responses**:
 
-- **403 Forbidden** (not from localhost)
+- **403 Forbidden** (not on the admin listener, or not from this host)
 - **409 Conflict** (code_name exists):
 ```json
 {"error": "Organization already exists or creation failed"}
@@ -181,12 +222,12 @@ Create a new organization (tenant).
 
 **Example**:
 ```bash
-curl -X POST http://localhost:8080/api/admin/organizations \
-  -H "Content-Type: application/json" \
-  -d '{
-    "code_name": "aaacorp",
-    "display_name": "Triple A Corporation"
-  }'
+./auth-server --admin POST /api/admin/organizations - <<'EOF'
+{
+  "code_name": "aaacorp",
+  "display_name": "Triple A Corporation"
+}
+EOF
 ```
 
 ---
@@ -210,11 +251,13 @@ Create a user account (not attached to any organization or client).
 
 | Field    | Type   | Required  | Description                          |
 |----------|--------|-----------|--------------------------------------|
-| username | string | No*       | Unique username                      |
-| email    | string | No*       | Email address                        |
+| username | string | Yes       | Unique username                      |
+| email    | string | No        | Email address                        |
 | password | string | Yes       | Password (plaintext, will be hashed) |
 
-*At least one of username or email must be provided.
+The user signs in with the username. An address given here goes on the account unverified, and
+nothing is sent to it, so it can't be signed in with, or take reset links, until the user verifies
+it from their account (in a build with email support).
 
 **Success Response** (200 OK):
 ```json
@@ -227,7 +270,11 @@ Create a user account (not attached to any organization or client).
 
 **Error Responses**:
 
-- **403 Forbidden** (not from localhost)
+- **400 Bad Request** (no username or no password):
+```json
+{"error": "username and password are required"}
+```
+- **403 Forbidden** (not on the admin listener, or not from this host)
 - **409 Conflict** (username or email exists):
 ```json
 {"error": "User already exists or creation failed"}
@@ -235,13 +282,13 @@ Create a user account (not attached to any organization or client).
 
 **Example**:
 ```bash
-curl -X POST http://localhost:8080/api/admin/users \
-  -H "Content-Type: application/json" \
-  -d '{
-    "username": "tiger",
-    "email": "tiger@example.com",
-    "password": "T1g3rzP4$$w0rd"
-  }'
+./auth-server --admin POST /api/admin/users - <<'EOF'
+{
+  "username": "tiger",
+  "email": "tiger@example.com",
+  "password": "T1g3rzP4$$w0rd"
+}
+EOF
 ```
 
 ---
@@ -277,7 +324,7 @@ Grant organization admin privileges to a user.
 
 **Error Responses**:
 
-- **403 Forbidden** (not from localhost)
+- **403 Forbidden** (not on the admin listener, or not from this host)
 - **404 Not Found** (user or organization doesn't exist):
 ```json
 {"error": "User not found"}
@@ -285,12 +332,12 @@ Grant organization admin privileges to a user.
 
 **Example**:
 ```bash
-curl -X POST http://localhost:8080/api/admin/org-admins \
-  -H "Content-Type: application/json" \
-  -d '{
-    "username": "tiger",
-    "org_code_name": "aaacorp"
-  }'
+./auth-server --admin POST /api/admin/org-admins - <<'EOF'
+{
+  "username": "tiger",
+  "org_code_name": "aaacorp"
+}
+EOF
 ```
 
 ---
@@ -300,7 +347,8 @@ curl -X POST http://localhost:8080/api/admin/org-admins \
 Activate a user account. Idempotent — activating an already-active user succeeds silently without touching the row.
 
 Reactivation restores the account, not what deactivation closed: the user signs in again, and
-no earlier session, token or emailed link comes back.
+no earlier session, token or emailed link comes back. That includes one created in the instant a
+deactivation ran, which escaped it: reactivating closes whatever the account holds.
 
 **Request Body**:
 ```json
@@ -322,14 +370,14 @@ no earlier session, token or emailed link comes back.
 
 **Error Responses**:
 - **400** — missing or invalid user_id
-- **403** — not from localhost
+- **403** — not on the admin listener, or not from this host
 - **404** — user not found
 
 **Example**:
 ```bash
-curl -X POST http://localhost:8080/api/admin/users/activate \
-  -H "Content-Type: application/json" \
-  -d '{"user_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"}'
+./auth-server --admin POST /api/admin/users/activate - <<'EOF'
+{"user_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"}
+EOF
 ```
 
 ---
@@ -338,16 +386,38 @@ curl -X POST http://localhost:8080/api/admin/users/activate \
 
 Deactivate a user account. Idempotent — deactivating an already-inactive user succeeds, and closes anything the account still has open.
 
-Deactivated users cannot log in or create new sessions. Deactivation also closes the user's sessions, revokes their refresh and access tokens, and voids any password-reset, passwordless-login or invitation link still outstanding, so reactivating the account later brings none of them back: whoever held them has to sign in again. A resource server that validates access tokens locally against `/.well-known/jwks.json` cannot see deactivation or revocation, because a self-contained token carries no liveness state, and will keep accepting one until its `exp`. Resource servers that need deactivation to take effect immediately should use `POST /introspect`.
+Deactivated users cannot log in or create new sessions. Deactivation also closes the user's sessions, revokes their refresh and access tokens, and voids any password-reset, passwordless-login, invitation or email-verification link still outstanding, so reactivating the account later brings none of them back: whoever held them has to sign in again. A resource server that validates access tokens locally against `/.well-known/jwks.json` cannot see deactivation or revocation, because a self-contained token carries no liveness state, and will keep accepting one until its `exp`. Resource servers that need deactivation to take effect immediately should use `POST /introspect`.
 
-Deactivation doesn't change the password, and a deactivated account can't have it changed: no
-reset link can be requested or used, and nobody can sign in to change it. So whoever knows the
-password can sign in again once the account is reactivated. After a compromise, the order today
-is: deactivate; reset MFA if a factor was stolen; reactivate when the user is ready; the user
-signs in at once, changes the password and enrolls a factor. Someone holding the old password
-can still get in between reactivation and that change. What would close that window is a way to
-set a new password while the account is still deactivated, through an emailed link or one the
-operator hands over; that doesn't exist yet.
+Deactivation doesn't change the password, and the user can't change it while deactivated: no
+reset link can be requested or used, and nobody can sign in. The operator can, with
+`POST /api/admin/users/set-password`. After a compromise, the order is:
+
+1. Deactivate.
+2. Set a new password and give it to the user out of band.
+3. Reset MFA (`POST /api/admin/users/reset-mfa`), since whoever held the account may have
+   enrolled a factor or regenerated recovery codes of their own, and that isn't one stolen.
+4. Check the user's addresses (`GET /api/admin/users/emails`). An address someone added and
+   verified while they held the account still takes password-reset links, and passwordless
+   sign-in links if they turned that on. If one looks suspicious (the user doesn't recognize
+   it, or it was added or verified during the compromise), remove it
+   (`DELETE /api/admin/users/emails`). Nothing needs removing if everything checks out.
+5. If the user administers an organization, check what their session could have left there,
+   which none of the steps above touches. The most dangerous is a redirect URI on a host
+   nobody recognizes. There's no consent screen, so any signed-in user of that client who
+   follows a crafted `/authorize` link sends their code there. Also look for:
+   - resource-server and client keys (their listings show when each was generated);
+   - clients and resource servers nobody asked for, and links between them;
+   - a client's `require_mfa` turned off;
+   - a resource server's `allow_user_provisioning` turned on.
+
+   Remove or revert what was added or changed during the compromise, with another admin's
+   session or an organization key (`POST /api/admin/organization-keys`). The listings don't
+   show dates. In the database, each of those tables records when a row was created and last
+   changed (`created_at`, `updated_at`). With history tables on, earlier versions of changed
+   rows are kept there.
+6. Reactivate.
+
+The old password works at no point in between.
 
 **Request Body**:
 ```json
@@ -369,14 +439,14 @@ operator hands over; that doesn't exist yet.
 
 **Error Responses**:
 - **400** — missing or invalid user_id
-- **403** — not from localhost
+- **403** — not on the admin listener, or not from this host
 - **404** — user not found
 
 **Example**:
 ```bash
-curl -X POST http://localhost:8080/api/admin/users/deactivate \
-  -H "Content-Type: application/json" \
-  -d '{"user_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"}'
+./auth-server --admin POST /api/admin/users/deactivate - <<'EOF'
+{"user_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"}
+EOF
 ```
 
 ---
@@ -413,14 +483,141 @@ the user too, and follow the recovery order under `POST /api/admin/users/deactiv
 
 **Error Responses**:
 - **400** — missing or invalid user_id
-- **403** — not from localhost
+- **403** — not on the admin listener, or not from this host
 - **404** — user not found
 
 **Example**:
 ```bash
-curl -X POST http://localhost:8080/api/admin/users/reset-mfa \
-  -H "Content-Type: application/json" \
-  -d '{"user_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"}'
+./auth-server --admin POST /api/admin/users/reset-mfa - <<'EOF'
+{"user_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"}
+EOF
+```
+
+---
+
+### POST /api/admin/users/set-password
+
+Set a user's password, for an operator handing one over out of band: after a compromise, or
+in a build without email, where there is no reset link to send. No current password is needed,
+and it works whether or not the account is active; it doesn't reactivate one. Any
+password-reset link or invitation still outstanding is voided, since either could set another
+password over this one.
+
+Sessions and tokens are left alone, apart from sessions still waiting on MFA for a user who
+requires it, which close; deactivation is what evicts the rest, so after a compromise
+follow the order under `POST /api/admin/users/deactivate`. The password has the same minimum
+length as any other. Nothing makes the user change it at their next sign-in: give it to them by
+a channel you trust, and they can change it themselves once signed in.
+
+**Request Body**:
+```json
+{
+  "user_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+  "password": "a temporary password"
+}
+```
+
+| Field    | Type   | Required | Description           |
+|----------|--------|----------|-----------------------|
+| user_id  | string | Yes      | 32-character hex UUID |
+| password | string | Yes      | The new password      |
+
+**Success Response** (200 OK):
+```json
+{
+  "message": "Password set"
+}
+```
+
+**Error Responses**:
+- **400** — missing or invalid user_id, missing password, or a password below the minimum length
+- **403** — not on the admin listener, or not from this host
+- **404** — user not found
+
+**Example**:
+```bash
+./auth-server --admin POST /api/admin/users/set-password - <<'EOF'
+{"user_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4", "password": "a temporary password"}
+EOF
+```
+
+---
+
+### GET /api/admin/users/emails
+
+List a user's email addresses, with when each was added and verified, active or not: for
+checking an account during recovery (see the order under `POST /api/admin/users/deactivate`).
+Up to 100; `total` counts them all.
+
+**Request Body**:
+```json
+{
+  "user_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"
+}
+```
+
+**Success Response** (200 OK):
+```json
+{
+  "emails": [
+    {"address": "alice@example.com", "is_verified": true, "is_primary": true,
+     "added_at": "2026-03-02 09:14:00", "verified_at": "2026-03-02 09:20:11"},
+    {"address": "someone@elsewhere.example", "is_verified": true, "is_primary": false,
+     "added_at": "2026-10-04 23:51:07", "verified_at": "2026-10-04 23:52:40"}
+  ],
+  "total": 2
+}
+```
+
+`verified_at` is `null` for an address not verified.
+
+**Error Responses**:
+- **400** — missing or invalid user_id
+- **403** — not on the admin listener, or not from this host
+- **404** — user not found
+
+**Example**:
+```bash
+./auth-server --admin GET /api/admin/users/emails - <<'EOF'
+{"user_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"}
+EOF
+```
+
+---
+
+### DELETE /api/admin/users/emails
+
+Remove an address from a user's account, with any verification or invitation link outstanding
+for it, and every password-reset and passwordless sign-in link outstanding on the account:
+those aren't kept by address, and one sent to the address removed mustn't still work. Works
+while the account is deactivated, so a suspicious address can go before the account is handed
+back. Matching is case-insensitive.
+
+**Request Body**:
+```json
+{
+  "user_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+  "email": "someone@elsewhere.example"
+}
+```
+
+**Success Response** (200 OK):
+```json
+{
+  "message": "Email deleted"
+}
+```
+
+**Error Responses**:
+- **400** — missing or invalid user_id, or missing email
+- **403** — not on the admin listener, or not from this host
+- **404** — user not found, or the user has no such address (so a typo isn't taken for a removal)
+
+**Example**:
+```bash
+./auth-server --admin DELETE /api/admin/users/emails - <<'EOF'
+{"user_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4", "email": "someone@elsewhere.example"}
+EOF
 ```
 
 ---
@@ -429,39 +626,39 @@ curl -X POST http://localhost:8080/api/admin/users/reset-mfa \
 
 ```bash
 # 1. Bootstrap system organization + management UI
-curl -X POST http://localhost:8080/api/admin/bootstrap \
-  -H "Content-Type: application/json" \
-  -d '{
-    "username": "admin",
-    "password": "MySecurePassword123!"
-  }'
+./auth-server --admin POST /api/admin/bootstrap - <<'EOF'
+{
+  "username": "admin",
+  "password": "MySecurePassword123!"
+}
+EOF
 
 # System is now ready - admin can log into management UI at http://localhost:8080/
 
 # 2. Create tenant organization
-curl -X POST http://localhost:8080/api/admin/organizations \
-  -H "Content-Type: application/json" \
-  -d '{
-    "code_name": "aaacorp",
-    "display_name": "Triple A Corporation"
-  }'
+./auth-server --admin POST /api/admin/organizations - <<'EOF'
+{
+  "code_name": "aaacorp",
+  "display_name": "Triple A Corporation"
+}
+EOF
 
 # 3. Create user for tenant
-curl -X POST http://localhost:8080/api/admin/users \
-  -H "Content-Type: application/json" \
-  -d '{
-    "username": "tiger",
-    "email": "tiger@example.com",
-    "password": "T1g3rzP4$$w0rd"
-  }'
+./auth-server --admin POST /api/admin/users - <<'EOF'
+{
+  "username": "tiger",
+  "email": "tiger@example.com",
+  "password": "T1g3rzP4$$w0rd"
+}
+EOF
 
 # 4. Make user admin of organization
-curl -X POST http://localhost:8080/api/admin/org-admins \
-  -H "Content-Type: application/json" \
-  -d '{
-    "username": "tiger",
-    "org_code_name": "aaacorp"
-  }'
+./auth-server --admin POST /api/admin/org-admins - <<'EOF'
+{
+  "username": "tiger",
+  "org_code_name": "aaacorp"
+}
+EOF
 
 # "tiger" can now log into management UI and configure "aaacorp" resources/clients
 ```
@@ -573,6 +770,13 @@ Add redirect URI to client.
 
 Body: `client_id`, `redirect_uri`, `note` (required except note)
 
+The URI must use http or https, and must not contain a fragment (`#`), where the code would
+land and never reach the client's server (RFC 6749 §3.1.2); either answers `400`. URIs
+registered before the fragment rule aren't rechecked. Plain http is allowed to any host: it
+exposes the code and state on the wire to that client's own users only, PKCE keeps a code seen
+there from being redeemed, and it's the client deployer's call. (OAuth 2.1 and RFC 9700 §2.6
+would allow it only to localhost.)
+
 Returns `404` if the client doesn't exist or isn't in an organization the caller administers.
 
 **DELETE /api/admin/client-redirect-uris**
@@ -613,6 +817,12 @@ Unlink client from resource server.
 Query: `client_id`, `resource_server_id` (both required)
 
 Returns `404` if there is no such link, or the client isn't the caller's.
+
+Unlinking also revokes the client's access tokens for that resource server, so linking the pair
+again brings none of them back. The client's refresh tokens stay valid, but can't get a token for a
+server the client is no longer linked to. A resource server that validates access tokens locally
+against `/.well-known/jwks.json` can't see the unlink, and keeps accepting a token until its `exp`;
+`POST /introspect` reports it inactive at once.
 
 ### Resource Server Keys
 
@@ -706,7 +916,7 @@ Used for programmatic access to org-admin endpoints (alternative to session cook
 **SECURITY**: Organization keys grant FULL admin access, same as being an admin-user of an org.
 Not managed through the web UI — use the API directly.
 
-**POST /api/admin/organization-keys** (Localhost-only)
+**POST /api/admin/organization-keys** (Localhost-only: the admin listener)
 Create new organization API key.
 
 Body:
@@ -730,7 +940,7 @@ Response (user-provided secret):
 }
 ```
 
-**GET /api/admin/organization-keys** (Dual-auth)
+**GET /api/admin/organization-keys** (Dual-auth: the admin listener, or an org key)
 List organization API keys.
 
 Query: `organization_code_name` (required), `limit`, `offset`, `is_active`
@@ -742,7 +952,7 @@ Response:
     {
       "key_id": "555e5478e10b41c4a554098765432100",
       "is_active": true,
-      "generated_at": "2026-02-04T10:30:00Z",
+      "generated_at": "2026-02-04 10:30:00",
       "note": "CI/CD pipeline key"
     }
   ],
@@ -750,7 +960,7 @@ Response:
 }
 ```
 
-**DELETE /api/admin/organization-keys** (Dual-auth)
+**DELETE /api/admin/organization-keys** (Dual-auth: the admin listener, or an org key)
 Revoke (soft delete) organization API key.
 
 Query: `id` (required) - Key UUID
@@ -761,10 +971,10 @@ another organization's key, so the endpoint doesn't reveal which keys exist.
 
 ---
 
-**GET /api/admin/list-all-organizations** (Localhost-only)
+**GET /api/admin/list-all-organizations** (Localhost-only: the admin listener)
 List all organizations (unscoped - no user authorization filter).
 
-Auth: Localhost-only
+Auth: Localhost-only, on the admin listener
 
 Query: `limit`, `offset`, `is_active`
 
@@ -794,10 +1004,9 @@ curl "http://localhost:8080/api/admin/resource-servers?organization_id=555e5478e
   -H "X-Org-Key-Secret: xK9mN2pQ7rS4tV6wY8zA1bC3dE5fG7hJ9kL0mN2pQ4rS"
 ```
 
-Organization keys can be managed via:
-- **API**: The endpoints documented above (for scripts, CLI, programmatic access)
-- **Web UI**: Organization detail page in the management console includes a key management section 
-    (for browser-based admin workflows)
+Organization keys are managed through the API alone: created on the admin listener
+(`./auth-server --admin POST /api/admin/organization-keys`), and listed or revoked there or
+with an org key. The management console has no key section.
 
 ---
 
@@ -809,9 +1018,11 @@ Standard OAuth2 endpoints for authentication and token management.
 
 User authentication endpoint. Creates browser session on successful login.
 
-The `username` field accepts either a username or a verified email address
-(when built with `EMAIL_SUPPORT=1`). If the value contains `@`, it is
-treated as an email lookup against verified addresses.
+The `username` field accepts either a username or a verified email address. If the
+value contains `@` (which no username can), it is treated as an email lookup against
+verified addresses. That works in every build: without `EMAIL_SUPPORT`, an address is
+verified by accepting an invitation, and an account provisioned with only an address has
+no username to sign in with.
 
 **Request Body**:
 ```json
@@ -821,7 +1032,7 @@ treated as an email lookup against verified addresses.
 }
 ```
 
-Or with email (requires `EMAIL_SUPPORT`):
+Or with email:
 ```json
 {
   "username": "alice@example.com",
@@ -831,7 +1042,7 @@ Or with email (requires `EMAIL_SUPPORT`):
 
 **Success Response — no MFA** (200 OK):
 ```http
-HTTP/1.1 200 OK
+HTTP/1.0 200 OK
 Set-Cookie: __Host-session=<token>; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=604800
 Content-Type: application/json
 
@@ -840,7 +1051,7 @@ Content-Type: application/json
 
 **Success Response — user requires MFA** (200 OK):
 ```http
-HTTP/1.1 200 OK
+HTTP/1.0 200 OK
 Set-Cookie: __Host-session=<token>; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=604800
 Content-Type: application/json
 
@@ -863,8 +1074,8 @@ When `mfa_required` is true, the session cookie is set but the session's `mfa_co
 ```
 
 **Session Cookie**:
-- Name: `session`
-- Attributes: `HttpOnly; Secure; SameSite=Lax`
+- Name: `__Host-session`
+- Attributes: `HttpOnly; Secure; SameSite=Lax; Path=/`
 - Lifetime: 7 days (604800 seconds)
 - Used for subsequent OAuth2 authorization flow
 
@@ -945,7 +1156,7 @@ code_verifier=<pkce_verifier>
 ```json
 {"error": "invalid_grant", "error_description": "Invalid authorization code"}
 ```
-Note: Replayed codes and genuinely invalid codes return the same error to prevent information disclosure. Replay triggers automatic revocation of the entire token chain.
+Note: Replayed codes and genuinely invalid codes return the same error to prevent information disclosure. Replay triggers automatic revocation of the entire token chain: the access token the first exchange issued (also for a client that issues no refresh tokens), and every refresh and access token issued from it since.
 
 #### Refresh Token Grant
 
@@ -1037,7 +1248,7 @@ resource=<resource_address>
 | client_id     | Yes        | Client UUID (hex-encoded)                              |
 | client_key_id | Yes        | Client key UUID (hex-encoded, identifies which secret) |
 | client_secret | Yes        | Client secret (plaintext)                              |
-| scope         | No         | Requested scopes (space-separated)                     |
+| scope         | No         | Requested scopes (space-separated); not checked against any list, see below |
 | resource      | No         | Resource server address (RFC 8707)                     |
 
 **Success Response** (200 OK):
@@ -1051,6 +1262,9 @@ resource=<resource_address>
 ```
 
 **Notes**:
+- The scope is whatever the client asks for: only its syntax is checked, and no list says
+  which scopes a client may have. Resource servers authorize by `client_id` and `sub`, not
+  by scope (README, Deliberate Tradeoffs).
 - No refresh token issued (machine clients re-authenticate when token expires)
 - Only available for confidential clients with `grant_type=client_credentials`
 - Requires client authentication with client_key_id + client_secret
@@ -1077,7 +1291,7 @@ OAuth2 authorization endpoint (RFC 6749 Section 3.1). Initiates authorization co
 | response_type         | string        | Yes         | Must be "code"                                               |
 | client_id             | string (UUID) | Yes         | Client identifier                                            |
 | redirect_uri          | string        | Yes         | Registered callback URL                                      |
-| scope                 | string        | No          | Space-separated scope list                                   |
+| scope                 | string        | No          | Space-separated scope list; any scope is accepted (see the README's Deliberate Tradeoffs) |
 | state                 | string        | No          | CSRF protection token                                        |
 | code_challenge        | string        | Yes         | PKCE challenge (required for all authorization_code clients) |
 | code_challenge_method | string        | Yes         | Must be "S256"                                               |
@@ -1111,7 +1325,12 @@ Location: /login?mfa_step=1&return=%2Fauthorize%3Fresponse_type%3Dcode%26client_
 Location: https://app.example.com/callback?error=access_denied&error_description=MFA%20required%20but%20no%20methods%20enrolled
 ```
 
-- **400 Bad Request** (invalid client_id, missing redirect_uri, or unregistered redirect_uri — pre-trust, no redirect):
+- **400 Bad Request** (missing response_type, client_id or redirect_uri — pre-trust, no redirect):
+```json
+{"error": "response_type, client_id, and redirect_uri required"}
+```
+
+- **400 Bad Request** (invalid client_id, or a redirect_uri the client hasn't registered — pre-trust, no redirect):
 ```json
 {"error": "Invalid client_id or redirect_uri"}
 ```
@@ -1132,7 +1351,7 @@ Location: https://app.example.com/callback?error=invalid_request&error_descripti
 **Example**:
 ```bash
 # Redirect user to authorization endpoint (after login)
-https://localhost:8080/authorize?response_type=code&client_id=555e5478e10b41c4a554098765432100&redirect_uri=https://app.example.com/callback&scope=read+write&state=xyz789&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256
+http://localhost:8080/authorize?response_type=code&client_id=555e5478e10b41c4a554098765432100&redirect_uri=https://app.example.com/callback&scope=read+write&state=xyz789&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256
 ```
 
 ---
@@ -1232,10 +1451,14 @@ client_secret=<client_secret>         # confidential clients only
 - **A client authentication failure IS reported** (`invalid_client`), per RFC 7009 §2.2.1. A
   confidential client that omits or fumbles its secret is told so, rather than being handed a
   `200 OK` while its token quietly stays alive.
-- **Revoking a refresh token also revokes the access tokens issued under the same grant**
-  (RFC 7009 §2.1). This is what makes a logout an actual logout: without it the refresh token
-  dies while an access token lifted from storage keeps working until it expires. Revoking an
-  *access* token revokes only that token.
+- **A revocation the server couldn't complete answers `503`**: the token may still be live, so
+  retry (RFC 7009 §2.2.1).
+- **Revoking a refresh token revokes its whole grant** (RFC 7009 §2.1): every access token
+  issued under it, the code exchange's and each refresh's, and the grant's refresh tokens,
+  including a newer one when an earlier one is revoked. Tokens that a refresh still in flight
+  makes are refused from their first use. This is what makes a logout an actual
+  logout: without it the refresh token dies while an access token lifted from storage keeps
+  working until it expires. Revoking an *access* token revokes only that token.
 - Only the token's own client can revoke it — the lookup is scoped to the `client_id` supplied.
 - Revocation is idempotent.
 
@@ -1304,7 +1527,7 @@ resource_server_secret=<resource_server_secret>
 |------------|---------|----------------------------------------------------------------|
 | active     | boolean | Always `true` for valid tokens                                 |
 | token_type | string  | Always `"Bearer"`                                              |
-| scope      | string  | Space-separated scopes (optional)                              |
+| scope      | string  | Space-separated scopes (optional), as the client asked for them: not validated |
 | client_id  | string  | Client UUID (hex) that owns the token                          |
 | sub        | string  | User account UUID (hex), omitted for client_credentials tokens |
 | aud        | string  | Resource server UUID (hex, audience)                           |
@@ -1324,6 +1547,7 @@ resource_server_secret=<resource_server_secret>
   - Expired tokens
   - Revoked tokens
   - Tokens whose user, client, resource server or client's organization has been deactivated
+  - Tokens whose client has been unlinked from the resource server, or whose user has been unlinked from the client (a universal client's users need no link)
   - Tokens not belonging to the authenticated resource server
   - Authentication failures
 - This prevents information disclosure per RFC 7662
@@ -1345,7 +1569,9 @@ OpenID Connect UserInfo endpoint (OIDC Core Section 5.3). Returns claims about t
 
 **Security**: Bearer token authentication. The access token (ES256 JWT) must be provided in the Authorization header. The token is verified against the server's current (and prior) signing keys.
 
-Signature and expiry are verified from the JWT itself, but a self-contained token cannot carry revocation state — so the token record is also consulted. A token revoked via `POST /revoke`, auto-revoked by replay-chain revocation, or whose user, client, resource server or client's organization has since been deactivated, is rejected here immediately rather than remaining usable until `exp`. This applies the same liveness predicate as `POST /introspect`.
+Signature and expiry are verified from the JWT itself, but a self-contained token cannot carry revocation state — so the token record is also consulted. A token revoked via `POST /revoke`, auto-revoked by replay-chain revocation, whose user, client, resource server or client's organization has since been deactivated, or whose client or user has since been unlinked, is rejected here immediately rather than remaining usable until `exp`. This applies the same liveness predicate as `POST /introspect`.
+
+**Who can call it**: any holder of a live access token for the user, whatever the token's resource server or scopes. That's the client it was issued to, and any resource server the client sends it to. This is a first-party identity provider (README.md, "Deliberate Tradeoffs"): every resource server is registered by an org admin of this deployment, so one that receives a user's token is trusted with that user's identity. Looking users up through `/api/rs/users` still needs `allow_user_provisioning`; reading the identity of a user whose token it holds doesn't.
 
 **Request**:
 ```http
@@ -1561,9 +1787,10 @@ Add an email address to the current user's account.
 ```
 ```json
 {
-  "error": "Invalid email format"
+  "error": "Email must look like name@example.com: letters, digits and . _ + - before the @, and a domain after it"
 }
 ```
+(The default `email_pattern`'s message; the rules are at the top of this document.)
 
 - **401 Unauthorized** (not authenticated):
 ```json
@@ -1616,6 +1843,8 @@ Remove an email address from the current user's account.
 **Notes**:
 - Idempotent: returns success even if the email was already gone
 - No restriction on deleting primary emails (caller's responsibility)
+- Removing one voids the account's outstanding password-reset and passwordless sign-in links,
+  so one sent to the address removed stops working; ask for a new one at an address kept
 
 **Error Responses**:
 
@@ -1700,7 +1929,9 @@ curl -X POST http://localhost:8080/api/user/emails/set-primary \
 
 ### POST /api/user/password
 
-Change current user's password.
+Change current user's password. Other sessions stay signed in (see the README's Deliberate
+Tradeoffs), except, for a user who requires MFA, sessions that never completed it: opened with the
+old password, they could only submit codes, and they close.
 
 **Authentication**: Session cookie required
 
@@ -1796,17 +2027,17 @@ Change current user's username.
 }
 ```
 
-- **400 Bad Request** (invalid username — empty, contains spaces, or contains @):
+- **400 Bad Request** (the username breaks a rule below; the message names which):
 ```json
 {
-  "error": "Invalid username"
+  "error": "Username may contain only letters, digits and . _ + -, with no dot first, last or doubled"
 }
 ```
 
 **Validation Rules**:
-- Cannot be empty
-- Cannot contain spaces
-- Cannot contain `@` symbol
+- Not empty, at most 100 characters, no spaces, no `@`, well-formed UTF-8
+- Matches `username_pattern`: by default letters, digits and `. _ + -`, with no dot first, last
+  or doubled (the rules at the top of this document)
 - Must be unique (case-insensitive)
 
 **Example**:
@@ -2208,7 +2439,7 @@ Consume a password reset token and set a new password.
 | Field    | Type   | Required | Description          |
 |----------|--------|----------|----------------------|
 | token    | string | Yes      | Password reset token |
-| password | string | Yes      | New password         |
+| password | string | Yes      | New password, up to 1024 bytes |
 
 **Success Response** (200 OK):
 
@@ -2219,7 +2450,9 @@ with a link to the login page.
 - Validates the token (must be valid, unexpired, unused, unrevoked, user active)
 - Marks the token as used
 - Hashes the new password and updates the user account
-- Both steps in a single transaction
+- For a user who requires MFA, closes their sessions that never completed it (opened with the
+  old password, they could only submit codes); other sessions stay
+- All in a single transaction
 
 **Error Response** (400 Bad Request):
 
@@ -2563,6 +2796,15 @@ or
 - Every call (valid or invalid) is logged to the MFA usage audit table.
 - Method must be confirmed (`is_confirmed = 1`) and owned by the authenticated user.
 - On success (`valid: true`), sets `mfa_completed = true` on the session, unblocking `/authorize`.
+- **429** after 5 failed codes in a minute on the method, or 10 in the last 24 hours across all
+  of the user's methods, even for a right code. The daily limit is what keeps guessing out of
+  reach (about a 1% chance a year, against 2% a day with the per-minute limit alone), at the
+  cost that whoever has the password can use up the user's day. A successful code doesn't
+  reset the count. A recovery code still works (`POST /api/user/mfa/recover`), and the
+  operator's `POST /api/admin/users/reset-mfa` clears it.
+- **503** `{"error": "MFA verification is unavailable, try again soon"}` when the attempt can't
+  be recorded. The limits count recorded attempts, so one that can't be recorded gets no
+  verdict, right code or wrong. Retry it; don't take it for a wrong code.
 
 ---
 
@@ -2725,10 +2967,18 @@ All endpoints require RS key authentication and `allow_user_provisioning = true`
 
 - **Authentication**: RS key credentials in JSON body (same key pair used for `/introspect`)
 - **Authorization**: `allow_user_provisioning` must be enabled on the resource server
+- **What it opens**: lookups and provisioning reach every user on the server, not only those
+  linked to this resource server's clients. That's what lets a resource server tell whether
+  someone already has an account before it invites them. It can find anyone by `user_id`,
+  username or verified address, and the reply gives that user's username and all their
+  addresses, verified or not. Each organization's admins (or its org keys) switch provisioning
+  on for their own resource servers, so on a shared server every organization is trusted with
+  that much.
 - **Scope**: Client-user operations scoped to clients linked to the authenticated RS
 - **Content-Type**: `application/json` for all endpoints (including GET)
 - **Audience**: Resource server backends
 - **Browser aliases**: `POST /api/rs/users/lookup` and `POST /api/rs/client-users/list` are provided as POST alternatives to the GET endpoints, since browsers cannot send GET requests with a JSON body. Same handlers, identical behavior.
+- **`is_active: false`**: the server's operator has deactivated the account. It can't sign in, and its sessions and tokens are closed. Users belong to the server, not to any resource server, so nothing a resource server does (provisioning, linking, inviting) reactivates one; send the user to the operator. Provisioning finds a deactivated user like any other and returns them as they are, without an invitation.
 
 ### Auth Fields (required on all endpoints)
 
@@ -2744,10 +2994,27 @@ All endpoints require RS key authentication and `allow_user_provisioning = true`
 
 ### POST /api/rs/users
 
-Find or create a user. If user exists (by username or verified email), returns user info.
-If user doesn't exist, creates user (active, no password), creates invitation token, and optionally sends invitation email.
+Find or create a user. A user is found by username, or by an email address they have verified,
+and their info is returned. A user who doesn't exist is created (active, no password) with an
+invitation to set a password.
+
+An account still pending (provisioned, its invitation not yet accepted) holds its address
+unverified. Provisioning it again finds it instead of creating a second account: on a server
+that can email, by the address alone or with its username; on one that can't, by its username
+(there, an address alone answers 400, as below). A server that can email (see **Invitations** below)
+invites it again: a fresh invitation to the mailbox, which voids the earlier ones once it's
+handed to the email command. One account gets at most five invitations in an hour; past that
+it's returned without one. A server that can't email returns it without an invitation, since
+the link would come back to whichever resource server asked, and the account may be another
+tenant's. A deactivated account is found like any other and never invited (see `is_active`
+above).
 
 At least one of `username` or `email` required. If both are provided and they match two different existing users, returns 409 (ambiguous).
+
+On a server that can't email, a username is required to create an account: an address alone
+only finds an existing account that has verified it, and otherwise answers 400. An account with
+only an address has nothing to sign in with until its invitation is accepted, and there nothing
+issues another once it expires.
 
 **Request Body**:
 ```json
@@ -2783,25 +3050,56 @@ At least one of `username` or `email` required. If both are provided and they ma
     {"address": "jdoe@example.com", "is_verified": false, "is_primary": true}
   ],
   "created": true,
-  "invitation": {
-    "token": "abc123...",
-    "url": "https://host/accept-invitation?token=abc123..."
-  }
+  "invitation": {"emailed": true}
 }
 ```
 
+Or, when the server can't email it:
+```json
+  "invitation": {
+    "emailed": false,
+    "token": "abc123...",
+    "url": "https://host/accept-invitation?token=abc123..."
+  }
+```
+
+**Success Response — a pending user invited again** (200 OK, only on a server that can email):
+the account as it is, with `"created": false`, and `"invitation": {"emailed": true}`.
+
 **Error Responses**:
-- `400` — missing username and email
+- `400` — missing username and email; or, on a server that can't email, an address alone that
+  no account has verified
 - `401` — authentication failed
 - `403` — user provisioning not enabled
 - `409` — ambiguous match (username and email resolve to different users)
 
-**Notes**:
-- The `invitation` object is only present when `created` is `true`
-- When `EMAIL_SUPPORT=1`, an invitation email is automatically sent to the provided email address
-- The invitation URL is always returned regardless of `EMAIL_SUPPORT` so the RS can deliver it through its own channel
-- Created users have no password — they must use the invitation link to set one
-- Invitation tokens expire after `invitation_token_ttl_seconds` (default 72 hours)
+**Invitations**:
+- The `invitation` object is present whenever this call issued one, for a new account or a
+  pending one. Its presence, not `created`, says whether a link went out.
+- Accepting an invitation sets the password and verifies the address it went to. So when the
+  server can email it (built with `EMAIL_SUPPORT=1`, an `email_command` configured, and an
+  address given), it's emailed and never returned: `"emailed": true` once the server has handed
+  it to its email command, which also voids the account's earlier invitations. `"emailed": false`
+  with no link means that hand-off failed, and any earlier link still works; provisioning again
+  sends a fresh one.
+- Otherwise (no email support, no `email_command`, or provisioning by username alone) the link
+  comes back for the resource server to deliver, and only for an account this call created. A
+  server that can't email still verifies the address when the link is accepted, on the resource
+  server's word. Such a deployment trusts every resource server it lets provision with that, so
+  enable provisioning only for ones you trust. A link lost or expired there (they expire after
+  72 hours by default) can't be issued again. The operator sets a password
+  (`POST /api/admin/users/set-password`) and gives it to the user, who signs in with the
+  username; the address stays unverified. To free the address instead, the operator removes it
+  from that account (`DELETE /api/admin/users/emails`).
+- An account created while the server could email, by an address alone, has no username. If the
+  server later runs without email and its link expires, it can't sign in: the operator removes
+  the address (`DELETE /api/admin/users/emails`), and the resource server provisions it again
+  with a username.
+- Invitation tokens expire after `invitation_token_ttl_seconds` (default 72 hours).
+
+**Usernames**: a username is a first-come handle with no proof behind it, and provisioning by
+username returns whichever account holds that name. A resource server that cares who someone is
+should go by an address marked `is_verified`.
 
 **Example**:
 ```bash
@@ -2924,6 +3222,13 @@ curl -X POST http://localhost:8080/api/rs/client-users \
 ### DELETE /api/rs/client-users
 
 Unlink a user from a client. Idempotent — succeeds even if not currently linked.
+
+Unlinking also revokes the user's refresh and access tokens for that client, so linking them again
+brings none of them back, and an authorization code issued before the unlink no longer exchanges;
+the user's sign-in sessions stay. A universal client signs in any user
+without a link, so unlinking a user from one revokes nothing. An access token validated locally
+against `/.well-known/jwks.json` keeps working until its `exp`; `POST /introspect` reports it
+inactive at once.
 
 **Request Body**:
 ```json
@@ -3050,5 +3355,6 @@ token=<invitation_token>&password=<new_password>
 
 **Notes**:
 - Each invitation token can only be used once
+- The password can be up to 1024 bytes
 - On success, the user can log in with username + password or email + password
 - Email verification and password set happen atomically in the same transaction

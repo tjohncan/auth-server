@@ -72,7 +72,9 @@ int mfa_totp_confirm(db_handle_t *db,
 /*
  * Verify TOTP code during authentication
  *
- * Verifies the method belongs to the user, code is valid, and logs the attempt.
+ * Verifies the method belongs to the user, code is valid, and records the
+ * attempt, which the attempt limits count. An attempt that can't be recorded
+ * gets no verdict, valid or not.
  *
  * Parameters:
  *   db               - Database handle
@@ -82,7 +84,8 @@ int mfa_totp_confirm(db_handle_t *db,
  *   source_ip        - Client IP for audit log (optional)
  *   user_agent       - Client user agent for audit log (optional)
  *
- * Returns: 1 if valid, 0 if invalid, -1 on error, -2 if rate limited
+ * Returns: 1 if valid, 0 if invalid, -1 on error, -2 if rate limited,
+ *          -3 if the attempt couldn't be recorded
  */
 int mfa_verify(db_handle_t *db,
                long long user_account_pin,

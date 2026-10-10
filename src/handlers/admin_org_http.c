@@ -25,6 +25,45 @@
  * Authentication Helpers (Dual Auth: Session Cookie OR Organization Key)
  * ========================================================================== */
 
+/* Declared in handlers.h; the localhost org-key endpoints in admin_http.c use it
+ * too. It lives here rather than in common.c so the response helpers there link
+ * without the database layer, which the HTTP and router tests don't need. */
+int try_org_key_auth(const HttpRequest *req, const char *operation,
+                     long long *out_org_pin, long long *out_key_pin) {
+    db_handle_t *db = db_pool_get_connection();
+    if (!db) {
+        log_error("Failed to get database connection for org key auth");
+        return -1;
+    }
+
+    const char *key_id_hex = http_request_get_header(req, "X-Org-Key-Id");
+    const char *key_secret = http_request_get_header(req, "X-Org-Key-Secret");
+
+    if (!key_id_hex || !key_secret) {
+        return -1;
+    }
+
+    unsigned char key_id[16];
+    if (hex_to_bytes(key_id_hex, key_id, 16) != 0) {
+        log_error("Invalid X-Org-Key-Id format");
+        return -1;
+    }
+
+    long long org_pin, key_pin;
+    if (organization_key_verify(db, key_id, key_secret, &org_pin, &key_pin) != 0) {
+        log_error("Organization key verification failed");
+        return -1;
+    }
+
+    log_key_usage(db, KEY_USAGE_ORGANIZATION, key_pin, operation,
+                  http_request_get_client_ip(req, NULL),
+                  http_request_get_user_agent(req));
+
+    *out_org_pin = org_pin;
+    *out_key_pin = key_pin;
+    return 0;
+}
+
 /*
  * Authentication Context
  *
@@ -65,29 +104,10 @@ static int get_authenticated_user_pin(const HttpRequest *req, long long *out_use
         return -1;
     }
 
-    const char *cookie_header = http_request_get_header(req, "Cookie");
-    char *session_token = NULL;
-    if (cookie_header) {
-        session_token = http_cookie_get_value(cookie_header, SESSION_COOKIE_NAME);
-    }
-
-    if (!session_token) {
-        return -1;
-    }
-
     oauth_session_info_t session;
-    int result = oauth_session_get_by_token(db, session_token, &session);
-    OPENSSL_cleanse(session_token, strlen(session_token));
-    free(session_token);
-
-    if (result != 0) {
-        return -1;
-    }
-
-    /* The preference rule; see oauth_session_mfa_pending in db/queries/oauth.h */
-    if (session.user_requires_mfa && !session.mfa_completed) {
-        return -2;
-    }
+    int rc = session_authenticate(req, db, SESSION_MFA_IF_REQUIRED, &session);
+    if (rc == 3) return -2;
+    if (rc != 0) return -1;
 
     *out_user_pin = session.user_account_pin;
     return 0;
@@ -183,8 +203,7 @@ static HttpResponse *require_auth_context(const HttpRequest *req, const char *op
  * Query params (single mode):
  *   id - Organization UUID (hex)
  */
-HttpResponse *admin_get_organizations_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_get_organizations_handler(const HttpRequest *req) {
 
     /* Dual authentication: session OR org key */
     auth_context_t ctx;
@@ -290,8 +309,7 @@ HttpResponse *admin_get_organizations_handler(const HttpRequest *req, const Rout
  *   note         - New note
  *   is_active    - New active status (boolean)
  */
-HttpResponse *admin_update_organization_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_update_organization_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -391,8 +409,7 @@ cleanup:
  * Query params (single mode):
  *   id - Resource server UUID (hex)
  */
-HttpResponse *admin_get_resource_servers_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_get_resource_servers_handler(const HttpRequest *req) {
 
     /* Dual authentication: session OR org key */
     auth_context_t ctx;
@@ -516,8 +533,7 @@ HttpResponse *admin_get_resource_servers_handler(const HttpRequest *req, const R
  *   address        - API base URL (required)
  *   note           - Description (optional)
  */
-HttpResponse *admin_create_resource_server_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_create_resource_server_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -549,7 +565,7 @@ HttpResponse *admin_create_resource_server_handler(const HttpRequest *req, const
     /* Validate input formats */
     char validation_error[256];
 
-    if (validate_code_name(code_name, validation_error, sizeof(validation_error)) != 0) {
+    if (validate_new_code_name(code_name, validation_error, sizeof(validation_error)) != 0) {
         resp = response_json_error(400, validation_error);
         goto cleanup;
     }
@@ -613,8 +629,7 @@ cleanup:
  *   note         - New note
  *   is_active    - New active status
  */
-HttpResponse *admin_update_resource_server_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_update_resource_server_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -712,8 +727,7 @@ cleanup:
  * Query params (list): organization_id, limit, offset, is_active
  * Query params (single): id
  */
-HttpResponse *admin_get_clients_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_get_clients_handler(const HttpRequest *req) {
 
     auth_context_t ctx;
     HttpResponse *auth_err = require_auth_context(req, "get_clients", &ctx);
@@ -844,8 +858,7 @@ HttpResponse *admin_get_clients_handler(const HttpRequest *req, const RouteParam
  *       note, require_mfa, access_token_ttl_seconds, issue_refresh_tokens,
  *       refresh_token_ttl_seconds, maximum_session_seconds, secret_rotation_seconds
  */
-HttpResponse *admin_create_client_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_create_client_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -881,7 +894,7 @@ HttpResponse *admin_create_client_handler(const HttpRequest *req, const RoutePar
     /* Validate input formats */
     char validation_error[256];
 
-    if (validate_code_name(code_name, validation_error, sizeof(validation_error)) != 0) {
+    if (validate_new_code_name(code_name, validation_error, sizeof(validation_error)) != 0) {
         resp = response_json_error(400, validation_error);
         goto cleanup;
     }
@@ -950,8 +963,7 @@ cleanup:
  *       issue_refresh_tokens, refresh_token_ttl_seconds, maximum_session_seconds,
  *       secret_rotation_seconds, is_active
  */
-HttpResponse *admin_update_client_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_update_client_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -1051,8 +1063,7 @@ cleanup:
  * GET /api/admin/client-redirect-uris
  * Query: client_id, limit, offset
  */
-HttpResponse *admin_get_client_redirect_uris_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_get_client_redirect_uris_handler(const HttpRequest *req) {
 
     auth_context_t ctx;
     HttpResponse *auth_err = require_auth_context(req, "get_redirect_uris", &ctx);
@@ -1111,8 +1122,7 @@ HttpResponse *admin_get_client_redirect_uris_handler(const HttpRequest *req, con
  * POST /api/admin/client-redirect-uris
  * Body: client_id, redirect_uri, note
  */
-HttpResponse *admin_create_client_redirect_uri_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_create_client_redirect_uri_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -1176,8 +1186,7 @@ HttpResponse *admin_create_client_redirect_uri_handler(const HttpRequest *req, c
  * DELETE /api/admin/client-redirect-uris
  * Query: client_id, redirect_uri
  */
-HttpResponse *admin_delete_client_redirect_uri_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_delete_client_redirect_uri_handler(const HttpRequest *req) {
 
     auth_context_t ctx;
     HttpResponse *auth_err = require_auth_context(req, "delete_redirect_uri", &ctx);
@@ -1241,8 +1250,7 @@ HttpResponse *admin_delete_client_redirect_uri_handler(const HttpRequest *req, c
  * GET /api/admin/client-resource-servers
  * Query: client_id, limit, offset
  */
-HttpResponse *admin_get_client_resource_servers_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_get_client_resource_servers_handler(const HttpRequest *req) {
 
     auth_context_t ctx;
     HttpResponse *auth_err = require_auth_context(req, "get_client_resource_servers", &ctx);
@@ -1307,8 +1315,7 @@ HttpResponse *admin_get_client_resource_servers_handler(const HttpRequest *req, 
  * GET /api/admin/resource-server-clients
  * Query: resource_server_id, limit, offset
  */
-HttpResponse *admin_get_resource_server_clients_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_get_resource_server_clients_handler(const HttpRequest *req) {
 
     auth_context_t ctx;
     HttpResponse *auth_err = require_auth_context(req, "get_resource_server_clients", &ctx);
@@ -1371,8 +1378,7 @@ HttpResponse *admin_get_resource_server_clients_handler(const HttpRequest *req, 
  * POST /api/admin/client-resource-servers
  * Body: client_id, resource_server_id
  */
-HttpResponse *admin_create_client_resource_server_link_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_create_client_resource_server_link_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -1421,8 +1427,7 @@ HttpResponse *admin_create_client_resource_server_link_handler(const HttpRequest
  * DELETE /api/admin/client-resource-servers
  * Query: client_id, resource_server_id
  */
-HttpResponse *admin_delete_client_resource_server_link_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_delete_client_resource_server_link_handler(const HttpRequest *req) {
 
     auth_context_t ctx;
     HttpResponse *auth_err = require_auth_context(req, "unlink_client_resource_server", &ctx);
@@ -1485,8 +1490,7 @@ HttpResponse *admin_delete_client_resource_server_link_handler(const HttpRequest
  * Response (user-provided secret):
  *   { "id": "uuid", "key_id": "uuid", "message": "Key created successfully" }
  */
-HttpResponse *admin_create_resource_server_key_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_create_resource_server_key_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -1530,7 +1534,13 @@ HttpResponse *admin_create_resource_server_key_handler(const HttpRequest *req, c
     int is_generated = 0;
 
     if (user_secret && strlen(user_secret) > 0) {
-        /* Bring-your-own mode */
+        /* Bring-your-own mode, which machine_secret_pattern governs */
+        if (validate_new_machine_secret(user_secret, validation_error, sizeof(validation_error)) != 0) {
+            free(rs_id_str); free(note);
+            OPENSSL_cleanse(user_secret, strlen(user_secret));
+            free(user_secret);
+            return response_json_error(400, validation_error);
+        }
         secret_to_use = user_secret;
         is_generated = 0;
     } else {
@@ -1605,8 +1615,7 @@ HttpResponse *admin_create_resource_server_key_handler(const HttpRequest *req, c
  *   offset            - Skip N results (default 0)
  *   is_active         - Filter by active status (optional)
  */
-HttpResponse *admin_get_resource_server_keys_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_get_resource_server_keys_handler(const HttpRequest *req) {
 
     auth_context_t ctx;
     HttpResponse *auth_err = require_auth_context(req, "get_resource_server_keys", &ctx);
@@ -1686,8 +1695,7 @@ HttpResponse *admin_get_resource_server_keys_handler(const HttpRequest *req, con
  * Query params:
  *   id - Key UUID (hex, required)
  */
-HttpResponse *admin_delete_resource_server_key_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_delete_resource_server_key_handler(const HttpRequest *req) {
 
     auth_context_t ctx;
     HttpResponse *auth_err = require_auth_context(req, "delete_resource_server_key", &ctx);
@@ -1746,8 +1754,7 @@ HttpResponse *admin_delete_resource_server_key_handler(const HttpRequest *req, c
  * Response (user-provided secret):
  *   { "id": "uuid", "key_id": "uuid", "message": "Key created successfully" }
  */
-HttpResponse *admin_create_client_key_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_create_client_key_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -1788,7 +1795,11 @@ HttpResponse *admin_create_client_key_handler(const HttpRequest *req, const Rout
     int is_generated = 0;
 
     if (user_secret && strlen(user_secret) > 0) {
-        /* Bring-your-own mode */
+        /* Bring-your-own mode, which machine_secret_pattern governs */
+        if (validate_new_machine_secret(user_secret, validation_error, sizeof(validation_error)) != 0) {
+            resp = response_json_error(400, validation_error);
+            goto cleanup;
+        }
         secret_to_use = user_secret;
     } else {
         /* Generate mode */
@@ -1854,8 +1865,7 @@ cleanup:
  *   offset    - Skip N results (default 0)
  *   is_active - Filter by active status (optional)
  */
-HttpResponse *admin_get_client_keys_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_get_client_keys_handler(const HttpRequest *req) {
 
     auth_context_t ctx;
     HttpResponse *auth_err = require_auth_context(req, "get_client_keys", &ctx);
@@ -1935,8 +1945,7 @@ HttpResponse *admin_get_client_keys_handler(const HttpRequest *req, const RouteP
  * Query params:
  *   id - Key UUID (hex, required)
  */
-HttpResponse *admin_delete_client_key_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_delete_client_key_handler(const HttpRequest *req) {
 
     auth_context_t ctx;
     HttpResponse *auth_err = require_auth_context(req, "delete_client_key", &ctx);

@@ -25,6 +25,11 @@ struct db_handle_t {
     db_type_t type;
     void *connection;  /* sqlite3* or PGconn* */
     char error_msg[512];
+
+    /* What must hold on the session before it runs anything (db_set_session_hook) */
+    db_session_hook_t session_hook;
+    int session_ready;    /* the hook has held since the last (re)connect */
+    int in_session_hook;  /* the hook's own statements run ungated */
 };
 
 /*
@@ -51,7 +56,7 @@ struct db_stmt_t {
     char *pg_query;             /* SQL string (duped from prepare) */
     char **pg_param_values;     /* Parameter value strings */
     int *pg_param_lengths;      /* Parameter lengths */
-    int *pg_param_formats;      /* 0=text per param */
+    int *pg_param_formats;      /* Per param: 0 text, 1 binary (a blob's bytes) */
     char **pg_param_bufs;       /* Allocated buffers for int/blob conversions (to free) */
     PGresult *pg_result;        /* Current result set from PQexecParams */
     int pg_current_row;         /* Cursor position for step() emulation */
@@ -59,6 +64,7 @@ struct db_stmt_t {
     int pg_executed;            /* Has step() been called? */
     unsigned char *pg_blob_buf; /* Decoded blob buffer (reused per column_blob call) */
     size_t pg_blob_len;         /* Length of last decoded blob */
+    int pg_blob_col;            /* The column it was decoded from, this row (-1: none) */
 #endif
 };
 
@@ -605,13 +611,31 @@ static int sqlite_finalize(db_stmt_t *stmt) {
 #define PG_UUID_OID    2950
 
 /*
+ * Why a statement or connection failed, for the log line, as sqlite3_errmsg
+ * gives SQLite's. A statement's primary message only: its DETAIL can quote key
+ * values. Else the connection's message, which spans lines; it's folded onto one.
+ */
+static void pg_reason(const PGresult *result, const PGconn *conn, char *out, size_t size) {
+    const char *msg = result ? PQresultErrorField(result, PG_DIAG_MESSAGE_PRIMARY) : NULL;
+    if (!msg) msg = conn ? PQerrorMessage(conn) : "";
+    size_t n = 0;
+    for (const char *c = msg; *c && n + 1 < size; c++) {
+        out[n++] = (*c == '\n' || *c == '\r') ? ' ' : *c;
+    }
+    while (n > 0 && out[n - 1] == ' ') n--;
+    out[n] = '\0';
+}
+
+/*
  * Connect to PostgreSQL database
  */
 static int pg_connect(db_handle_t *db, const char *connection_string) {
     PGconn *conn = PQconnectdb(connection_string);
     if (PQstatus(conn) != CONNECTION_OK) {
-        str_copy(db->error_msg, sizeof(db->error_msg),
-                 "PostgreSQL connection failed");
+        char reason[384];
+        pg_reason(NULL, conn, reason, sizeof(reason));
+        snprintf(db->error_msg, sizeof(db->error_msg),
+                 "PostgreSQL connection failed: %s", reason);
         log_error("%s", db->error_msg);
         PQfinish(conn);
         return -1;
@@ -663,8 +687,10 @@ static int pg_reconnect(db_handle_t *db) {
     PQreset(conn);
 
     if (PQstatus(conn) != CONNECTION_OK) {
-        str_copy(db->error_msg, sizeof(db->error_msg),
-                 "PostgreSQL reconnect failed");
+        char reason[384];
+        pg_reason(NULL, conn, reason, sizeof(reason));
+        snprintf(db->error_msg, sizeof(db->error_msg),
+                 "PostgreSQL reconnect failed: %s", reason);
         log_error("%s", db->error_msg);
         return -1;
     }
@@ -677,7 +703,29 @@ static int pg_reconnect(db_handle_t *db) {
     }
     PQclear(tz_result);
 
+    /* A new session: the hook holds again before it runs anything else */
+    db->session_ready = 0;
+
     log_info("PostgreSQL reconnected successfully");
+    return 0;
+}
+
+/*
+ * The session hook must hold before this connection runs a statement: once at
+ * connect, and again after every reconnect. Returns 0, or -1 if it doesn't (the
+ * statement isn't run).
+ */
+static int pg_session_gate(db_handle_t *db) {
+    if (!db->session_hook || db->session_ready || db->in_session_hook) return 0;
+    db->in_session_hook = 1;
+    int rc = db->session_hook(db);
+    db->in_session_hook = 0;
+    db->session_ready = rc == 0;
+    if (rc != 0) {
+        str_copy(db->error_msg, sizeof(db->error_msg),
+                 "This connection's session doesn't hold what it must to run statements");
+        return -1;
+    }
     return 0;
 }
 
@@ -685,13 +733,16 @@ static int pg_reconnect(db_handle_t *db) {
  * Execute SQL directly (no parameters, no result set)
  */
 static int pg_execute(db_handle_t *db, const char *sql) {
+    if (pg_session_gate(db) != 0) return -1;
     PGconn *conn = (PGconn *)db->connection;
     PGresult *result = PQexec(conn, sql);
     ExecStatusType status = PQresultStatus(result);
 
     if (status != PGRES_COMMAND_OK && status != PGRES_TUPLES_OK) {
-        str_copy(db->error_msg, sizeof(db->error_msg),
-                 "PostgreSQL execute failed");
+        char reason[384];
+        pg_reason(result, conn, reason, sizeof(reason));
+        snprintf(db->error_msg, sizeof(db->error_msg),
+                 "PostgreSQL execute failed: %s", reason);
         log_error("%s", db->error_msg);
         PQclear(result);
         if (PQstatus(conn) == CONNECTION_BAD)
@@ -707,13 +758,16 @@ static int pg_execute(db_handle_t *db, const char *sql) {
  * Execute SQL and collect results into db_result_t
  */
 static int pg_query(db_handle_t *db, const char *sql, db_result_t **out) {
+    if (pg_session_gate(db) != 0) return -1;
     PGconn *conn = (PGconn *)db->connection;
     PGresult *pg_result = PQexec(conn, sql);
     ExecStatusType status = PQresultStatus(pg_result);
 
     if (status != PGRES_TUPLES_OK) {
-        str_copy(db->error_msg, sizeof(db->error_msg),
-                 "PostgreSQL query failed");
+        char reason[384];
+        pg_reason(pg_result, conn, reason, sizeof(reason));
+        snprintf(db->error_msg, sizeof(db->error_msg),
+                 "PostgreSQL query failed: %s", reason);
         log_error("%s", db->error_msg);
         PQclear(pg_result);
         if (PQstatus(conn) == CONNECTION_BAD)
@@ -869,6 +923,7 @@ static int pg_prepare(db_handle_t *db, db_stmt_t **stmt_out, const char *sql) {
     stmt->pg_result = NULL;
     stmt->pg_blob_buf = NULL;
     stmt->pg_blob_len = 0;
+    stmt->pg_blob_col = -1;
 
     /* Duplicate SQL string */
     stmt->pg_query = str_dup(sql);
@@ -994,9 +1049,11 @@ static int pg_bind_int64(db_stmt_t *stmt, int index, long long value) {
 }
 
 /*
- * Bind blob parameter
- * 16-byte values are formatted as UUID strings (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
- * All other lengths are hex-encoded for bytea (\x prefix + hex pairs)
+ * Bind blob parameter: the bytes themselves, in binary format, which PostgreSQL
+ * reads as whatever type the statement gives the parameter: a uuid takes its 16
+ * bytes, a bytea any number. In text format the type would have to be guessed
+ * from the length, and a 16-byte bytea guessed to be a uuid would be stored as
+ * the uuid's 36 characters.
  */
 static int pg_bind_blob(db_stmt_t *stmt, int index, const void *value, int len) {
     int idx = index - 1;
@@ -1004,43 +1061,23 @@ static int pg_bind_blob(db_stmt_t *stmt, int index, const void *value, int len) 
         log_error("Parameter index %d out of range (1-%d)", index, stmt->param_count);
         return -1;
     }
-
-    const unsigned char *bytes = (const unsigned char *)value;
-    char *buf;
-
-    if (len == 16) {
-        /* UUID format: 8-4-4-4-12 with dashes (36 chars + null) */
-        buf = malloc(37);
-        if (!buf) {
-            log_error("Failed to allocate UUID param buffer");
-            return -1;
-        }
-        snprintf(buf, 37,
-                 "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
-                 bytes[0], bytes[1], bytes[2], bytes[3],
-                 bytes[4], bytes[5], bytes[6], bytes[7],
-                 bytes[8], bytes[9], bytes[10], bytes[11],
-                 bytes[12], bytes[13], bytes[14], bytes[15]);
-    } else {
-        /* Bytea hex format: \x prefix + 2 hex chars per byte + null */
-        size_t hex_len = 2 + (len * 2) + 1;
-        buf = malloc(hex_len);
-        if (!buf) {
-            log_error("Failed to allocate blob param buffer");
-            return -1;
-        }
-        buf[0] = '\\';
-        buf[1] = 'x';
-        for (int i = 0; i < len; i++) {
-            snprintf(buf + 2 + (i * 2), 3, "%02x", bytes[i]);
-        }
+    if (len < 0 || (len > 0 && !value)) {
+        log_error("Invalid blob for parameter %d", index);
+        return -1;
     }
+
+    char *buf = malloc(len > 0 ? (size_t)len : 1);
+    if (!buf) {
+        log_error("Failed to allocate blob param buffer");
+        return -1;
+    }
+    if (len > 0) memcpy(buf, value, (size_t)len);
 
     free(stmt->pg_param_bufs[idx]);
     stmt->pg_param_bufs[idx] = buf;
     stmt->pg_param_values[idx] = buf;
-    stmt->pg_param_lengths[idx] = 0;
-    stmt->pg_param_formats[idx] = 0;
+    stmt->pg_param_lengths[idx] = len;
+    stmt->pg_param_formats[idx] = 1;  /* Binary format */
     stmt->bound_count++;
     return 0;
 }
@@ -1078,6 +1115,7 @@ static int pg_step(db_stmt_t *stmt) {
 
     if (!stmt->pg_executed) {
         /* First call: execute the query */
+        if (pg_session_gate(stmt->db) != 0) return -1;
         PGconn *conn = (PGconn *)stmt->db->connection;
 
         stmt->pg_result = PQexecParams(conn,
@@ -1092,8 +1130,10 @@ static int pg_step(db_stmt_t *stmt) {
         ExecStatusType status = PQresultStatus(stmt->pg_result);
 
         if (status != PGRES_TUPLES_OK && status != PGRES_COMMAND_OK) {
-            str_copy(stmt->error_msg, sizeof(stmt->error_msg),
-                     "PostgreSQL step failed");
+            char reason[384];
+            pg_reason(stmt->pg_result, conn, reason, sizeof(reason));
+            snprintf(stmt->error_msg, sizeof(stmt->error_msg),
+                     "PostgreSQL step failed: %s", reason);
             log_error("%s", stmt->error_msg);
             PQclear(stmt->pg_result);
             stmt->pg_result = NULL;
@@ -1125,6 +1165,7 @@ static int pg_step(db_stmt_t *stmt) {
     free(stmt->pg_blob_buf);
     stmt->pg_blob_buf = NULL;
     stmt->pg_blob_len = 0;
+    stmt->pg_blob_col = -1;
 
     stmt->pg_current_row++;
     if (stmt->pg_current_row < stmt->pg_total_rows) {
@@ -1146,6 +1187,7 @@ static int pg_reset(db_stmt_t *stmt) {
     free(stmt->pg_blob_buf);
     stmt->pg_blob_buf = NULL;
     stmt->pg_blob_len = 0;
+    stmt->pg_blob_col = -1;
 
     pg_clear_params(stmt);
 
@@ -1227,10 +1269,12 @@ static const void *pg_column_blob(db_stmt_t *stmt, int col) {
     if (!stmt->pg_result || stmt->pg_current_row < 0) return NULL;
     if (PQgetisnull(stmt->pg_result, stmt->pg_current_row, col)) return NULL;
 
-    /* Free previous decode */
+    /* Free previous decode; what this one gives is this column's (a failed one
+       leaves its length 0) */
     free(stmt->pg_blob_buf);
     stmt->pg_blob_buf = NULL;
     stmt->pg_blob_len = 0;
+    stmt->pg_blob_col = col;
 
     Oid col_type = PQftype(stmt->pg_result, col);
     const char *val = PQgetvalue(stmt->pg_result, stmt->pg_current_row, col);
@@ -1275,19 +1319,33 @@ static const void *pg_column_blob(db_stmt_t *stmt, int col) {
 }
 
 /*
- * Get blob column byte length (from last column_blob decode)
+ * Get a column's length in bytes, as SQLite's does: the column asked for, read
+ * before or after its blob or any other column's. PostgreSQL sends a uuid or
+ * bytea as text, so its length in bytes is worked out from that text, leaving
+ * the decoded blob alone: a uuid is 16, hex bytea ("\x", two digits a byte) is
+ * half its digits, and the older escape form is decoded for its length.
+ * Straight after db_column_blob on the same column, it's what that read gave,
+ * 0 if it failed.
  */
 static int pg_column_bytes(db_stmt_t *stmt, int col) {
     if (!stmt->pg_result || stmt->pg_current_row < 0) return 0;
     if (PQgetisnull(stmt->pg_result, stmt->pg_current_row, col)) return 0;
 
-    /* If we have a decoded blob, return its length */
-    if (stmt->pg_blob_buf) {
-        return (int)stmt->pg_blob_len;
-    }
+    if (stmt->pg_blob_col == col) return (int)stmt->pg_blob_len;
 
-    /* Fallback: raw value length */
-    return PQgetlength(stmt->pg_result, stmt->pg_current_row, col);
+    int len = PQgetlength(stmt->pg_result, stmt->pg_current_row, col);
+    Oid col_type = PQftype(stmt->pg_result, col);
+    if (col_type == PG_UUID_OID) return 16;
+    if (col_type == PG_BYTEA_OID) {
+        const char *val = PQgetvalue(stmt->pg_result, stmt->pg_current_row, col);
+        if (len >= 2 && val[0] == '\\' && val[1] == 'x') return (len - 2) / 2;
+        size_t decoded_len = 0;
+        unsigned char *decoded = PQunescapeBytea((const unsigned char *)val, &decoded_len);
+        if (!decoded) return 0;
+        PQfreemem(decoded);
+        return (int)decoded_len;
+    }
+    return len;
 }
 
 /*
@@ -1424,6 +1482,19 @@ int db_disconnect(db_handle_t *db) {
 
     free(db);
     return result;
+}
+
+int db_set_session_hook(db_handle_t *db, db_session_hook_t hook) {
+    if (!db || !hook) {
+        log_error("Invalid arguments to db_set_session_hook");
+        return -1;
+    }
+    db->session_hook = hook;
+    db->in_session_hook = 1;
+    int rc = hook(db);
+    db->in_session_hook = 0;
+    db->session_ready = rc == 0;
+    return rc;
 }
 
 int db_execute_trusted(db_handle_t *db, const char *sql, ...) {
@@ -1716,6 +1787,10 @@ int db_bind_null(db_stmt_t *stmt, int index) {
             log_error("Database backend not compiled: %d", stmt->type);
             return -1;
     }
+}
+
+int db_bind_text_or_null(db_stmt_t *stmt, int index, const char *value) {
+    return value ? db_bind_text(stmt, index, value, -1) : db_bind_null(stmt, index);
 }
 
 int db_step(db_stmt_t *stmt) {

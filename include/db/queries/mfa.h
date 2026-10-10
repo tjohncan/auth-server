@@ -77,6 +77,9 @@ typedef struct {
     int hash_iterations;
     int is_active;
     char generated_at[32];
+    char method[16];                /* its unused codes' hashing method; "" if they name none */
+    int codes_left;                 /* 0 once every code is used (the cleaner purges used
+                                       ones, so a set can end up with none at all) */
 } recovery_code_set_t;
 
 /* Create recovery code set with hashed codes
@@ -95,7 +98,8 @@ int recovery_code_set_get_active(db_handle_t *db,
                                   long long user_account_pin,
                                   recovery_code_set_t *out_set);
 
-/* Verify recovery code (marks as used if valid)
+/* Verify recovery code (marks as used if valid). Checking and marking are one
+ * statement, so a code submitted twice at once is accepted once.
  * Returns: 1 if valid, 0 if invalid, -1 on error */
 int recovery_code_verify(db_handle_t *db,
                          long long user_account_pin,
@@ -137,14 +141,15 @@ int mfa_reset_user(db_handle_t *db, const unsigned char *user_id);
  * Logging
  * ========================================================================== */
 
-/* Log MFA authentication attempt (fire-and-forget)
+/* Record an MFA attempt: the rows the attempt limits count
  * user_mfa_pin: which method was used
  * success: 1 if code was valid, 0 if invalid
- * Logs warning on failure but never propagates errors. */
-void mfa_log_usage(db_handle_t *db,
-                   long long user_mfa_pin,
-                   int success,
-                   const char *source_ip,
-                   const char *user_agent);
+ * Returns: 0, or -1 if it wasn't recorded (logged): mfa_verify then refuses to
+ * answer the attempt, so no attempt goes uncounted. */
+int mfa_log_usage(db_handle_t *db,
+                  long long user_mfa_pin,
+                  int success,
+                  const char *source_ip,
+                  const char *user_agent);
 
 #endif /* DB_QUERIES_MFA_H */

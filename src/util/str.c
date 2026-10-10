@@ -1,4 +1,5 @@
 #include "util/str.h"
+#include "util/json.h"
 #include <string.h>  /* for strlen */
 #include <stdlib.h>  /* for malloc, free */
 #include <ctype.h>   /* for tolower */
@@ -197,21 +198,19 @@ int str_url_decode(char *dst, size_t dst_size, const char *src) {
     const char *p = src;
 
     while (*p && written < dst_size - 1) {
-        if (*p == '%' && p[1] && p[2]) {
-            /* Decode %XX hex sequence */
-            char hex[3] = {p[1], p[2], '\0'};
-            char *end;
-            long val = strtol(hex, &end, 16);
+        /* Exactly two hex digits after the '%' (RFC 3986 pct-encoded). Checked digit
+           by digit rather than with strtol, which also takes a sign or leading
+           whitespace, so "%-1" would decode to 0xFF and "% 9" to a tab. Anything
+           else falls through and is copied literally. */
+        if (*p == '%' && isxdigit((unsigned char)p[1]) && isxdigit((unsigned char)p[2])) {
+            int hi = isdigit((unsigned char)p[1]) ? p[1] - '0' : tolower((unsigned char)p[1]) - 'a' + 10;
+            int lo = isdigit((unsigned char)p[2]) ? p[2] - '0' : tolower((unsigned char)p[2]) - 'a' + 10;
+            int val = hi * 16 + lo;
 
-            if (end == hex + 2) {
-                /* Reject NULL byte injection (%00) */
-                if (val == 0) return -1;
-                dst[written++] = (char)val;
-                p += 3;
-            } else {
-                /* Invalid hex - copy literally */
-                dst[written++] = *p++;
-            }
+            /* Reject NULL byte injection (%00) */
+            if (val == 0) return -1;
+            dst[written++] = (char)val;
+            p += 3;
         } else if (*p == '+') {
             /* Convert '+' to space (form encoding) */
             dst[written++] = ' ';
@@ -298,4 +297,31 @@ void *memmem_nocase(const void *haystack, size_t haystack_len,
         if (j == needle_len) return (void *)(h + i);
     }
     return NULL;
+}
+
+size_t str_utf8_sanitize(char *dst, size_t dst_size, const char *src) {
+    if (!dst || dst_size == 0) return 0;
+    const unsigned char *s = (const unsigned char *)(src ? src : "");
+    size_t out = 0;
+
+    while (*s) {
+        /* The length the lead byte claims (a stray one claims one), and whether
+           that many bytes are there and form a character */
+        size_t n = *s < 0xC0 ? 1 : *s < 0xE0 ? 2 : *s < 0xF0 ? 3 : 4;
+        size_t have = 0;
+        while (have < n && s[have]) have++;
+        int whole = have == n && json_utf8_valid((const char *)s, n);
+        size_t take = whole ? n : 1;
+
+        if (out + take > dst_size - 1) break;
+        if (whole) {
+            memcpy(dst + out, s, n);
+        } else {
+            dst[out] = '?';
+        }
+        out += take;
+        s += take;
+    }
+    dst[out] = '\0';
+    return out;
 }

@@ -20,22 +20,6 @@
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
 
-/*
- * Apply max_access_token_ttl_seconds to a client's configured TTL.
- *
- * Enforced here, at issuance, rather than only when a client is saved, so a
- * client row saved while the cap was higher is covered too. The admin endpoints
- * also refuse over-cap values so the stored number isn't a lie.
- * Every grant calls this straight after oauth_client_lookup, so exp, the DB
- * expiry and expires_in all see the same value.
- */
-static void cap_access_token_ttl(oauth_client_info_t *client) {
-    int cap = g_config ? g_config->max_access_token_ttl_seconds : 0;
-    if (cap > 0 && client->access_token_ttl_seconds > cap) {
-        client->access_token_ttl_seconds = cap;
-    }
-}
-
 /* Cleanse and free a heap-allocated sensitive string */
 static void cleanse_free(char *s) {
     if (s) {
@@ -273,6 +257,15 @@ int oauth_authorize(db_handle_t *db,
         log_error("Only S256 PKCE method is supported, got: %s", code_challenge_method);
         return -1;
     }
+    /* An S256 challenge is a SHA-256 in base64url: 43 of A-Z a-z 0-9 - _ (RFC 7636
+       4.2). Any other can never be met, so it's refused here, not stored with a code
+       no verifier redeems (or, ill-formed text, refused by PostgreSQL as it's stored) */
+    if (strlen(code_challenge) != 43 ||
+        strspn(code_challenge, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+                               "0123456789-_") != 43) {
+        log_error("PKCE code_challenge isn't an S256 challenge (43 base64url characters)");
+        return -1;
+    }
 
     /* Step 9: Get signing key for auth request JWTs */
     signing_key_t *auth_signing_key = NULL;
@@ -390,6 +383,81 @@ int oauth_authorize(db_handle_t *db,
     return 0;
 }
 
+/*
+ * Sign and store the access token a grant ends in, and put it in the response.
+ *
+ * The grant passes in what it decided: the user the token acts for (NULL and 0
+ * for client_credentials, whose subject is the client, RFC 9068 Section 2.2),
+ * the code or refresh token it descends from (so a replay of that revokes it),
+ * and its scope. What must be the same for every grant is settled here: the
+ * issuer, and the lifetime. That is the client's TTL capped by
+ * max_access_token_ttl_seconds, applied at issuance rather than only when a
+ * client is saved, so a client saved while the cap was higher is covered too.
+ * The JWT's exp, the row's expiry and expires_in are all that one number.
+ *
+ * Fills out_response's access_token, expires_in and token_type. The caller keeps
+ * the signing key and the transaction.
+ */
+static int issue_access_token(db_handle_t *db, const signing_key_t *signing_key,
+                              const oauth_client_info_t *client,
+                              long long resource_server_pin,
+                              const unsigned char *resource_server_id,
+                              const unsigned char *user_account_id,
+                              long long user_account_pin,
+                              const unsigned char *authorization_code_id,
+                              const unsigned char *refresh_token_id,
+                              const char *scope,
+                              oauth_token_response_t *out_response) {
+    int ttl = client->access_token_ttl_seconds;
+    int cap = g_config->max_access_token_ttl_seconds;
+    if (cap > 0 && ttl > cap) ttl = cap;
+
+    /* Claims carry UUIDs, not internal PINs */
+    char sub_hex[33], aud_hex[33], client_id_hex[33];
+    bytes_to_hex(user_account_id ? user_account_id : client->id, 16, sub_hex, sizeof(sub_hex));
+    bytes_to_hex(resource_server_id, 16, aud_hex, sizeof(aud_hex));
+    bytes_to_hex(client->id, 16, client_id_hex, sizeof(client_id_hex));
+
+    jwt_claims_t claims = {0};
+    str_copy(claims.iss, sizeof(claims.iss), g_config->public_base_url);
+    str_copy(claims.sub, sizeof(claims.sub), sub_hex);
+    str_copy(claims.aud, sizeof(claims.aud), aud_hex);
+    str_copy(claims.client_id, sizeof(claims.client_id), client_id_hex);
+    str_copy(claims.scope, sizeof(claims.scope), scope);
+    claims.iat = time(NULL);
+    claims.exp = claims.iat + ttl;
+
+    char *access_token = malloc(JWT_MAX_TOKEN_LENGTH);
+    if (!access_token) {
+        log_error("Failed to allocate access token");
+        return -1;
+    }
+
+    const char *active_private = signing_key_active_private(signing_key);
+    char kid[SIGNING_KEY_KID_MAX];
+    if (signing_key_active_kid(signing_key, active_private, kid, sizeof(kid)) != 0 ||
+        jwt_encode_es256(&claims, active_private, kid,
+                         access_token, JWT_MAX_TOKEN_LENGTH) != 0) {
+        OPENSSL_cleanse(access_token, JWT_MAX_TOKEN_LENGTH); free(access_token);
+        log_error("Failed to generate ES256 JWT access token");
+        return -1;
+    }
+
+    unsigned char access_token_id[16];
+    if (oauth_token_create_access(db, resource_server_pin, client->pin, user_account_pin,
+                                   authorization_code_id, refresh_token_id,
+                                   access_token, scope, ttl, access_token_id) != 0) {
+        OPENSSL_cleanse(access_token, JWT_MAX_TOKEN_LENGTH); free(access_token);
+        log_error("Failed to create access token");
+        return -1;
+    }
+
+    out_response->access_token = access_token;
+    out_response->expires_in = ttl;
+    out_response->token_type = "Bearer";
+    return 0;
+}
+
 int oauth_exchange_authorization_code(db_handle_t *db,
                                        const unsigned char *client_id,
                                        const char *code,
@@ -410,7 +478,6 @@ int oauth_exchange_authorization_code(db_handle_t *db,
         log_error("Client not found");
         return -1;
     }
-    cap_access_token_ttl(&client);
 
     /* Step 1b: Validate grant type */
     if (strcmp(client.grant_type, "authorization_code") != 0) {
@@ -550,6 +617,27 @@ int oauth_exchange_authorization_code(db_handle_t *db,
         return -1;
     }
 
+    /* Step 9b: Verify user is still linked to this client (skipped for universal
+     * clients). /authorize checked when it issued the code, but an unlink in the
+     * code's lifetime revokes what the pair holds, and a grant made after it
+     * mustn't follow; refresh checks the same at every use. */
+    if (!client.is_universal) {
+        int link_rc = oauth_client_user_check(db, client.pin, user_account_pin);
+        if (link_rc < 0) {
+            signing_key_free(signing_key);
+            db_execute_trusted(db, "ROLLBACK");
+            log_error("Failed to check client_user link");
+            return -1;
+        }
+        if (link_rc == 0) {
+            signing_key_free(signing_key);
+            db_execute_trusted(db, "ROLLBACK");
+            log_info("User not linked to client: client=%s, user_pin=%lld",
+                     client.code_name, user_account_pin);
+            return -1;
+        }
+    }
+
     /* Use JWT claims for token creation (cryptographically verified) */
 
     /* Step 10: Resolve resource server (RFC 8707) */
@@ -563,74 +651,32 @@ int oauth_exchange_authorization_code(db_handle_t *db,
         return -1;
     }
 
-    /* Step 11: Build JWT claims for access token (UUIDs, not internal PINs) */
-    char user_id_hex[33], rs_id_hex[33], client_id_hex[33];
-    bytes_to_hex(auth_claims.user_account_id, 16, user_id_hex, sizeof(user_id_hex));
-    bytes_to_hex(resource_server_id, 16, rs_id_hex, sizeof(rs_id_hex));
-    bytes_to_hex(client.id, 16, client_id_hex, sizeof(client_id_hex));
-
-    jwt_claims_t claims = {0};
-    if (strcmp(g_config->host, "localhost") == 0)
-        snprintf(claims.iss, sizeof(claims.iss), "http://localhost:%d", g_config->port);
-    else
-        snprintf(claims.iss, sizeof(claims.iss), "https://%s", g_config->host);
-    str_copy(claims.sub, sizeof(claims.sub), user_id_hex);
-    str_copy(claims.aud, sizeof(claims.aud), rs_id_hex);
-    str_copy(claims.client_id, sizeof(claims.client_id), client_id_hex);
-    str_copy(claims.scope, sizeof(claims.scope), auth_claims.scope);
-    claims.iat = time(NULL);
-    claims.exp = claims.iat + client.access_token_ttl_seconds;
-
-    char *access_token = malloc(JWT_MAX_TOKEN_LENGTH);
-    if (!access_token) {
-        signing_key_free(signing_key);
-        db_execute_trusted(db, "ROLLBACK");
-        log_error("Failed to allocate access token");
-        return -1;
-    }
-
-    const char *active_private = signing_key_active_private(signing_key);
-    char kid[SIGNING_KEY_KID_MAX];
-    if (signing_key_active_kid(signing_key, active_private, kid, sizeof(kid)) != 0 ||
-        jwt_encode_es256(&claims, active_private, kid,
-                         access_token, JWT_MAX_TOKEN_LENGTH) != 0) {
-        OPENSSL_cleanse(access_token, JWT_MAX_TOKEN_LENGTH); free(access_token);
-        signing_key_free(signing_key);
-        db_execute_trusted(db, "ROLLBACK");
-        log_error("Failed to generate ES256 JWT access token");
-        return -1;
-    }
-
+    /* Step 11: Issue the access token, descended from the code */
+    int issue_rc = issue_access_token(db, signing_key, &client,
+                                      resource_server_pin, resource_server_id,
+                                      auth_claims.user_account_id, user_account_pin,
+                                      db_code_data.id, NULL,
+                                      auth_claims.scope, out_response);
     signing_key_free(signing_key);
-
-    /* Step 12: Create access token in database */
-    unsigned char access_token_id[16];
-    if (oauth_token_create_access(db, resource_server_pin, client.pin,
-                                   user_account_pin,
-                                   db_code_data.id, NULL,  /* Link to authorization code */
-                                   access_token, auth_claims.scope,
-                                   client.access_token_ttl_seconds,
-                                   access_token_id) != 0) {
-        OPENSSL_cleanse(access_token, JWT_MAX_TOKEN_LENGTH); free(access_token);
+    if (issue_rc != 0) {
         db_execute_trusted(db, "ROLLBACK");
-        log_error("Failed to create access token");
         return -1;
     }
 
-    /* Step 13: Create refresh token (if configured) */
+    /* Step 12: Create refresh token (if configured) */
     char *refresh_token = NULL;
     if (client.issue_refresh_tokens) {
         size_t refresh_token_size = crypto_token_encoded_size(REFRESH_TOKEN_BYTES);
         refresh_token = malloc(refresh_token_size);
         if (!refresh_token) {
-            OPENSSL_cleanse(access_token, JWT_MAX_TOKEN_LENGTH); free(access_token);
+            oauth_token_response_free(out_response);
             db_execute_trusted(db, "ROLLBACK");
             log_error("Failed to allocate refresh token");
             return -1;
         }
 
         if (crypto_random_token(refresh_token, refresh_token_size, REFRESH_TOKEN_BYTES) <= 0) {
-            OPENSSL_cleanse(access_token, JWT_MAX_TOKEN_LENGTH); free(access_token);
+            oauth_token_response_free(out_response);
             cleanse_free(refresh_token);
             db_execute_trusted(db, "ROLLBACK");
             log_error("Failed to generate refresh token");
@@ -642,7 +688,7 @@ int oauth_exchange_authorization_code(db_handle_t *db,
                                         db_code_data.id, refresh_token, auth_claims.scope,
                                         client.refresh_token_ttl_seconds,
                                         refresh_token_id) != 0) {
-            OPENSSL_cleanse(access_token, JWT_MAX_TOKEN_LENGTH); free(access_token);
+            oauth_token_response_free(out_response);
             cleanse_free(refresh_token);
             db_execute_trusted(db, "ROLLBACK");
             log_error("Failed to create refresh token");
@@ -652,18 +698,14 @@ int oauth_exchange_authorization_code(db_handle_t *db,
 
     /* Commit transaction */
     if (db_execute_trusted(db, "COMMIT") != 0) {
-        OPENSSL_cleanse(access_token, JWT_MAX_TOKEN_LENGTH); free(access_token);
+        oauth_token_response_free(out_response);
         cleanse_free(refresh_token);
         log_error("Failed to commit transaction");
         return -1;
     }
 
-    /* Build response */
-    out_response->access_token = access_token;
+    /* Build the rest of the response */
     out_response->refresh_token = refresh_token;  /* May be NULL */
-    out_response->expires_in = client.access_token_ttl_seconds;
-
-    out_response->token_type = "Bearer";
 
     if (auth_claims.scope[0] != '\0') {
         out_response->scope = str_dup(auth_claims.scope);
@@ -671,6 +713,9 @@ int oauth_exchange_authorization_code(db_handle_t *db,
         out_response->scope = NULL;
     }
 
+    char client_id_hex[33], user_id_hex[33];
+    bytes_to_hex(client.id, 16, client_id_hex, sizeof(client_id_hex));
+    bytes_to_hex(auth_claims.user_account_id, 16, user_id_hex, sizeof(user_id_hex));
     log_info("Exchanged authorization code for client_id=%s, user_id=%s",
              client_id_hex, user_id_hex);
     return 0;
@@ -695,7 +740,6 @@ int oauth_refresh_access_token(db_handle_t *db,
         log_error("Client not found");
         return -1;
     }
-    cap_access_token_ttl(&client);
 
     /* Check client issues refresh tokens */
     if (!client.issue_refresh_tokens) {
@@ -865,77 +909,29 @@ int oauth_refresh_access_token(db_handle_t *db,
         return -1;
     }
 
-    /* Step 9: Build JWT claims for access token (UUIDs, not internal PINs) */
-    char user_id_hex[33], rs_id_hex[33], client_id_hex[33];
-    bytes_to_hex(user_account_id, 16, user_id_hex, sizeof(user_id_hex));
-    bytes_to_hex(resource_server_id, 16, rs_id_hex, sizeof(rs_id_hex));
-    bytes_to_hex(client.id, 16, client_id_hex, sizeof(client_id_hex));
-
-    jwt_claims_t claims = {0};
-    if (strcmp(g_config->host, "localhost") == 0)
-        snprintf(claims.iss, sizeof(claims.iss), "http://localhost:%d", g_config->port);
-    else
-        snprintf(claims.iss, sizeof(claims.iss), "https://%s", g_config->host);
-    str_copy(claims.sub, sizeof(claims.sub), user_id_hex);
-    str_copy(claims.aud, sizeof(claims.aud), rs_id_hex);
-    str_copy(claims.client_id, sizeof(claims.client_id), client_id_hex);
-    str_copy(claims.scope, sizeof(claims.scope), final_scope);
-    claims.iat = time(NULL);
-    claims.exp = claims.iat + client.access_token_ttl_seconds;
-
-    char *access_token = malloc(JWT_MAX_TOKEN_LENGTH);
-    if (!access_token) {
-        signing_key_free(signing_key);
-        cleanse_free(new_refresh_token);
-        db_execute_trusted(db, "ROLLBACK");
-        log_error("Failed to allocate access token");
-        return -1;
-    }
-
-    const char *active_private = signing_key_active_private(signing_key);
-    char kid[SIGNING_KEY_KID_MAX];
-    if (signing_key_active_kid(signing_key, active_private, kid, sizeof(kid)) != 0 ||
-        jwt_encode_es256(&claims, active_private, kid,
-                         access_token, JWT_MAX_TOKEN_LENGTH) != 0) {
-        OPENSSL_cleanse(access_token, JWT_MAX_TOKEN_LENGTH); free(access_token);
-        signing_key_free(signing_key);
-        cleanse_free(new_refresh_token);
-        db_execute_trusted(db, "ROLLBACK");
-        log_error("Failed to generate ES256 JWT access token");
-        return -1;
-    }
-
+    /* Step 9: Issue the access token, descended from the new refresh token */
+    int issue_rc = issue_access_token(db, signing_key, &client,
+                                      resource_server_pin, resource_server_id,
+                                      user_account_id, token_data.user_account_pin,
+                                      NULL, new_refresh_token_id,
+                                      final_scope, out_response);
     signing_key_free(signing_key);
-
-    /* Step 10: Create access token in database */
-    unsigned char access_token_id[16];
-    if (oauth_token_create_access(db, resource_server_pin, client.pin,
-                                   token_data.user_account_pin,
-                                   NULL, new_refresh_token_id,  /* Link to rotated refresh token */
-                                   access_token, final_scope,
-                                   client.access_token_ttl_seconds,
-                                   access_token_id) != 0) {
-        OPENSSL_cleanse(access_token, JWT_MAX_TOKEN_LENGTH); free(access_token);
+    if (issue_rc != 0) {
         cleanse_free(new_refresh_token);
         db_execute_trusted(db, "ROLLBACK");
-        log_error("Failed to create access token");
         return -1;
     }
 
     /* Commit transaction */
     if (db_execute_trusted(db, "COMMIT") != 0) {
-        OPENSSL_cleanse(access_token, JWT_MAX_TOKEN_LENGTH); free(access_token);
+        oauth_token_response_free(out_response);
         cleanse_free(new_refresh_token);
         log_error("Failed to commit transaction");
         return -1;
     }
 
-    /* Build response */
-    out_response->access_token = access_token;
+    /* Build the rest of the response */
     out_response->refresh_token = new_refresh_token;
-    out_response->expires_in = client.access_token_ttl_seconds;
-
-    out_response->token_type = "Bearer";
 
     if (final_scope && final_scope[0] != '\0') {
         out_response->scope = str_dup(final_scope);
@@ -943,6 +939,8 @@ int oauth_refresh_access_token(db_handle_t *db,
         out_response->scope = NULL;
     }
 
+    char client_id_hex[33];
+    bytes_to_hex(client.id, 16, client_id_hex, sizeof(client_id_hex));
     log_info("Refreshed access token for client_id=%s, generation=%d",
              client_id_hex, token_data.generation + 1);
     return 0;
@@ -984,7 +982,6 @@ int oauth_client_credentials(db_handle_t *db,
         log_error("Client not found after successful authentication");
         return -1;
     }
-    cap_access_token_ttl(&client);
 
     /* Validate grant type is client_credentials */
     if (strcmp(client.grant_type, "client_credentials") != 0) {
@@ -1014,64 +1011,19 @@ int oauth_client_credentials(db_handle_t *db,
         return -1;
     }
 
-    /* Step 5: Build JWT claims (RFC 9068 Section 2.2: sub = client_id for client_credentials) */
-    char rs_id_hex[33], client_id_hex[33];
-    bytes_to_hex(resource_server_id, 16, rs_id_hex, sizeof(rs_id_hex));
-    bytes_to_hex(client.id, 16, client_id_hex, sizeof(client_id_hex));
-
-    jwt_claims_t claims = {0};
-    if (strcmp(g_config->host, "localhost") == 0)
-        snprintf(claims.iss, sizeof(claims.iss), "http://localhost:%d", g_config->port);
-    else
-        snprintf(claims.iss, sizeof(claims.iss), "https://%s", g_config->host);
-    str_copy(claims.sub, sizeof(claims.sub), client_id_hex);
-    str_copy(claims.aud, sizeof(claims.aud), rs_id_hex);
-    str_copy(claims.client_id, sizeof(claims.client_id), client_id_hex);
-    str_copy(claims.scope, sizeof(claims.scope), scope ? scope : "");
-    claims.iat = time(NULL);
-    claims.exp = claims.iat + client.access_token_ttl_seconds;
-
-    char *access_token = malloc(JWT_MAX_TOKEN_LENGTH);
-    if (!access_token) {
-        signing_key_free(signing_key);
-        log_error("Failed to allocate access token");
-        return -1;
-    }
-
-    const char *active_private = signing_key_active_private(signing_key);
-    char kid[SIGNING_KEY_KID_MAX];
-    if (signing_key_active_kid(signing_key, active_private, kid, sizeof(kid)) != 0 ||
-        jwt_encode_es256(&claims, active_private, kid,
-                         access_token, JWT_MAX_TOKEN_LENGTH) != 0) {
-        OPENSSL_cleanse(access_token, JWT_MAX_TOKEN_LENGTH); free(access_token);
-        signing_key_free(signing_key);
-        log_error("Failed to generate ES256 JWT access token");
-        return -1;
-    }
-
+    /* Step 5: Issue the access token. No user, so its subject is the client
+     * (RFC 9068 Section 2.2), and no code or refresh token it descends from. */
+    int issue_rc = issue_access_token(db, signing_key, &client,
+                                      resource_server_pin, resource_server_id,
+                                      NULL, 0,
+                                      NULL, NULL,
+                                      scope ? scope : "", out_response);
     signing_key_free(signing_key);
-
-    /* Step 6: Create access token record (no user context for client_credentials) */
-    unsigned char access_token_id[16];
-    if (oauth_token_create_access(db, resource_server_pin, client.pin,
-                                   0,    /* user_account_pin = 0 (no user) */
-                                   NULL, /* authorization_code_id = NULL */
-                                   NULL, /* refresh_token_id = NULL */
-                                   access_token,
-                                   scope ? scope : "",
-                                   client.access_token_ttl_seconds,
-                                   access_token_id) != 0) {
-        OPENSSL_cleanse(access_token, JWT_MAX_TOKEN_LENGTH); free(access_token);
-        log_error("Failed to create access token record");
+    if (issue_rc != 0) {
         return -1;
     }
 
-    /* Step 7: Build response */
-    out_response->access_token = access_token;
-
-    out_response->token_type = "Bearer";
-    out_response->expires_in = client.access_token_ttl_seconds;
-
+    /* Step 6: Build the rest of the response */
     if (scope && scope[0] != '\0') {
         out_response->scope = str_dup(scope);
     } else {
@@ -1081,6 +1033,8 @@ int oauth_client_credentials(db_handle_t *db,
     /* Client credentials grant does not issue refresh tokens */
     out_response->refresh_token = NULL;
 
+    char client_id_hex[33];
+    bytes_to_hex(client.id, 16, client_id_hex, sizeof(client_id_hex));
     log_info("Issued access token for client_credentials grant: client_id=%s", client_id_hex);
     return 0;
 }

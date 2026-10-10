@@ -77,7 +77,7 @@ class OAuthClient {
      * @param {string} config.redirectUri - Redirect URI for callbacks
      * @param {string} [config.scope='openid'] - OAuth2 scope
      * @param {number} [config.refreshBufferSeconds=60] - Seconds before expiry to trigger proactive refresh
-     * @param {Function} [config.onSessionExpired] - Called when session cannot be recovered (refresh token expired/revoked)
+     * @param {Function} [config.onSessionExpired] - Called when session cannot be recovered (refresh token expired/revoked); not for this instance's own logout()
      * @param {Function} [config.onTokenRefresh] - Called after successful token refresh with new token data
      * @param {string} [config.tokenStorage='local'] - Token storage: 'local' (cross-tab) or 'session' (per-tab)
      */
@@ -97,6 +97,10 @@ class OAuthClient {
 
         this._refreshTimer = null;
         this._refreshPromise = null;
+        /* Set by logout() until a session is stored again: tokens this instance's own
+         * logout cleared are not an expired session (_handleSessionExpired) */
+        this._loggedOut = false;
+        this._destroyed = false;
         this._tabId = Math.random().toString(36).slice(2) + Date.now().toString(36);
 
         // Listen for token updates from other tabs
@@ -275,6 +279,7 @@ class OAuthClient {
      * @param {Object} tokens - Token data to store
      */
     storeTokens(tokens) {
+        this._loggedOut = false;
         this._tokenStorage.setItem(this.tokenKey, JSON.stringify(tokens));
     }
 
@@ -359,26 +364,34 @@ class OAuthClient {
     }
 
     /**
-     * Log out: revoke the refresh token at the server, then clear local state.
+     * Log out: clear local state, then revoke the refresh token at the server.
      *
-     * This is what clearTokens() alone cannot do. Forgetting a token locally leaves it
-     * alive server-side for the remainder of its TTL — so "log out" would not actually
-     * log anyone out, and a token lifted from storage beforehand would keep working.
-     * Revoking first is what closes that window.
+     * The revoking is what clearTokens() alone cannot do. Forgetting a token locally
+     * leaves it alive server-side for the remainder of its TTL — so "log out" would not
+     * actually log anyone out, and a token lifted from storage beforehand would keep
+     * working. Revoking any of a grant's refresh tokens revokes all of it, the newest
+     * included, and the server refuses what a refresh still in flight makes.
      *
-     * Best-effort by design: if the revocation request fails (offline, server down), the
-     * local session is cleared anyway. A user who asks to log out must always end up
-     * logged out on the device in front of them, whatever the network is doing.
+     * Local state goes first, so a refresh in flight finds its token gone and leaves
+     * storage alone (_executeRefresh). The revocation is best-effort: if it fails
+     * (offline, server down), the user is logged out here all the same. A user who asks
+     * to log out must always end up logged out on the device in front of them, whatever
+     * the network is doing.
      *
      * @returns {Promise<void>}
      */
     async logout() {
         const tokens = this.getTokens();
+        this._loggedOut = true;
+        this.clearTokens();
 
         if (tokens && tokens.refresh_token) {
             try {
+                /* keepalive: sent even if the page goes before it's answered, as an app
+                 * that moves on once logout() is called may make it */
                 await fetch(`${this.authUrl}/revoke`, {
                     method: 'POST',
+                    keepalive: true,
                     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                     body: new URLSearchParams({
                         token: tokens.refresh_token,
@@ -387,12 +400,10 @@ class OAuthClient {
                     })
                 });
             } catch (e) {
-                /* Network failure. Fall through and clear locally anyway — never trap a
+                /* Network failure. The local session is already gone — never trap a
                  * user inside a session they have asked to leave. */
             }
         }
-
-        this.clearTokens();
     }
 
     /* ======================================================================
@@ -415,6 +426,7 @@ class OAuthClient {
         if (event.newValue) {
             const tokens = this._safeParse(event.newValue);
             if (!tokens) return;  /* Corrupt value — ignore rather than throw in a listener */
+            this._loggedOut = false;  /* Another tab holds a session, and this one follows it */
             this._scheduleRefresh(tokens);
             if (this.onTokenRefresh) this.onTokenRefresh(tokens);
         } else {
@@ -482,7 +494,7 @@ class OAuthClient {
      * Wait for another tab to complete its token refresh
      *
      * Polls storage every 200ms for as long as a lock can be held (LOCK_TTL_MS,
-     * currently 10 seconds). Resolves as soon as the stored tokens change (the
+     * 10 seconds). Resolves as soon as the stored tokens change (the
      * other tab finished refreshing).
      *
      * @private
@@ -596,6 +608,8 @@ class OAuthClient {
             })
         });
 
+        this._assertStillHeld(refreshToken);
+
         if (!response.ok) {
             /* Only a 4xx means the grant itself is dead (revoked, replayed, expired) —
              * that is when the tokens must go. A 5xx is the server or a proxy having a
@@ -618,10 +632,29 @@ class OAuthClient {
             expires_at: Date.now() + (data.expires_in * 1000)
         };
 
+        /* Again: reading the body is a wait of its own */
+        this._assertStillHeld(refreshToken);
         this.storeTokens(tokenData);
         this._scheduleRefresh(tokenData);
-        if (this.onTokenRefresh) this.onTokenRefresh(tokenData);
+        if (this.onTokenRefresh && !this._destroyed) this.onTokenRefresh(tokenData);
         return tokenData;
+    }
+
+    /**
+     * Throw unless storage still holds the refresh token a refresh sent. Anything else
+     * means a logout or a new sign-in landed while the refresh was out, in this tab or
+     * another: storing would bring back tokens the user is rid of, and clearing on a
+     * 4xx would end a session that isn't this one. Called with no await between it and
+     * what it guards.
+     *
+     * @private
+     * @param {string} refreshToken - the refresh token the refresh sent
+     */
+    _assertStillHeld(refreshToken) {
+        const current = this.getTokens();
+        if (!current || current.refresh_token !== refreshToken) {
+            throw new Error('Tokens changed during the refresh (logged out, or signed in again)');
+        }
     }
 
     /**
@@ -630,7 +663,7 @@ class OAuthClient {
      */
     _scheduleRefresh(tokens) {
         this._cancelRefresh();
-        if (!tokens || !tokens.refresh_token || !tokens.expires_at) return;
+        if (this._destroyed || !tokens || !tokens.refresh_token || !tokens.expires_at) return;
 
         const msUntilExpiry = tokens.expires_at - Date.now();
 
@@ -682,7 +715,11 @@ class OAuthClient {
      */
     _handleSessionExpired() {
         this._cancelRefresh();
-        if (this.onSessionExpired) this.onSessionExpired();
+        /* Not after this instance's own logout(). A refresh waiting on another tab, or a
+         * request answered 401 because the logout revoked its token, then finds the
+         * tokens gone, as the user asked. Apps send the user to sign in from here, and
+         * doing that mid-logout could cut the revocation short. */
+        if (this.onSessionExpired && !this._loggedOut && !this._destroyed) this.onSessionExpired();
     }
 
     /* ======================================================================
@@ -766,8 +803,13 @@ class OAuthClient {
      *
      * Call this when the client instance is no longer needed
      * (e.g., on page unload or when switching accounts).
+     *
+     * A refresh in flight still lands, and stores its tokens for other tabs (the
+     * token it sent is spent). Past that a destroyed instance schedules no refresh
+     * and calls none of its callbacks.
      */
     destroy() {
+        this._destroyed = true;
         this._cancelRefresh();
         window.removeEventListener('storage', this._onStorage);
     }

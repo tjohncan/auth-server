@@ -322,6 +322,10 @@ int rs_client_user_link(db_handle_t *db, long long client_pin,
 /*
  * Unlink user from client (idempotent)
  *
+ * Also revokes the pair's refresh and access tokens, on every call, so linking
+ * the user again brings none of them back. Not for a universal client, whose
+ * users need no link: unlinking one withdraws nothing. The user's sessions stay.
+ *
  * Returns: 0 on success (including no-op), -1 on error
  */
 int rs_client_user_unlink(db_handle_t *db, long long client_pin,

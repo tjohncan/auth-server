@@ -17,6 +17,7 @@
 #include "util/validation.h"
 #include "util/json.h"
 #include <string.h>
+#include <strings.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <openssl/crypto.h>
@@ -25,15 +26,44 @@
  * Authentication Helpers
  * ========================================================================== */
 
+/* Host names the loopback interface: localhost, 127.0.0.1 or [::1], with any port */
+static int host_is_loopback(const char *host) {
+    static const char *const names[] = {"localhost", "127.0.0.1", "[::1]"};
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        size_t n = strlen(names[i]);
+        if (strncasecmp(host, names[i], n) != 0) continue;
+        if (host[n] == '\0') return 1;
+        if (host[n] == ':' && strspn(host + n + 1, "0123456789") == strlen(host + n + 1)) return 1;
+    }
+    return 0;
+}
+
 /*
  * is_localhost - Check if request is from direct localhost connection
  *
  * Security policy: Localhost-only endpoints MUST be accessed via direct
  * connection (not through reverse proxy). This prevents header spoofing.
  *
+ * And only on the admin listener (admin_port), which listens on loopback
+ * alone: the public port, which every interface reaches and a proxy forwards
+ * to, serves none of these. That holds for any endpoint that calls this, so a
+ * new one can't be left on the public port by mistake.
+ *
+ * Nor from a browser. A web page the operator's browser loads can reach a
+ * loopback port too: a browser on the server itself, or one using an
+ * `ssh -L` tunnel. A page that rebinds its own DNS name to 127.0.0.1 even
+ * makes same-origin requests, which need no CORS preflight and whose
+ * responses it can read. Such a request still names the page's host in Host,
+ * and browsers mark their requests with Origin or Sec-Fetch-* headers. curl,
+ * wget and docker exec send Host: localhost (or the address) and neither.
+ *
  * Returns: 1 if localhost, 0 if not
  */
 static int is_localhost(const HttpRequest *req) {
+    if (!req->admin_listener) {
+        return 0;
+    }
+
     /* Reject any request with proxy headers (X-Real-IP, X-Forwarded-For) */
     /* These indicate the request came through a reverse proxy */
     const char *real_ip = http_request_get_header(req, "X-Real-IP");
@@ -44,26 +74,39 @@ static int is_localhost(const HttpRequest *req) {
         return 0;
     }
 
-    /* Direct connection - check socket IP */
+    /* Browser-made: a Host other than loopback, an Origin, or any Sec-Fetch-* */
+    const char *host = http_request_get_header(req, "Host");
+    if ((host && !host_is_loopback(host)) || http_request_get_header(req, "Origin")) {
+        return 0;
+    }
+    for (int i = 0; i < req->header_count; i++) {
+        if (req->headers[i].name && strncasecmp(req->headers[i].name, "Sec-Fetch-", 10) == 0) {
+            return 0;
+        }
+    }
+
+    /* Direct connection - check socket IP: loopback, or the admin socket's
+       "local", whose file mode already decided who could connect */
     const char *socket_ip = req->remote_ip;
     return (strcmp(socket_ip, "127.0.0.1") == 0 ||
             strcmp(socket_ip, "::1") == 0 ||
-            strcmp(socket_ip, "::ffff:127.0.0.1") == 0);
+            strcmp(socket_ip, "::ffff:127.0.0.1") == 0 ||
+            strcmp(socket_ip, "local") == 0);
 }
 
 /* ============================================================================
  * POST /api/admin/bootstrap
  * ========================================================================== */
 
-HttpResponse *admin_bootstrap_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_bootstrap_handler(const HttpRequest *req) {
+    /* The admin listener first: the public port refuses these with 403,
+       whatever the request */
+    if (!is_localhost(req)) {
+        return response_json_error(403, "Admin endpoints are served only on the admin listener, from this host");
+    }
+
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
-
-    /* Localhost validation */
-    if (!is_localhost(req)) {
-        return response_json_error(403, "Admin endpoints only accessible from localhost");
-    }
 
     /* Get database connection from pool */
     db_handle_t *db = db_pool_get_connection();
@@ -99,8 +142,8 @@ HttpResponse *admin_bootstrap_handler(const HttpRequest *req, const RouteParams 
         goto cleanup;
     }
 
-    /* Validate input formats */
-    if (validate_code_name(org_code_name, validation_error, sizeof(validation_error)) != 0) {
+    /* Validate input formats: all three are created here */
+    if (validate_new_code_name(org_code_name, validation_error, sizeof(validation_error)) != 0) {
         resp = response_json_error(400, validation_error);
         goto cleanup;
     }
@@ -110,7 +153,8 @@ HttpResponse *admin_bootstrap_handler(const HttpRequest *req, const RouteParams 
         goto cleanup;
     }
 
-    if (validate_username(username, validation_error, sizeof(validation_error)) != 0) {
+    if (validate_new_username(username, validation_error, sizeof(validation_error)) != 0 ||
+        validate_new_password(password, validation_error, sizeof(validation_error)) != 0) {
         resp = response_json_error(400, validation_error);
         goto cleanup;
     }
@@ -171,15 +215,15 @@ cleanup:
  * POST /api/admin/organizations
  * ========================================================================== */
 
-HttpResponse *admin_create_organization_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_create_organization_handler(const HttpRequest *req) {
+    /* The admin listener first: the public port refuses these with 403,
+       whatever the request */
+    if (!is_localhost(req)) {
+        return response_json_error(403, "Admin endpoints are served only on the admin listener, from this host");
+    }
+
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
-
-    /* Localhost validation */
-    if (!is_localhost(req)) {
-        return response_json_error(403, "Admin endpoints only accessible from localhost");
-    }
 
     /* Get database connection from pool */
     db_handle_t *db = db_pool_get_connection();
@@ -206,7 +250,7 @@ HttpResponse *admin_create_organization_handler(const HttpRequest *req, const Ro
     /* Validate input formats */
     char validation_error[256];
 
-    if (validate_code_name(code_name, validation_error, sizeof(validation_error)) != 0) {
+    if (validate_new_code_name(code_name, validation_error, sizeof(validation_error)) != 0) {
         resp = response_json_error(400, validation_error);
         goto cleanup;
     }
@@ -252,15 +296,15 @@ cleanup:
  * POST /api/admin/users
  * ========================================================================== */
 
-HttpResponse *admin_create_user_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_create_user_handler(const HttpRequest *req) {
+    /* The admin listener first: the public port refuses these with 403,
+       whatever the request */
+    if (!is_localhost(req)) {
+        return response_json_error(403, "Admin endpoints are served only on the admin listener, from this host");
+    }
+
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
-
-    /* Localhost validation */
-    if (!is_localhost(req)) {
-        return response_json_error(403, "Admin endpoints only accessible from localhost");
-    }
 
     /* Get database connection from pool */
     db_handle_t *db = db_pool_get_connection();
@@ -278,26 +322,24 @@ HttpResponse *admin_create_user_handler(const HttpRequest *req, const RouteParam
     char *email = json_get_string(req->body, "email");
     char *password = json_get_string(req->body, "password");
 
-    /* Validate required fields */
-    if (!password) {
-        resp = response_json_error(400, "password is required");
-        goto cleanup;
-    }
-
-    if (!username && !email) {
-        resp = response_json_error(400, "At least one of username or email is required");
+    /* Validate required fields. A username is one: an address given here goes on
+       the account unverified, and nothing sends it a link, so it can't be signed
+       in with until the user verifies it from their account. */
+    if (!username || !password) {
+        resp = response_json_error(400, "username and password are required");
         goto cleanup;
     }
 
     /* Validate input formats */
     char validation_error[256];
 
-    if (username && validate_username(username, validation_error, sizeof(validation_error)) != 0) {
+    if (validate_new_username(username, validation_error, sizeof(validation_error)) != 0 ||
+        validate_new_password(password, validation_error, sizeof(validation_error)) != 0) {
         resp = response_json_error(400, validation_error);
         goto cleanup;
     }
 
-    if (email && validate_email(email, validation_error, sizeof(validation_error)) != 0) {
+    if (email && validate_new_email(email, validation_error, sizeof(validation_error)) != 0) {
         resp = response_json_error(400, validation_error);
         goto cleanup;
     }
@@ -312,13 +354,9 @@ HttpResponse *admin_create_user_handler(const HttpRequest *req, const RouteParam
         bytes_to_hex(user_id, 16, user_id_hex, sizeof(user_id_hex));
 
         JsonBuf *jb = jsonbuf_new(2048);
-        jsonbuf_appendf(jb, "{\"user_id\":\"%s\"", user_id_hex);
-
-        if (username) {
-            jsonbuf_appendf(jb, ",\"username\":\"");
-            jsonbuf_append_escaped(jb, username);
-            jsonbuf_appendf(jb, "\"");
-        }
+        jsonbuf_appendf(jb, "{\"user_id\":\"%s\",\"username\":\"", user_id_hex);
+        jsonbuf_append_escaped(jb, username);
+        jsonbuf_appendf(jb, "\"");
         if (email) {
             jsonbuf_appendf(jb, ",\"email\":\"");
             jsonbuf_append_escaped(jb, email);
@@ -343,15 +381,15 @@ cleanup:
  * POST /api/admin/org-admins
  * ========================================================================== */
 
-HttpResponse *admin_make_org_admin_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_make_org_admin_handler(const HttpRequest *req) {
+    /* The admin listener first: the public port refuses these with 403,
+       whatever the request */
+    if (!is_localhost(req)) {
+        return response_json_error(403, "Admin endpoints are served only on the admin listener, from this host");
+    }
+
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
-
-    /* Localhost validation */
-    if (!is_localhost(req)) {
-        return response_json_error(403, "Admin endpoints only accessible from localhost");
-    }
 
     /* Get database connection from pool */
     db_handle_t *db = db_pool_get_connection();
@@ -423,12 +461,11 @@ cleanup:
  * GET /api/admin/list-all-organizations
  * ========================================================================== */
 
-HttpResponse *admin_list_all_organizations_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_list_all_organizations_handler(const HttpRequest *req) {
 
     /* Localhost validation */
     if (!is_localhost(req)) {
-        return response_json_error(403, "Admin endpoints only accessible from localhost");
+        return response_json_error(403, "Admin endpoints are served only on the admin listener, from this host");
     }
 
     /* Get database connection from pool */
@@ -488,15 +525,15 @@ HttpResponse *admin_list_all_organizations_handler(const HttpRequest *req, const
  * POST /api/admin/organization-keys
  * ========================================================================== */
 
-HttpResponse *admin_create_organization_key_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_create_organization_key_handler(const HttpRequest *req) {
+    /* The admin listener first: the public port refuses these with 403,
+       whatever the request */
+    if (!is_localhost(req)) {
+        return response_json_error(403, "Admin endpoints are served only on the admin listener, from this host");
+    }
+
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
-
-    /* Localhost validation */
-    if (!is_localhost(req)) {
-        return response_json_error(403, "Admin endpoints only accessible from localhost");
-    }
 
     /* Get database connection from pool */
     db_handle_t *db = db_pool_get_connection();
@@ -534,7 +571,11 @@ HttpResponse *admin_create_organization_key_handler(const HttpRequest *req, cons
     int is_generated = 0;
 
     if (user_secret && strlen(user_secret) > 0) {
-        /* User provided their own secret (BYOS) */
+        /* User provided their own secret (BYOS), which machine_secret_pattern governs */
+        if (validate_new_machine_secret(user_secret, validation_error, sizeof(validation_error)) != 0) {
+            resp = response_json_error(400, validation_error);
+            goto cleanup;
+        }
         secret_to_use = user_secret;
     } else {
         /* Generate secure 32-byte base64url token */
@@ -596,8 +637,7 @@ cleanup:
  * GET /api/admin/organization-keys
  * ========================================================================== */
 
-HttpResponse *admin_list_organization_keys_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_list_organization_keys_handler(const HttpRequest *req) {
 
     /* Get database connection first (needed for both auth methods) */
     db_handle_t *db = db_pool_get_connection();
@@ -708,8 +748,7 @@ HttpResponse *admin_list_organization_keys_handler(const HttpRequest *req, const
  * DELETE /api/admin/organization-keys
  * ========================================================================== */
 
-HttpResponse *admin_revoke_organization_key_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *admin_revoke_organization_key_handler(const HttpRequest *req) {
 
     /* Get database connection first (needed for both auth methods) */
     db_handle_t *db = db_pool_get_connection();
@@ -774,6 +813,7 @@ HttpResponse *admin_revoke_organization_key_handler(const HttpRequest *req, cons
  * POST /api/admin/users/activate
  * POST /api/admin/users/deactivate
  * POST /api/admin/users/reset-mfa
+ * POST /api/admin/users/set-password
  * ========================================================================== */
 
 /*
@@ -784,11 +824,11 @@ HttpResponse *admin_revoke_organization_key_handler(const HttpRequest *req, cons
  */
 static HttpResponse *server_user_request(const HttpRequest *req, db_handle_t **out_db,
                                          unsigned char *out_user_id) {
+    if (!is_localhost(req))
+        return response_json_error(403, "Admin endpoints are served only on the admin listener, from this host");
+
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
-
-    if (!is_localhost(req))
-        return response_json_error(403, "Server admin endpoints only accessible from localhost");
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -825,15 +865,11 @@ static HttpResponse *set_user_active(const HttpRequest *req, int active) {
         : "{\"message\":\"User deactivated\"}");
 }
 
-HttpResponse *server_activate_user_handler(const HttpRequest *req,
-                                            const RouteParams *params) {
-    (void)params;
+HttpResponse *server_activate_user_handler(const HttpRequest *req) {
     return set_user_active(req, 1);
 }
 
-HttpResponse *server_deactivate_user_handler(const HttpRequest *req,
-                                              const RouteParams *params) {
-    (void)params;
+HttpResponse *server_deactivate_user_handler(const HttpRequest *req) {
     return set_user_active(req, 0);
 }
 
@@ -842,9 +878,7 @@ HttpResponse *server_deactivate_user_handler(const HttpRequest *req,
  * for someone who has lost them all. The next factor is enrolled with the
  * password alone, so whoever runs this confirms who is asking first.
  */
-HttpResponse *server_reset_user_mfa_handler(const HttpRequest *req,
-                                             const RouteParams *params) {
-    (void)params;
+HttpResponse *server_reset_user_mfa_handler(const HttpRequest *req) {
 
     db_handle_t *db = NULL;
     unsigned char user_id[16];
@@ -856,4 +890,124 @@ HttpResponse *server_reset_user_mfa_handler(const HttpRequest *req,
     if (rc != 0) return response_json_error(500, "Internal error");
 
     return response_json_ok("{\"message\":\"MFA reset\"}");
+}
+
+/*
+ * Sets a user's password, for an operator handing one over out of band: after
+ * a compromise, or where there is no email to reset by. Works while the account
+ * is deactivated and doesn't reactivate it; see user_set_password.
+ */
+HttpResponse *server_set_user_password_handler(const HttpRequest *req) {
+
+    db_handle_t *db = NULL;
+    unsigned char user_id[16];
+    HttpResponse *req_err = server_user_request(req, &db, user_id);
+    if (req_err) return req_err;
+
+    char *password = json_get_string(req->body ? req->body : "", "password");
+    if (!password) return response_json_error(400, "password required");
+
+    char validation_error[256];
+    if (validate_new_password(password, validation_error, sizeof(validation_error)) != 0) {
+        OPENSSL_cleanse(password, strlen(password));
+        free(password);
+        return response_json_error(400, validation_error);
+    }
+
+    int rc = user_set_password(db, user_id, password);
+    OPENSSL_cleanse(password, strlen(password));
+    free(password);
+
+    if (rc == 1) return response_json_error(404, "User not found");
+    if (rc == -2) {
+        char msg[128];
+        snprintf(msg, sizeof(msg),
+                 "Password must be at least %d characters", crypto_password_min_length());
+        return response_json_error(400, msg);
+    }
+    if (rc != 0) return response_json_error(500, "Internal error");
+
+    return response_json_ok("{\"message\":\"Password set\"}");
+}
+
+/* ============================================================================
+ * GET /api/admin/users/emails
+ * DELETE /api/admin/users/emails
+ * ========================================================================== */
+
+/*
+ * Lists a user's addresses, with when each was added and verified. For an
+ * operator recovering an account: an address someone added and verified while
+ * they held it still takes password-reset and passwordless links, and the
+ * dates show what's new.
+ */
+HttpResponse *server_list_user_emails_handler(const HttpRequest *req) {
+
+    db_handle_t *db = NULL;
+    unsigned char user_id[16];
+    HttpResponse *req_err = server_user_request(req, &db, user_id);
+    if (req_err) return req_err;
+
+    user_identity_t user;
+    int rc = user_get_by_id(db, user_id, &user);
+    if (rc == 1) return response_json_error(404, "User not found");
+    if (rc != 0) return response_json_error(500, "Internal error");
+
+    user_email_t *emails = NULL;
+    int count = 0, total = 0;
+    if (user_get_emails(db, user.user_account_pin, 100, 0, &emails, &count, &total) != 0) {
+        return response_json_error(500, "Internal error");
+    }
+
+    JsonBuf *jb = jsonbuf_new(512 + count * 512);
+    jsonbuf_appendf(jb, "{\"emails\":[");
+    for (int i = 0; i < count; i++) {
+        jsonbuf_appendf(jb, "%s{\"address\":\"", i > 0 ? "," : "");
+        jsonbuf_append_escaped(jb, emails[i].email_address);
+        jsonbuf_appendf(jb, "\",\"is_verified\":%s,\"is_primary\":%s,\"added_at\":\"",
+                        emails[i].is_verified ? "true" : "false",
+                        emails[i].is_primary ? "true" : "false");
+        jsonbuf_append_escaped(jb, emails[i].added_at);
+        if (emails[i].verified_at[0]) {
+            jsonbuf_appendf(jb, "\",\"verified_at\":\"");
+            jsonbuf_append_escaped(jb, emails[i].verified_at);
+            jsonbuf_appendf(jb, "\"}");
+        } else {
+            jsonbuf_appendf(jb, "\",\"verified_at\":null}");
+        }
+    }
+    jsonbuf_appendf(jb, "],\"total\":%d}", total);
+
+    free(emails);
+    return jsonbuf_to_response(jb, 200);
+}
+
+/*
+ * Removes an address from a user's account, with any verification or
+ * invitation link outstanding for it. Works while the account is deactivated,
+ * so the operator can remove what the user doesn't recognize before handing
+ * the account back. An address the account doesn't have is a 404, so a typo
+ * doesn't pass for a removal.
+ */
+HttpResponse *server_delete_user_email_handler(const HttpRequest *req) {
+
+    db_handle_t *db = NULL;
+    unsigned char user_id[16];
+    HttpResponse *req_err = server_user_request(req, &db, user_id);
+    if (req_err) return req_err;
+
+    char *email = json_get_string(req->body ? req->body : "", "email");
+    if (!email) return response_json_error(400, "email required");
+
+    user_identity_t user;
+    int rc = user_get_by_id(db, user_id, &user);
+    if (rc == 0) rc = user_delete_email(db, user.user_account_pin, email);
+    else if (rc == 1) rc = 2;
+    free(email);
+
+    if (rc == 2) return response_json_error(404, "User not found");
+    if (rc == 1) return response_json_error(404, "The user has no such address");
+    if (rc != 0) return response_json_error(500, "Internal error");
+
+    return response_json_ok("{\"message\":\"Email deleted\"}");
 }

@@ -161,8 +161,7 @@ static void template_remove_section(StaticFile *sf,
  *
  * Serves files from the in-memory cache.
  */
-HttpResponse *static_file_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *static_file_handler(const HttpRequest *req) {
 
     const char *request_path = req->path;
     if (!request_path) {
@@ -198,14 +197,14 @@ HttpResponse *static_file_handler(const HttpRequest *req, const RouteParams *par
 /*
  * Handler for extensionless HTML file aliases (e.g., /login -> /login.html)
  */
-HttpResponse *static_html_alias_handler(const HttpRequest *req, const RouteParams *params) {
+HttpResponse *static_html_alias_handler(const HttpRequest *req) {
     char path_with_html[512];
     snprintf(path_with_html, sizeof(path_with_html), "%s.html", req->path);
 
     HttpRequest modified_req = *req;  /* shallow copy — downstream usage is read-only */
     modified_req.path = path_with_html;
 
-    return static_file_handler(&modified_req, params);
+    return static_file_handler(&modified_req);
 }
 
 /*
@@ -213,11 +212,11 @@ HttpResponse *static_html_alias_handler(const HttpRequest *req, const RouteParam
  *
  * Serves index.html as the root page.
  */
-HttpResponse *index_handler(const HttpRequest *req, const RouteParams *params) {
+HttpResponse *index_handler(const HttpRequest *req) {
     HttpRequest index_req = *req;
     index_req.path = "/index.html";
 
-    return static_file_handler(&index_req, params);
+    return static_file_handler(&index_req);
 }
 
 /* -------------------------------------------------------------------- */

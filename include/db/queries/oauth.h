@@ -115,46 +115,8 @@ typedef struct {
     time_t started_at;              /* Session creation time (Unix epoch) */
 } oauth_session_info_t;
 
-/*
- * Must this session prove a factor before it may manage factors?
- *
- * Gates TOTP setup/confirm, method deletion, recovery-code regeneration and the
- * require toggle. Keyed on ENROLLMENT, not on the require_mfa preference: several
- * of those endpoints end in a factor the session can then present (fresh recovery
- * codes, a newly enrolled authenticator), so gating them on the preference would
- * let a password-only session satisfy a client's require_mfa for any user who has
- * enrolled but not opted in. require_mfa implies has_mfa (schema CHECK), so this
- * covers both.
- *
- * A user with no factor yet is not gated: first enrollment is open to whoever
- * holds the password, by necessity — see "Deliberate Tradeoffs" in README.md.
- *
- * This is one of TWO MFA rules in the handlers:
- *   - Managing factors (this function, used in mfa_http.c): gated on
- *     ENROLLMENT. Anyone who has a factor proves it before touching factors.
- *   - The user's own /api/user endpoints (session_http.c
- *     require_authenticated_session): gated on the require_mfa PREFERENCE.
- *     MFA is optional until the user, or a client at /authorize, requires it,
- *     and enrolling must not lock a user out of their own profile.
- * Those two differ deliberately; unifying them either way changes behavior.
- *
- * The cookie leg of the /api/admin endpoints (admin_org_http.c
- * get_authenticated_user_pin) applies the preference rule as well, and that is
- * policy: MFA guards admin work for an admin who has turned on require, and
- * having a factor does not by itself demand it. For such an admin, /login asks
- * for the factor before the console loads, and a session that skipped that step
- * gets 403 "MFA verification required" from the admin API, as from /api/user,
- * which the console turns into the MFA step.
- *
- * The management UI client's own require_mfa stays off, for a separate reason:
- * the console is where a first factor gets enrolled, and a client that requires
- * MFA turns away users who have none. A require_mfa set on that client anyway is
- * enforced by /authorize when the console signs in, not by the admin API, which
- * authenticates by cookie and never learns which client the console came through.
- */
-static inline int oauth_session_mfa_pending(const oauth_session_info_t *session) {
-    return session->user_has_mfa && !session->mfa_completed;
-}
+/* Which MFA a session-authenticated endpoint asks for is the handlers' policy:
+ * see session_mfa_policy_t in handlers.h. */
 
 /*
  * Look up browser session by session token
@@ -192,12 +154,12 @@ int oauth_session_close(db_handle_t *db, const char *session_token);
  * Sets mfa_completed = TRUE after successful MFA verification.
  *
  * Parameters:
- *   db            - Database handle
- *   session_token - Session token from cookie
+ *   db         - Database handle
+ *   session_id - The session's id, as oauth_session_get_by_token returned it
  *
  * Returns: 0 on success, -1 on error or not found
  */
-int oauth_session_set_mfa_completed(db_handle_t *db, const char *session_token);
+int oauth_session_set_mfa_completed(db_handle_t *db, const unsigned char *session_id);
 
 /*
  * Create authorization code
@@ -480,13 +442,13 @@ int oauth_introspect_token(db_handle_t *db,
  * Check whether an access token is still active
  *
  * Access tokens are self-contained ES256 JWTs, so signature and expiry can be
- * verified offline. Two things cannot be: revocation, and whether the token's
- * client, its user, its resource server and the client's organization are still
- * active — both live in the database. Endpoints that accept a Bearer token
- * (e.g. GET /userinfo) must consult this to honor POST /revoke, replay-chain
- * revocation and deactivation; otherwise a revoked token, or one whose client,
- * user, resource server or organization has been deactivated, keeps working
- * until exp.
+ * verified offline. Two things cannot be: revocation, and whether what the token
+ * stands on still holds (its client, user, resource server and the client's
+ * organization still active, the client still linked to the resource server,
+ * the user still linked to the client) — both live in the database. Endpoints
+ * that accept a Bearer token (e.g. GET /userinfo) must consult this to honor
+ * POST /revoke, replay-chain revocation, deactivation and unlinking; otherwise
+ * such a token keeps working until exp.
  *
  * Applies the same liveness predicate as oauth_introspect_token(), but takes no
  * resource_server_pin — it answers only "is this token still valid at all", not
@@ -510,12 +472,13 @@ int oauth_access_token_is_active(db_handle_t *db, const char *token);
  * - Validates token belongs to authenticated client_pin
  * - Returns success even if token doesn't exist (prevents enumeration)
  * - Idempotent (revoking already-revoked token succeeds)
- * - Revoking a REFRESH token cascades to the access tokens issued under the same
- *   grant (RFC 7009 Section 2.1). Without that cascade a logout is theatre: the
- *   refresh token dies while an access token lifted out of storage keeps working
- *   until it expires. Revoking an ACCESS token revokes only that token.
- * - Does NOT revoke the whole rotation chain — that is oauth_revoke_token_chain(),
- *   which exists for replay detection, a different (hostile) event.
+ * - Revoking a REFRESH token revokes its whole grant: every refresh token of its
+ *   rotation chain, and every access token issued under it, the code exchange's
+ *   and each rotation's (RFC 7009 Section 2.1). Without that cascade a logout is
+ *   theatre: the refresh token dies while an access token lifted out of storage
+ *   keeps working until it expires. Revoking an ACCESS token revokes only that token.
+ * - The same tokens oauth_revoke_token_chain() revokes on a replay, which is
+ *   logged as an attack; this is an ordinary logout.
  *
  * Parameters:
  *   db              - Database handle
@@ -541,13 +504,16 @@ int oauth_revoke_token(db_handle_t *db,
  *
  * For authorization code replay:
  *   - Pass the authorization_code_id as origin_id
+ *   - Revokes the access token the code's exchange issued, even when its client
+ *     issues no refresh tokens
  *   - Revokes all refresh tokens derived from that code
  *   - Revokes all access tokens linked to those refresh tokens
  *
  * For refresh token replay:
  *   - Pass the origin_refresh_token_id as origin_id
  *   - Revokes all refresh tokens in the rotation chain
- *   - Revokes all access tokens linked to those refresh tokens
+ *   - Revokes all access tokens linked to those refresh tokens, and the one the
+ *     code exchange issued
  *
  * Implementation:
  *   - Sets is_revoked = 1, revoked_at = current_timestamp on all affected tokens

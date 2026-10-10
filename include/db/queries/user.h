@@ -94,19 +94,18 @@ int user_verify_password(db_handle_t *db, const char *username,
                          const char *password, long long *out_pin,
                          unsigned char *out_id);
 
-#ifdef EMAIL_SUPPORT
 /*
  * Verify user password by verified email
  *
  * Looks up user by verified email address and verifies password hash.
- * Same semantics as user_verify_password.
+ * Same semantics as user_verify_password. In every build: without email
+ * support, accepting an invitation is what verifies an address.
  *
  * Returns: 1 if password valid, 0 if invalid, -1 on error
  */
 int user_verify_password_by_email(db_handle_t *db, const char *email,
                                    const char *password, long long *out_pin,
                                    unsigned char *out_id);
-#endif
 
 /*
  * Make user an admin of organization
@@ -219,6 +218,8 @@ typedef struct {
     char email_address[256];
     int is_primary;
     int is_verified;
+    char added_at[32];       /* When it was added */
+    char verified_at[32];    /* When it was verified; empty if it isn't */
 } user_email_t;
 
 /*
@@ -256,9 +257,13 @@ int user_add_email(db_handle_t *db, long long user_account_pin,
                    const char *email);
 
 /*
- * Delete email from user account (idempotent)
+ * Delete email from user account (idempotent), with its verification and
+ * invitation links. Deleting one also voids the account's outstanding
+ * password-reset and passwordless sign-in links, as deactivating does: neither is
+ * kept by address, and one emailed to the address removed mustn't still work.
  *
- * Returns: 0 on success (including no-op), -1 on error
+ * Returns: 0 on success, 1 if the account has no such address (nothing
+ * changed), -1 on error
  */
 int user_delete_email(db_handle_t *db, long long user_account_pin,
                       const char *email);
@@ -316,6 +321,12 @@ int user_set_primary_email(db_handle_t *db, long long user_account_pin,
  * their password *and nothing else*, the attacker survives until that session
  * expires (see session_ttl_seconds).
  *
+ * One exception, which costs the user nothing: for a user who requires MFA, the
+ * sessions still waiting on it are closed. Opened with the old password, they
+ * are only half signed in, and all they can do is submit codes, which count
+ * against the user's daily MFA cap. Someone who had only the old password keeps
+ * nothing. A reset and the operator's set-password do the same.
+ *
  * Revisit if: account-takeover recovery becomes a first-class goal. The shape is
  * then not "close everything" but "close everything except the caller's own
  * session" — the requesting cookie identifies the session to spare, evicting the
@@ -325,6 +336,23 @@ int user_change_password(db_handle_t *db, long long user_account_pin,
                          const unsigned char *user_account_id,
                          const char *current_password,
                          const char *new_password);
+
+/*
+ * Set a user's password, for the operator (POST /api/admin/users/set-password)
+ *
+ * No current password, and the account may be inactive: after a compromise, the
+ * recovery order is deactivate, set the password, reactivate, and the old
+ * password works at no point in between. It doesn't reactivate, and like
+ * user_change_password it leaves sessions and tokens alone, apart from sessions
+ * waiting on MFA; deactivating is what evicts. Outstanding reset links and
+ * invitations are voided in the same transaction, since either could set
+ * another password over this one.
+ *
+ * Returns: 0 on success, 1 if no such user, -1 on error,
+ *          -2 if password below minimum length
+ */
+int user_set_password(db_handle_t *db, const unsigned char *user_id,
+                      const char *new_password);
 
 /*
  * Change username
@@ -442,11 +470,14 @@ int user_lookup_password_reset_token(db_handle_t *db, const char *token);
 /*
  * Consume password reset token and set new password
  *
- * Single transaction: validate token, mark used, hash new password,
- * update user_account.
+ * Checks the token, hashes the new password outside any transaction, then in
+ * one transaction marks the token used and sets the password. Both statements
+ * re-check (the token, then the account), so a token used, revoked or expired
+ * since the first check, or an account deactivated since, is refused and nothing
+ * is written. Sessions waiting on MFA close with it, as for user_change_password.
  *
- * Returns: 0 on success, 1 if token invalid/expired/used,
- *          -1 on error, -2 if password below minimum length
+ * Returns: 0 on success, 1 if token invalid/expired/used/revoked or the account
+ *          inactive, -1 on error, -2 if password below minimum length
  */
 int user_consume_password_reset_token(db_handle_t *db, const char *token,
                                        const char *new_password);
@@ -529,15 +560,16 @@ typedef struct {
 /*
  * Create invitation token
  *
- * Direct insert — no rate limiting (RS are trusted callers).
- * Caller provides user_account_pin and optional user_email_pin
- * from the RS provisioning flow.
+ * For a new account, or one still pending invited again. At most five per
+ * account in an hour, like reset links. The account's earlier invitations
+ * stay valid: user_void_earlier_invitations voids them once this one has been
+ * handed on, so one that never arrives costs the user nothing.
  *
  * Parameters:
  *   user_email_pin - Email PIN (0 for no email)
  *   out_token      - Output: token string (caller buffer, >= 44 bytes)
  *
- * Returns: 0 on success, -1 on error
+ * Returns: 0 on success, 1 if five were issued in the last hour, -1 on error
  */
 int user_create_invitation_token(db_handle_t *db,
                                   long long user_account_pin,
@@ -545,6 +577,16 @@ int user_create_invitation_token(db_handle_t *db,
                                   int ttl_seconds,
                                   const char *source_ip,
                                   char *out_token);
+
+/*
+ * Void every unused invitation of the account this token invites that was
+ * issued before it, so only the newest works. Never a later one: overlapping
+ * re-invitations would void each other. Two issued in the same second (SQLite's
+ * resolution) both stay valid.
+ *
+ * Returns: 0 on success (whether or not there were any), -1 on error
+ */
+int user_void_earlier_invitations(db_handle_t *db, const char *token);
 
 /*
  * Look up invitation token (read-only)
@@ -561,11 +603,13 @@ int user_lookup_invitation_token(db_handle_t *db, const char *token,
 /*
  * Consume invitation token (verify email + set password)
  *
- * Single transaction:
- *   1. Validate token (exists, not expired, not used, user active)
- *   2. Mark token used
- *   3. If email present and not yet verified: verify + squatter cleanup
- *   4. Hash and set password on user account
+ * Checks the token (exists, not expired, not used, user active) and the email for
+ * a conflict, and hashes the new password outside any transaction. Then, in one
+ * transaction:
+ *   1. Mark token used, re-checking it
+ *   2. If email present and not yet verified: verify + squatter cleanup
+ *   3. Set the password, re-checking that the account is active
+ * A re-check that fails rolls all of it back and returns 1.
  *
  * Returns: 0 on success,
  *          1 if token invalid/expired/used,
@@ -601,6 +645,18 @@ int user_find_by_identity(db_handle_t *db, const char *username,
                            user_identity_t *out_match);
 
 /*
+ * Find the pending account holding an address: one provisioned for it that
+ * hasn't accepted its invitation, so has no password yet and holds the address
+ * unverified. The oldest, if there are two. Doesn't filter by is_active.
+ *
+ * out_email_pin - Output: the pin of that address's row, for a new invitation
+ *
+ * Returns: 0 found, 1 none, -1 on error
+ */
+int user_find_pending_by_email(db_handle_t *db, const char *email,
+                               user_identity_t *out_match, long long *out_email_pin);
+
+/*
  * Create user account without password
  *
  * For RS provisioning — creates ACTIVE user with no password fields.
@@ -634,9 +690,12 @@ int user_get_by_id(db_handle_t *db, const unsigned char *user_id,
  *
  * Deactivating also closes the user's browser sessions, revokes their refresh
  * and access tokens, and voids their outstanding password-reset,
- * passwordless-login and invitation links, in the same transaction, so
+ * passwordless-login, invitation and email-verification links, in the same
+ * transaction, so
  * reactivating later brings none of them back. It does that on every call,
- * already inactive or not. Activating an active user is a no-op.
+ * already inactive or not. Reactivating an inactive user sweeps the same way,
+ * for anything created while the deactivation ran. Activating an active user is
+ * a no-op.
  * active: 1 = active, 0 = inactive
  *
  * Returns: 0 success, 1 not found, -1 on error

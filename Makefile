@@ -11,15 +11,21 @@ CC = gcc
 CFLAGS = -Wall -Wextra -std=c11 -O2 -Iinclude
 LDFLAGS = -lpthread -lm -ldl -largon2 -lssl -lcrypto
 
+# Goals that compile no database code: the fuzz targets, the str, http and router
+# suites (on their own or under test-sanitized), and the email delivery test. A fresh
+# clone can run them before it has vendored the 9 MB SQLite amalgamation or
+# installed libpq. DB_GOALS is what is left of the named goals without them, or
+# `all` when none is named, and the backend checks below run only when it isn't
+# empty: one exempt goal on the command line doesn't excuse the others.
+NO_DB_GOALS = clean help fuzz fuzz-regress test-str test-http test-router test-email test-sanitized
+DB_GOALS = $(if $(MAKECMDGOALS),$(filter-out $(NO_DB_GOALS),$(MAKECMDGOALS)),all)
+
 # Configure database backend
 ifeq ($(DB_BACKEND),sqlite)
     CFLAGS += -Ivendor/sqlite -DDB_BACKEND_SQLITE
     DB_VENDOR_SRCS = vendor/sqlite/sqlite3.c
     ifeq ($(wildcard vendor/sqlite/sqlite3.c),)
-        # The fuzz targets and test-str compile only the parser and a few utils — no
-        # database. Exempt them so a fresh clone can fuzz and run the string/JSON tests
-        # before vendoring a 9 MB amalgamation that neither of them links.
-        ifeq ($(filter clean fuzz fuzz-regress test-str,$(MAKECMDGOALS)),)
+        ifneq ($(DB_GOALS),)
             $(error SQLite amalgamation not found at vendor/sqlite/sqlite3.c — see vendor/setup_notes.txt)
         endif
     endif
@@ -35,9 +41,9 @@ else ifeq ($(DB_BACKEND),postgresql)
         # rather than after this block because a bare -isystem consumes the NEXT flag
         # as its argument: -fstack-protector-strong silently becomes an include
         # directory and the build succeeds unhardened, with no diagnostic. The exempt
-        # targets below still compile C, so skipping the $(error) must not leave the
-        # bad flag behind.
-        ifeq ($(filter clean fuzz fuzz-regress test-str,$(MAKECMDGOALS)),)
+        # goals still compile C, so skipping the $(error) must not leave the bad flag
+        # behind.
+        ifneq ($(DB_GOALS),)
             $(error pg_config not found — install libpq-dev)
         endif
     else
@@ -49,6 +55,14 @@ else ifeq ($(DB_BACKEND),postgresql)
     endif
 else
     $(error Invalid DB_BACKEND: $(DB_BACKEND). Must be 'sqlite' or 'postgresql')
+endif
+
+# test-postgresql runs the database suites as PostgreSQL builds; refused before
+# anything is compiled for SQLite instead
+ifneq ($(filter test-postgresql,$(MAKECMDGOALS)),)
+    ifneq ($(DB_BACKEND),postgresql)
+        $(error test-postgresql runs the PostgreSQL build: make DB_BACKEND=postgresql test-postgresql)
+    endif
 endif
 
 # Configure email support
@@ -78,14 +92,20 @@ HANDLER_SRCS = src/handlers/common.c src/handlers/health.c src/handlers/admin.c 
                src/handlers/admin_org_http.c src/handlers/session.c src/handlers/session_http.c \
                src/handlers/oauth.c src/handlers/oauth_http.c src/handlers/static.c \
                src/handlers/mfa.c src/handlers/mfa_http.c \
-               src/handlers/rs.c src/handlers/rs_http.c
+               src/handlers/rs.c src/handlers/rs_http.c src/handlers/routes.c
 DB_SRCS = src/db/db.c src/db/db_pool.c src/db/cleaner.c src/db/init/db_init.c src/db/init/db_history.c \
+          src/db/instance_lock.c src/db/maintenance.c src/db/encryption_params.c \
           src/db/queries/org.c src/db/queries/user.c src/db/queries/client.c src/db/queries/resource_server.c src/db/queries/oauth.c \
-          src/db/queries/mfa.c
+          src/db/queries/mfa.c src/db/queries/secret.c
 CRYPTO_SRCS = src/crypto/random.c src/crypto/argon2.c src/crypto/pbkdf2.c src/crypto/password.c src/crypto/hmac.c src/crypto/sha256.c src/crypto/jwt.c src/crypto/signing_keys.c src/crypto/totp.c src/crypto/encrypt.c
 
 SRCS = src/main.c $(SERVER_SRCS) $(UTIL_SRCS) $(HANDLER_SRCS) $(DB_SRCS) $(CRYPTO_SRCS) $(DB_VENDOR_SRCS)
 OBJS = $(SRCS:.c=.o)
+
+# The SQLite amalgamation is compiled once, by the %.o rule below, and that object is
+# what the server and the test programs that need SQLite link. Compiling the 9 MB file
+# is most of a full build.
+DB_VENDOR_OBJS = $(DB_VENDOR_SRCS:.c=.o)
 
 # Target executable
 TARGET = auth-server
@@ -113,17 +133,24 @@ HEADERS := $(shell find include -name '*.h')
 $(filter-out vendor/%,$(OBJS)): $(HEADERS)
 
 # Nothing compiles the SQLite amalgamation until vendor/verify-sqlite.sh has checked
-# it against its pinned hashes, however it arrived. It runs on every build that could
-# compile it rather than once per stamp: hashing both files takes a fraction of a
-# second, and a stamp judged by file times would trust a replacement whose times were
-# restored, as unzip, cp -p and tar all do. Order-only, so a passing check never
-# forces a recompile. test/sanitize.sh, which compiles outside make, runs it too.
+# it against its pinned hashes, however it arrived. Only the object rule compiles it,
+# and the check runs whenever that rule is considered rather than once per stamp:
+# hashing both files takes a fraction of a second, and a stamp judged by file times
+# would trust a replacement whose times were restored, as unzip, cp -p and tar all do.
+# Order-only, so a passing check never forces a recompile. test/sanitize.sh, which
+# compiles outside make, runs it too.
+#
+# Nothing built with sanitizer flags depends on the object. test-sanitized appends
+# them as a target-specific variable, which make passes down to prerequisites, so an
+# object built under it would carry ASan into the next plain build's link; make
+# doesn't track flags, so nothing would ever rebuild it. The suites test-sanitized
+# runs don't link SQLite.
 ifeq ($(DB_BACKEND),sqlite)
 .PHONY: verify-sqlite
 verify-sqlite:
 	@sh vendor/verify-sqlite.sh
 
-vendor/sqlite/sqlite3.o test-http test-router test-db test-crypto: | verify-sqlite
+vendor/sqlite/sqlite3.o: | verify-sqlite
 endif
 
 # Debug build (security flags applied except _FORTIFY_SOURCE which requires -O1+)
@@ -137,30 +164,47 @@ release: clean $(TARGET)
 
 # Clean build artifacts
 clean:
-	rm -f src/*.o src/**/*.o src/**/**/*.o vendor/**/*.o $(TARGET) test-str test-http test-router test-db test-crypto test-email
+	rm -f src/*.o src/**/*.o src/**/**/*.o vendor/**/*.o $(TARGET) test-str test-http test-router test-db test-crypto test-handlers test-handlers-email test-email
 	rm -rf fuzz-replay fuzz-replay-http fuzz-replay-jwt fuzz-replay-json fuzz_http fuzz_jwt fuzz_json fuzz_http_replay auth-server-asan .fuzz-work
 	@echo "Cleaned build artifacts (crash seeds in test/fuzz/crashes/ are kept — they are tests)"
 
 # Test programs
+
+# Where the database suites get databases of their own (test/scratch_db.h)
+SCRATCH_DB_SRCS = test/scratch_db.c
+
 test-str:
-	$(CC) $(CFLAGS) $(SECURITY_FLAGS) test/test_str.c src/util/str.c src/util/json.c src/util/log.c -o test-str $(SECURITY_LDFLAGS)
+	$(CC) $(CFLAGS) $(SECURITY_FLAGS) test/test_str.c src/util/str.c src/util/json.c src/util/log.c src/util/validation.c -o test-str $(SECURITY_LDFLAGS)
 	@echo "Test built! Run with: ./test-str"
 
 test-http:
-	$(CC) $(CFLAGS) $(SECURITY_FLAGS) test/test_http.c src/server/http.c src/handlers/common.c $(UTIL_SRCS) $(DB_SRCS) $(CRYPTO_SRCS) $(DB_VENDOR_SRCS) -o test-http $(LDFLAGS) $(SECURITY_LDFLAGS)
+	$(CC) $(CFLAGS) $(SECURITY_FLAGS) test/test_http.c src/server/http.c src/handlers/common.c $(UTIL_SRCS) -o test-http $(LDFLAGS) $(SECURITY_LDFLAGS)
 	@echo "HTTP parser test built! Run with: ./test-http"
 
 test-router:
-	$(CC) $(CFLAGS) $(SECURITY_FLAGS) test/test_router.c src/server/router.c src/server/http.c src/handlers/common.c $(UTIL_SRCS) $(DB_SRCS) $(CRYPTO_SRCS) $(DB_VENDOR_SRCS) -o test-router $(LDFLAGS) $(SECURITY_LDFLAGS)
+	$(CC) $(CFLAGS) $(SECURITY_FLAGS) test/test_router.c src/server/router.c src/server/http.c src/handlers/common.c $(UTIL_SRCS) -o test-router $(LDFLAGS) $(SECURITY_LDFLAGS)
 	@echo "Router test built! Run with: ./test-router"
 
-test-db:
-	$(CC) $(CFLAGS) $(SECURITY_FLAGS) test/test_db.c $(UTIL_SRCS) $(DB_SRCS) $(CRYPTO_SRCS) $(DB_VENDOR_SRCS) -o test-db $(LDFLAGS) $(SECURITY_LDFLAGS)
+test-db: $(DB_VENDOR_OBJS)
+	$(CC) $(CFLAGS) $(SECURITY_FLAGS) test/test_db.c $(SCRATCH_DB_SRCS) $(UTIL_SRCS) $(DB_SRCS) $(CRYPTO_SRCS) $(DB_VENDOR_OBJS) -o test-db $(LDFLAGS) $(SECURITY_LDFLAGS)
 	@echo "Database test built! Run with: ./test-db"
 
-test-crypto:
-	$(CC) $(CFLAGS) $(SECURITY_FLAGS) test/test_crypto.c $(CRYPTO_SRCS) $(UTIL_SRCS) $(DB_SRCS) $(DB_VENDOR_SRCS) -o test-crypto $(LDFLAGS) $(SECURITY_LDFLAGS)
+test-crypto: $(DB_VENDOR_OBJS)
+	$(CC) $(CFLAGS) $(SECURITY_FLAGS) test/test_crypto.c $(CRYPTO_SRCS) $(UTIL_SRCS) $(DB_SRCS) $(DB_VENDOR_OBJS) -o test-crypto $(LDFLAGS) $(SECURITY_LDFLAGS)
 	@echo "Crypto test built! Run with: ./test-crypto"
+
+test-handlers: $(DB_VENDOR_OBJS)
+	$(CC) $(CFLAGS) $(SECURITY_FLAGS) test/test_handlers.c $(SCRATCH_DB_SRCS) src/server/router.c src/server/http.c $(HANDLER_SRCS) $(UTIL_SRCS) $(DB_SRCS) $(CRYPTO_SRCS) $(DB_VENDOR_OBJS) -o test-handlers $(LDFLAGS) $(SECURITY_LDFLAGS)
+	@echo "Handler test built! Run with: ./test-handlers"
+
+# The handler suite again with email support compiled in, whatever EMAIL_SUPPORT says,
+# so the flows that exist only there (emailed invitations, reset and verification links)
+# run in every `make test`. It points the email command at a capture of what would have
+# been sent. Compiled from source like test-handlers, so the flag reaches every file;
+# the SQLite object it shares includes no project header.
+test-handlers-email: $(DB_VENDOR_OBJS)
+	$(CC) $(CFLAGS) -DEMAIL_SUPPORT $(SECURITY_FLAGS) test/test_handlers.c $(SCRATCH_DB_SRCS) src/server/router.c src/server/http.c $(HANDLER_SRCS) $(filter-out src/util/email.c,$(UTIL_SRCS)) src/util/email.c $(DB_SRCS) $(CRYPTO_SRCS) $(DB_VENDOR_OBJS) -o test-handlers-email $(LDFLAGS) $(SECURITY_LDFLAGS)
+	@echo "Handler test with email support built! Run with: ./test-handlers-email"
 
 test-email:
 ifeq ($(EMAIL_SUPPORT),1)
@@ -170,13 +214,20 @@ else
 	@echo "Email support not enabled. Build with: make EMAIL_SUPPORT=1 test-email"
 endif
 
-test: test-str test-http test-router test-db test-crypto
+test: test-str test-http test-router test-db test-crypto test-handlers test-handlers-email
 	@echo "All tests built! Running..."
-	./test-str && ./test-http && ./test-router && ./test-db && ./test-crypto
+	./test-str && ./test-http && ./test-router && ./test-db && ./test-crypto && ./test-handlers && ./test-handlers-email
 	@$(MAKE) --no-print-directory fuzz-regress
 
+# The database suites on PostgreSQL: test-db and both handler suites, built for it
+# and run against a throwaway cluster that test/pg-cluster.sh starts and removes.
+# That needs PostgreSQL's server programs (initdb, pg_ctl); against a server of
+# your own instead, set AUTH_TEST_PG and run the three binaries.
+test-postgresql: test-db test-handlers test-handlers-email
+	sh test/pg-cluster.sh run sh -c './test-db && ./test-handlers && ./test-handlers-email'
 
-# Three of the five suites, rebuilt under ASan+UBSan.
+
+# Three of the six suites, rebuilt under ASan+UBSan.
 #
 # `make test` already replays the fuzz corpus under sanitizers, and stops there:
 # the unit suites themselves build without them. That leaves the arithmetic most
@@ -184,10 +235,12 @@ test: test-str test-http test-router test-db test-crypto
 # and the routing added for CORS and HEAD — which is exactly the code where an
 # off-by-one is likeliest and review is weakest.
 #
-# str, http and router, deliberately not all five. None of the three opens a
-# database. test-db is left out because it opens the configured one and its value
-# is integration coverage rather than memory safety, and test-crypto because
-# Argon2 at 64 MiB under ASan costs real time for no arithmetic payoff.
+# str, http and router, deliberately not all six. None of the three links the
+# database, so this needs no amalgamation and no configuration. The other three
+# link the SQLite object, which nothing built with sanitizer flags may (see its
+# rule above), and they wouldn't repay it: db and handlers are integration coverage
+# rather than memory safety, and Argon2 at 64 MiB under ASan costs crypto real time
+# for no arithmetic payoff.
 #
 # CFLAGS is assigned with `=`, so overriding it on the command line would replace
 # it wholesale and drop -Iinclude; appending through a target-specific variable is
@@ -275,8 +328,11 @@ help:
 	@echo "  make test-router    - Build router test"
 	@echo "  make test-db        - Build database integration test"
 	@echo "  make test-crypto    - Build crypto test (random generation, password hashing, hmac, jwt)"
+	@echo "  make test-handlers  - Build request-flow test (route table, handlers, in-memory DB)"
+	@echo "  make test-handlers-email - The same, with email support compiled in"
 	@echo "  make test-email     - Build email delivery test (requires EMAIL_SUPPORT=1)"
 	@echo "  make test           - Build and run all tests (excludes test-email)"
+	@echo "  make DB_BACKEND=postgresql test-postgresql - The database suites on a throwaway PostgreSQL"
 	@echo "  make clean          - Remove build artifacts"
 	@echo "  make help           - Show this help"
 	@echo ""
@@ -285,5 +341,5 @@ help:
 	@echo "  make fuzz           - Coverage-guided fuzz (clang; FUZZ_TARGET=http|jwt|json, FUZZ_TIME=60)"
 	@echo "  make sanitize       - Build the whole server with ASan+UBSan to drive by hand"
 
-.PHONY: all debug release clean help test test-str test-http test-router test-db test-crypto test-email \
-        test-sanitized fuzz fuzz-regress sanitize
+.PHONY: all debug release clean help test test-str test-http test-router test-db test-crypto test-handlers test-handlers-email test-email \
+        test-postgresql test-sanitized fuzz fuzz-regress sanitize

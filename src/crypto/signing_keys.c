@@ -203,7 +203,7 @@ cleanup:
  * later format can take "e2:" without guessing.
  *
  * A value that will not open fails every operation that needs the key; nothing is
- * regenerated. The two ways to get there are a row in the older plaintext format,
+ * regenerated. The two ways to get there are a row stored in plaintext (no "e1:"),
  * fixed by deleting the rows, and an encryption_key that differs from the one that
  * stored the row, fixed by restoring that key, which sign-in needs too. The log
  * messages say which.
@@ -235,9 +235,9 @@ static int seal_key_material(const char *plaintext, char *out, size_t out_size) 
 /* Returns a heap copy of the plaintext (caller cleanses and frees), or NULL. */
 static char *open_key_material(const char *stored, const char *table, const char *column) {
     if (strncmp(stored, SIGNING_KEY_SEALED_PREFIX, SIGNING_KEY_SEALED_PREFIX_LEN) != 0) {
-        log_error("Signing key %s.%s is stored unencrypted (written by a build before signing "
-                  "keys were encrypted). Token issuance, /userinfo and JWKS will fail until it "
-                  "is removed: delete the rows in %s and %s; new keys are generated on next use.",
+        log_error("Signing key %s.%s is stored unencrypted (no e1: prefix). Token issuance, "
+                  "/userinfo and JWKS will fail until it is removed: delete the rows in %s "
+                  "and %s; new keys are generated on next use.",
                   table, column, TBL_ACCESS_TOKEN_SIGNING, TBL_AUTH_REQUEST_SIGNING);
         return NULL;
     }
@@ -259,6 +259,105 @@ static char *open_key_material(const char *stored, const char *table, const char
         log_error("Failed to allocate memory for signing key material");
     }
     return copy;
+}
+
+/* Opens one sealed value the statement reads, a signing key's after its prefix.
+   Returns 1 if it opens, 0 if it won't, 2 if there's none to try (no row, NULL,
+   or a signing key stored in plaintext, which proves nothing either way), -1
+   on error. */
+static int open_sealed(db_handle_t *db, const char *sql, int prefixed) {
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        log_error("Failed to prepare the encryption key check");
+        return -1;
+    }
+
+    int rc = db_step(stmt);
+    if (rc != DB_ROW) {
+        db_finalize(stmt);
+        if (rc == DB_DONE) return 2;
+        log_error("Failed to read a sealed value for the encryption key check");
+        return -1;
+    }
+
+    const char *stored = db_column_text(stmt, 0);
+    if (!stored || (prefixed && strncmp(stored, SIGNING_KEY_SEALED_PREFIX,
+                                        SIGNING_KEY_SEALED_PREFIX_LEN) != 0)) {
+        db_finalize(stmt);
+        return 2;
+    }
+    if (prefixed) stored += SIGNING_KEY_SEALED_PREFIX_LEN;
+
+    char plaintext[ENCRYPT_FIELD_MAX_LENGTH + 1];
+    int opened = decrypt_field(stored, plaintext, sizeof(plaintext)) == 0;
+    OPENSSL_cleanse(plaintext, sizeof(plaintext));
+    db_finalize(stmt);
+    return opened;
+}
+
+int signing_key_check_encryption_key(db_handle_t *db) {
+    if (!db) {
+        log_error("Invalid arguments to signing_key_check_encryption_key");
+        return -1;
+    }
+
+    /* 1. The user data first, which nothing can regenerate: a username, else an
+          address. Whether it opens is whether this is the key that sealed the
+          database. */
+    static const struct { const char *sql; const char *what; } users[] = {
+        { "SELECT username FROM " TBL_USER_ACCOUNT " WHERE username IS NOT NULL LIMIT 1",
+          "a username" },
+        { "SELECT email_address FROM " TBL_USER_EMAIL " LIMIT 1", "an email address" },
+    };
+    int have_users = 0;
+    for (size_t i = 0; i < sizeof(users) / sizeof(users[0]) && !have_users; i++) {
+        int rc = open_sealed(db, users[i].sql, 0);
+        if (rc == -1) return -1;
+        if (rc == 0) {
+            log_error("encryption_key does not open %s already in the database: it is not the "
+                      "key that sealed it. Start with that one (encryption_key in auth.conf, or "
+                      "AUTH_ENCRYPTION_KEY). Sign-in, token issuance and every other sealed "
+                      "value need it.", users[i].what);
+            return -1;
+        }
+        have_users = rc == 1;
+    }
+
+    /* 2. Then every stored signing key, current and prior, which token issuance
+          loads together. One that won't open under the key that opens the users
+          was sealed under another: rows copied in from another deployment, say. */
+    static const struct { const char *sql; const char *what; } keys[] = {
+        { "SELECT current_secret FROM " TBL_AUTH_REQUEST_SIGNING,
+          TBL_AUTH_REQUEST_SIGNING ".current_secret" },
+        { "SELECT prior_secret FROM " TBL_AUTH_REQUEST_SIGNING,
+          TBL_AUTH_REQUEST_SIGNING ".prior_secret" },
+        { "SELECT current_private_key FROM " TBL_ACCESS_TOKEN_SIGNING,
+          TBL_ACCESS_TOKEN_SIGNING ".current_private_key" },
+        { "SELECT prior_private_key FROM " TBL_ACCESS_TOKEN_SIGNING,
+          TBL_ACCESS_TOKEN_SIGNING ".prior_private_key" },
+    };
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+        int rc = open_sealed(db, keys[i].sql, 1);
+        if (rc == -1) return -1;
+        if (rc != 0) continue;
+        if (have_users) {
+            log_error("encryption_key opens the users but not %s: the signing keys were sealed "
+                      "under another key, for example copied in from another deployment. Delete "
+                      "the rows in %s and %s; new signing keys are generated on next use, and "
+                      "sessions and refresh tokens survive that.",
+                      keys[i].what, TBL_ACCESS_TOKEN_SIGNING, TBL_AUTH_REQUEST_SIGNING);
+        } else {
+            log_error("encryption_key does not open %s, and there are no users to tell why. "
+                      "Either it is not the key that sealed the database (start with that one: "
+                      "encryption_key in auth.conf, or AUTH_ENCRYPTION_KEY), or the signing keys "
+                      "came from another deployment (delete the rows in %s and %s; new ones are "
+                      "generated on next use).",
+                      keys[i].what, TBL_ACCESS_TOKEN_SIGNING, TBL_AUTH_REQUEST_SIGNING);
+        }
+        return -2;
+    }
+
+    return 0;  /* Everything opens, or nothing is sealed yet: a fresh database */
 }
 
 /* ============================================================================
@@ -748,9 +847,8 @@ int signing_key_get_or_rotate(db_handle_t *db, signing_key_type_t type,
 
     /*
      * Validate the cached row against the database before using it.
-     * current_generated_at is read fresh on every call, so the rotation check
-     * below fires exactly as promptly as it did when this function took the
-     * write lock unconditionally.
+     * current_generated_at is read fresh on every call, so a cached key never
+     * delays the rotation check below.
      */
     signing_key_cache_t *entry = &g_key_cache[type];
     if (entry->key && cache_matches_db(db, type, entry)

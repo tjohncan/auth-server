@@ -119,11 +119,7 @@ int resource_server_create_bootstrap(db_handle_t *db, const char *org_code_name,
     db_bind_text(stmt, 4, display_name, -1);
     db_bind_text(stmt, 5, address, -1);
 
-    if (note != NULL) {
-        db_bind_text(stmt, 6, note, -1);
-    } else {
-        db_bind_null(stmt, 6);
-    }
+    db_bind_text_or_null(stmt, 6, note);
 
     /* Execute and get returned pin */
     int rc = db_step(stmt);
@@ -229,11 +225,7 @@ int resource_server_create(db_handle_t *db,
     db_bind_text(stmt, 4, display_name, -1);
     db_bind_text(stmt, 5, address, -1);
 
-    if (note != NULL) {
-        db_bind_text(stmt, 6, note, -1);
-    } else {
-        db_bind_null(stmt, 6);
-    }
+    db_bind_text_or_null(stmt, 6, note);
 
     if (is_org_key_auth) {
         db_bind_int64(stmt, 7, organization_key_pin);
@@ -759,10 +751,10 @@ int resource_server_key_create(db_handle_t *db,
 
     /* Hash secret with configured algorithm */
     char salt_hex[PASSWORD_SALT_HEX_MAX_LENGTH];
-    char hash_hex[PASSWORD_HASH_HEX_MAX_LENGTH];
+    char hash_hex[PASSWORD_HASH_MAX_LENGTH];
     int iterations;
 
-    int hash_rc = crypto_password_hash(secret, strlen(secret),
+    int hash_rc = crypto_password_hash(SECRET_MACHINE, secret, strlen(secret),
                             salt_hex, sizeof(salt_hex),
                             &iterations,
                             hash_hex, sizeof(hash_hex));
@@ -820,11 +812,7 @@ int resource_server_key_create(db_handle_t *db,
     db_bind_int(stmt, 4, iterations);
     db_bind_text(stmt, 5, hash_hex, -1);
 
-    if (note != NULL) {
-        db_bind_text(stmt, 6, note, -1);
-    } else {
-        db_bind_null(stmt, 6);
-    }
+    db_bind_text_or_null(stmt, 6, note);
 
     if (is_org_key_auth) {
         db_bind_int64(stmt, 7, organization_key_pin);
@@ -1234,16 +1222,22 @@ int rs_client_user_unlink(db_handle_t *db, long long client_pin,
         return -1;
     }
 
-    const char *sql =
-        "DELETE FROM " TBL_CLIENT_USER " "
-        "WHERE client_pin = " P"1 "
-        "AND user_account_pin = ("
-            "SELECT pin FROM " TBL_USER_ACCOUNT " WHERE id = " P"2"
-        ")";
+    if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
+        log_error("Failed to begin transaction");
+        return -1;
+    }
+
+    /* The user, and whether the client signs users in without a link */
+    const char *lookup_sql =
+        "SELECT ua.pin, c.is_universal "
+        "FROM " TBL_USER_ACCOUNT " ua "
+        "JOIN " TBL_CLIENT " c ON c.pin = " P"1 "
+        "WHERE ua.id = " P"2";
 
     db_stmt_t *stmt = NULL;
-    if (db_prepare(db, &stmt, sql) != 0) {
-        log_error("Failed to prepare rs_client_user_unlink");
+    if (db_prepare(db, &stmt, lookup_sql) != 0) {
+        log_error("Failed to prepare rs_client_user_unlink lookup");
+        db_execute_trusted(db, "ROLLBACK");
         return -1;
     }
 
@@ -1251,11 +1245,65 @@ int rs_client_user_unlink(db_handle_t *db, long long client_pin,
     db_bind_blob(stmt, 2, user_id, 16);
 
     int rc = db_step(stmt);
+    if (rc != DB_ROW) {
+        db_finalize(stmt);
+        db_execute_trusted(db, "ROLLBACK");
+        if (rc == DB_DONE) return 0;  /* No such user: nothing to unlink */
+        log_error("Error in rs_client_user_unlink lookup");
+        return -1;
+    }
+
+    long long user_account_pin = db_column_int64(stmt, 0);
+    int is_universal = db_column_int(stmt, 1);
     db_finalize(stmt);
 
-    if (rc == DB_DONE) return 0;  /* Deleted or no-op — both success */
-    log_error("Failed to delete client_user link");
-    return -1;
+    /* Unlinking withdraws the user's access through this client. The use-time
+     * checks read the link, but linking the user again would bring back every
+     * token the pair still held, so the pair's refresh and access tokens are
+     * revoked as the link goes. On every call, the link there or not, so calling
+     * it again sweeps up a token issued while an unlink ran. A universal client
+     * needs no link to sign anyone in, so unlinking from one withdraws nothing
+     * and revokes nothing. Sessions stay: they are the user's, not the client's. */
+    const char *steps[] = {
+        "DELETE FROM " TBL_CLIENT_USER " "
+        "WHERE client_pin = " P"1 AND user_account_pin = " P"2",
+
+        "UPDATE " TBL_REFRESH_TOKEN " "
+        "SET is_revoked = " BOOL_TRUE ", revoked_at = " NOW ", updated_at = " NOW " "
+        "WHERE client_pin = " P"1 AND user_account_pin = " P"2 AND is_revoked = " BOOL_FALSE,
+
+        "UPDATE " TBL_ACCESS_TOKEN " "
+        "SET is_revoked = " BOOL_TRUE ", revoked_at = " NOW ", updated_at = " NOW " "
+        "WHERE client_pin = " P"1 AND user_account_pin = " P"2 AND is_revoked = " BOOL_FALSE,
+    };
+    size_t step_count = is_universal ? 1 : sizeof(steps) / sizeof(steps[0]);
+
+    for (size_t i = 0; i < step_count; i++) {
+        if (db_prepare(db, &stmt, steps[i]) != 0) {
+            log_error("Failed to prepare rs_client_user_unlink");
+            db_execute_trusted(db, "ROLLBACK");
+            return -1;
+        }
+
+        db_bind_int64(stmt, 1, client_pin);
+        db_bind_int64(stmt, 2, user_account_pin);
+
+        rc = db_step(stmt);
+        db_finalize(stmt);
+
+        if (rc != DB_DONE) {
+            log_error("Failed to unlink user from client");
+            db_execute_trusted(db, "ROLLBACK");
+            return -1;
+        }
+    }
+
+    if (db_execute_trusted(db, "COMMIT") != 0) {
+        log_error("Failed to commit rs_client_user_unlink");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+    return 0;
 }
 
 int rs_client_user_list(db_handle_t *db, long long client_pin,

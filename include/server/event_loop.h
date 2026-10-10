@@ -35,8 +35,9 @@ typedef struct EventLoopPool EventLoopPool;
  * ============================================================================ */
 
 /*
- * Connection states (currently uses READING_HEADERS → WRITING_RESPONSE;
- * others reserved for future use, e.g., HTTP/1.1 keep-alive)
+ * Connection states. A connection goes READING_HEADERS → WRITING_RESPONSE and
+ * closes: one request each (HTTP/1.0, no keep-alive). The states marked Reserved
+ * aren't used.
  */
 typedef enum {
     CONN_STATE_READING_HEADERS,   /* Reading HTTP request (headers + body) */
@@ -65,8 +66,10 @@ typedef struct Connection {
     size_t bytes_written;         /* How much we've written so far */
 
     char remote_ip[INET6_ADDRSTRLEN];  /* Client IP address (IPv4 or IPv6, for logging) */
-    uint64_t connection_id;       /* Unique ID for logging/debugging */
+    int admin_listener;           /* Accepted on the loopback admin listener, not the public one */
+    uint64_t connection_id;       /* Unique across workers, for logging/debugging */
     struct timespec last_activity; /* Last read/write time (for timeout detection) */
+    struct timespec opened_at;    /* When accepted: one request per connection, so its deadline */
 
     void *userdata;               /* Shared context from handler_context (not owned by connection) */
 
@@ -104,10 +107,15 @@ typedef int (*RequestHandler)(Connection *conn,
 
 typedef struct {
     int num_workers;              /* Number of worker threads (caller must resolve) */
-    int port;                     /* Port to listen on */
+    int port;                     /* Port to listen on, every interface (IPv4 and IPv6) */
+    int admin_port;               /* Port for the admin listener: 127.0.0.1, and ::1 where the
+                                     host has it, never any other interface (0: none) */
+    const char *admin_socket;     /* Unix socket path for the admin listener (NULL: none) */
+    int admin_socket_mode;        /* Its file mode: who may connect (0600: its owner) */
     int backlog;                  /* Listen queue size (default: 128) */
     size_t max_request_size;      /* Max request size in bytes (default: 1MB) */
-    int connection_timeout_ms;    /* Close idle connections after this (default: 30s) */
+    int connection_timeout_ms;    /* Close a connection idle this long, or still reading
+                                     its request this long after it opened (default: 30s) */
     int max_connections_per_worker; /* Max concurrent connections per worker (0 = unlimited) */
     RequestHandler handler;       /* Application request handler */
     void *handler_context;        /* Passed to handler (e.g., router) */
@@ -121,20 +129,39 @@ typedef struct {
 /*
  * event_loop_pool_create - Create a pool of worker threads
  *
- * Each worker runs its own epoll event loop.
- * Connections are distributed by the kernel via SO_REUSEPORT.
+ * Each worker runs its own epoll event loop, with a public listening socket of
+ * its own, between which the kernel distributes connections (SO_REUSEPORT).
+ * The admin listener is one socket per process, shared by the workers. Every
+ * socket is opened here, before any worker starts, so a port that can't be had
+ * is a startup failure.
  *
- * Returns: EventLoopPool pointer, or NULL on error
+ * Returns: EventLoopPool pointer, or NULL on error (logged)
  */
 EventLoopPool *event_loop_pool_create(EventLoopConfig *config);
+
+/*
+ * admin_socket_dir_private - May only the right users replace the admin
+ * socket at path? Anyone who can write a directory on its path can make or
+ * swap what's below it, put a socket of their own there, and receive the
+ * operator's calls, passwords included. A path with any directory up to /
+ * that every user can write (as written, or as it resolves) is refused, the
+ * sticky bit or not; with owner_too, so is a socket directory another user owns
+ * (the server's own, or root's, is fine). The server checks both;
+ * ./auth-server --admin, which may run as root, the first. A socket directory
+ * that isn't there yet passes: the server makes it 0700.
+ *
+ * Returns: 1, or 0 with what's wrong in reason
+ */
+int admin_socket_dir_private(const char *path, int owner_too, char *reason, size_t size);
 
 /*
  * event_loop_pool_start - Start all worker threads and begin accepting connections
  *
  * This blocks until the server is shut down (e.g., SIGINT).
- * Workers run in background threads, main thread waits.
+ * Workers run in background threads, main thread waits. A worker whose loop
+ * can't run stops them all.
  *
- * Returns: 0 on clean shutdown, -1 on error
+ * Returns: 0 on clean shutdown, -1 if a worker couldn't run (or couldn't start)
  */
 int event_loop_pool_start(EventLoopPool *pool);
 
@@ -178,7 +205,8 @@ EventLoop *event_loop_create(void);
 /*
  * event_loop_run - Run the event loop (blocks until stopped)
  *
- * Calls epoll_wait in a loop, handling events as they arrive.
+ * Calls epoll_wait in a loop, handling events as they arrive, on the
+ * listening sockets event_loop_pool_create opened for this loop.
  *
  * Parameters:
  *   loop    - Event loop instance

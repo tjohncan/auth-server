@@ -51,6 +51,30 @@ static HttpResponse *response_html_error(int status_code, const char *message) {
     return resp;
 }
 
+/*
+ * A form's password, URL-decoded into a new buffer (cleanse_free it). The
+ * buffer is as long as the encoded value, so decoding never truncates, and the
+ * limit is PASSWORD_MAX_LENGTH, as for every JSON endpoint that takes one.
+ *
+ * Returns: 0, 1 if it's longer than a password may be, -1 if it can't be
+ * decoded (an encoded NUL), -2 if out of memory
+ */
+static int form_password(const char *encoded, char **out_password) {
+    size_t size = strlen(encoded) + 1;
+    char *password = malloc(size);
+    if (!password) return -2;
+
+    int len = str_url_decode(password, size, encoded);
+    if (len < 0 || len > PASSWORD_MAX_LENGTH) {
+        OPENSSL_cleanse(password, size);
+        free(password);
+        return len < 0 ? -1 : 1;
+    }
+
+    *out_password = password;
+    return 0;
+}
+
 /* Session token size: 32 bytes (256 bits) — matches session.c */
 #define SESSION_TOKEN_BYTES 32
 
@@ -58,38 +82,39 @@ static HttpResponse *response_html_error(int status_code, const char *message) {
  * Auth Helper
  * ========================================================================== */
 
-/*
- * require_authenticated_session - Validate session cookie and MFA completion
- *
- * Returns NULL on success (session populated), or error response on failure.
- */
-static HttpResponse *require_authenticated_session(const HttpRequest *req,
-                                                    db_handle_t *db,
-                                                    oauth_session_info_t *out_session) {
+/* Declared in handlers.h, with the policies */
+int session_authenticate(const HttpRequest *req, db_handle_t *db,
+                         session_mfa_policy_t policy, oauth_session_info_t *out_session) {
     const char *cookie_header = http_request_get_header(req, "Cookie");
-    char *session_token = NULL;
-    if (cookie_header) {
-        session_token = http_cookie_get_value(cookie_header, SESSION_COOKIE_NAME);
-    }
-
+    char *session_token = cookie_header
+        ? http_cookie_get_value(cookie_header, SESSION_COOKIE_NAME) : NULL;
     if (!session_token) {
-        return response_json_error(401, "Authentication required");
+        return 1;
     }
 
-    if (oauth_session_get_by_token(db, session_token, out_session) != 0) {
-        cleanse_free(session_token);
-        return response_json_error(401, "Invalid or expired session");
-    }
-
+    int found = oauth_session_get_by_token(db, session_token, out_session) == 0;
     cleanse_free(session_token);
-
-    /* The preference rule, not the enrollment rule used for factor management;
-       see oauth_session_mfa_pending in db/queries/oauth.h for why there are two. */
-    if (out_session->user_requires_mfa && !out_session->mfa_completed) {
-        return response_json_error(403, "MFA verification required");
+    if (!found) {
+        return 2;
     }
 
-    return NULL;
+    int owes_factor = 0;
+    switch (policy) {
+        case SESSION_MFA_IF_ENROLLED: owes_factor = out_session->user_has_mfa; break;
+        case SESSION_MFA_IF_REQUIRED: owes_factor = out_session->user_requires_mfa; break;
+        case SESSION_MFA_NONE: break;
+    }
+    return owes_factor && !out_session->mfa_completed ? 3 : 0;
+}
+
+HttpResponse *session_require(const HttpRequest *req, db_handle_t *db,
+                              session_mfa_policy_t policy, oauth_session_info_t *out_session) {
+    switch (session_authenticate(req, db, policy, out_session)) {
+        case 0:  return NULL;
+        case 1:  return response_json_error(401, "Authentication required");
+        case 2:  return response_json_error(401, "Invalid or expired session");
+        default: return response_json_error(403, "MFA verification required");
+    }
 }
 
 /* ============================================================================
@@ -111,8 +136,7 @@ static HttpResponse *require_authenticated_session(const HttpRequest *req,
  *   401 Unauthorized
  *   {"error":"invalid_credentials","message":"Invalid username or password"}
  */
-HttpResponse *login_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;  /* Unused */
+HttpResponse *login_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -145,7 +169,7 @@ HttpResponse *login_handler(const HttpRequest *req, const RouteParams *params) {
     int rc = session_authenticate_and_create(
         db, username, password,
         http_request_get_client_ip(req, NULL),  /* source_ip */
-        http_request_get_header(req, "User-Agent"),  /* user_agent */
+        http_request_get_user_agent(req),  /* user_agent */
         g_config->session_ttl_seconds,
         &session_token,
         &user_pin
@@ -247,8 +271,7 @@ HttpResponse *login_handler(const HttpRequest *req, const RouteParams *params) {
  *     ]
  *   }
  */
-HttpResponse *management_setups_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *management_setups_handler(const HttpRequest *req) {
 
     /* Get database connection */
     db_handle_t *db = db_pool_get_connection();
@@ -290,7 +313,7 @@ HttpResponse *management_setups_handler(const HttpRequest *req, const RouteParam
      * has only passed the password gets 403 here, not their org/client topology.
      * The console's picker sends that 403 to the MFA step. */
     oauth_session_info_t session;
-    HttpResponse *auth_err = require_authenticated_session(req, db, &session);
+    HttpResponse *auth_err = session_require(req, db, SESSION_MFA_IF_REQUIRED, &session);
     if (auth_err) return auth_err;
 
     /* Get management UI setups */
@@ -334,8 +357,7 @@ HttpResponse *management_setups_handler(const HttpRequest *req, const RouteParam
  * Returns profile information for the authenticated user.
  * Requires valid session cookie.
  */
-HttpResponse *profile_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *profile_handler(const HttpRequest *req) {
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -344,7 +366,7 @@ HttpResponse *profile_handler(const HttpRequest *req, const RouteParams *params)
     }
 
     oauth_session_info_t session;
-    HttpResponse *auth_err = require_authenticated_session(req, db, &session);
+    HttpResponse *auth_err = session_require(req, db, SESSION_MFA_IF_REQUIRED, &session);
     if (auth_err) return auth_err;
 
     /* Get user profile */
@@ -376,8 +398,7 @@ HttpResponse *profile_handler(const HttpRequest *req, const RouteParams *params)
  * Returns email addresses for the authenticated user.
  * Requires valid session cookie.
  */
-HttpResponse *emails_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *emails_handler(const HttpRequest *req) {
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -386,7 +407,7 @@ HttpResponse *emails_handler(const HttpRequest *req, const RouteParams *params) 
     }
 
     oauth_session_info_t session;
-    HttpResponse *auth_err = require_authenticated_session(req, db, &session);
+    HttpResponse *auth_err = session_require(req, db, SESSION_MFA_IF_REQUIRED, &session);
     if (auth_err) return auth_err;
 
     int limit = parse_query_int(req->query_string, "limit", 20, 1, 100);
@@ -426,8 +447,7 @@ HttpResponse *emails_handler(const HttpRequest *req, const RouteParams *params) 
  * Changes the authenticated user's password.
  * Requires valid session cookie and correct current password.
  */
-HttpResponse *change_password_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *change_password_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -438,7 +458,7 @@ HttpResponse *change_password_handler(const HttpRequest *req, const RouteParams 
     }
 
     oauth_session_info_t session;
-    HttpResponse *auth_err = require_authenticated_session(req, db, &session);
+    HttpResponse *auth_err = session_require(req, db, SESSION_MFA_IF_REQUIRED, &session);
     if (auth_err) return auth_err;
 
     /* Parse JSON body */
@@ -455,6 +475,15 @@ HttpResponse *change_password_handler(const HttpRequest *req, const RouteParams 
         free(current_password);
         free(new_password);
         return response_json_error(400, "current_password and new_password required");
+    }
+
+    char validation_error[256];
+    if (validate_new_password(new_password, validation_error, sizeof(validation_error)) != 0) {
+        OPENSSL_cleanse(current_password, strlen(current_password));
+        OPENSSL_cleanse(new_password, strlen(new_password));
+        free(current_password);
+        free(new_password);
+        return response_json_error(400, validation_error);
     }
 
     /* Change password */
@@ -489,8 +518,7 @@ HttpResponse *change_password_handler(const HttpRequest *req, const RouteParams 
  * Changes the authenticated user's username.
  * Requires valid session cookie.
  */
-HttpResponse *change_username_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *change_username_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -501,7 +529,7 @@ HttpResponse *change_username_handler(const HttpRequest *req, const RouteParams 
     }
 
     oauth_session_info_t session;
-    HttpResponse *auth_err = require_authenticated_session(req, db, &session);
+    HttpResponse *auth_err = session_require(req, db, SESSION_MFA_IF_REQUIRED, &session);
     if (auth_err) return auth_err;
 
     /* Parse JSON body */
@@ -515,7 +543,7 @@ HttpResponse *change_username_handler(const HttpRequest *req, const RouteParams 
     }
 
     char validation_error[256];
-    if (validate_username(new_username, validation_error, sizeof(validation_error)) != 0) {
+    if (validate_new_username(new_username, validation_error, sizeof(validation_error)) != 0) {
         free(new_username);
         return response_json_error(400, validation_error);
     }
@@ -541,8 +569,7 @@ HttpResponse *change_username_handler(const HttpRequest *req, const RouteParams 
  * Adds a new email address to the authenticated user's account.
  * The email is added as unverified and non-primary.
  */
-HttpResponse *add_email_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *add_email_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -553,7 +580,7 @@ HttpResponse *add_email_handler(const HttpRequest *req, const RouteParams *param
     }
 
     oauth_session_info_t session;
-    HttpResponse *auth_err = require_authenticated_session(req, db, &session);
+    HttpResponse *auth_err = session_require(req, db, SESSION_MFA_IF_REQUIRED, &session);
     if (auth_err) return auth_err;
 
     if (!req->body) {
@@ -567,7 +594,7 @@ HttpResponse *add_email_handler(const HttpRequest *req, const RouteParams *param
     }
 
     char validation_error[256];
-    if (validate_email(email, validation_error, sizeof(validation_error)) != 0) {
+    if (validate_new_email(email, validation_error, sizeof(validation_error)) != 0) {
         resp = response_json_error(400, validation_error);
         goto cleanup;
     }
@@ -598,8 +625,7 @@ cleanup:
  * Removes an email address from the authenticated user's account.
  * Idempotent: returns success even if the email was already gone.
  */
-HttpResponse *delete_email_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *delete_email_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -610,7 +636,7 @@ HttpResponse *delete_email_handler(const HttpRequest *req, const RouteParams *pa
     }
 
     oauth_session_info_t session;
-    HttpResponse *auth_err = require_authenticated_session(req, db, &session);
+    HttpResponse *auth_err = session_require(req, db, SESSION_MFA_IF_REQUIRED, &session);
     if (auth_err) return auth_err;
 
     if (!req->body) {
@@ -637,8 +663,7 @@ HttpResponse *delete_email_handler(const HttpRequest *req, const RouteParams *pa
  *
  * Sets an email address as the primary email for the authenticated user.
  */
-HttpResponse *set_primary_email_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *set_primary_email_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -649,7 +674,7 @@ HttpResponse *set_primary_email_handler(const HttpRequest *req, const RouteParam
     }
 
     oauth_session_info_t session;
-    HttpResponse *auth_err = require_authenticated_session(req, db, &session);
+    HttpResponse *auth_err = session_require(req, db, SESSION_MFA_IF_REQUIRED, &session);
     if (auth_err) return auth_err;
 
     if (!req->body) {
@@ -727,9 +752,7 @@ static HttpResponse *response_template(int status, const char *name, ...) {
  * Request body:
  *   {"email":"user@example.com"}
  */
-HttpResponse *create_email_verification_token_handler(const HttpRequest *req,
-                                                       const RouteParams *params) {
-    (void)params;
+HttpResponse *create_email_verification_token_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -740,7 +763,7 @@ HttpResponse *create_email_verification_token_handler(const HttpRequest *req,
     }
 
     oauth_session_info_t session;
-    HttpResponse *auth_err = require_authenticated_session(req, db, &session);
+    HttpResponse *auth_err = session_require(req, db, SESSION_MFA_IF_REQUIRED, &session);
     if (auth_err) return auth_err;
 
     if (!req->body) {
@@ -776,15 +799,8 @@ HttpResponse *create_email_verification_token_handler(const HttpRequest *req,
 
     /* Build verification URL */
     char verify_url[512];
-    if (strcmp(g_config->host, "localhost") == 0) {
-        snprintf(verify_url, sizeof(verify_url),
-                 "http://localhost:%d/verify-email?token=%s",
-                 g_config->port, token);
-    } else {
-        snprintf(verify_url, sizeof(verify_url),
-                 "https://%s/verify-email?token=%s",
-                 g_config->host, token);
-    }
+    snprintf(verify_url, sizeof(verify_url), "%s/verify-email?token=%s",
+             g_config->public_base_url, token);
     OPENSSL_cleanse(token, sizeof(token));
 
     /* Send verification email */
@@ -808,9 +824,7 @@ HttpResponse *create_email_verification_token_handler(const HttpRequest *req,
  * Public endpoint (no auth). Renders confirmation page showing the email
  * address and username so the user can confirm before verifying.
  */
-HttpResponse *verify_email_page_handler(const HttpRequest *req,
-                                         const RouteParams *params) {
-    (void)params;
+HttpResponse *verify_email_page_handler(const HttpRequest *req) {
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -850,11 +864,11 @@ HttpResponse *verify_email_page_handler(const HttpRequest *req,
     }
 
     /* Escape the token even though it has already been matched against a stored
-     * SHA-256 hash and so cannot carry attacker bytes. This is uniformity, not a
-     * live XSS fix: template_render does not escape by default — USERNAME_DISPLAY
+     * SHA-256 hash and so cannot carry attacker bytes. This is uniformity, not an
+     * XSS defence: template_render does not escape by default — USERNAME_DISPLAY
      * just above is deliberately raw HTML — so "is this substitution escaped?" has
-     * to be answerable at each call site, and three of the four token pages were
-     * answering it differently from the fourth.
+     * to be answerable at each call site, and the four token pages all answer it
+     * the same way.
      *
      * 128 is ample because the token is 43 characters of base64url, an alphabet
      * holding none of & < > " ' — so escaping is a straight copy. 43 characters that
@@ -880,9 +894,7 @@ HttpResponse *verify_email_page_handler(const HttpRequest *req,
  * Public endpoint (no auth). Consumes the token and marks the email verified.
  * Expects form-encoded body: token=...
  */
-HttpResponse *verify_email_handler(const HttpRequest *req,
-                                    const RouteParams *params) {
-    (void)params;
+HttpResponse *verify_email_handler(const HttpRequest *req) {
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -922,10 +934,8 @@ HttpResponse *verify_email_handler(const HttpRequest *req,
  *
  * Renders a page with an email input form for requesting a password reset.
  */
-HttpResponse *request_password_reset_page_handler(const HttpRequest *req,
-                                                    const RouteParams *params) {
+HttpResponse *request_password_reset_page_handler(const HttpRequest *req) {
     (void)req;
-    (void)params;
 
     HttpResponse *resp = response_template(200, "pages/request-password-reset.html", NULL);
     return resp ? resp : response_json_error(500, "Template error");
@@ -939,9 +949,7 @@ HttpResponse *request_password_reset_page_handler(const HttpRequest *req,
  *
  * Request body: {"email":"user@example.com"}
  */
-HttpResponse *request_password_reset_handler(const HttpRequest *req,
-                                               const RouteParams *params) {
-    (void)params;
+HttpResponse *request_password_reset_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -976,15 +984,8 @@ HttpResponse *request_password_reset_handler(const HttpRequest *req,
     if (result == 0) {
         /* Token created — send email */
         char reset_url[512];
-        if (strcmp(g_config->host, "localhost") == 0) {
-            snprintf(reset_url, sizeof(reset_url),
-                     "http://localhost:%d/reset-password?token=%s",
-                     g_config->port, token);
-        } else {
-            snprintf(reset_url, sizeof(reset_url),
-                     "https://%s/reset-password?token=%s",
-                     g_config->host, token);
-        }
+        snprintf(reset_url, sizeof(reset_url), "%s/reset-password?token=%s",
+                 g_config->public_base_url, token);
         OPENSSL_cleanse(token, sizeof(token));
 
         char *body_text = template_render("emails/reset.txt", "URL", reset_url, NULL);
@@ -1014,9 +1015,7 @@ HttpResponse *request_password_reset_handler(const HttpRequest *req,
  * Public endpoint (no auth). Validates the token and renders
  * a "Set New Password" page with password input.
  */
-HttpResponse *reset_password_page_handler(const HttpRequest *req,
-                                            const RouteParams *params) {
-    (void)params;
+HttpResponse *reset_password_page_handler(const HttpRequest *req) {
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -1058,9 +1057,7 @@ HttpResponse *reset_password_page_handler(const HttpRequest *req,
  * Public endpoint (no auth). Consumes the token and sets the new password.
  * Expects form-encoded body: token=...&password=...
  */
-HttpResponse *reset_password_handler(const HttpRequest *req,
-                                       const RouteParams *params) {
-    (void)params;
+HttpResponse *reset_password_handler(const HttpRequest *req) {
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -1081,17 +1078,35 @@ HttpResponse *reset_password_handler(const HttpRequest *req,
         return response_html_error(400, "Missing token or password");
     }
 
-    /* URL-decode password (form-encoded) */
-    char password[256];
-    if (str_url_decode(password, sizeof(password), password_enc) < 0) {
-        cleanse_free(token);
-        cleanse_free(password_enc);
-        return response_html_error(400, "Invalid request");
-    }
+    char *password = NULL;
+    int decoded = form_password(password_enc, &password);
     cleanse_free(password_enc);
+    if (decoded != 0) {
+        cleanse_free(token);
+        if (decoded == 1) {
+            char msg[128];
+            snprintf(msg, sizeof(msg), "Password must be at most %d characters.",
+                     PASSWORD_MAX_LENGTH);
+            HttpResponse *resp = response_template(400, "pages/reset-password-error.html",
+                "MESSAGE", msg, NULL);
+            return resp ? resp : response_json_error(400, msg);
+        }
+        return decoded == -2 ? response_html_error(500, "Internal server error")
+                             : response_html_error(400, "Invalid request");
+    }
+
+    /* Checked before the link is spent, so a refused password can be retried */
+    char validation_error[256];
+    if (validate_new_password(password, validation_error, sizeof(validation_error)) != 0) {
+        cleanse_free(password);
+        cleanse_free(token);
+        HttpResponse *resp = response_template(400, "pages/reset-password-error.html",
+            "MESSAGE", validation_error, NULL);
+        return resp ? resp : response_json_error(400, validation_error);
+    }
 
     int rc = user_consume_password_reset_token(db, token, password);
-    OPENSSL_cleanse(password, sizeof(password));
+    cleanse_free(password);
     cleanse_free(token);
 
     if (rc == -2) {
@@ -1125,9 +1140,7 @@ HttpResponse *reset_password_handler(const HttpRequest *req,
  * Public endpoint (no auth). Validates invitation token and renders
  * password-set form showing username and/or email.
  */
-HttpResponse *accept_invitation_page_handler(const HttpRequest *req,
-                                               const RouteParams *params) {
-    (void)params;
+HttpResponse *accept_invitation_page_handler(const HttpRequest *req) {
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -1204,9 +1217,7 @@ HttpResponse *accept_invitation_page_handler(const HttpRequest *req,
  * Public endpoint (no auth). Consumes the invitation token and sets password.
  * Expects form-encoded body: token=...&password=...
  */
-HttpResponse *accept_invitation_handler(const HttpRequest *req,
-                                          const RouteParams *params) {
-    (void)params;
+HttpResponse *accept_invitation_handler(const HttpRequest *req) {
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -1227,17 +1238,35 @@ HttpResponse *accept_invitation_handler(const HttpRequest *req,
         return response_html_error(400, "Missing token or password");
     }
 
-    /* URL-decode password (form-encoded) */
-    char password[256];
-    if (str_url_decode(password, sizeof(password), password_enc) < 0) {
-        cleanse_free(token);
-        cleanse_free(password_enc);
-        return response_html_error(400, "Invalid request");
-    }
+    char *password = NULL;
+    int decoded = form_password(password_enc, &password);
     cleanse_free(password_enc);
+    if (decoded != 0) {
+        cleanse_free(token);
+        if (decoded == 1) {
+            char msg[128];
+            snprintf(msg, sizeof(msg), "Password must be at most %d characters.",
+                     PASSWORD_MAX_LENGTH);
+            HttpResponse *resp = response_template(400, "pages/accept-invitation-error.html",
+                "MESSAGE", msg, NULL);
+            return resp ? resp : response_json_error(400, msg);
+        }
+        return decoded == -2 ? response_html_error(500, "Internal server error")
+                             : response_html_error(400, "Invalid request");
+    }
+
+    /* Checked before the invitation is spent, so a refused password can be retried */
+    char validation_error[256];
+    if (validate_new_password(password, validation_error, sizeof(validation_error)) != 0) {
+        cleanse_free(password);
+        cleanse_free(token);
+        HttpResponse *resp = response_template(400, "pages/accept-invitation-error.html",
+            "MESSAGE", validation_error, NULL);
+        return resp ? resp : response_json_error(400, validation_error);
+    }
 
     int rc = user_consume_invitation_token(db, token, password);
-    OPENSSL_cleanse(password, sizeof(password));
+    cleanse_free(password);
     cleanse_free(token);
 
     if (rc == -2) {
@@ -1278,9 +1307,7 @@ HttpResponse *accept_invitation_handler(const HttpRequest *req,
  * Renders a page with an email input form for requesting a passwordless login link.
  * Carries return_to from query param into a hidden form field.
  */
-HttpResponse *request_passwordless_login_page_handler(const HttpRequest *req,
-                                                        const RouteParams *params) {
-    (void)params;
+HttpResponse *request_passwordless_login_page_handler(const HttpRequest *req) {
 
     /* Extract return_to from query string (authorize query params, or empty) */
     char *return_to = NULL;
@@ -1307,9 +1334,7 @@ HttpResponse *request_passwordless_login_page_handler(const HttpRequest *req,
  *
  * Request body: {"email":"user@example.com","return_to":"client_id=...&..."}
  */
-HttpResponse *request_passwordless_login_handler(const HttpRequest *req,
-                                                   const RouteParams *params) {
-    (void)params;
+HttpResponse *request_passwordless_login_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -1353,15 +1378,8 @@ HttpResponse *request_passwordless_login_handler(const HttpRequest *req,
 
     if (result == 0) {
         char login_url[512];
-        if (strcmp(g_config->host, "localhost") == 0) {
-            snprintf(login_url, sizeof(login_url),
-                     "http://localhost:%d/passwordless-login?token=%s",
-                     g_config->port, token);
-        } else {
-            snprintf(login_url, sizeof(login_url),
-                     "https://%s/passwordless-login?token=%s",
-                     g_config->host, token);
-        }
+        snprintf(login_url, sizeof(login_url), "%s/passwordless-login?token=%s",
+                 g_config->public_base_url, token);
         OPENSSL_cleanse(token, sizeof(token));
 
         char *body_text = template_render("emails/passwordless.txt", "URL", login_url, NULL);
@@ -1392,9 +1410,7 @@ HttpResponse *request_passwordless_login_handler(const HttpRequest *req,
  * Public endpoint (no auth). Validates the token and renders
  * a confirmation page: "Log in as user@example.com?"
  */
-HttpResponse *passwordless_login_page_handler(const HttpRequest *req,
-                                                const RouteParams *params) {
-    (void)params;
+HttpResponse *passwordless_login_page_handler(const HttpRequest *req) {
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -1451,9 +1467,7 @@ HttpResponse *passwordless_login_page_handler(const HttpRequest *req,
  * sets the session cookie, and redirects to return_to or /.
  * Expects form-encoded body: token=...
  */
-HttpResponse *passwordless_login_handler(const HttpRequest *req,
-                                           const RouteParams *params) {
-    (void)params;
+HttpResponse *passwordless_login_handler(const HttpRequest *req) {
 
     /* The confirmation page is the one legitimate sender, and it is same-origin.
      * Another site posting here would be posting its own token, to sign this
@@ -1508,7 +1522,7 @@ HttpResponse *passwordless_login_handler(const HttpRequest *req,
     rc = oauth_session_create(db, user_pin, user_id, session_token,
                               "passwordless",
                               http_request_get_client_ip(req, NULL),
-                              http_request_get_header(req, "User-Agent"),
+                              http_request_get_user_agent(req),
                               g_config->session_ttl_seconds,
                               session_id);
 
@@ -1539,7 +1553,7 @@ HttpResponse *passwordless_login_handler(const HttpRequest *req,
     if (!resp) {
         /* Not a clean unwind: the session row is already committed, so this leaves one
          * behind that no cookie ever reached. It ages out on its own TTL, and the
-         * alternative was dereferencing NULL. */
+         * alternative is dereferencing NULL. */
         log_error("Failed to allocate response for passwordless login");
         OPENSSL_cleanse(cookie_header, sizeof(cookie_header));
         return response_json_error(500, "Internal server error");
@@ -1564,9 +1578,7 @@ HttpResponse *passwordless_login_handler(const HttpRequest *req,
  * Toggles allow_passwordless_login for the authenticated user.
  * Requires at least one verified email to enable.
  */
-HttpResponse *passwordless_login_toggle_handler(const HttpRequest *req,
-                                                 const RouteParams *params) {
-    (void)params;
+HttpResponse *passwordless_login_toggle_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -1577,7 +1589,7 @@ HttpResponse *passwordless_login_toggle_handler(const HttpRequest *req,
     }
 
     oauth_session_info_t session;
-    HttpResponse *auth_err = require_authenticated_session(req, db, &session);
+    HttpResponse *auth_err = session_require(req, db, SESSION_MFA_IF_REQUIRED, &session);
     if (auth_err) return auth_err;
 
     if (!req->body) {
@@ -1612,8 +1624,7 @@ HttpResponse *passwordless_login_toggle_handler(const HttpRequest *req,
 
 #endif /* EMAIL_SUPPORT */
 
-HttpResponse *logout_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *logout_handler(const HttpRequest *req) {
 
     /* Get database connection */
     db_handle_t *db = db_pool_get_connection();

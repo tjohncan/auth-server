@@ -36,9 +36,14 @@ This server focuses on authentication logic.
 
 **Network layer**
 - Dual-stack IPv4/IPv6 support (single socket handles both)
-- Connection timeout enforcement with efficient linked-list tracking
+- Connection timeouts with efficient linked-list tracking: a request must arrive whole within 30 s
+    of its connection opening, and a connection idle that long closes
+- Control characters in a request target answer 400, and a NUL, or a CR or LF outside a line
+    ending, anywhere in the header block closes the connection unanswered
 - Request smuggling protection (detects conflicting Content-Length headers, rejects Transfer-Encoding)
-- Per-worker connection limit (default 1024) prevents resource exhaustion
+- Per-worker connection limit (1024, or fewer where the descriptor limit requires) prevents
+    resource exhaustion, and is reached before descriptors run out, so a flood on the public
+    port leaves the admin API reachable
 
 **Security hardening**
 - Stack buffer overflow protection (`-fstack-protector-strong`)
@@ -48,7 +53,8 @@ This server focuses on authentication logic.
 - JSON injection protection in error responses
 - SHA-256 hashed token storage (sessions, auth codes, refresh/access tokens)
 - AES-256-GCM encryption of sensitive information at rest (usernames, emails, MFA secrets,
-    JWT signing secrets and private keys) with HMAC-SHA256 blind indexes for lookups
+    JWT signing secrets and private keys) with HMAC-SHA256 blind indexes for lookups, under keys
+    stretched from a passphrase (Argon2id or PBKDF2) that `--rekey` can change
 
 **System Dependencies**
 - POSIX + pthreads
@@ -74,8 +80,8 @@ Core HTTP server infrastructure.
 - **Event Loop** (`event_loop.c`, `include/server/event_loop.h`) - Multi-threaded epoll network layer. 
     Each worker runs independent epoll instance with kernel-level load balancing via SO_REUSEPORT.
 - **HTTP** (`http.c`, `include/server/http.h`) - Zero-copy parser and response builder. HTTP/1.0 implementation.
-- **Router** (`router.c`, `include/server/router.h`) - Hash table-based routing (FNV-1a, O(1) lookup). 
-    Path parameters disabled by default.
+- **Router** (`router.c`, `include/server/router.h`) - Hash table-based routing (FNV-1a, O(1) lookup)
+    on exact paths; identifiers travel in the query string or the body.
 
 ### Database Layer (`src/db/`)
 Database abstraction supporting SQLite and PostgreSQL.
@@ -91,6 +97,18 @@ Database abstraction supporting SQLite and PostgreSQL.
 - **Cleaner** (`cleaner.c`, `include/db/cleaner.h`) - Background thread for purging old sessions, tokens, 
     usage logs, and history records. Prevents unbounded database growth with configurable retention periods. 
     Uses dedicated connection (not from pool). Randomized table rotation prevents thundering herd in horizontal deployments.
+    Keeps purging a table while its batches come back full, for up to two seconds a visit, and warns when one
+    still has a backlog after that.
+- **Instance Lock** (`instance_lock.c`, `include/db/instance_lock.h`) - Held shared by every running
+    instance, and exclusively by a maintenance run, so a run happens with every instance stopped: a lock
+    file beside an SQLite database, an advisory lock in PostgreSQL.
+- **Encryption params** (`encryption_params.c`, `include/db/encryption_params.h`) - The database's record
+    of how `encryption_key` is stretched (method, iterations, salt): one row, made at the first start with
+    nothing sealed, and by `--rekey`.
+- **Maintenance** (`maintenance.c`, `include/db/maintenance.h`) - One-shot runs of the same binary:
+    `./auth-server --drophistory` removes every history table and its triggers, and
+    `./auth-server --rekey` seals everything sealed under one `encryption_key` again under another
+    (sql/README.md).
 
 ### Utilities (`src/util/`)
 Common helper functions.
@@ -111,14 +129,18 @@ Cryptographic primitives for OAuth2 security.
     Random integer generation for password hashing iterations.
 - **Argon2** (`argon2.c`, `include/crypto/argon2.h`) - Argon2id password hashing (memory-hard, GPU-resistant)
 - **PBKDF2** (`pbkdf2.c`, `include/crypto/pbkdf2.h`) - PBKDF2-SHA256 password hashing (alternative to Argon2)
-- **Password** (`password.c`, `include/crypto/password.h`) - Config-driven wrapper with random iteration selection
+- **Password** (`password.c`, `include/crypto/password.h`) - Config-driven wrapper with random iteration selection.
+    Two kinds of secret, each with its configured method: passwords, and machine secrets (key secrets and
+    recovery codes). A stored hash names its method (`argon2id$...`), and one made otherwise is hashed
+    again when next verified.
 - **SHA-256** (`sha256.c`, `include/crypto/sha256.h`) - SHA-256 hashing for token storage (sessions, auth codes, refresh/access tokens)
 - **HMAC** (`hmac.c`, `include/crypto/hmac.h`) - HMAC-SHA256 for JWT signatures and token validation. Timing-safe comparison.
 - **JWT** (`jwt.c`, `include/crypto/jwt.h`) - HS256/ES256 JWT encoding/decoding for OAuth2 tokens with expiration checking
 - **Signing Keys** (`signing_keys.c`, `include/crypto/signing_keys.h`) - Automatic key rotation management for JWTs. 
     HMAC secrets for auth requests, ES256 keypairs for access tokens.
 - **Encrypt** (`encrypt.c`, `include/crypto/encrypt.h`) - AES-256-GCM field encryption and HMAC-SHA256 blind indexing 
-    for PII and security info at rest. HKDF-derived keys from config passphrase.
+    for PII and security info at rest. Keys from the config passphrase: stretched with Argon2id or PBKDF2
+    as the database's `encryption_params` row says, then HKDF.
 - **TOTP** (`totp.c`, `include/crypto/totp.h`) - RFC 6238 TOTP implementation for multi-factor authentication
 
 ### Handlers (`src/handlers/`)
@@ -138,6 +160,7 @@ HTTP endpoint implementations.
 - `rs.c` - Resource servers invite users and manage their access to clients
 - `rs_http.c` - HTTP endpoints for the user provisioning API
 - `static.c` - Static file serving for management console
+- `routes.c` - The route table: every API endpoint, by method and exact path
 
 ## Handler Architecture
 
@@ -146,7 +169,8 @@ Each handler domain (admin, session, OAuth, MFA, user provisioning) follows the 
 ### 1. Database Query Layer (`src/db/queries/`)
 Entity-based query functions for direct database operations.
 
-- **Files**: `org.c`, `user.c`, `client.c`, `resource_server.c`, `oauth.c`, `mfa.c`
+- **Files**: `org.c`, `user.c`, `client.c`, `resource_server.c`, `oauth.c`, `mfa.c`, and `secret.c`
+    (a secret hashed again under the configured settings, when it's used)
 - **Responsibility**: Prepared statements, parameter binding, result extraction
 - **Used by**: Admin handlers, OAuth2 handlers
 - **Design**: Natural keys (code_name, username) instead of internal PINs
@@ -155,7 +179,7 @@ Entity-based query functions for direct database operations.
 Examples:
 - `org_exists(db, code_name)` - Check if organization exists
 - `user_create(db, username, email, password, out_id)` - Create user with hashed password
-- `client_link_resource_server(db, org_code_name, client_id, address)` - Link client to API
+- `client_link_resource_server_bootstrap(db, org_code_name, client_id, address)` - Link client to API
 - `oauth_session_create(db, user_pin, token, auth_method, ttl, out_id)` - Create browser session
 - `oauth_auth_code_consume(db, code, out_data)` - Atomically consume auth code with replay detection
 - `oauth_token_rotate_refresh(db, old_token, new_token, ttl, out_data, out_id)` - Refresh token rotation
@@ -190,9 +214,9 @@ HTTP endpoint implementations for admin API.
 - TOCTOU protection: specific key re-verified active at query execution time
 
 Examples:
-- `admin_bootstrap_handler(req, params)` - POST /api/admin/bootstrap (localhost-only)
-- `admin_get_organizations_handler(req, params)` - GET /api/admin/organizations (dual-auth)
-- `admin_create_client_handler(req, params)` - POST /api/admin/clients (dual-auth)
+- `admin_bootstrap_handler(req)` - POST /api/admin/bootstrap (localhost-only)
+- `admin_get_organizations_handler(req)` - GET /api/admin/organizations (dual-auth)
+- `admin_create_client_handler(req)` - POST /api/admin/clients (dual-auth)
 
 **Benefits of layered approach:**
 - Query functions reusable across handlers
@@ -223,13 +247,13 @@ HTTP endpoints for user authentication and management.
 - **Security**: Never exposes internal database PINs to browser, only UUIDs
 
 Examples:
-- `login_handler(req, params)` - POST /login
-- `logout_handler(req, params)` - POST /logout
-- `management_setups_handler(req, params)` - GET /api/user/management-setups
-- `profile_handler(req, params)` - GET /api/user/profile
-- `emails_handler(req, params)` - GET /api/user/emails
-- `change_password_handler(req, params)` - POST /api/user/password
-- `change_username_handler(req, params)` - POST /api/user/username
+- `login_handler(req)` - POST /login
+- `logout_handler(req)` - POST /logout
+- `management_setups_handler(req)` - GET /api/user/management-setups
+- `profile_handler(req)` - GET /api/user/profile
+- `emails_handler(req)` - GET /api/user/emails
+- `change_password_handler(req)` - POST /api/user/password
+- `change_username_handler(req)` - POST /api/user/username
 
 ### 6. OAuth2 Handler Layer (`src/handlers/oauth.c`)
 Business logic for OAuth2 token operations.
@@ -253,7 +277,7 @@ HTTP endpoint for OAuth2 token operations.
 - **Design**: Supports grant_type: authorization_code, refresh_token, client_credentials
 
 Examples:
-- `token_handler(req, params)` - POST /token
+- `token_handler(req)` - POST /token
 
 ### 8. RS User Provisioning Layer (`src/handlers/rs.c`, `rs_http.c`)
 User provisioning (invitations, admission to clients) is a power and responsibility of resource servers (via resource server keys).
@@ -265,9 +289,9 @@ User provisioning (invitations, admission to clients) is a power and responsibil
 - **Design**: Shared `rs_authenticate()` helper, `rs_user_info_t` result struct with dynamic emails array
 
 Examples:
-- `rs_provision_user_handler(req, params)` - POST /api/rs/users
-- `rs_lookup_user_handler(req, params)` - GET /api/rs/users
-- `rs_link_client_user_handler(req, params)` - POST /api/rs/client-users
+- `rs_provision_user_handler(req)` - POST /api/rs/users
+- `rs_lookup_user_handler(req)` - GET /api/rs/users
+- `rs_link_client_user_handler(req)` - POST /api/rs/client-users
 
 ## Cryptographic Infrastructure
 
@@ -284,15 +308,24 @@ Manages cryptographic signing keys for JWTs with automatic rotation.
 - Current + prior keys retained for graceful rotation
 - HMAC secrets and ES256 private keys are stored encrypted with the field-encryption key
     (`encryption_key`), as `e1:`-prefixed values; public keys are stored in plaintext
-- A stored key that will not decrypt (an `encryption_key` that differs from the one that
-    stored it) stops token issuance, `/userinfo` and the JWKS endpoint, with an error naming
-    both tables; it is never silently regenerated. `/introspect` and `/revoke` don't use the
-    keys and keep working. The fix is to restore that `encryption_key`, which sign-in needs
-    too. Only if it is lost for good, delete the rows in both tables, which regenerates the
-    keys on next use. Refresh tokens and sessions survive that. Outstanding access tokens
-    stop verifying against the published keys and at `/userinfo`, but `/introspect` reports
-    them active until they expire, so deleting the rows is no way to retire leaked tokens:
-    revoke them, or deactivate the user.
+- At startup the server opens a username or email address already in the database, then
+    every stored signing key, and refuses to start if one won't open, so a wrong key fails
+    there rather than at the first sign-in:
+    - A username or address that won't open means `encryption_key` isn't the key that sealed
+      the data. The fix is to start with that one. A key lost for good loses everything sealed
+      under it (every username, address and TOTP secret), and no one can sign in, so keep a
+      copy of `encryption_key` wherever the database is backed up. To change it, `--rekey`
+      seals everything again under the new one (sql/README.md).
+    - A signing key that won't open while the users do was sealed under another key: rows
+      copied in from another deployment, say. The error names both tables. Deleting the rows
+      in both regenerates the keys on next use, and refresh tokens and sessions survive that.
+      Outstanding access tokens stop verifying against the published keys and at
+      `/userinfo`, but `/introspect` reports them active until they expire, so deleting the
+      rows is no way to retire leaked tokens: revoke them, or deactivate the user.
+    - With no users yet, a signing key that won't open could be either, and the error says so.
+- A signing key is never silently regenerated: one that won't decrypt while the server runs
+    stops token issuance, `/userinfo` and the JWKS endpoint with the same error. `/introspect`
+    and `/revoke` don't use the keys and keep working.
 
 **Rotation:**
 - **Passive mechanism**: Keys checked on every use, rotated if stale
@@ -315,8 +348,8 @@ Generates and verifies JWTs for OAuth2 access tokens.
 Header: {"alg": "ES256", "typ": "JWT"}
 Payload:
 {
-  "iss": "https://auth.example.com",  // auth server URL
-  "sub": "7777777a333b44448cd8999999999001",  // user_account_id (UUID)
+  "iss": "https://auth.example.com",  // https:// + server_host (http://localhost:PORT in development)
+  "sub": "7777777a333b44448cd8999999999001",  // user_account_id (UUID); the client_id for client_credentials
   "aud": "7777777a333b44448cd8999999999002",  // resource_server_id (UUID)
   "client_id": "7777777a333b44448cd8999999999000",  // client_id (UUID)
   "scope": "read write",
@@ -370,6 +403,9 @@ src/
 │   ├── db.c
 │   ├── db_pool.c
 │   ├── cleaner.c
+│   ├── instance_lock.c
+│   ├── maintenance.c
+│   ├── encryption_params.c
 │   ├── init/
 │   │   ├── db_init.c
 │   │   └── db_history.c
@@ -379,7 +415,8 @@ src/
 │       ├── client.c
 │       ├── resource_server.c
 │       ├── oauth.c
-│       └── mfa.c
+│       ├── mfa.c
+│       └── secret.c
 ├── crypto/             # Cryptographic primitives
 │   ├── random.c
 │   ├── argon2.c
@@ -414,6 +451,7 @@ src/
 │   ├── mfa_http.c
 │   ├── rs.c
 │   ├── rs_http.c
+│   ├── routes.c
 │   └── static.c
 └── main.c              # Server entry point
 
@@ -427,6 +465,9 @@ include/
 │   ├── db_pool.h
 │   ├── db_sql.h
 │   ├── cleaner.h
+│   ├── instance_lock.h
+│   ├── maintenance.h
+│   ├── encryption_params.h
 │   ├── init/
 │   │   ├── db_init.h
 │   │   └── db_history.h
@@ -436,7 +477,8 @@ include/
 │       ├── client.h
 │       ├── resource_server.h
 │       ├── oauth.h
-│       └── mfa.h
+│       ├── mfa.h
+│       └── secret.h
 ├── crypto/
 │   ├── random.h
 │   ├── argon2.h
@@ -471,7 +513,10 @@ test/
 ├── test_str.c          # String utilities unit tests
 ├── test_db.c           # Database integration test
 ├── test_crypto.c       # Crypto test (random, password hashing, hmac, jwt)
+├── test_handlers.c     # Request flows through the real route table and handlers
 ├── test_email.c   # Infrastructure/deployment convenience check; not in standard "make test" battery 
+├── scratch_db.c        # A database of each test's own, on either backend
+├── pg-cluster.sh       # A throwaway PostgreSQL cluster, for make test-postgresql
 ├── sanitize.sh         # Build the whole server with ASan+UBSan, to drive by hand
 └── fuzz/               # Coverage-guided fuzzing (see fuzz/README.md)
     ├── fuzz_http.c     # Harness: HTTP request parser
@@ -529,8 +574,26 @@ vendor/
 - `make test-router` - Router tests
 - `make test-db` - Database integration test
 - `make test-crypto` - Crypto tests (random generation, password hashing, hmac, jwt)
+- `make test-handlers` - Request flows through the real route table and handlers: code
+    exchange with PKCE, refresh rotation and replay, client credentials and introspection,
+    the MFA gates
+- `make test-handlers-email` - The same flows with email support compiled in, plus the ones
+    only it has; the email command is a capture the tests read the links back from
 - `make test` - All of the above, plus `fuzz-regress`
+- `make DB_BACKEND=postgresql test-postgresql` - test-db and both handler suites against
+    PostgreSQL, on a throwaway cluster that `test/pg-cluster.sh` starts and removes. It needs
+    PostgreSQL's server programs (initdb, pg_ctl): from `PG_BIN`, `PATH`, or Debian's and
+    Ubuntu's `/usr/lib/postgresql/<version>/bin`. On PostgreSQL, test-db runs the tests written
+    for either backend and PostgreSQL's own; the rest are SQLite's. CI runs it against the
+    oldest PostgreSQL still supported, the schema's floor, and the newest (14 and 18), side
+    by side; its manual Run workflow button takes any list of versions.
 - `make test-email` - Deliver a test email through the deployed "send script" (optional infrastructure)
+
+The database suites use a database of their own for each test: on SQLite one in memory, on
+PostgreSQL a new database on the server `AUTH_TEST_PG` names (a libpq connection string, in
+key=value form, for a role that may create databases and roles), dropped when the suite ends.
+A PostgreSQL build without `AUTH_TEST_PG` skips them, so its `make test` still passes; set it
+to run the three binaries against a server of your own.
 
 **Memory Safety:**
 
@@ -568,7 +631,7 @@ See **[sql/README.md](sql/README.md)** for full schema documentation. Key design
 **User Sovereignty**
 - Users are independent entities — once created, no organization or resource server can modify, delete, or impersonate them
 - Resource servers can invite users and control access to their own clients, but cannot alter user credentials or profile
-- Account-level moderation (activate/deactivate) is reserved for the server administrator (localhost-only)
+- Account-level moderation (activate/deactivate, MFA reset, setting a password, removing an address) is reserved for the server administrator (localhost-only)
 
 **Stateless Authorization Codes**
 - Authorization codes are signed JWTs containing all required state
@@ -594,8 +657,14 @@ There is no in-server throttling or account lockout on `/login`. Brute-force def
 to the reverse proxy or WAF in front of us (see `deployment/nginx/`), which sees the whole
 traffic picture and can shed load before it ever reaches a worker. Duplicating it here would
 spend a database write per failed guess and still be the weaker of the two.
-MFA attempts and email-token issuance *are* throttled in-server,
+TOTP attempts and email-token issuance *are* throttled in-server,
 because those are bounded per-account actions rather than an open front door.
+Recovery codes aren't, on purpose. A code is 80 random bits, ten to a set, so no rate this
+server could answer makes guessing one plausible. A per-user limit would let whoever holds the
+password keep the user's own recovery at 429, and with the daily TOTP cap already theirs to
+spend, the user would be locked out until the operator stepped in. Each attempt costs one hash
+under the machine-secret method, and the shipped nginx config puts `/api/user/mfa/recover`
+under the same strict per-IP limit as `/login`.
 If you delegate a job to the edge, the edge has to actually do it: the shipped nginx config
 enforces a strict per-IP limit on `/login` specifically (10r/m, burst 10), separate from the
 generous limit on ordinary traffic. Per-IP limiting does not stop a distributed or
@@ -612,7 +681,8 @@ the secret, both get in. Single-use doesn't stop an attacker who *has* the secre
 30 seconds. It doesn't stop real-time relay phishing either: the bot beats the human it's
 proxying, so the attacker gets in regardless and the *victim* is the one who gets rejected.
 What it reliably produces is a race between legitimate co-holders of the same seed. Guessing,
-as opposed to observing, is capped by per-method rate limiting.
+as opposed to observing, is capped: 5 failures a minute per method, and 10 a day per user
+across methods, which leaves someone holding the password about a 1% chance a year.
 
 **A user's first MFA method can be enrolled with the password alone.**
 Once a user has a factor, managing factors (adding, deleting, regenerating recovery codes,
@@ -632,9 +702,13 @@ survive it. Compromise recovery has stronger, explicit paths here — account de
 (localhost-only), which closes every session and revokes every token and emailed link, and
 token revocation — and password change isn't asked to carry that weight.
 Mass invalidation is a cost paid by every user on every routine rotation, in order to evict an
-attacker who, in the case that actually matters, already knows the new password. Deactivation
-evicts but leaves the password as it was; the API reference gives the order for handing the
-account back.
+attacker who, in the case that actually matters, already knows the new password. One kind of
+session does close, since that costs the user nothing: for a user who requires MFA, a session
+opened with the old password that never completed the factor. It's only half signed in, and all it
+could do is submit codes against the user's daily cap. Deactivation
+evicts but leaves the password as it was. The operator sets a new one while the account is
+still deactivated (`POST /api/admin/users/set-password`, localhost-only), and the API reference
+gives the order for handing the account back.
 
 **Defaults are permissive; policy is the deployer's.**
 The shipped `encryption_key` is a public placeholder and `password_min_length` is 1. The server
@@ -642,7 +716,14 @@ warns and runs. `git clone && make && run` has to work, or nobody gets far enoug
 the project; taxing every newcomer to protect a deployer who ignored both a startup warning
 *and* a documented config line is the wrong trade. Field encryption's threat model is bounded
 and stated: keep PII out of plain view of whoever is reading the database — not defeat an
-attacker who holds the database *and* the configuration.
+attacker who holds the database *and* the configuration. A production deployment sets
+`strict = true` (or `AUTH_STRICT=true`), and then the server refuses to start on either: the
+placeholder key, or a password minimum under 8.
+One default is strict on purpose. New usernames, code names and email addresses take a
+conservative ASCII shape (letters, digits, `. _ + -`; an address like `name@example.com`). A name
+with a Cyrillic а or an invisible space looks identical to the real one in every list an admin
+reads, and nothing downstream can tell them apart. Patterns in auth.conf widen it, and they
+apply only to new values, so nothing already stored stops working (`auth.conf.example`).
 
 **PKCE (S256) is mandatory for every `authorization_code` client, including confidential ones.**
 RFC 6749 makes PKCE optional, and RFC 7636 permits the weaker `plain` method. We require it,
@@ -655,12 +736,26 @@ authorized user. Authorization is enforced structurally instead — a user must 
 linked to a client (`client_user`) before `/authorize` will issue anything, and only a
 resource server or an org admin can create that link.
 
+**Scope is whatever the client asked for.**
+`/authorize` and the `client_credentials` grant check only a scope's syntax, and there is no
+list anywhere of the scopes a client may request or a resource server will honor. The string
+becomes the token's `scope` claim and introspection's `scope` as asked; a refresh can only
+narrow it. So any client can ask for any scope, including a user running their own PKCE flow
+through a public client. A resource server must not grant anything on scope alone: who may
+act is the token's `sub` and `client_id`, which the server does check (`client_user` and
+`client_resource_server` links). Use scope only to narrow what a token already allowed.
+
 **A malformed header line fails the whole request; it is not skipped.**
-A line in the header block with no colon (including an obsolete `obs-fold` continuation) gets
-a 400, rather than being quietly ignored the way a lenient parser would. RFC 7230 §3.2.4
-explicitly sanctions this. Request *framing* — the control that actually stops smuggling — is
-enforced earlier, at the socket layer (`src/server/event_loop.c`): conflicting `Content-Length`
-headers and any `Transfer-Encoding` are rejected outright, and the connection is closed after a
+A line in the header block with no colon, one that starts with a space or tab (an obsolete
+`obs-fold` continuation, colon or not), and one whose name has a space, a tab or another control
+character in it (a space before the colon among them) gets a 400, rather than being quietly
+ignored the way a lenient parser would. RFC 7230 §3.2.4 and RFC 9112 §5.1 and §5.2 sanction this,
+and nginx refuses such names too. Request *framing* — the
+control that actually stops smuggling — is enforced earlier, at the socket layer
+(`src/server/event_loop.c`): conflicting `Content-Length` headers, any `Transfer-Encoding`, and
+a NUL or a CR or LF outside a line ending anywhere in the header block are rejected outright
+(the parser refuses those bytes too, so the two layers read the same lines), a request without
+`Content-Length` has no body, and the connection is closed after a
 single request (HTTP/1.0, no keep-alive), so there is no reused connection to smuggle into.
 This rejection is narrower and is header-interpretation hygiene: it removes the divergence
 between a front-end proxy that might fold or tolerate a malformed line and an origin that would
@@ -673,7 +768,11 @@ laptop core, and for that long the worker's `epoll` loop is stopped: other login
 files and `/health` on that worker wait behind it. Login throughput is therefore a few per
 second per core, growing with cores rather than connections, and transient memory peaks at
 **64 MiB × worker count**. That cost is what makes a stolen database expensive to crack, so
-the answer to login load is more cores, not cheaper hashing. Anything else that waits
+the answer to login load is more cores, not cheaper hashing. Machine secrets are another
+matter: a client's or resource server's key is checked on every `/token` and `/introspect`,
+and its randomness, not the hash, is what protects it. So they have a method of their own
+(`machine_secret_hashing_algorithm`), which `auth.conf.example` sets to PBKDF2 at 777
+iterations, well under a millisecond. Left unset, it's the password method. Anything else that waits
 behaves the same way, in smaller measure: a write that meets another's SQLite write lock
 waits for it (up to the 2.2 s busy timeout, then fails), and on PostgreSQL every query is a
 round trip the worker spends waiting.

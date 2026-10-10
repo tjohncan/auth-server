@@ -100,7 +100,7 @@ new OAuthClient(config)
 - `config.redirectUri` (string, required) - Redirect URI for callbacks
 - `config.scope` (string, optional) - OAuth2 scope (default: `'openid'`)
 - `config.refreshBufferSeconds` (number, optional) - Seconds before expiry to trigger proactive refresh (default: `60`)
-- `config.onSessionExpired` (function, optional) - Called when session cannot be recovered (refresh token expired or revoked)
+- `config.onSessionExpired` (function, optional) - Called when session cannot be recovered (refresh token expired or revoked). Not called for this instance's own `logout()`
 - `config.onTokenRefresh` (function, optional) - Called after successful token refresh with new token data
 - `config.tokenStorage` (string, optional) - Token storage: `'local'` (default, cross-tab) or `'session'` (per-tab, disables cross-tab coordination)
 
@@ -236,13 +236,25 @@ Removes tokens and PKCE data from storage, releases the cross-tab refresh lock i
 client.clearTokens();
 ```
 
+This only makes this browser forget the tokens. The refresh token stays valid at the server until it expires. To end a session, call `logout()`.
+
+---
+
+#### `logout()`
+
+Logs out: clears local state as `clearTokens()` does, then revokes the refresh token at the server, which revokes its whole grant. A refresh in flight finds the tokens gone and stores nothing. Until a session is stored again, this instance doesn't call `onSessionExpired`: a refresh or request still in flight that finds the tokens gone just fails. The revocation is sent with `keepalive`, so it goes out even if the page navigates away before it's answered. If it can't be sent (offline, server down), the user is still logged out on this device.
+
+```javascript
+await client.logout();
+```
+
 ---
 
 #### `destroy()`
 
 Cancels the scheduled refresh timer and removes the cross-tab `storage` listener. Call when the client instance is no longer needed (e.g., on page unload or when switching accounts).
 
-Deliberately does **not** release the refresh lock. A tab destroyed mid-refresh keeps its claim until the 10-second TTL expires, and that window is what lets its in-flight response still land and write the new tokens for other tabs to pick up. Releasing eagerly would hand the lock to a tab that would then send the old refresh token — already invalidated by the in-flight rotation — and take a `4xx` that logs every tab out.
+Deliberately does **not** release the refresh lock. A tab destroyed mid-refresh keeps its claim until the 10-second TTL expires, and that window is what lets its in-flight response still land and write the new tokens for other tabs to pick up. Past storing them, a destroyed instance schedules no refresh and calls none of its callbacks. Releasing eagerly would hand the lock to a tab that would then send the old refresh token — already invalidated by the in-flight rotation — and take a `4xx` that logs every tab out.
 
 ```javascript
 client.destroy();

@@ -464,8 +464,9 @@ int admin_revoke_client_key(db_handle_t *db,
  *
  * Parameters:
  *   db           - Database handle
- *   username     - Unique username (can be NULL for email-only accounts)
- *   email        - Email address (optional, can be NULL)
+ *   username     - Unique username, required: the account signs in with it
+ *   email        - Email address (optional, can be NULL), added unverified, so
+ *                  it can't be signed in with until the user verifies it
  *   password     - Plaintext password (will be hashed)
  *   out_user_id  - Output: 16-byte UUID of created user
  *

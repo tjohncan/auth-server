@@ -1,10 +1,15 @@
+/* fileno, dup and dup2, for capturing a log record */
+#define _POSIX_C_SOURCE 200809L
+
 #include "util/str.h"
 #include "util/json.h"
 #include "util/log.h"
+#include "util/validation.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <unistd.h>
 
 void test_str_copy(void) {
     printf("\n=== Testing str_copy ===\n\n");
@@ -186,6 +191,26 @@ void test_str_url_encode_decode(void) {
     assert(dec_len > 0);
     assert(strcmp(decoded, input) == 0);
     printf("Decode '%s' -> '%s' (%d bytes)\n", encoded, decoded, dec_len);
+
+    /* Only '%' and two hex digits is an escape. A sign or whitespace in their place
+       is not, so it can't smuggle in a byte the client never encoded: "%-1" isn't
+       0xFF, nor "% 9" a tab. A malformed escape is copied as it came. */
+    const struct { const char *in, *out; } escapes[] = {
+        { "%41%4a%4A", "AJJ" },
+        { "%-1",  "%-1" },
+        { "%+f",  "% f" },   /* the '+' after a literal '%' is still form-encoding's space */
+        { "% 9",  "% 9" },
+        { "%\t9", "%\t9" },
+        { "%zz",  "%zz" },
+        { "100%", "100%" },
+        { "%4",   "%4" },
+    };
+    for (size_t i = 0; i < sizeof(escapes) / sizeof(escapes[0]); i++) {
+        assert(str_url_decode(decoded, sizeof(decoded), escapes[i].in) >= 0);
+        assert(strcmp(decoded, escapes[i].out) == 0);
+    }
+    assert(str_url_decode(decoded, sizeof(decoded), "a%00b") == -1);
+    printf("Only %%XX with two hex digits decodes; malformed escapes copy literally; %%00 refused\n");
 }
 
 void test_str_html_escape(void) {
@@ -229,6 +254,35 @@ void test_str_html_escape(void) {
     written = str_html_escape(buf, sizeof(buf), "");
     assert(strcmp(buf, "") == 0);
     printf("Empty string: '%s' (%zu bytes)\n", buf, written);
+}
+
+void test_str_utf8_sanitize(void) {
+    printf("\n=== Testing str_utf8_sanitize ===\n\n");
+    char buf[64];
+
+    /* Well-formed text passes as it is, four-byte characters included */
+    const char *fine = "Mozilla/5.0 caf\xc3\xa9 \xf0\x9f\x98\x80";
+    assert(str_utf8_sanitize(buf, sizeof(buf), fine) == strlen(fine) && strcmp(buf, fine) == 0);
+
+    /* Each byte that isn't part of a character becomes '?': a stray byte, an
+       overlong form, a surrogate, a stray continuation, a sequence cut short */
+    str_utf8_sanitize(buf, sizeof(buf), "x\xff" "y");
+    assert(strcmp(buf, "x?y") == 0);
+    str_utf8_sanitize(buf, sizeof(buf), "\xc0\x80");
+    assert(strcmp(buf, "??") == 0);
+    str_utf8_sanitize(buf, sizeof(buf), "\xed\xa0\x80");
+    assert(strcmp(buf, "???") == 0);
+    str_utf8_sanitize(buf, sizeof(buf), "\x80" "a");
+    assert(strcmp(buf, "?a") == 0);
+    str_utf8_sanitize(buf, sizeof(buf), "\xe2" "A" "\xe2\x82");
+    assert(strcmp(buf, "?A??") == 0);
+    printf("✓ ill-formed bytes become '?', well-formed text is kept\n");
+
+    /* The copy ends at the last whole character that fits */
+    assert(str_utf8_sanitize(buf, 4, "ab\xc3\xa9") == 2 && strcmp(buf, "ab") == 0);
+    assert(str_utf8_sanitize(buf, 5, "ab\xc3\xa9") == 4 && strcmp(buf, "ab\xc3\xa9") == 0);
+    assert(str_utf8_sanitize(buf, sizeof(buf), NULL) == 0 && buf[0] == '\0');
+    printf("✓ cut on a character boundary; NULL gives empty\n");
 }
 
 void test_json_escape(void) {
@@ -456,6 +510,136 @@ void test_json_utf8_valid(void) {
     printf("Well-formed UTF-8 accepted; overlong, surrogate, out-of-range and truncated refused OK\n");
 }
 
+/* Usernames, addresses and code names: the fixed rules every arrival passes, and
+ * the patterns only new values meet, with their defaults */
+void test_validation_patterns(void) {
+    printf("\n=== Testing validation patterns ===\n\n");
+    char err[256];
+
+    /* Before validation_init, a new value is refused rather than let through */
+    assert(validate_new_username("alice", err, sizeof(err)) == -1);
+
+    validation_patterns_t defaults = {0};
+    assert(validation_init(&defaults) == 0);
+
+    static const char *const good_names[] = { "alice", "Alice.Smith", "a_b+c-d", "x1" };
+    static const char *const bad_names[] = {
+        "a!b", ".alice", "alice.", "al..ice", "o'brien", "jos\xc3\xa9",
+        "admin\xc2\xa0", "ad\xe2\x80\x8bmin", "\xd0\xb0" "dmin",
+    };
+    for (size_t i = 0; i < sizeof(good_names) / sizeof(good_names[0]); i++) {
+        assert(validate_new_username(good_names[i], err, sizeof(err)) == 0);
+        assert(validate_new_code_name(good_names[i], err, sizeof(err)) == 0);
+    }
+    for (size_t i = 0; i < sizeof(bad_names) / sizeof(bad_names[0]); i++) {
+        assert(validate_new_username(bad_names[i], err, sizeof(err)) == -1);
+        assert(validate_new_code_name(bad_names[i], err, sizeof(err)) == -1);
+    }
+    /* The fixed rules still take what was stored before a pattern was set: an
+       accent, an apostrophe, NBSP, a zero-width space, a Cyrillic a */
+    for (size_t i = 3; i < sizeof(bad_names) / sizeof(bad_names[0]); i++) {
+        assert(validate_username(bad_names[i], err, sizeof(err)) == 0);
+    }
+    printf("Default name rule: letters, digits, . _ + -; NBSP, zero-width and homoglyphs refused OK\n");
+
+    static const char *const good_emails[] = {
+        "alice@example.com", "a.b+tag@mail.example.co.uk", "x_y@sub-domain.example.org",
+        "user@xn--bcher-kva.example", "u@example.xn--p1ai",
+    };
+    static const char *const bad_emails[] = {
+        "o'brien@example.com", "x@localhost", "a..b@example.com", ".a@example.com",
+        "a@-example.com", "a@example-.com", "a@example.c", "a@example.123",
+        "jos\xc3\xa9@example.com", "a@ex\xc2\xa0mple.com",
+    };
+    for (size_t i = 0; i < sizeof(good_emails) / sizeof(good_emails[0]); i++) {
+        assert(validate_new_email(good_emails[i], err, sizeof(err)) == 0);
+    }
+    for (size_t i = 0; i < sizeof(bad_emails) / sizeof(bad_emails[0]); i++) {
+        assert(validate_new_email(bad_emails[i], err, sizeof(err)) == -1);
+        assert(validate_email(bad_emails[i], err, sizeof(err)) == 0);  /* found, if stored */
+    }
+    char long_local[80];
+    memset(long_local, 'a', 65);
+    strcpy(long_local + 65, "@example.com");
+    assert(validate_new_email(long_local, err, sizeof(err)) == -1);
+    assert(strstr(err, "64") != NULL);
+    long_local[64] = '\0';
+    strcat(long_local, "@example.com");
+    assert(validate_new_email(long_local, err, sizeof(err)) == 0);
+    printf("Default address rule: one real-world shape, 64 bytes before the @; stored ones still found OK\n");
+
+    /* Fixed rules, for every arrival: invalid UTF-8 and C0 controls are refused;
+       C1 controls only in a new value */
+    assert(validate_username("bad\xff", err, sizeof(err)) == -1);
+    assert(validate_email("a\xc3@example.com", err, sizeof(err)) == -1);
+    assert(validate_code_name("x\xed\xa0\x80", err, sizeof(err)) == -1);
+    assert(validate_display_name("Caf\xc3", err, sizeof(err)) == -1);
+    assert(validate_note("ok\nfine", err, sizeof(err)) == 0);
+    assert(validate_note("bad\xc0\xaf", err, sizeof(err)) == -1);
+    assert(validate_username("c1\xc2\x85", err, sizeof(err)) == 0);
+    printf("Invalid UTF-8 refused for every value; display names and notes too OK\n");
+
+    /* Configured patterns, matched against the whole value; none for secrets by
+       default; an empty one means none */
+    validation_patterns_t custom = {
+        .username = "[a-z]+", .email = "", .code_name = "[A-Z]{3}",
+        .password = "^.{12,}$", .machine_secret = ".{32,}",
+    };
+    assert(validation_init(&custom) == 0);
+    assert(validate_new_username("alice", err, sizeof(err)) == 0);
+    assert(validate_new_username("alice9", err, sizeof(err)) == -1);   /* whole value */
+    assert(strstr(err, "username_pattern") != NULL);
+    assert(validate_new_email("x@localhost", err, sizeof(err)) == 0);  /* no pattern */
+    assert(validate_new_code_name("ABC", err, sizeof(err)) == 0);
+    assert(validate_new_code_name("ABCD", err, sizeof(err)) == -1);
+    assert(validate_new_password("twelve chars", err, sizeof(err)) == 0);
+    assert(validate_new_password("eleven char", err, sizeof(err)) == -1);
+    assert(validate_new_machine_secret("short", err, sizeof(err)) == -1);
+    assert(validate_new_email("x\xc2\x85y@example.com", err, sizeof(err)) == -1);  /* C1, even here */
+    assert(validate_email("x\xc2\x85y@example.com", err, sizeof(err)) == 0);      /* stored, found */
+    printf("Configured patterns match whole values; empty means none OK\n");
+
+    /* A pattern that won't compile is refused, naming the setting */
+    validation_patterns_t broken = { .email = "[a-" };
+    assert(validation_init(&broken) == -1);
+    assert(validate_new_email("alice@example.com", err, sizeof(err)) == -1);   /* not ready */
+    assert(validation_init(&defaults) == 0);
+    assert(validate_new_password("x", err, sizeof(err)) == 0);
+    assert(validate_new_machine_secret("x", err, sizeof(err)) == 0);
+    validation_cleanup();
+    printf("A bad pattern is refused; secrets have no default pattern OK\n");
+}
+
+/*
+ * A log record is one line of printable ASCII whatever its message holds: a line
+ * feed from a request (decoded from %0A, say) would otherwise start a forged
+ * record, and so would NEL or U+2028 to a reader that splits lines on them.
+ */
+void test_log_one_line(void) {
+    printf("\n=== Test: Log records are one line ===\n");
+
+    FILE *capture = tmpfile();
+    assert(capture);
+    fflush(stderr);
+    int saved = dup(fileno(stderr));
+    assert(saved >= 0 && dup2(fileno(capture), fileno(stderr)) >= 0);
+    log_error("method %s", "x\nERROR: forged\r\x1b[0m\tend\xc2\x85nel\xe2\x80\xa8ls");
+    fflush(stderr);
+    assert(dup2(saved, fileno(stderr)) >= 0);
+    close(saved);
+
+    char record[256];
+    rewind(capture);
+    size_t n = fread(record, 1, sizeof(record) - 1, capture);
+    record[n] = '\0';
+    fclose(capture);
+    assert(strstr(record, "ERROR: method x\\x0aERROR: forged\\x0d\\x1b[0m\tend"
+                          "\\xc2\\x85nel\\xe2\\x80\\xa8ls\n") != NULL);
+    assert(n > 0 && strchr(record, '\n') == record + n - 1);
+    printf("✓ a line feed, CR, escape, NEL and U+2028 in a message are written as \\xNN, "
+           "a tab as it is\n");
+}
+
 int main(void) {
     log_init(LOG_INFO);
     log_info("TESTING - String Utilities");
@@ -467,10 +651,13 @@ int main(void) {
     test_str_url_encode_decode();
     test_memmem_nocase();
     test_str_html_escape();
+    test_str_utf8_sanitize();
     test_json_escape();
     test_json_escaped_len();
     test_json_unescape();
     test_json_utf8_valid();
+    test_validation_patterns();
+    test_log_one_line();
 
     printf("\n=== All tests complete ===\n");
 

@@ -56,6 +56,9 @@ alter database auth set search_path = security, session, lookup;
 -- Remove DDL capability from service role
 revoke auth_dbo from auth_service;
 
+-- Connecting came with that membership too (step 4 revoked it from public)
+grant connect on database auth to auth_service;
+
 -- Grant runtime DML privileges explicitly
 grant usage on schema security, session, lookup, logging, keys to auth_service;
 
@@ -76,6 +79,10 @@ grant select, insert, update, delete on all tables in schema lookup_history to a
 -- !! IMPORTANT NOTE !! :: After revoking membership, auth_service cannot VACUUM tables owned
 -- by auth_dbo. Set cleaner_postgres_vacuum_enabled = false in auth.conf
 -- and rely on PostgreSQL's built-in autovacuum instead.
+-- Likewise, ./auth-server --drophistory scrubs pg_statistic with VACUUM FULL (and with
+-- enable_history_tables on makes the history tables again), and ./auth-server --rekey sets
+-- the history functions aside and scrubs with VACUUM FULL: both need the owner role. Grant
+-- auth_dbo to auth_service for the run, and revoke it after (sql/README.md).
 
 -- ============================================================================
 -- OPTIONAL: Read-only role for reporting / analytics

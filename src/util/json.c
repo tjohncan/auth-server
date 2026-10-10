@@ -559,16 +559,14 @@ void jsonbuf_appendf(JsonBuf *jb, const char *fmt, ...) {
 void jsonbuf_append_escaped(JsonBuf *jb, const char *src) {
     if (!jb || jb->error || !src) return;
 
-    /* Size the growth to what the escaped form actually needs. The previous
-     * estimate assumed the 6x worst case (every byte becoming \uXXXX), which for
-     * ordinary text overstates the requirement by roughly six times and can trip
-     * the JSONBUF_MAX_CAP ceiling in jsonbuf_grow() — setting jb->error and
-     * dropping the response — on input that would have fit comfortably.
+    /* Size the growth to what the escaped form actually needs. The 6x worst case
+     * (every byte becoming \uXXXX) overstates ordinary text roughly six times, and
+     * could trip the JSONBUF_MAX_CAP ceiling in jsonbuf_grow() — setting jb->error
+     * and dropping the response — on input that fits comfortably.
      *
      * A side effect worth relying on: this leaves cap - len >= escaped_len + 1,
      * so json_escape() below cannot truncate and its return is always the exact
-     * escaped length. This function no longer depends on the clamping behaviour
-     * of that return value to advance jb->len. */
+     * escaped length, which is what advances jb->len. */
     size_t needed = jb->len + json_escaped_len(src) + 1;
 
     if (needed > jb->cap) {

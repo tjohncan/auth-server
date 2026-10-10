@@ -41,21 +41,11 @@ int admin_bootstrap(db_handle_t *db,
         return -1;
     }
 
-    /* Build management API address and redirect URI from config.
-     * localhost uses http with port; anything else uses https. */
+    /* Management API address and redirect URI, at the server's public address */
     char mgmt_api_address[256];
     char mgmt_ui_redirect[256];
-    if (strcmp(config->host, "localhost") == 0) {
-        snprintf(mgmt_api_address, sizeof(mgmt_api_address),
-                 "http://localhost:%d/api", config->port);
-        snprintf(mgmt_ui_redirect, sizeof(mgmt_ui_redirect),
-                 "http://localhost:%d/callback", config->port);
-    } else {
-        snprintf(mgmt_api_address, sizeof(mgmt_api_address),
-                 "https://%s/api", config->host);
-        snprintf(mgmt_ui_redirect, sizeof(mgmt_ui_redirect),
-                 "https://%s/callback", config->host);
-    }
+    snprintf(mgmt_api_address, sizeof(mgmt_api_address), "%s/api", config->public_base_url);
+    snprintf(mgmt_ui_redirect, sizeof(mgmt_ui_redirect), "%s/callback", config->public_base_url);
 
     /* Create organization */
     long long org_pin;
@@ -850,21 +840,19 @@ int admin_create_user(db_handle_t *db,
         return -1;
     }
 
-    /* At least one of username or email must be provided */
-    if (!username && !email) {
-        log_error("Must provide either username or email");
+    /* A username is what the account signs in with: an address goes on unverified */
+    if (!username) {
+        log_error("A username is required");
         return -1;
     }
 
     /* Check if username already exists */
-    if (username) {
-        int exists = user_username_exists(db, username);
-        if (exists < 0) {
-            return -1;
-        } else if (exists == 1) {
-            log_error("Username already exists");
-            return -1;
-        }
+    int username_taken = user_username_exists(db, username);
+    if (username_taken < 0) {
+        return -1;
+    } else if (username_taken == 1) {
+        log_error("Username already exists");
+        return -1;
     }
 
     /* Check if email already exists */

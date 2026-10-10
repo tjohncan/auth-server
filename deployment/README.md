@@ -45,11 +45,12 @@ docker build -f deployment/Dockerfile -t auth-server .
 docker run -d --name auth-server -p 8080:8080 -v ./data:/app/data auth-server
 curl http://localhost:8080/health
 
-# Bootstrap admin account (localhost only)
-docker exec auth-server wget -qO- \
-  --header='Content-Type: application/json' \
-  --post-data='{"username":"admin","password":"changeme"}' \
-  http://localhost:8080/api/admin/bootstrap
+# Bootstrap admin account: the admin API listens on a Unix socket in the data
+# directory (admin_socket), so it's reached with docker exec, as the container's user,
+# and never published. The body goes on standard input, out of the process list.
+docker exec -i auth-server /app/auth-server --admin POST /api/admin/bootstrap - <<'EOF'
+{"username":"admin","password":"changeme"}
+EOF
 ```
 
 ## Single-Server Production (Docker Compose)
@@ -63,6 +64,24 @@ For multi-server deployments, use a load balancer with managed certificates inst
 cd deployment
 cp .env.example .env
 # Edit .env with your domain, database settings, etc.
+
+# The server's own settings, at the project root. The compose file mounts ../auth.conf and
+# ../data; a mount whose source is missing comes up as an empty directory, which the server
+# refuses to start on. Before the first start, set in auth.conf:
+#   server_host = auth.yourdomain.com   (bootstrap stores the console's URLs from it, tokens
+#                                        carry it as their issuer, and emailed links use it;
+#                                        bootstrap can't be re-run to change them)
+#   encryption_key = <a long random secret>
+#   password_min_length = 8             (or more)
+#   strict = true                       (then the server refuses to start on the placeholder
+#                                        key or a password minimum under 8)
+# auth.conf must be readable by uid 1000 (the container's user): the server refuses one it
+# can't read.
+cp ../auth.conf.example ../auth.conf
+mkdir -p ../data && sudo chown 1000:1000 ../data    # the container runs as uid 1000
+# The compose file mounts an email script too: the no-op one unless the server sends mail
+# (Email Delivery, below)
+cp email/send-email.sh.example-noop email/send-email.sh && chmod +x email/send-email.sh
 ```
 
 ### 2. Generate nginx config
@@ -112,6 +131,19 @@ docker compose up -d --build
 # To force a manual renewal:
 docker compose run --rm certbot renew
 docker compose exec nginx nginx -s reload
+
+# A maintenance run (--drophistory, --rekey; sql/README.md) needs every instance stopped;
+# it refuses to run otherwise, and an instance won't start while it runs
+docker compose stop auth-server
+docker compose run --rm auth-server --drophistory
+docker compose start auth-server
+
+# Changing the encryption key: export the key in use now as AUTH_ENCRYPTION_KEY_PREVIOUS
+# and the new one as AUTH_ENCRYPTION_KEY in this shell; after the run, put the new one in
+# auth.conf, then start
+docker compose stop auth-server
+docker compose run --rm -e AUTH_ENCRYPTION_KEY_PREVIOUS -e AUTH_ENCRYPTION_KEY auth-server --rekey
+docker compose start auth-server
 ```
 
 ## Cloud Deployment (ALB / Load Balancer)
@@ -134,11 +166,23 @@ Permissions-Policy, and the full CSP as a header rather than the pages' `<meta>`
 has to come from whatever sits in front of the server. With an ALB, that means
 configuring the load balancer's header settings or the WAF to add them.
 
+Set `client_ip_header = x-forwarded-for` in auth.conf. The client address the server
+records (`source_ip` on sessions, key-usage logs, MFA attempts and emailed links) comes from
+the header that setting names, `X-Real-IP` by default, which the shipped nginx overwrites
+with the real peer. An ALB doesn't touch `X-Real-IP`, so a client could put anything there.
+It appends the real address to the end of `X-Forwarded-For`, and `x-forwarded-for` reads that
+last entry. (Putting nginx between the ALB and the server, with `real_ip` configured as
+`deployment/nginx/nginx.conf` describes, works with the default instead.)
+
 ### Bare Binary with systemd
 
 1. Install dependencies and build the binary (see [main top-level README](../README.md) for packages)
 2. Create a service user: `useradd -r -s /bin/false authserver`
-3. Place the project in `/opt/auth-server` and configure `auth.conf`
+3. Place the project in `/opt/auth-server` and configure `auth.conf`. Set `server_host` to the
+   public hostname and `encryption_key` before the first start: bootstrap stores the console's
+   URLs from `server_host`, and can't be re-run to change them. Set `password_min_length` (8 or
+   more) and `strict = true`, so the server refuses to start on the placeholder key or a
+   shorter password minimum
 4. Set ownership: `chown -R authserver:authserver /opt/auth-server/data`
 5. Create the systemd unit file at `/etc/systemd/system/auth-server.service`:
 
@@ -157,6 +201,10 @@ Restart=always
 WantedBy=multi-user.target
 ```
 
+   The server raises its own soft descriptor limit as far as its workers need, within the
+   hard limit, and logs at start how many connections a worker may hold. Where the hard limit
+   is low, `LimitNOFILE=` under `[Service]` raises it.
+
 6. Enable and start:
 
 ```bash
@@ -168,11 +216,14 @@ systemctl status auth-server
 
 ## Configuration
 
-The server loads `auth.conf` from its working directory. All settings can also be
-overridden by environment variables (useful for Docker and secrets management).
+The server loads `auth.conf` from its working directory. These settings can also be set by
+environment variable, which wins over the file (useful for Docker and secrets management); the
+rest go in `auth.conf`.
 
 | Environment Variable  | auth.conf key    | Description              | Default        |
 |-----------------------|------------------|--------------------------|----------------|
+| `AUTH_SERVER_HOST`    | `server_host`    | Public hostname          | `localhost`    |
+| `AUTH_SERVER_PORT`    | `server_port`    | Public port              | `8080`         |
 | `AUTH_DB_TYPE`        | `db_type`        | `sqlite` or `postgresql` | `sqlite`       |
 | `AUTH_DB_HOST`        | `db_host`        | PostgreSQL host          | —              |
 | `AUTH_DB_PORT`        | `db_port`        | PostgreSQL port          | `5432`         |
@@ -181,13 +232,29 @@ overridden by environment variables (useful for Docker and secrets management).
 | `AUTH_DB_PASSWORD`    | `db_password`    | PostgreSQL password      | —              |
 | `AUTH_DB_OWNER_ROLE`  | `db_owner_role`  | Schema owner role        | (db_user)      |
 | `AUTH_ENCRYPTION_KEY` | `encryption_key` | Field encryption key     | `customize_me` |
+| `AUTH_ENCRYPTION_KEY_PREVIOUS` | `encryption_key_previous` | The key data is sealed under now, for `--rekey` only | — |
+| `AUTH_STRICT`         | `strict`         | Refuse to start on the placeholder key or a password minimum under 8 | `false` |
+| `AUTH_ADMIN_SOCKET`   | `admin_socket`   | The admin API's Unix socket (empty: none) | `./data/admin.sock` |
+| `AUTH_ADMIN_PORT`     | `admin_port`     | The admin API on loopback TCP too (0: not) | `0` |
 | `AUTH_LOG_LEVEL`      | `log_level`      | `debug/info/warn/error`  | `info`         |
+| `AUTH_MOTHERSHIP_URL` | `mothership_url` | Parent/brand URL on the index page | —     |
+| `AUTH_ENABLE_HISTORY_TABLES` | `enable_history_tables` | History of changed and deleted rows | `false` |
+| `AUTH_CLEANER_ENABLED` | `cleaner_enabled` | Purge expired rows in the background | `true` |
+| `AUTH_CLEANER_INTERVAL_SECONDS` | `cleaner_interval_seconds` | Pause between table checks | `10` |
+| `AUTH_CLEANER_BATCH_SIZE` | `cleaner_batch_size` | Rows deleted per batch | `1000` |
+| `AUTH_CLEANER_SQLITE_VACUUM_PAGES` | `cleaner_sqlite_vacuum_pages` | SQLite pages freed per pass | `100` |
+| `AUTH_CLEANER_POSTGRES_VACUUM_ENABLED` | `cleaner_postgres_vacuum_enabled` | VACUUM after purging (PostgreSQL) | `true` |
+| `AUTH_RETENTION_USAGE_LOGS_DAYS` | `retention_usage_logs_days` | Usage logs kept | `60` |
+| `AUTH_RETENTION_HISTORY_DAYS` | `retention_history_days` | History kept | `90` |
+| `AUTH_RETENTION_SESSIONS_GRACE_DAYS` | `retention_sessions_grace_days` | Ended sessions kept | `8` |
+| `AUTH_RETENTION_TOKENS_GRACE_DAYS` | `retention_tokens_grace_days` | Expired tokens kept | `8` |
 | `AUTH_EMAIL_COMMAND`  | `email_command`  | Email delivery script    | —              |
 | `AUTH_EMAIL_FROM`     | `email_from`     | Sender address           | —              |
 | `AUTH_EMAIL_FROM_NAME`| `email_from_name`| Sender display name      | —              |
 
-Environment variable names can be customized in `auth.conf` (e.g., `db_password_env = MY_SECRET`)
-to match your infrastructure's naming conventions. See `auth.conf.example` for the full list of
+Each of these except the history, cleaner and retention ones can have its variable renamed by
+a `<key>_env` setting in `auth.conf` (e.g., `db_password_env = MY_SECRET`), to match your
+infrastructure's naming conventions; those three groups keep the names above. See `auth.conf.example` for the full list of
 configuration options including password policy, session TTL, token limits, and cleaner settings.
 
 ## Email Delivery (Optional)

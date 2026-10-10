@@ -100,6 +100,8 @@ Cryptographic signing keys for JWTs with automatic rotation.
 **Tables:**
 - `auth_request_signing` - HMAC secrets for stateless authorization code JWTs
 - `access_token_signing` - ES256 (ECDSA P-256) keypairs for access token JWTs
+- `encryption_params` - How `encryption_key` is stretched before the field keys are derived from
+  it: method, iterations and salt, in one row (`--rekey`, below)
 
 **Design:**
 - Singleton tables (single row enforced via CHECK constraint)
@@ -308,8 +310,7 @@ Partial unique indexes enforce single-use semantics for authorization codes and 
 
 The `client_redirect_uri` table stores registered OAuth2 callback URLs for each client. Per OAuth2 spec (RFC 6749):
 
-- If a client has **one** registered redirect URI, the `redirect_uri` parameter is **optional** in authorization requests (server uses the registered URI)
-- If a client has **multiple** registered URIs, the `redirect_uri` parameter is **required** (client must specify which one)
+- The `redirect_uri` parameter is **always required** in authorization requests, and must be one of the client's registered URIs: the server never substitutes a registered one, even when the client has only one
 - Validation uses **exact match only** - no prefix matching, no wildcards (prevents authorization code interception attacks)
 
 ### Universal Clients
@@ -332,9 +333,43 @@ The `client.is_universal` flag enables special public clients (like system manag
 **Recovery Code Verification:**
 - Recovery codes use a shared-salt design for efficient verification
 - `salt` and `hash_iterations` are stored in `recovery_code_set` (not per-code)
-- All codes in a set share the same salt and iteration count
-- Verification: hash user input once with set parameters, compare against all code hashes
+- All codes in a set share the same salt, iteration count and method
+- Verification: hash user input once as the set's codes were (their method label, the set's salt
+  and iterations), compare against all code hashes
 - Secure because codes are high-entropy random strings (not user-chosen passwords)
+
+**Hash methods:**
+- Every `secret_hash` names the method that made it: `argon2id$<hex>` or `pbkdf2-sha256$<hex>`.
+  `salt` and `hash_iterations` keep their columns.
+- A method name stands for fixed parameters, here and in `encryption_params`: `argon2id` is 64 MiB,
+  one lane and 32 bytes out; `pbkdf2-sha256` is HMAC-SHA256 with 32 bytes out. Other parameters
+  would be a method name of their own, which re-hash on use (and `--rekey`, for the key) rolls
+  forward.
+- Passwords are hashed with `secret_hashing_algorithm`, machine secrets (client, resource-server
+  and organization key secrets, and recovery codes) with `machine_secret_hashing_algorithm`, each
+  at an iteration count drawn from its range.
+- A password or key secret that verifies under another method, or an iteration count outside its
+  range, is hashed again as configured and stored, at its next use, only while the row
+  still holds the hash that verified. With history on, the replaced hash goes to history like any
+  update. Once history is purged (retention, or `--drophistory`), no row holds a retired hash,
+  and on PostgreSQL no planner statistics keep a sample of one, in history or out (as for sealed
+  columns, under `--rekey` below). The files still hold some until they're rewritten: the
+  tables' own keep the row versions re-hashing replaced, and history's the rows retention
+  deleted. On SQLite that's `VACUUM`, then `PRAGMA wal_checkpoint(TRUNCATE)`, with every
+  instance stopped, as `--drophistory` does. On PostgreSQL it's `VACUUM FULL` on `user_account`,
+  `client_key`, `resource_server_key` and `organization_key`, and on the same tables in
+  `security_history` where they exist (turning history off doesn't remove them), as the
+  database's owner (`auth_dbo` in `setup_reference.sql`: the history tables belong to the login
+  role), which locks each table while it runs. Backups and WAL archives keep what they had, and
+  on PostgreSQL so does each server's `pg_wal` until its segments are overwritten.
+- Recovery codes aren't hashed again: a code is used once, and its siblings' plaintexts are
+  unknown. A new method reaches them when the user regenerates the set.
+- Until then, a secret costs what the settings it was hashed under cost to check, while a missing
+  account (or an unknown key id, while the machine method is cheap enough to spend a dummy on)
+  costs what the configured settings cost. So after a change, whether an account or key exists can
+  be told by timing, for those not used since. Passwords catch up as users sign in. For key
+  secrets, rotate them after changing the machine method: that ends it at once, and moves them to
+  the new method right away.
 
 ### Log Tables
 
@@ -428,6 +463,166 @@ CREATE INDEX idx_recovery_code_set_cleanup ON recovery_code_set(is_active, revok
 - Automatically created when history tables are generated
 - Index on `history_created_at` for efficient purging of old audit records
 
+### Removing History: `--drophistory`
+
+History keeps the old values of changed and deleted rows: a username or address someone replaced, a
+display name, a hash. After a key leak, or when history is no longer wanted, lowering
+`retention_history_days` only purges it gradually. With every instance stopped, run:
+
+```bash
+./auth-server --drophistory
+```
+
+It removes every history table and every trigger that fills one, in one transaction, then makes
+empty ones again if `enable_history_tables` is on. A failure rolls back and changes nothing. On
+SQLite it then rewrites the file (`VACUUM`) and empties the `-wal` file (a truncating checkpoint),
+so no page of the old rows stays behind. On PostgreSQL the dropped tables' files go with them,
+and it rewrites `pg_statistic` (`VACUUM FULL`), where each table's planner statistics kept a
+sample of its columns. WAL archives, replicas and backups keep what they had.
+
+- **Every instance stopped.** An instance lock enforces it: a `<db_path>.lock` file beside an
+  SQLite database, or an advisory lock in PostgreSQL. The run refuses while an instance holds it,
+  and an instance won't start while a run does. The lock file is never stale (the lock goes with
+  the process holding it), and removing it doesn't help: on SQLite a run also takes SQLite's own
+  exclusive lock on the database and holds it to the end, which any connection still open refuses,
+  from another container (as `docker compose run` starts) or another user too. Where it can see
+  the process with the database open, it names it. On PostgreSQL every connection a server serves
+  with holds the lock: each takes it when it connects, and again after a reconnect (PostgreSQL
+  drops it with the session, on a restart, say) before it runs anything else. One that finds a
+  run holding it stops its instance without serving. Point the server and the run at PostgreSQL
+  directly, not through a transaction-pooling proxy, whose sessions can't hold the lock; the
+  server refuses to start when it can tell its statements reach different sessions.
+- **Turning `enable_history_tables` off** doesn't remove the existing tables or triggers, so history
+  keeps being written. Run `--drophistory` after turning it off.
+- **PostgreSQL hardened per `setup_reference.sql`.** Dropping needs only what the login role owns
+  (the server made the history tables and their trigger functions), but rewriting `pg_statistic`
+  takes the database's owner, and making the tables again the owner role: `auth_dbo` is both, so
+  grant it for the run. Without the grant the run fails and changes nothing if
+  `enable_history_tables` is on; if it's off, the run drops history, then reports `pg_statistic`
+  unrewritten and exits non-zero. Running it again with the grant finishes it (every run rewrites
+  `pg_statistic`, with or without history to drop), as does `vacuum full pg_statistic` as the
+  owner.
+  ```sql
+  grant auth_dbo to auth_service;
+  -- ./auth-server --drophistory
+  revoke auth_dbo from auth_service;
+  ```
+- **Stopping a run.** Ctrl-C or SIGTERM stops it. Stopped before its COMMIT, it changed nothing;
+  after, history is gone and the scrub may not have run. Either way, running it again finishes
+  it: every run scrubs, with or without history to drop.
+- Only history is touched: sessions, tokens, keys and every main table stay as they were.
+
+For reference, what it runs for each table `T` with history, in one transaction. Dropping a
+history table alone would leave its triggers failing every update and delete on `T`.
+
+```sql
+-- SQLite (then, after COMMIT: VACUUM; PRAGMA wal_checkpoint(TRUNCATE);)
+DROP TRIGGER "tg_T_before_update";
+DROP TRIGGER "tg_T_before_delete";
+DROP TABLE "history__T";
+
+-- PostgreSQL, for T in schema S (CASCADE takes each function's trigger on S.T)
+DROP FUNCTION S_history."tg_fn_T_before_update"() CASCADE;
+DROP FUNCTION S_history."tg_fn_T_before_delete"() CASCADE;
+DROP TABLE S_history."T";
+```
+
+### Changing the Encryption Key: `--rekey`
+
+Usernames, email addresses, TOTP secrets and the signing keys are sealed under keys derived from
+`encryption_key`. `--rekey` seals them all again under keys from a new one. With every instance
+stopped (the instance lock enforces it, as for `--drophistory`):
+
+```bash
+AUTH_ENCRYPTION_KEY_PREVIOUS='the passphrase in use now' \
+AUTH_ENCRYPTION_KEY='the new passphrase' ./auth-server --rekey
+```
+
+`encryption_key_previous` (or `AUTH_ENCRYPTION_KEY_PREVIOUS`) is the passphrase the data is sealed
+under now, and `encryption_key` the new one. Then start every instance with the new
+`encryption_key`, and remove `encryption_key_previous`: only `--rekey` reads it.
+
+**How a passphrase becomes keys.** It's stretched with the method user passwords are hashed with
+(`secret_hashing_algorithm`, at `secret_hash_max_iterations`) and a random salt of the
+deployment's own; HKDF then derives the AES key and the blind indexes' HMAC key. The method,
+iterations and salt are kept in `encryption_params`, so the stretch belongs to the database, not
+to the configuration: changing the hashing settings changes nothing until the next `--rekey`. A
+new database gets its row at the first start. Someone holding only the database then pays one
+hash under that method for each guess at the passphrase, which matters for a passphrase a person
+chose; a long random one needs no stretch. A database without the row derives its keys by HKDF
+alone, and the server warns about it at every start.
+
+In one transaction, `--rekey`:
+- opens every sealed value with the old keys and seals it again with the new ones, stretched with
+  the configured method and a fresh salt: `user_account.username`, `user_email.email_address`,
+  `passwordless_login_token.email_address`, `user_mfa.secret`, and both signing tables' current
+  and prior keys. A signing key stored in plaintext is left as it is.
+- makes the blind indexes again from the opened values (`username_hash`, `email_hash`).
+- records the new stretch in `encryption_params`.
+- writes no history. A history trigger keeps the row as it was, so each change would copy the
+  old-key value into history again, dated now. SQLite: the re-sealed tables' history triggers
+  are dropped for the run and made again from their saved SQL. PostgreSQL: their update
+  functions return without writing until they're put back from their saved definitions.
+
+A value the old key won't open rolls everything back, naming its table and row. After COMMIT
+the replaced ciphertext and the old blind indexes are still in the files, so the run scrubs them:
+on SQLite it rewrites the file (`VACUUM`) and empties the `-wal` file; on PostgreSQL it runs
+`VACUUM FULL` on the re-sealed tables, which rewrites them and their indexes, and on
+`encryption_params` (its replaced row holds the old salt) and `pg_statistic`. It prints what it
+re-sealed, per kind.
+
+On PostgreSQL, sealed columns, blind indexes and the hashes of secrets keep no planner
+statistics: `schema.sql` sets their statistics target to 0, and the server makes history's
+copies of them the same way. `ANALYZE`, which autovacuum runs, would otherwise keep a sample of
+their values in `pg_statistic`, where no rewrite reaches it, and anyone who may read a table may
+read its sample (the `pg_stats` view). A sample outlives its rows: an `ANALYZE` that finds a
+table emptied leaves the last one in place. The run checks the sealed columns, and reports NOT
+SCRUBBED, naming them, if any has statistics. To clear one, as its table's owner, set its
+statistics target to 0 and change the column to its own type, which drops its sample without
+rewriting anything; then run `--rekey` again, giving the same passphrase as both:
+
+```sql
+alter table security.user_account alter column username set statistics 0;
+alter table security.user_account alter column username type text;
+```
+
+- **Keeping the passphrase.** Give the same passphrase as both: everything is sealed again under
+  keys from a fresh salt and the configured stretch. That's how a database without an
+  `encryption_params` row gets its stretch, and how a change of hashing method or iteration
+  count takes effect.
+- **Stopping a run.** Ctrl-C or SIGTERM stops it. Stopped before its COMMIT, it changed nothing:
+  run it again as it was. Stopped after, while it scrubs, everything is sealed under the new
+  passphrase: run it again giving that one as both, which seals again and scrubs. Not knowing
+  which, run it as it was first: if it had committed, the old passphrase opens nothing, so the run
+  fails at the first value and rolls back.
+- **History** made before the re-key stays sealed under the old key. After a leak, run
+  `--drophistory` next; `--rekey` says how many history tables of the re-sealed tables (those of
+  `user_account`, `user_email` and `user_mfa`) hold some.
+- **What the run doesn't reach.** Backups made before it, and any other copy of the database
+  from before it, still hold the old-key values, and a leaked passphrase still opens them. On
+  PostgreSQL so does the WAL written up to the run's end, the run's own included: each page an
+  update first touches after a checkpoint is logged whole, with the replaced row still on it.
+  That's the WAL archive up to then, each replica's `pg_wal`, and the primary's until those
+  segments are overwritten (a copy of the data directory takes them along). After the response
+  to a leak (`--rekey`, then `--drophistory`), as a superuser,
+  `checkpoint; select pg_switch_wal();` ends the segment written last: treat the archive up to
+  there like a backup from before.
+- **PostgreSQL hardened per `setup_reference.sql`.** Grant the owner role for the run, as for
+  `--drophistory`. Setting the history functions aside replaces them, which takes CREATE on
+  the history schemas, and `VACUUM FULL` takes the tables' owner, and for `pg_statistic` the
+  database's. Without the grant:
+  - while history tables exist (whatever `enable_history_tables` says now), the run fails at
+    the start and changes nothing;
+  - with none (never made, or removed by `--drophistory`), it re-keys, then finds each table
+    `VACUUM FULL` left unwritten (PostgreSQL only warns, and skips a table its role may not
+    vacuum), names them, reports NOT SCRUBBED and exits non-zero. `VACUUM FULL` on each, as
+    the owner, finishes it.
+  ```sql
+  grant auth_dbo to auth_service;
+  -- ./auth-server --rekey
+  revoke auth_dbo from auth_service;
+  ```
+
 ### SQLite-Specific: Incremental Vacuum
 
 **Pragma set at initialization:**
@@ -435,7 +630,10 @@ CREATE INDEX idx_recovery_code_set_cleanup ON recovery_code_set(is_active, revok
 PRAGMA auto_vacuum = INCREMENTAL;
 ```
 
-Must be set on an empty database before tables are created. Enables gradual space reclamation:
+Must be set on an empty database before tables are created, and before `journal_mode = WAL`,
+which writes the database header and fixes the setting. The server reads it back at startup
+and warns if it is off; with the server stopped, one `PRAGMA auto_vacuum = INCREMENTAL; VACUUM;`
+turns it on for an existing database. Enables gradual space reclamation:
 
 ```sql
 PRAGMA incremental_vacuum(100);  -- Frees 100 pages

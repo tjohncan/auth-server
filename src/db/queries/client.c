@@ -91,11 +91,7 @@ int client_create_bootstrap(db_handle_t *db, const char *org_code_name,
     db_bind_text(stmt, 5, client_type, -1);
     db_bind_text(stmt, 6, grant_type, -1);
 
-    if (note != NULL) {
-        db_bind_text(stmt, 7, note, -1);
-    } else {
-        db_bind_null(stmt, 7);
-    }
+    db_bind_text_or_null(stmt, 7, note);
 
     db_bind_int(stmt, 8, require_mfa);
     db_bind_int(stmt, 9, access_token_ttl_seconds);
@@ -166,11 +162,7 @@ int client_add_redirect_uri_bootstrap(db_handle_t *db, const unsigned char *clie
     db_bind_blob(stmt, 1, client_id, 16);
     db_bind_text(stmt, 2, redirect_uri, -1);
 
-    if (note != NULL) {
-        db_bind_text(stmt, 3, note, -1);
-    } else {
-        db_bind_null(stmt, 3);
-    }
+    db_bind_text_or_null(stmt, 3, note);
 
     int rc = db_step(stmt);
     db_finalize(stmt);
@@ -275,11 +267,7 @@ int client_create(db_handle_t *db,
     db_bind_text(stmt, 5, client_type, -1);
     db_bind_text(stmt, 6, grant_type, -1);
 
-    if (note != NULL) {
-        db_bind_text(stmt, 7, note, -1);
-    } else {
-        db_bind_null(stmt, 7);
-    }
+    db_bind_text_or_null(stmt, 7, note);
 
     db_bind_int(stmt, 8, require_mfa);
     db_bind_int(stmt, 9, access_token_ttl_seconds);
@@ -1167,11 +1155,7 @@ int client_redirect_uri_create(db_handle_t *db, long long user_account_pin,
     db_bind_blob(stmt, 1, client_id, 16);
     db_bind_text(stmt, 2, redirect_uri, -1);
 
-    if (note != NULL) {
-        db_bind_text(stmt, 3, note, -1);
-    } else {
-        db_bind_null(stmt, 3);
-    }
+    db_bind_text_or_null(stmt, 3, note);
 
     if (is_org_key_auth) {
         db_bind_int64(stmt, 4, organization_key_pin);
@@ -1687,7 +1671,7 @@ int client_resource_server_delete(db_handle_t *db, long long user_account_pin,
                 "WHERE rs.id = " P"2 "
                 "LIMIT 1"
             ") "
-            "RETURNING pin";
+            "RETURNING client_pin, resource_server_pin";
     } else {
         /* Session authentication - verify user is org admin */
         sql =
@@ -1706,12 +1690,18 @@ int client_resource_server_delete(db_handle_t *db, long long user_account_pin,
                 "WHERE rs.id = " P"2 "
                 "LIMIT 1"
             ") "
-            "RETURNING pin";
+            "RETURNING client_pin, resource_server_pin";
+    }
+
+    if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
+        log_error("Failed to begin transaction");
+        return -1;
     }
 
     db_stmt_t *stmt = NULL;
     if (db_prepare(db, &stmt, sql) != 0) {
         log_error("Failed to prepare client_resource_server_delete statement");
+        db_execute_trusted(db, "ROLLBACK");
         return -1;
     }
 
@@ -1724,14 +1714,53 @@ int client_resource_server_delete(db_handle_t *db, long long user_account_pin,
     }
 
     int rc = db_step(stmt);
+    long long client_pin = rc == DB_ROW ? db_column_int64(stmt, 0) : 0;
+    long long resource_server_pin = rc == DB_ROW ? db_column_int64(stmt, 1) : 0;
     db_finalize(stmt);
 
     if (rc == DB_DONE) {
+        db_execute_trusted(db, "ROLLBACK");
         log_info("Link not deleted: not found or caller not authorized");
         return 1;
     }
     if (rc != DB_ROW) {
+        db_execute_trusted(db, "ROLLBACK");
         log_error("Failed to delete client-resource-server link");
+        return -1;
+    }
+
+    /* Unlinking withdraws the client's access to the server. Introspection reads
+     * the link, but linking the pair again would bring back every access token
+     * the client held for it, so those are revoked as the link goes. Refresh
+     * tokens stay: they aren't tied to one server, and a refresh can't mint a
+     * token for a server the client isn't linked to. */
+    const char *revoke_sql =
+        "UPDATE " TBL_ACCESS_TOKEN " "
+        "SET is_revoked = " BOOL_TRUE ", revoked_at = " NOW ", updated_at = " NOW " "
+        "WHERE client_pin = " P"1 AND resource_server_pin = " P"2 "
+        "AND is_revoked = " BOOL_FALSE;
+
+    if (db_prepare(db, &stmt, revoke_sql) != 0) {
+        log_error("Failed to prepare the unlinked pair's token revocation");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    db_bind_int64(stmt, 1, client_pin);
+    db_bind_int64(stmt, 2, resource_server_pin);
+
+    rc = db_step(stmt);
+    db_finalize(stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Failed to revoke the unlinked pair's access tokens");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    if (db_execute_trusted(db, "COMMIT") != 0) {
+        log_error("Failed to commit client_resource_server_delete");
+        db_execute_trusted(db, "ROLLBACK");
         return -1;
     }
 
@@ -1764,10 +1793,10 @@ int client_key_create(db_handle_t *db,
 
     /* Hash secret with configured algorithm */
     char salt_hex[PASSWORD_SALT_HEX_MAX_LENGTH];
-    char hash_hex[PASSWORD_HASH_HEX_MAX_LENGTH];
+    char hash_hex[PASSWORD_HASH_MAX_LENGTH];
     int iterations;
 
-    int hash_rc = crypto_password_hash(secret, strlen(secret),
+    int hash_rc = crypto_password_hash(SECRET_MACHINE, secret, strlen(secret),
                             salt_hex, sizeof(salt_hex),
                             &iterations,
                             hash_hex, sizeof(hash_hex));
@@ -1827,11 +1856,7 @@ int client_key_create(db_handle_t *db,
     db_bind_int(stmt, 4, iterations);
     db_bind_text(stmt, 5, hash_hex, -1);
 
-    if (note != NULL) {
-        db_bind_text(stmt, 6, note, -1);
-    } else {
-        db_bind_null(stmt, 6);
-    }
+    db_bind_text_or_null(stmt, 6, note);
 
     if (is_org_key_auth) {
         db_bind_int64(stmt, 7, organization_key_pin);

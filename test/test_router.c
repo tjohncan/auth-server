@@ -11,54 +11,10 @@
  * Handler Functions (examples)
  * ============================================================================ */
 
-HttpResponse *health_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)req;     /* Unused */
-    (void)params;  /* Unused */
+HttpResponse *health_handler(const HttpRequest *req) {
+    (void)req;  /* Unused */
 
     return response_json_ok("{\"status\":\"ok\"}");
-}
-
-HttpResponse *get_user_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)req;  /* Unused */
-
-    const char *user_id = route_params_get(params, "id");
-    if (!user_id) {
-        return response_json_error(400, "Missing user ID");
-    }
-
-    /* Build response with user ID */
-    char json[256];
-    snprintf(json, sizeof(json), "{\"user_id\":\"%s\",\"name\":\"Test User\"}", user_id);
-
-    return response_json_ok(json);
-}
-
-HttpResponse *create_user_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;  /* Unused */
-
-    /* Just log the body for now */
-    printf("Creating user with body: %.*s\n", (int)req->body_length,
-           req->body ? req->body : "(no body)");
-
-    return response_json_ok("{\"status\":\"created\",\"id\":\"123\"}");
-}
-
-HttpResponse *get_post_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)req;  /* Unused */
-
-    const char *user_id = route_params_get(params, "user_id");
-    const char *post_id = route_params_get(params, "post_id");
-
-    if (!user_id || !post_id) {
-        return response_json_error(400, "Missing parameters");
-    }
-
-    char json[256];
-    snprintf(json, sizeof(json),
-             "{\"user_id\":\"%s\",\"post_id\":\"%s\",\"title\":\"Test Post\"}",
-             user_id, post_id);
-
-    return response_json_ok(json);
 }
 
 /* ============================================================================
@@ -82,101 +38,6 @@ void test_exact_match(Router *router) {
     http_response_free(resp);
     http_request_cleanup(&req);
 }
-
-#if ROUTER_USE_PATH_PARAMS
-void test_path_params(Router *router) {
-    printf("\n=== Test: Path Parameters ===\n");
-
-    /* Create request */
-    char req_str[] = "GET /users/456 HTTP/1.0\r\n\r\n";
-    HttpRequest req = http_request_parse(req_str, strlen(req_str));
-
-    /* Dispatch */
-    HttpResponse *resp = router_dispatch(router, &req);
-    assert(resp != NULL);
-    assert(resp->status_code == 200);
-
-    /* Serialize to check body contains "456" */
-    size_t resp_len;
-    char *serialized = http_response_serialize(resp, &resp_len);
-    assert(strstr(serialized, "456") != NULL);
-
-    printf("✓ /users/:id matched, extracted id=456\n");
-
-    free(serialized);
-    http_response_free(resp);
-    http_request_cleanup(&req);
-}
-
-void test_multiple_params(Router *router) {
-    printf("\n=== Test: Multiple Path Parameters ===\n");
-
-    /* Create request */
-    char req_str[] = "GET /users/42/posts/99 HTTP/1.0\r\n\r\n";
-    HttpRequest req = http_request_parse(req_str, strlen(req_str));
-
-    /* Dispatch */
-    HttpResponse *resp = router_dispatch(router, &req);
-    assert(resp != NULL);
-    assert(resp->status_code == 200);
-
-    /* Check response contains both IDs */
-    size_t resp_len;
-    char *serialized = http_response_serialize(resp, &resp_len);
-    assert(strstr(serialized, "42") != NULL);
-    assert(strstr(serialized, "99") != NULL);
-
-    printf("✓ Multiple params extracted: user_id=42, post_id=99\n");
-
-    free(serialized);
-    http_response_free(resp);
-    http_request_cleanup(&req);
-}
-
-void test_method_filtering(Router *router) {
-    printf("\n=== Test: Method Filtering ===\n");
-
-    /* Test GET /users/123 - should match get_user_handler */
-    char req1_str[] = "GET /users/123 HTTP/1.0\r\n\r\n";
-    HttpRequest req1 = http_request_parse(req1_str, strlen(req1_str));
-    HttpResponse *resp1 = router_dispatch(router, &req1);
-    assert(resp1->status_code == 200);
-    http_response_free(resp1);
-    http_request_cleanup(&req1);
-
-    /* Test POST /users - should match create_user_handler */
-    char req2_str[] = "POST /users HTTP/1.0\r\nContent-Length: 0\r\n\r\n";
-    HttpRequest req2 = http_request_parse(req2_str, strlen(req2_str));
-    HttpResponse *resp2 = router_dispatch(router, &req2);
-    assert(resp2->status_code == 200);
-    http_response_free(resp2);
-    http_request_cleanup(&req2);
-
-    printf("✓ GET and POST handled separately\n");
-}
-
-void test_segment_count_mismatch(Router *router) {
-    printf("\n=== Test: Segment Count Mismatch ===\n");
-
-    /* Too many segments */
-    char req1_str[] = "GET /users/123/extra HTTP/1.0\r\n\r\n";
-    HttpRequest req1 = http_request_parse(req1_str, strlen(req1_str));
-    HttpResponse *resp1 = router_dispatch(router, &req1);
-    assert(resp1->status_code == 404);
-    http_response_free(resp1);
-    http_request_cleanup(&req1);
-
-    /* Too few segments */
-    char req2_str[] = "GET /users HTTP/1.0\r\n\r\n";
-    HttpRequest req2 = http_request_parse(req2_str, strlen(req2_str));
-    HttpResponse *resp2 = router_dispatch(router, &req2);
-    assert(resp2->status_code == 404);
-    http_response_free(resp2);
-    http_request_cleanup(&req2);
-
-    printf("✓ Segment count mismatch correctly returns 404\n");
-}
-#endif /* ROUTER_USE_PATH_PARAMS */
 
 void test_404(Router *router) {
     printf("\n=== Test: 404 Not Found ===\n");
@@ -213,9 +74,17 @@ static const char *header_value(const HttpResponse *resp, const char *name) {
     return NULL;
 }
 
+/* raw is a request with its body, if any, after the blank line; the Content-Length
+   that frames the body is added here, as a client sends it */
 static HttpResponse *request(Router *router, const char *raw) {
     char buf[512];
-    snprintf(buf, sizeof(buf), "%s", raw);
+    const char *blank = strstr(raw, "\r\n\r\n");
+    if (blank && blank[4] && !strstr(raw, "Content-Length:")) {
+        snprintf(buf, sizeof(buf), "%.*s\r\nContent-Length: %zu\r\n\r\n%s",
+                 (int)(blank - raw), raw, strlen(blank + 4), blank + 4);
+    } else {
+        snprintf(buf, sizeof(buf), "%s", raw);
+    }
     HttpRequest req = http_request_parse(buf, strlen(buf));
     HttpResponse *resp = router_dispatch(router, &req);
     http_request_cleanup(&req);
@@ -370,7 +239,7 @@ void test_cors_preflight(Router *router) {
     assert(strcmp(header_value(resp, "Access-Control-Allow-Origin"), "*") == 0);
     /* Every method the router will actually answer on these paths must be listed,
      * or a browser refuses the preflight for the one that is missing. HEAD is
-     * CORS-safelisted so no browser preflights it today, but leaving it out would
+     * CORS-safelisted so no browser preflights it, but leaving it out would
      * be an internal disagreement between this list and what the router does. */
     assert(strstr(header_value(resp, "Access-Control-Allow-Methods"), "GET") != NULL);
     assert(strstr(header_value(resp, "Access-Control-Allow-Methods"), "HEAD") != NULL);
@@ -484,10 +353,9 @@ void test_head_requests(Router *router) {
     printf("✓ HEAD on an unrouted path is 404 with no body\n");
 
     /*
-     * The regression this commit could cause. HEAD is handled after
-     * dispatch_route and before the CORS attachment, precisely so that a HEAD on
-     * a public endpoint keeps the header commit 5 added. Handling it as an early
-     * return, the way OPTIONS is, would silently drop it here.
+     * HEAD is handled after dispatch_route and before the CORS attachment,
+     * precisely so that a HEAD on a public endpoint keeps its CORS header.
+     * Handling it as an early return, the way OPTIONS is, would silently drop it.
      */
     head = request(router, "HEAD /userinfo HTTP/1.0\r\n\r\n");
     assert(head);
@@ -550,11 +418,6 @@ int main(void) {
     /* /token is deliberately NOT registered here: a CORS path with no matching
        route must still get the header on its 404, or the browser cannot read the
        error either. */
-#if ROUTER_USE_PATH_PARAMS
-    router_add(router, HTTP_GET, "/users/:id", get_user_handler);
-    router_add(router, HTTP_GET, "/users/:user_id/posts/:post_id", get_post_handler);
-    router_add(router, HTTP_POST, "/users", create_user_handler);
-#endif
 
     /* Run tests */
     test_exact_match(router);
@@ -567,14 +430,6 @@ int main(void) {
     test_cors_boot_validation();
     test_head_requests(router);
     test_default_security_headers(router);
-#if ROUTER_USE_PATH_PARAMS
-    test_path_params(router);
-    test_multiple_params(router);
-    test_method_filtering(router);
-    test_segment_count_mismatch(router);
-#else
-    printf("\n=== Path parameter tests skipped (ROUTER_USE_PATH_PARAMS=0) ===\n");
-#endif
 
     router_destroy(router);
     printf("\n=== All Router Tests Passed! ===\n\n");

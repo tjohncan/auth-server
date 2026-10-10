@@ -1,5 +1,6 @@
 /*
- * Fuzz harness for the HTTP request path (http_request_parse + its accessors).
+ * Fuzz harness for the HTTP request path (http_request_parse + its accessors), and
+ * the socket layer's framing scans (http_find_header_end, http_scan_content_length).
  * See test/fuzz/README.md for how to build and run.
  *
  * The harness models src/main.c:router_request_handler() byte for byte: same
@@ -36,6 +37,30 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
         http_request_get_client_ip(&req, NULL);
     }
 
+    /* The two layers read one request: on a request the socket layer frames (its
+     * scan finds a Content-Length, or none) and the parser accepts, the parser
+     * read the same Content-Length, and the body is exactly what it frames (none
+     * without one). Each disagreement found so far was a header line one of them
+     * read and the other didn't. */
+    {
+        size_t header_end = http_find_header_end((const char *)data, size, 0);
+        char *exact = header_end ? malloc(header_end) : NULL;
+        if (exact && req.method != HTTP_UNKNOWN) {
+            memcpy(exact, data, header_end);
+            size_t framed = 0;
+            int scan = http_scan_content_length(exact, header_end, &framed);
+            if (scan == 0 || scan == 1) {
+                size_t arrived = size - header_end;
+                size_t body = scan == 0 ? (framed < arrived ? framed : arrived) : 0;
+                if (req.body_length != body ||
+                    (http_request_get_header(&req, "Content-Length") != NULL) != (scan == 0)) {
+                    abort();
+                }
+            }
+        }
+        free(exact);
+    }
+
     http_request_cleanup(&req);
 
     /* The socket layer's resumable header-end scan (src/server/event_loop.c calls
@@ -54,6 +79,24 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
         }
         if (http_find_header_end((const char *)data, size, 0) == 0 && found != 0) {
             abort();   /* resuming found one where scanning everything did not */
+        }
+    }
+
+    /* The socket layer's Content-Length scan, which runs once the header end is
+     * found. Its buffer is NOT NUL-terminated, so it gets an exactly-sized heap
+     * copy: reading even one byte past the block lands outside the allocation,
+     * where ASan sees it. (Replay mode reads into a large static buffer, which
+     * would hide exactly that.) */
+    {
+        size_t header_end = http_find_header_end((const char *)data, size, 0);
+        if (header_end) {
+            char *exact = malloc(header_end);
+            if (exact) {
+                memcpy(exact, data, header_end);
+                size_t length = 0;
+                http_scan_content_length(exact, header_end, &length);
+                free(exact);
+            }
         }
     }
 

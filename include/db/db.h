@@ -169,7 +169,9 @@ int db_bind_int(db_stmt_t *stmt, int index, int value);
 int db_bind_int64(db_stmt_t *stmt, int index, long long value);
 
 /*
- * Bind binary data parameter
+ * Bind binary data parameter: an id's 16 bytes, or any others. On PostgreSQL the
+ * bytes are sent as they are, and read as the statement's type for the
+ * parameter: a uuid column's, or a bytea's of any length.
  */
 int db_bind_blob(db_stmt_t *stmt, int index, const void *value, int len);
 
@@ -177,6 +179,15 @@ int db_bind_blob(db_stmt_t *stmt, int index, const void *value, int len);
  * Bind NULL parameter
  */
 int db_bind_null(db_stmt_t *stmt, int index);
+
+/*
+ * Bind an optional text parameter: SQL NULL when value is NULL
+ *
+ * For columns that may be NULL. db_bind_text refuses NULL on purpose, so that a
+ * required value that's missing fails loudly; this says at the call site that
+ * NULL is allowed there.
+ */
+int db_bind_text_or_null(db_stmt_t *stmt, int index, const char *value);
 
 /*
  * Execute statement / fetch next row
@@ -217,6 +228,22 @@ int db_column_int(db_stmt_t *stmt, int col);
 long long db_column_int64(db_stmt_t *stmt, int col);
 
 /*
+ * db_set_session_hook - What must hold on this connection's session before it
+ * runs anything
+ *
+ * The hook runs now, and on PostgreSQL again before the first statement after
+ * any reconnect, since PostgreSQL drops a session's state (an advisory lock,
+ * say) with the session. Until it returns 0, no statement on the connection
+ * runs; each fails, retrying the hook first. Its own statements run ungated.
+ * SQLite never reconnects, so there it runs once. For the instance lock
+ * (main.c).
+ *
+ * Returns: the hook's result now
+ */
+typedef int (*db_session_hook_t)(db_handle_t *db);
+int db_set_session_hook(db_handle_t *db, db_session_hook_t hook);
+
+/*
  * Get blob column
  *
  * Returns: Pointer to binary data, or NULL if column is NULL
@@ -225,7 +252,8 @@ long long db_column_int64(db_stmt_t *stmt, int col);
 const void *db_column_blob(db_stmt_t *stmt, int col);
 
 /*
- * Get column size in bytes
+ * Get column size in bytes: a blob's length (16 for a PostgreSQL uuid), a text's
+ * in bytes, 0 for NULL. In any order with db_column_blob, on either backend.
  */
 int db_column_bytes(db_stmt_t *stmt, int col);
 

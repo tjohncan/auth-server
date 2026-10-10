@@ -1,4 +1,4 @@
-/* Define _GNU_SOURCE for SO_REUSEPORT and memmem */
+/* Define _GNU_SOURCE for SO_REUSEPORT and accept4 */
 #define _GNU_SOURCE
 
 #include "server/event_loop.h"
@@ -10,15 +10,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>  /* strncasecmp */
 #include <stdbool.h>
 #include <stdatomic.h>
 #include <unistd.h>
-#include <fcntl.h>
 #include <errno.h>
+#include <limits.h>
 #include <pthread.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <time.h>
@@ -33,24 +34,33 @@
 #define DEFAULT_CONNECTION_TIMEOUT_MS 30000         /* 30 seconds */
 #define INITIAL_READ_BUFFER_SIZE 4096               /* 4KB initial buffer */
 
-/* Ceiling on an UNTERMINATED header block. The check fires once bytes_read passes
- * this, and since the buffer doubles (4, 8, 16, 32 KB) and the test runs after the
- * recv, at most 32 KB is ever held. That is the same header-block total nginx
- * allows by default — large_client_header_buffers is `4 8k`, four buffers of 8 KB
- * each, with any single line capped at 8 KB — so this is not a guess at what is
- * generous, it is the ceiling the edge in front of us already enforces.
- * Without it a client can
- * make every connection buffer max_request_size of headers that will never be
- * parsed, and each new byte triggers a rescan of everything received so far —
- * and it cannot time out, because last_activity is refreshed on every recv.
- * Applies only before the delimiter is found; after it the body is entitled to
- * grow to max_request_size, which is what that limit is for. */
-#define MAX_HEADER_BYTES 16384
+/* Ceiling on the header block: the CRLFCRLF that ends it has to fall within the
+ * first MAX_HEADER_BYTES bytes, or the request is refused. That is the header-block
+ * total nginx allows by default — large_client_header_buffers is `4 8k`, four
+ * buffers of 8 KB each, with any single line capped at 8 KB — so this is not a
+ * guess at what is generous, it is the ceiling the edge in front of us already
+ * enforces. The rule is on where the block ends, not on how many bytes have arrived
+ * when a check runs, so a request passes or fails the same way however the network
+ * splits it into reads. The read buffer doubles (4, 8, 16, 32 KB), so this is also
+ * the most an unterminated block can occupy.
+ * Without it a client can make every connection buffer max_request_size of headers
+ * that will never be parsed. That bounds memory, not time: the idle timeout can't
+ * close such a connection, because last_activity is refreshed on every recv, so
+ * close_idle_connections also gives a request a deadline from the connection's
+ * opening. Applies only before the delimiter is found; after it the body is entitled
+ * to grow to max_request_size, which is what that limit is for. */
+#define MAX_HEADER_BYTES 32768
 #define MAX_EPOLL_EVENTS 1024                       /* Process up to 1024 events per epoll_wait */
 
 /* ============================================================================
  * Internal Structures
  * ============================================================================ */
+
+/* Connection IDs come from one counter for the whole process, not one per worker:
+ * the ID is how log lines from the same request are tied together, and with a
+ * counter per worker every worker hands out the same numbers at once. One
+ * uncontended atomic increment per accepted connection. */
+static atomic_uint_fast64_t g_next_connection_id = 1;
 
 /*
  * EventLoop - One epoll instance, runs on one thread
@@ -58,15 +68,35 @@
 struct EventLoop {
     int epoll_fd;                 /* epoll file descriptor */
     atomic_bool running;          /* Set to false to stop the loop */
-    uint64_t next_connection_id;  /* Monotonic counter for connection IDs */
     EventLoopConfig config;       /* Configuration (copied) */
     int worker_index;             /* Index of this worker (for DB connection binding) */
+    struct EventLoopPool *pool;   /* Its pool, stopped if this loop can't run */
+
+    /* Listening sockets, opened by the pool before any worker starts: this
+       worker's public one (-1: none), and the process's admin ones, shared */
+    int public_fd;
+    int admin_fds[3];
+    int admin_fd_count;
 
     /* Doubly-linked list of all active connections (for timeout enforcement) */
     Connection *connections_head;
     Connection *connections_tail;
     int active_connections;        /* Current count of active connections */
+    bool at_limit;                 /* Refusing public connections at the limit (logged once) */
 };
+
+/*
+ * Listener - One listening socket. Its epoll event carries a pointer to this,
+ * which is how its events are told from a connection's.
+ */
+typedef struct {
+    int fd;
+    int admin;                    /* The loopback admin listener, not the public one */
+
+    /* accept4() failed for want of descriptors or memory, with connections maybe
+     * still queued: retried on every pass of the loop until it succeeds */
+    bool accept_failing;
+} Listener;
 
 /*
  * EventLoopPool - Manages multiple worker threads
@@ -77,6 +107,11 @@ struct EventLoopPool {
     pthread_t *worker_threads;    /* Array of worker thread handles */
     EventLoop **event_loops;      /* One EventLoop per worker */
     atomic_bool running;          /* Set to false to stop all workers */
+    atomic_bool failed;           /* A worker's loop couldn't run */
+    int admin_fds[3];             /* The admin listener's sockets: a Unix one, and loopback
+                                     TCP per family */
+    int admin_fd_count;
+    char *admin_socket_path;      /* The Unix socket this process made, removed at the end */
 };
 
 /* ============================================================================
@@ -84,35 +119,22 @@ struct EventLoopPool {
  * ============================================================================ */
 
 /*
- * set_nonblocking - Make a socket non-blocking
- *
- * This is CRITICAL for event loops. Blocking I/O would hang the entire loop.
- */
-static int set_nonblocking(int fd) {
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags == -1) {
-        log_error("fcntl(F_GETFL) failed: %s", strerror(errno));
-        return -1;
-    }
-
-    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1) {
-        log_error("fcntl(F_SETFL) failed: %s", strerror(errno));
-        return -1;
-    }
-
-    return 0;
-}
-
-/*
  * create_listen_socket - Create dual-stack TCP socket (IPv4 + IPv6)
  *
  * Uses SO_REUSEPORT so multiple threads can accept on the same port.
  * Creates IPv6 socket with IPV6_V6ONLY=0 to accept both IPv4 and IPv6.
  * IPv4 connections appear as IPv4-mapped IPv6 addresses (::ffff:192.0.2.1).
+ *
+ * Every descriptor the event loop opens -- this one, each accepted connection,
+ * each epoll instance -- is non-blocking (blocking I/O would hang the loop) and
+ * close-on-exec, both set atomically at creation. Close-on-exec keeps them out of
+ * the email command (util/email.c), which would otherwise hold a client's
+ * connection open after the worker closed it, and could keep a listening socket
+ * in SO_REUSEPORT's group past a restart, where connections queue unaccepted.
  */
 static int create_listen_socket(int port, int backlog) {
     /* Create IPv6 socket (supports both IPv4 and IPv6 when IPV6_V6ONLY=0) */
-    int fd = socket(AF_INET6, SOCK_STREAM, 0);
+    int fd = socket(AF_INET6, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     if (fd < 0) {
         log_error("socket(AF_INET6) failed: %s", strerror(errno));
         return -1;
@@ -160,16 +182,297 @@ static int create_listen_socket(int port, int backlog) {
         return -1;
     }
 
-    /* Make non-blocking */
-    if (set_nonblocking(fd) < 0) {
-        close(fd);
-        return -1;
-    }
-
     log_info("Created dual-stack listen socket on port %d (IPv4+IPv6, fd=%d)", port, fd);
     return fd;
 }
 
+/*
+ * claim_public_port - Is the public port free of every other process?
+ *
+ * The public listener is a group of SO_REUSEPORT sockets, one per worker, and
+ * Linux lets any process running as the same user join that group: a second
+ * deployment on the same port would share it, and the kernel would split
+ * connections between the two databases. A socket without SO_REUSEPORT can't
+ * bind a port anyone listens on, so one is bound and closed first, and a port
+ * held refuses the start. SO_REUSEADDR still lets a restart past its
+ * predecessor's connections in TIME_WAIT.
+ *
+ * Returns: 0, or -1 (logged)
+ */
+static int claim_public_port(int port) {
+    int fd = socket(AF_INET6, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) {
+        log_error("socket(AF_INET6) failed: %s", strerror(errno));
+        return -1;
+    }
+    int opt = 0;
+    if (setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &opt, sizeof(opt)) < 0) {
+        log_warn("setsockopt(IPV6_V6ONLY) failed: %s - IPv4 may not work", strerror(errno));
+    }
+    opt = 1;
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+        log_warn("setsockopt(SO_REUSEADDR) failed: %s", strerror(errno));
+    }
+
+    struct sockaddr_in6 addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin6_family = AF_INET6;
+    addr.sin6_addr = in6addr_any;
+    addr.sin6_port = htons(port);
+    int rc = bind(fd, (struct sockaddr *)&addr, sizeof(addr));
+    int err = errno;
+    close(fd);
+    if (rc == 0) return 0;
+    if (err == EADDRINUSE) {
+        log_error("server_port %d is in use: another program, or another deployment of this "
+                  "server, holds it. Each deployment on a host needs a server_port of its own "
+                  "(auth.conf, or AUTH_SERVER_PORT).", port);
+    } else {
+        log_error("bind() failed on port %d: %s", port, strerror(err));
+    }
+    return -1;
+}
+
+/*
+ * create_loopback_listen_socket - One loopback address only, for the admin listener
+ *
+ * Loopback has no dual-stack form: a socket on ::1 doesn't take connections to
+ * 127.0.0.1. So the admin listener is one socket per family: 127.0.0.1 always,
+ * and ::1 where the host has it. A container without IPv6 may have no ::1 at
+ * all (EADDRNOTAVAIL), or no IPv6 sockets (EAFNOSUPPORT); either way the admin
+ * listener goes on without it. CLOEXEC and non-blocking, as for the public socket.
+ *
+ * Not SO_REUSEPORT: each socket is opened once per process and shared by its
+ * workers, so a port another process holds refuses this one at startup. With
+ * SO_REUSEPORT, two deployments on one host under one user would share the
+ * port, and the kernel would split admin calls between their databases.
+ *
+ * Returns: the descriptor, -2 for an IPv6 loopback this host doesn't have, -1 on error
+ */
+static int create_loopback_listen_socket(int family, int port, int backlog) {
+    const char *name = family == AF_INET ? "127.0.0.1" : "[::1]";
+
+    int fd = socket(family, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    if (fd < 0) {
+        if (family == AF_INET6 && errno == EAFNOSUPPORT) return -2;
+        log_error("socket() for the admin listener on %s failed: %s", name, strerror(errno));
+        return -1;
+    }
+
+    int opt = 1;
+    if (family == AF_INET6 &&
+        setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &opt, sizeof(opt)) < 0) {
+        log_warn("setsockopt(IPV6_V6ONLY) on the admin listener failed: %s", strerror(errno));
+    }
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+        log_warn("setsockopt(SO_REUSEADDR) failed: %s", strerror(errno));
+    }
+
+    int rc;
+    if (family == AF_INET) {
+        struct sockaddr_in addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_port = htons(port);
+        rc = bind(fd, (struct sockaddr *)&addr, sizeof(addr));
+    } else {
+        struct sockaddr_in6 addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sin6_family = AF_INET6;
+        addr.sin6_addr = in6addr_loopback;
+        addr.sin6_port = htons(port);
+        rc = bind(fd, (struct sockaddr *)&addr, sizeof(addr));
+    }
+    if (rc < 0) {
+        int err = errno;
+        close(fd);
+        if (family == AF_INET6 && err == EADDRNOTAVAIL) return -2;
+        if (err == EADDRINUSE) {
+            log_error("admin_port %d is in use on %s: another program, or another deployment of "
+                      "this server, holds it. Each deployment on a host needs an admin_port of "
+                      "its own (auth.conf, or AUTH_ADMIN_PORT).", port, name);
+        } else {
+            log_error("bind() failed for the admin listener on %s:%d: %s", name, port,
+                      strerror(err));
+        }
+        return -1;
+    }
+
+    if (listen(fd, backlog) < 0) {
+        log_error("listen() failed on the admin listener: %s", strerror(errno));
+        close(fd);
+        return -1;
+    }
+
+    log_info("Created admin listen socket on %s:%d (loopback only, fd=%d)", name, port, fd);
+    return fd;
+}
+
+
+/* The first directory on path, from / down, that every user can write: into
+   found, 1; 0 if there's none. Missing ones are skipped. */
+static int world_writable_dir_on(const char *path, char *found, size_t size) {
+    char prefix[PATH_MAX];
+    size_t len = strlen(path);
+    for (size_t i = 0; i <= len; i++) {
+        if (i < len && path[i] != '/') continue;
+        size_t n = i == 0 ? 1 : i;  /* the root, then each directory below it */
+        if (n >= sizeof(prefix)) return 0;
+        memcpy(prefix, path, n);
+        prefix[n] = '\0';
+        struct stat st;
+        if (stat(prefix, &st) == 0 && S_ISDIR(st.st_mode) && (st.st_mode & S_IWOTH)) {
+            snprintf(found, size, "%s", prefix);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int admin_socket_dir_private(const char *path, int owner_too, char *reason, size_t size) {
+    char dir[1024];
+    snprintf(dir, sizeof(dir), "%s", path);
+    char *slash = strrchr(dir, '/');
+    if (!slash) {
+        snprintf(dir, sizeof(dir), ".");
+    } else if (slash == dir) {
+        dir[1] = '\0';
+    } else {
+        *slash = '\0';
+    }
+
+    /* Every directory on the way, as written and as it resolves: one every user
+       can write lets anyone make or swap what's below it */
+    char absolute[PATH_MAX], resolved[PATH_MAX], found[PATH_MAX];
+    if (dir[0] == '/') {
+        snprintf(absolute, sizeof(absolute), "%s", dir);
+    } else if (!getcwd(resolved, sizeof(resolved)) ||
+               snprintf(absolute, sizeof(absolute), "%s/%s", resolved, dir) >= (int)sizeof(absolute)) {
+        absolute[0] = '\0';
+    }
+    if ((absolute[0] && world_writable_dir_on(absolute, found, sizeof(found))) ||
+        (realpath(dir, resolved) && world_writable_dir_on(resolved, found, sizeof(found)))) {
+        snprintf(reason, size, "%s, on its path, is writable by every user", found);
+        return 0;
+    }
+
+    struct stat st;
+    if (stat(dir, &st) != 0) return 1;  /* not there yet: the server makes it, 0700 */
+    if (owner_too && st.st_uid != geteuid() && st.st_uid != 0) {
+        snprintf(reason, size, "its directory %s belongs to another user (uid %u)", dir,
+                 (unsigned)st.st_uid);
+        return 0;
+    }
+    return 1;
+}
+
+/*
+ * create_unix_listen_socket - The admin listener on a Unix socket at path
+ *
+ * Who may connect is the file's mode: 0600 lets only the server's own user (and
+ * root) in, 0660 its group too. It's set before listen(), so no connection is
+ * ever taken under a looser one. Who may replace it is its directory's: one
+ * every user can write, or another user's, is refused (admin_socket_dir_private).
+ * A file already at the path is left alone unless it's a socket that refuses
+ * connections, one a server left when it stopped: a live one is another
+ * server's, one this user may not connect to may be another user's, and
+ * anything else isn't ours to remove. The directory is made (0700) if it's
+ * missing, one level, as ./data may be on PostgreSQL.
+ *
+ * Returns: the descriptor, or -1 (logged)
+ */
+static int create_unix_listen_socket(const char *path, int mode, int backlog) {
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    if (strlen(path) >= sizeof(addr.sun_path)) {
+        log_error("admin_socket %s is too long: a Unix socket path takes at most %zu bytes",
+                  path, sizeof(addr.sun_path) - 1);
+        return -1;
+    }
+    memcpy(addr.sun_path, path, strlen(path) + 1);
+
+    char reason[1100];
+    if (!admin_socket_dir_private(path, 1, reason, sizeof(reason))) {
+        log_error("admin_socket %s can't be used: %s, so someone else could put a directory or "
+                  "a socket of their own on the path and receive the operator's calls. Put it "
+                  "where no directory up to / is writable by every user, as /tmp is (./data, the "
+                  "default, is such a place in the usual layouts).", path, reason);
+        return -1;
+    }
+
+    struct stat st;
+    if (lstat(path, &st) == 0) {
+        if (!S_ISSOCK(st.st_mode)) {
+            log_error("admin_socket %s exists and isn't a socket: not replacing it", path);
+            return -1;
+        }
+        int probe = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        if (probe < 0) {
+            log_error("socket(AF_UNIX) to try admin_socket %s failed: %s", path, strerror(errno));
+            return -1;
+        }
+        int rc = connect(probe, (struct sockaddr *)&addr, sizeof(addr));
+        int err = errno;
+        close(probe);
+        if (rc == 0) {
+            log_error("admin_socket %s is in use: another server answers on it. Each deployment "
+                      "needs an admin_socket of its own.", path);
+            return -1;
+        }
+        if (err != ECONNREFUSED && err != ENOENT) {
+            log_error("admin_socket %s is there, and this server can't try it (%s): it may be "
+                      "another user's server's, so it isn't replaced.", path, strerror(err));
+            return -1;
+        }
+        if (err == ECONNREFUSED && unlink(path) != 0 && errno != ENOENT) {
+            log_error("admin_socket %s was left by a server that stopped, and can't be removed: %s",
+                      path, strerror(errno));
+            return -1;
+        }
+    }
+
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    if (fd < 0) {
+        log_error("socket(AF_UNIX) for the admin listener failed: %s", strerror(errno));
+        return -1;
+    }
+    int rc = bind(fd, (struct sockaddr *)&addr, sizeof(addr));
+    if (rc < 0 && errno == ENOENT) {
+        /* The directory isn't there: make it, one level, and try again */
+        char dir[sizeof(addr.sun_path)];
+        snprintf(dir, sizeof(dir), "%s", path);
+        char *slash = strrchr(dir, '/');
+        if (slash && slash != dir) {
+            *slash = '\0';
+            if (mkdir(dir, 0700) == 0) {
+                log_info("Made %s for the admin socket", dir);
+                rc = bind(fd, (struct sockaddr *)&addr, sizeof(addr));
+            }
+        }
+    }
+    if (rc < 0) {
+        log_error("bind() failed for the admin socket %s: %s", path, strerror(errno));
+        close(fd);
+        return -1;
+    }
+    if (chmod(path, (mode_t)mode) != 0) {
+        log_error("chmod(%04o) failed for the admin socket %s: %s", mode, path, strerror(errno));
+        close(fd);
+        unlink(path);
+        return -1;
+    }
+    if (listen(fd, backlog) < 0) {
+        log_error("listen() failed on the admin socket: %s", strerror(errno));
+        close(fd);
+        unlink(path);
+        return -1;
+    }
+
+    log_info("Created admin listen socket at %s (mode %04o, fd=%d)", path, mode, fd);
+    return fd;
+}
 
 /* ============================================================================
  * Connection Management
@@ -178,7 +481,8 @@ static int create_listen_socket(int port, int backlog) {
 /*
  * connection_create - Allocate and initialize a new connection
  */
-static Connection *connection_create(int fd, const char *remote_ip, uint64_t connection_id) {
+static Connection *connection_create(int fd, const char *remote_ip, uint64_t connection_id,
+                                     int admin_listener) {
     Connection *conn = malloc(sizeof(Connection));
     if (!conn) {
         log_error("Failed to allocate connection");
@@ -187,9 +491,11 @@ static Connection *connection_create(int fd, const char *remote_ip, uint64_t con
 
     memset(conn, 0, sizeof(Connection));
     conn->fd = fd;
+    conn->admin_listener = admin_listener;
     conn->state = CONN_STATE_READING_HEADERS;
     conn->connection_id = connection_id;
     clock_gettime(CLOCK_MONOTONIC, &conn->last_activity);
+    conn->opened_at = conn->last_activity;
 
     /* Allocate initial read buffer */
     conn->read_buffer = malloc(INITIAL_READ_BUFFER_SIZE);
@@ -288,8 +594,8 @@ EventLoop *event_loop_create(void) {
 
     memset(loop, 0, sizeof(EventLoop));
 
-    /* Create epoll instance */
-    loop->epoll_fd = epoll_create1(0);
+    /* Create epoll instance (close-on-exec: see create_listen_socket) */
+    loop->epoll_fd = epoll_create1(EPOLL_CLOEXEC);
     if (loop->epoll_fd < 0) {
         log_error("epoll_create1() failed: %s", strerror(errno));
         free(loop);
@@ -297,9 +603,9 @@ EventLoop *event_loop_create(void) {
     }
 
     loop->running = false;
-    loop->next_connection_id = 1;
     loop->connections_head = NULL;
     loop->connections_tail = NULL;
+    loop->public_fd = -1;
 
     log_debug("Created event loop (epoll_fd=%d)", loop->epoll_fd);
     return loop;
@@ -322,6 +628,9 @@ void event_loop_destroy(EventLoop *loop) {
     if (loop->epoll_fd >= 0) {
         close(loop->epoll_fd);
     }
+    if (loop->public_fd >= 0) {
+        close(loop->public_fd);
+    }
 
     free(loop);
 }
@@ -334,36 +643,68 @@ void event_loop_destroy(EventLoop *loop) {
  *
  * Supports both IPv4 and IPv6 connections (dual-stack).
  */
-static void handle_accept(EventLoop *loop, int listen_fd) {
+static void handle_accept(EventLoop *loop, Listener *listener) {
     /* Loop until no more connections to accept */
     while (1) {
         struct sockaddr_storage client_addr;  /* Large enough for both IPv4 and IPv6 */
         socklen_t client_len = sizeof(client_addr);
 
-        /* Accept new connection (non-blocking, may return EAGAIN) */
-        int client_fd = accept(listen_fd, (struct sockaddr *)&client_addr, &client_len);
+        /* Accept new connection (non-blocking, may return EAGAIN). The connection
+         * itself comes back non-blocking and close-on-exec: see create_listen_socket. */
+        int client_fd = accept4(listener->fd, (struct sockaddr *)&client_addr, &client_len,
+                                SOCK_NONBLOCK | SOCK_CLOEXEC);
         if (client_fd < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 /* No more connections to accept right now - this is normal */
                 return;
             }
-            log_error("accept() failed: %s", strerror(errno));
+
+            /* That connection failed before we took it (accept(2) passes a new
+             * socket's pending network errors this way): the next may be fine */
+            if (errno == EINTR || errno == ECONNABORTED || errno == EPROTO ||
+                errno == ENETDOWN || errno == ENOPROTOOPT || errno == EHOSTDOWN ||
+                errno == EHOSTUNREACH || errno == EOPNOTSUPP || errno == ENETUNREACH
+#ifdef ENONET
+                || errno == ENONET
+#endif
+                ) {
+                continue;
+            }
+
+            /* Out of descriptors or memory (EMFILE, ENFILE, ENOBUFS, ENOMEM). The
+             * listening socket is edge-triggered, so connections still queued won't
+             * be announced again until another arrives: the loop retries on its
+             * next pass instead, at least once a second. Logged once until it
+             * clears, since every retry fails the same way. */
+            if (!listener->accept_failing) {
+                log_error("accept4() failed: %s; retrying until it clears", strerror(errno));
+            }
+            listener->accept_failing = true;
             return;
         }
 
-        /* Reject if at connection limit */
-        if (loop->config.max_connections_per_worker > 0 &&
-            loop->active_connections >= loop->config.max_connections_per_worker) {
-            close(client_fd);
-            log_warn("Connection limit reached (%d), rejecting new connection",
-                    loop->active_connections);
-            continue;
+        if (listener->accept_failing) {
+            log_info("accept4() is accepting connections again");
+            listener->accept_failing = false;
         }
 
-        /* Make client socket non-blocking */
-        if (set_nonblocking(client_fd) < 0) {
+        /* Reject if at connection limit. Not on the admin listener: only the host
+         * can reach it, and a flood on the public port mustn't lock the operator
+         * out of the admin API, which is how they'd respond to one. The limit is
+         * sized to leave descriptors for it (main.c). Logged once until a public
+         * connection is taken again: under a flood, every attempt lands here. */
+        if (!listener->admin && loop->config.max_connections_per_worker > 0 &&
+            loop->active_connections >= loop->config.max_connections_per_worker) {
             close(client_fd);
-            continue;  /* Try next connection */
+            if (!loop->at_limit) {
+                log_warn("Connection limit reached (%d), refusing new connections until one "
+                         "closes", loop->active_connections);
+                loop->at_limit = true;
+            }
+            continue;
+        }
+        if (!listener->admin) {
+            loop->at_limit = false;
         }
 
         /* Get client IP (handle both IPv4 and IPv6) */
@@ -376,13 +717,24 @@ static void handle_accept(EventLoop *loop, int listen_fd) {
             /* IPv6 connection (or IPv4-mapped IPv6) */
             struct sockaddr_in6 *addr_in6 = (struct sockaddr_in6 *)&client_addr;
             inet_ntop(AF_INET6, &addr_in6->sin6_addr, remote_ip, sizeof(remote_ip));
+        } else if (client_addr.ss_family == AF_UNIX) {
+            /* The admin socket: no address, but the kernel says who connected */
+            snprintf(remote_ip, sizeof(remote_ip), "local");
+            struct ucred cred;
+            socklen_t cred_len = sizeof(cred);
+            if (getsockopt(client_fd, SOL_SOCKET, SO_PEERCRED, &cred, &cred_len) == 0) {
+                log_info("Admin socket connection from uid %u (pid %d)",
+                         (unsigned)cred.uid, (int)cred.pid);
+            }
         } else {
             /* Unknown address family */
             snprintf(remote_ip, sizeof(remote_ip), "unknown");
         }
 
         /* Create connection object */
-        Connection *conn = connection_create(client_fd, remote_ip, loop->next_connection_id++);
+        Connection *conn = connection_create(client_fd, remote_ip,
+                                             atomic_fetch_add(&g_next_connection_id, 1),
+                                             listener->admin);
         if (!conn) {
             close(client_fd);
             continue;  /* Try next connection */
@@ -402,79 +754,9 @@ static void handle_accept(EventLoop *loop, int listen_fd) {
         /* Add to connection list for timeout tracking */
         list_add_connection(loop, conn);
 
-        log_info("Accepted connection %lu from %s (fd=%d)", conn->connection_id, remote_ip, client_fd);
+        log_info("Accepted connection %lu from %s (fd=%d)%s", conn->connection_id, remote_ip,
+                 client_fd, listener->admin ? " on the admin listener" : "");
     }  /* End of while(1) loop */
-}
-
-/*
- * extract_content_length - Quick scan for Content-Length header value
- *
- * Scans for "Content-Length: 123" without full HTTP parsing.
- * Used to determine if we need to read request body.
- *
- * SECURITY: Detects multiple Content-Length headers (request smuggling attack).
- * Per RFC 7230 Section 3.3.2: Multiple Content-Length with different values = REJECT.
- *
- * Returns: 0 if found (sets *out_length), -1 if not found, -2 if multiple/conflicting
- */
-static int extract_content_length(const char *buffer, size_t buffer_len, size_t *out_length) {
-    /* Look for "Content-Length:" (case-insensitive) */
-    const char *p = buffer;
-    const char *end = buffer + buffer_len;
-    bool found = false;
-    size_t first_value = 0;
-
-    while (p < end) {
-        /* Find next line */
-        const char *line_start = p;
-        const char *line_end = memmem(p, end - p, "\r\n", 2);
-        if (!line_end) break;
-
-        size_t line_len = line_end - line_start;
-
-        /* Check if this line starts with "Content-Length:" (case-insensitive) */
-        if (line_len > 15 && strncasecmp(line_start, "Content-Length:", 15) == 0) {
-            /* Found it! Extract the number */
-            const char *value_start = line_start + 15;
-
-            /* Skip whitespace */
-            while (value_start < line_end && (*value_start == ' ' || *value_start == '\t')) {
-                value_start++;
-            }
-
-            /* Parse number */
-            char *endptr;
-            long length = strtol(value_start, &endptr, 10);
-
-            /* Validate: at least one digit parsed, non-negative, no trailing garbage */
-            if (endptr > value_start && length >= 0 &&
-                (*endptr == '\r' || *endptr == '\n' || *endptr == '\0' || *endptr == ' ')) {
-                if (!found) {
-                    /* First Content-Length header */
-                    first_value = (size_t)length;
-                    found = true;
-                } else {
-                    /* Multiple Content-Length headers! */
-                    if (first_value != (size_t)length) {
-                        /* Different values = request smuggling attack */
-                        log_warn("Multiple Content-Length headers with different values detected");
-                        return -2;
-                    }
-                    /* Same value = accept (redundant but harmless) */
-                }
-            }
-        }
-
-        /* Next line */
-        p = line_end + 2;
-    }
-
-    if (found) {
-        *out_length = first_value;
-        return 0;  /* Success */
-    }
-
-    return -1;  /* Not found */
 }
 
 /*
@@ -537,24 +819,45 @@ static int handle_read(Connection *conn, size_t max_request_size) {
             conn->header_end = http_find_header_end(conn->read_buffer, conn->bytes_read,
                                                     scanned_before);
 
+            /* Judged by where the block ends: past the limit, or not ended
+             * anywhere within it, whichever read the bytes came in */
+            if (conn->header_end > MAX_HEADER_BYTES ||
+                (!conn->header_end && conn->bytes_read >= MAX_HEADER_BYTES)) {
+                log_warn("Header block exceeds %d bytes on connection %lu, closing",
+                         MAX_HEADER_BYTES, conn->connection_id);
+                return -1;
+            }
+
             if (!conn->header_end) {
-                if (conn->bytes_read > MAX_HEADER_BYTES) {
-                    log_warn("Header block exceeds %d bytes on connection %lu, closing",
-                             MAX_HEADER_BYTES, conn->connection_id);
-                    return -1;
-                }
                 continue;  /* headers still incomplete */
             }
 
             /* Everything below reads the header block, so it runs once per
              * request rather than once per chunk. */
             size_t content_length = 0;
-            int cl_result = extract_content_length(conn->read_buffer, conn->header_end,
-                                                   &content_length);
+            int cl_result = http_scan_content_length(conn->read_buffer, conn->header_end,
+                                                     &content_length);
+
+            if (cl_result == -3 || cl_result == -4) {
+                /* The parser would read other header lines than framed the request
+                 * here: it stops at a NUL, and at a line that starts with a bare CR */
+                log_warn("Rejecting request with %s in its header block from connection %lu",
+                        cl_result == -3 ? "a NUL" : "a CR or LF outside a line ending",
+                        conn->connection_id);
+                return -1;
+            }
 
             if (cl_result == -2) {
                 /* Multiple/conflicting Content-Length headers (request smuggling attack) */
                 log_warn("Rejecting request with conflicting Content-Length headers from connection %lu",
+                        conn->connection_id);
+                return -1;
+            }
+
+            if (cl_result == -1) {
+                /* Not 1*DIGIT: the framing is invalid (RFC 7230 §3.3.3), so there is
+                 * no right number of body bytes to wait for */
+                log_warn("Rejecting request with an invalid Content-Length from connection %lu",
                         conn->connection_id);
                 return -1;
             }
@@ -572,7 +875,7 @@ static int handle_read(Connection *conn, size_t max_request_size) {
             }
 
             if (cl_result != 0) {
-                /* No Content-Length (cl_result == -1), request is complete (GET/HEAD/etc.) */
+                /* No Content-Length (cl_result == 1), request is complete (GET/HEAD/etc.) */
                 log_debug("Received complete request (%zu bytes) from connection %lu",
                          conn->bytes_read, conn->connection_id);
                 return 1;
@@ -715,6 +1018,13 @@ static void handle_connection_event(EventLoop *loop, Connection *conn, uint32_t 
 
 /*
  * close_idle_connections - Check for and close timed-out connections
+ *
+ * Idle is measured from the last byte either way, so a client trickling a byte
+ * every few seconds is never idle: one every 29 s held a connection through a
+ * 32 KB header block for about eleven days. So a request also has to arrive
+ * whole within the same timeout of its connection opening, however steadily it
+ * trickles. One request per connection (HTTP/1.0, closed after the response),
+ * so the connection's age is the request's.
  */
 static void close_idle_connections(EventLoop *loop) {
     if (loop->config.connection_timeout_ms <= 0) return;  /* Timeout disabled */
@@ -728,9 +1038,16 @@ static void close_idle_connections(EventLoop *loop) {
 
         long idle_ms = (now.tv_sec - conn->last_activity.tv_sec) * 1000
                      + (now.tv_nsec - conn->last_activity.tv_nsec) / 1000000;
+        long age_ms = (now.tv_sec - conn->opened_at.tv_sec) * 1000
+                    + (now.tv_nsec - conn->opened_at.tv_nsec) / 1000000;
         if (idle_ms >= loop->config.connection_timeout_ms) {
             log_info("Closing idle connection %lu (idle for %ldms)",
                     conn->connection_id, idle_ms);
+            close_connection(loop, conn);
+        } else if (conn->state == CONN_STATE_READING_HEADERS &&
+                   age_ms >= loop->config.connection_timeout_ms) {
+            log_info("Closing connection %lu: its request didn't arrive within %dms",
+                    conn->connection_id, loop->config.connection_timeout_ms);
             close_connection(loop, conn);
         }
 
@@ -753,26 +1070,35 @@ int event_loop_run(EventLoop *loop, RequestHandler handler, void *context) {
     loop->config.handler_context = context;
     loop->running = true;
 
-    /* Create listen socket */
-    int listen_fd = create_listen_socket(loop->config.port,
-                                         loop->config.backlog > 0 ? loop->config.backlog : DEFAULT_BACKLOG);
-    if (listen_fd < 0) {
+    /* Listening sockets, which the pool opened before the server said it was
+     * ready: this worker's public one on every interface, then the admin
+     * listener's on loopback only, which every worker shares (an accept that
+     * loses the race to another worker gets EAGAIN, and waits for the next) */
+    if (loop->public_fd < 0) {
+        log_error("Event loop %d has no listening socket", loop->worker_index);
         return -1;
     }
-
-    /* Add listen socket to epoll (watch for new connections)
-     * Use sentinel pointer to distinguish from Connection pointers */
-    struct epoll_event ev;
-    ev.events = EPOLLIN | EPOLLET;
-    ev.data.ptr = &listen_fd;  /* Sentinel: address of listen_fd variable */
-
-    if (epoll_ctl(loop->epoll_fd, EPOLL_CTL_ADD, listen_fd, &ev) < 0) {
-        log_error("epoll_ctl(ADD listen) failed: %s", strerror(errno));
-        close(listen_fd);
-        return -1;
+    Listener listeners[4];
+    int listener_count = 0;
+    listeners[listener_count++] = (Listener){ .fd = loop->public_fd, .admin = 0 };
+    for (int i = 0; i < loop->admin_fd_count; i++) {
+        listeners[listener_count++] = (Listener){ .fd = loop->admin_fds[i], .admin = 1 };
     }
 
-    log_info("Event loop running on port %d", loop->config.port);
+    /* Each listening socket's events carry a pointer to its Listener */
+    for (int i = 0; i < listener_count; i++) {
+        struct epoll_event ev;
+        ev.events = EPOLLIN | EPOLLET;
+        ev.data.ptr = &listeners[i];
+
+        if (epoll_ctl(loop->epoll_fd, EPOLL_CTL_ADD, listeners[i].fd, &ev) < 0) {
+            log_error("epoll_ctl(ADD listen) failed: %s", strerror(errno));
+            return -1;
+        }
+    }
+
+    log_info("Event loop running on port %d, admin port %d", loop->config.port,
+             loop->config.admin_port);
 
     /* Event array for epoll_wait */
     struct epoll_event events[MAX_EPOLL_EVENTS];
@@ -796,13 +1122,25 @@ int event_loop_run(EventLoop *loop, RequestHandler handler, void *context) {
 
         /* Process each event */
         for (int i = 0; i < n; i++) {
-            if (events[i].data.ptr == &listen_fd) {
-                /* New connection on listen socket (sentinel pointer) */
-                handle_accept(loop, listen_fd);
+            Listener *listener = NULL;
+            for (int j = 0; j < listener_count && !listener; j++) {
+                if (events[i].data.ptr == &listeners[j]) listener = &listeners[j];
+            }
+            if (listener) {
+                /* New connection on a listening socket */
+                handle_accept(loop, listener);
             } else {
                 /* Event on existing connection */
                 Connection *conn = (Connection *)events[i].data.ptr;
                 handle_connection_event(loop, conn, events[i].events);
+            }
+        }
+
+        /* Connections left queued by a failed accept: closing others above may
+         * have freed what it lacked */
+        for (int j = 0; j < listener_count; j++) {
+            if (listeners[j].accept_failing) {
+                handle_accept(loop, &listeners[j]);
             }
         }
 
@@ -816,7 +1154,6 @@ int event_loop_run(EventLoop *loop, RequestHandler handler, void *context) {
     }
 
     log_info("Event loop stopped");
-    close(listen_fd);
     return 0;
 }
 
@@ -850,8 +1187,14 @@ static void *worker_thread_func(void *arg) {
         log_warn("Worker %d: No database connection available", loop->worker_index);
     }
 
-    /* Run event loop (blocks until stopped) */
-    event_loop_run(loop, loop->config.handler, loop->config.handler_context);
+    /* Run event loop (blocks until stopped). One that can't run stops every
+       worker, and the server exits failing, rather than serving on fewer */
+    if (event_loop_run(loop, loop->config.handler, loop->config.handler_context) != 0 &&
+        loop->pool) {
+        log_error("Worker %d couldn't run its event loop: stopping the server", loop->worker_index);
+        atomic_store(&loop->pool->failed, true);
+        event_loop_pool_stop_signal_safe(loop->pool);
+    }
 
     if (loop->config.on_worker_exit)
         loop->config.on_worker_exit();
@@ -924,6 +1267,52 @@ EventLoopPool *event_loop_pool_create(EventLoopConfig *config) {
 
         /* Set worker index for DB connection binding */
         pool->event_loops[i]->worker_index = i;
+        pool->event_loops[i]->pool = pool;
+    }
+
+    /* Every listening socket, before the server says it's ready, so a port
+       that can't be had stops the start: the admin listener's once for the
+       process (127.0.0.1, and ::1 where the host has it), then each worker's
+       public one, once no other process holds its port */
+    int failed = 0;
+    if (pool->config.admin_socket) {
+        int fd = create_unix_listen_socket(pool->config.admin_socket,
+                                           pool->config.admin_socket_mode, pool->config.backlog);
+        pool->admin_socket_path = fd >= 0 ? strdup(pool->config.admin_socket) : NULL;
+        if (fd < 0 || !pool->admin_socket_path) {
+            if (fd >= 0) close(fd);
+            failed = 1;
+        } else {
+            pool->admin_fds[pool->admin_fd_count++] = fd;
+        }
+    }
+    if (pool->config.admin_port > 0 && !failed) {
+        static const int families[] = { AF_INET, AF_INET6 };
+        for (size_t f = 0; f < sizeof(families) / sizeof(families[0]) && !failed; f++) {
+            int fd = create_loopback_listen_socket(families[f], pool->config.admin_port,
+                                                   pool->config.backlog);
+            if (fd == -2) {
+                log_info("No IPv6 loopback here: the admin listener is on 127.0.0.1 only");
+            } else if (fd < 0) {
+                failed = 1;
+            } else {
+                pool->admin_fds[pool->admin_fd_count++] = fd;
+            }
+        }
+    }
+    if (!failed && claim_public_port(pool->config.port) != 0) {
+        failed = 1;
+    }
+    for (int i = 0; i < pool->num_workers && !failed; i++) {
+        EventLoop *loop = pool->event_loops[i];
+        loop->public_fd = create_listen_socket(pool->config.port, pool->config.backlog);
+        failed = loop->public_fd < 0;
+        memcpy(loop->admin_fds, pool->admin_fds, sizeof(loop->admin_fds));
+        loop->admin_fd_count = pool->admin_fd_count;
+    }
+    if (failed) {
+        event_loop_pool_destroy(pool);
+        return NULL;
     }
 
     pool->running = false;
@@ -968,7 +1357,7 @@ int event_loop_pool_start(EventLoopPool *pool) {
     }
 
     log_info("All workers stopped");
-    return 0;
+    return atomic_load(&pool->failed) ? -1 : 0;
 }
 
 /*
@@ -1008,6 +1397,13 @@ void event_loop_pool_destroy(EventLoopPool *pool) {
 
     for (int i = 0; i < pool->num_workers; i++) {
         event_loop_destroy(pool->event_loops[i]);
+    }
+    for (int i = 0; i < pool->admin_fd_count; i++) {
+        close(pool->admin_fds[i]);
+    }
+    if (pool->admin_socket_path) {
+        unlink(pool->admin_socket_path);
+        free(pool->admin_socket_path);
     }
 
     free(pool->worker_threads);

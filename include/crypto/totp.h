@@ -59,8 +59,9 @@ int crypto_totp_generate_code(const char *secret, time_t timestamp,
  * this narrow.
  *
  * Accepted: an observed code can be replayed until its window closes.
- * Bounded by: guessing (as opposed to observing) is capped by per-method rate
- * limiting — see is_rate_limited in db/queries/mfa.c.
+ * Bounded by: guessing (as opposed to observing) is capped by rate limiting, 5
+ * failures a minute per method and 10 a day per user — see is_rate_limited in
+ * db/queries/mfa.c.
  *
  * Revisit if: we must certify against RFC 6238 §5.2, or delayed-replay attacks
  * appear against a real deployment. The change is small — persist the highest

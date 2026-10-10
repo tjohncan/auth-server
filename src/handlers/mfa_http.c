@@ -20,38 +20,6 @@
 #include <stdlib.h>
 
 /* ============================================================================
- * Auth Helper
- * ========================================================================== */
-
-/*
- * require_session - Validate session cookie and populate session struct
- *
- * Returns NULL on success (session populated), or error response on failure.
- */
-static HttpResponse *require_session(const HttpRequest *req, db_handle_t *db,
-                                     oauth_session_info_t *out_session) {
-    const char *cookie_header = http_request_get_header(req, "Cookie");
-    char *session_token = NULL;
-    if (cookie_header) {
-        session_token = http_cookie_get_value(cookie_header, SESSION_COOKIE_NAME);
-    }
-
-    if (!session_token) {
-        return response_json_error(401, "Authentication required");
-    }
-
-    if (oauth_session_get_by_token(db, session_token, out_session) != 0) {
-        OPENSSL_cleanse(session_token, strlen(session_token));
-        free(session_token);
-        return response_json_error(401, "Invalid or expired session");
-    }
-
-    OPENSSL_cleanse(session_token, strlen(session_token));
-    free(session_token);
-    return NULL;
-}
-
-/* ============================================================================
  * POST /api/user/mfa/totp/setup
  * ========================================================================== */
 
@@ -68,8 +36,7 @@ static HttpResponse *require_session(const HttpRequest *req, db_handle_t *db,
  *   200 OK
  *   {"method_id":"<32hex>","secret":"<base32>","qr_url":"otpauth://..."}
  */
-HttpResponse *mfa_totp_setup_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *mfa_totp_setup_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -82,13 +49,8 @@ HttpResponse *mfa_totp_setup_handler(const HttpRequest *req, const RouteParams *
 
     /* Validate session */
     oauth_session_info_t session;
-    HttpResponse *auth_err = require_session(req, db, &session);
+    HttpResponse *auth_err = session_require(req, db, SESSION_MFA_IF_ENROLLED, &session);
     if (auth_err) return auth_err;
-
-    /* If user already has MFA, require completion before enrolling new methods */
-    if (oauth_session_mfa_pending(&session)) {
-        return response_json_error(403, "MFA verification required");
-    }
 
     /* Parse JSON body */
     if (!req->body) {
@@ -176,8 +138,7 @@ HttpResponse *mfa_totp_setup_handler(const HttpRequest *req, const RouteParams *
  *   400 Bad Request
  *   {"error":"Invalid TOTP code"}
  */
-HttpResponse *mfa_totp_confirm_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *mfa_totp_confirm_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -190,13 +151,8 @@ HttpResponse *mfa_totp_confirm_handler(const HttpRequest *req, const RouteParams
 
     /* Validate session */
     oauth_session_info_t session;
-    HttpResponse *auth_err = require_session(req, db, &session);
+    HttpResponse *auth_err = session_require(req, db, SESSION_MFA_IF_ENROLLED, &session);
     if (auth_err) return auth_err;
-
-    /* If user already has MFA, require completion before confirming new methods */
-    if (oauth_session_mfa_pending(&session)) {
-        return response_json_error(403, "MFA verification required");
-    }
 
     /* Parse JSON body */
     if (!req->body) {
@@ -243,15 +199,7 @@ HttpResponse *mfa_totp_confirm_handler(const HttpRequest *req, const RouteParams
      * it, so this session has completed MFA. Without this, a first enrollment
      * would be followed by a bounce to the MFA step on the very next MFA-management
      * call. For an additional method the gate above already required completion. */
-    const char *confirm_cookie = http_request_get_header(req, "Cookie");
-    if (confirm_cookie) {
-        char *session_token = http_cookie_get_value(confirm_cookie, SESSION_COOKIE_NAME);
-        if (session_token) {
-            oauth_session_set_mfa_completed(db, session_token);
-            OPENSSL_cleanse(session_token, strlen(session_token));
-            free(session_token);
-        }
-    }
+    oauth_session_set_mfa_completed(db, session.id);
 
     /* Build response */
     if (recovery_codes && recovery_count > 0) {
@@ -289,8 +237,7 @@ HttpResponse *mfa_totp_confirm_handler(const HttpRequest *req, const RouteParams
  *   200 OK
  *   {"valid":true} or {"valid":false}
  */
-HttpResponse *mfa_verify_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *mfa_verify_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -303,7 +250,7 @@ HttpResponse *mfa_verify_handler(const HttpRequest *req, const RouteParams *para
 
     /* Validate session */
     oauth_session_info_t session;
-    HttpResponse *auth_err = require_session(req, db, &session);
+    HttpResponse *auth_err = session_require(req, db, SESSION_MFA_NONE, &session);
     if (auth_err) return auth_err;
 
     /* Parse JSON body */
@@ -333,24 +280,17 @@ HttpResponse *mfa_verify_handler(const HttpRequest *req, const RouteParams *para
     /* Verify TOTP code */
     int result = mfa_verify(db, session.user_account_pin, method_id, code,
                             http_request_get_client_ip(req, NULL),
-                            http_request_get_header(req, "User-Agent"));
+                            http_request_get_user_agent(req));
     OPENSSL_cleanse(code, strlen(code));
     free(code);
 
     if (result == 1) {
-        /* Mark session MFA as completed */
-        const char *cookie_header = http_request_get_header(req, "Cookie");
-        if (cookie_header) {
-            char *session_token = http_cookie_get_value(cookie_header, SESSION_COOKIE_NAME);
-            if (session_token) {
-                oauth_session_set_mfa_completed(db, session_token);
-                OPENSSL_cleanse(session_token, strlen(session_token));
-                free(session_token);
-            }
-        }
+        oauth_session_set_mfa_completed(db, session.id);
         return response_json_ok("{\"valid\":true}");
     } else if (result == -2) {
         return response_json_error(429, "Too many attempts, try again soon!");
+    } else if (result == -3) {
+        return response_json_error(503, "MFA verification is unavailable, try again soon");
     } else if (result == 0) {
         return response_json_ok("{\"valid\":false}");
     } else {
@@ -374,8 +314,7 @@ HttpResponse *mfa_verify_handler(const HttpRequest *req, const RouteParams *para
  *   200 OK
  *   {"valid":true} or {"valid":false}
  */
-HttpResponse *mfa_recover_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *mfa_recover_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -388,7 +327,7 @@ HttpResponse *mfa_recover_handler(const HttpRequest *req, const RouteParams *par
 
     /* Validate session */
     oauth_session_info_t session;
-    HttpResponse *auth_err = require_session(req, db, &session);
+    HttpResponse *auth_err = session_require(req, db, SESSION_MFA_NONE, &session);
     if (auth_err) return auth_err;
 
     /* Parse JSON body */
@@ -407,16 +346,7 @@ HttpResponse *mfa_recover_handler(const HttpRequest *req, const RouteParams *par
     free(recovery_code);
 
     if (result == 1) {
-        /* Mark session MFA as completed */
-        const char *cookie_header = http_request_get_header(req, "Cookie");
-        if (cookie_header) {
-            char *session_token = http_cookie_get_value(cookie_header, SESSION_COOKIE_NAME);
-            if (session_token) {
-                oauth_session_set_mfa_completed(db, session_token);
-                OPENSSL_cleanse(session_token, strlen(session_token));
-                free(session_token);
-            }
-        }
+        oauth_session_set_mfa_completed(db, session.id);
         return response_json_ok("{\"valid\":true}");
     } else if (result == 0) {
         return response_json_ok("{\"valid\":false}");
@@ -439,8 +369,7 @@ HttpResponse *mfa_recover_handler(const HttpRequest *req, const RouteParams *par
  *   {"methods":[{"id":"<32hex>","type":"TOTP","display_name":"My Phone",
  *                "is_confirmed":true,"confirmed_at":"2024-01-01T00:00:00Z"},...]}
  */
-HttpResponse *mfa_list_methods_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *mfa_list_methods_handler(const HttpRequest *req) {
 
     /* Get database connection */
     db_handle_t *db = db_pool_get_connection();
@@ -451,7 +380,7 @@ HttpResponse *mfa_list_methods_handler(const HttpRequest *req, const RouteParams
 
     /* Validate session */
     oauth_session_info_t session;
-    HttpResponse *auth_err = require_session(req, db, &session);
+    HttpResponse *auth_err = session_require(req, db, SESSION_MFA_NONE, &session);
     if (auth_err) return auth_err;
 
     /* List all methods (confirmed and unconfirmed) */
@@ -509,8 +438,7 @@ HttpResponse *mfa_list_methods_handler(const HttpRequest *req, const RouteParams
  *   200 OK
  *   {"message":"MFA method deleted"}
  */
-HttpResponse *mfa_delete_method_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *mfa_delete_method_handler(const HttpRequest *req) {
 
     /* Get database connection */
     db_handle_t *db = db_pool_get_connection();
@@ -521,13 +449,8 @@ HttpResponse *mfa_delete_method_handler(const HttpRequest *req, const RouteParam
 
     /* Validate session */
     oauth_session_info_t session;
-    HttpResponse *auth_err = require_session(req, db, &session);
+    HttpResponse *auth_err = session_require(req, db, SESSION_MFA_IF_ENROLLED, &session);
     if (auth_err) return auth_err;
-
-    /* Destructive MFA operation — require MFA completion first */
-    if (oauth_session_mfa_pending(&session)) {
-        return response_json_error(403, "MFA verification required");
-    }
 
     /* Get method ID from query string */
     if (!req->query_string) {
@@ -568,9 +491,7 @@ HttpResponse *mfa_delete_method_handler(const HttpRequest *req, const RouteParam
  *   200 OK
  *   {"recovery_codes":["...","...",...]}
  */
-HttpResponse *mfa_regenerate_recovery_codes_handler(const HttpRequest *req,
-                                                    const RouteParams *params) {
-    (void)params;
+HttpResponse *mfa_regenerate_recovery_codes_handler(const HttpRequest *req) {
     /* Nothing is read from the body. JSON is still required: it's what keeps a
      * plain HTML form out, and SameSite=Lax lets a form on a sibling subdomain
      * post here with the session cookie. */
@@ -586,13 +507,8 @@ HttpResponse *mfa_regenerate_recovery_codes_handler(const HttpRequest *req,
 
     /* Validate session */
     oauth_session_info_t session;
-    HttpResponse *auth_err = require_session(req, db, &session);
+    HttpResponse *auth_err = session_require(req, db, SESSION_MFA_IF_ENROLLED, &session);
     if (auth_err) return auth_err;
-
-    /* Destructive MFA operation — require MFA completion first */
-    if (oauth_session_mfa_pending(&session)) {
-        return response_json_error(403, "MFA verification required");
-    }
 
     /* Regenerate recovery codes */
     char **codes = NULL;
@@ -634,8 +550,7 @@ HttpResponse *mfa_regenerate_recovery_codes_handler(const HttpRequest *req,
  *   200 OK
  *   {"message":"MFA requirement updated"}
  */
-HttpResponse *mfa_set_require_handler(const HttpRequest *req, const RouteParams *params) {
-    (void)params;
+HttpResponse *mfa_set_require_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/json");
     if (ct_err) return ct_err;
 
@@ -648,13 +563,8 @@ HttpResponse *mfa_set_require_handler(const HttpRequest *req, const RouteParams 
 
     /* Validate session */
     oauth_session_info_t session;
-    HttpResponse *auth_err = require_session(req, db, &session);
+    HttpResponse *auth_err = session_require(req, db, SESSION_MFA_IF_ENROLLED, &session);
     if (auth_err) return auth_err;
-
-    /* Destructive MFA operation — require MFA completion first */
-    if (oauth_session_mfa_pending(&session)) {
-        return response_json_error(403, "MFA verification required");
-    }
 
     /* Parse JSON body */
     if (!req->body) {

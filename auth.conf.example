@@ -8,12 +8,43 @@ log_level = info
 # log_level_env = MY_LOG_LEVEL
 
 # Public identity of this server — used to build URLs (JWT `iss` claim, email links,
-# TOTP issuer). This is NOT a bind address: the server always listens on all
-# interfaces, so that an edge proxy or load balancer on another host can reach it.
-# Firewall the port; do not rely on this setting to restrict access.
+# TOTP issuer). localhost means http://localhost:<server_port>, reached directly; any
+# other name means https://<name>, through a TLS proxy on the default port.
+# This is NOT a bind address: the server always listens on all interfaces, so that
+# an edge proxy or load balancer on another host can reach it. Firewall the port;
+# do not rely on this setting to restrict access.
 server_host = localhost
 server_port = 8080
 server_workers = 0
+
+# The localhost-only admin API (bootstrap, users, organizations, org keys) listens on a
+# Unix socket, and the public port refuses those endpoints. Who may call it is the
+# socket file's mode: 0600 lets in the server's own user (and root), 0660 its group too.
+# Call it with ./auth-server --admin METHOD PATH [JSON | -], or curl --unix-socket; in
+# Docker, through docker exec. Each deployment needs its own socket, which its data
+# directory gives it. No directory on its path may be writable by every user (as /tmp
+# is), and its own directory must be the server user's or root's, or the server won't
+# start: whoever can write there could replace the socket and receive the operator's
+# calls. Empty turns it off.
+admin_socket = ./data/admin.sock
+admin_socket_mode = 0600
+# The admin API on loopback TCP as well (127.0.0.1, and ::1 where the host has it), off
+# unless set. Any process on the host can reach a port, whichever user runs it: the
+# socket is what knows who's calling. It must differ from server_port and be free;
+# don't publish or forward it.
+# admin_port = 8081
+
+# Which request header carries the client's address, as set by the proxy in front of
+# the server. It's recorded as source_ip on sessions, key-usage logs, MFA attempts and
+# emailed links; nothing grants or refuses access by it. Only the header your proxy
+# overwrites can be trusted: one it passes through is the client's to fill in, so
+# there is no safe order to try them in.
+#   x-real-ip        X-Real-IP, which the shipped nginx sets (the default)
+#   x-forwarded-for  the last X-Forwarded-For entry, which the nearest proxy appended:
+#                    an AWS ALB, or similar, directly in front of the server
+#   none             record no address
+# An unknown value refuses to start.
+# client_ip_header = x-real-ip
 
 # Database — "sqlite" or "postgresql"
 db_type = sqlite
@@ -35,25 +66,74 @@ schema_dir = ./sql
 
 # Enable history tables for auditing UPDATE/DELETE operations
 # History tables track changes to tables with 'pin' primary keys in lookup/security schemas
+# Turning this off doesn't remove history already made, nor stop its triggers writing: with
+# every instance stopped, run ./auth-server --drophistory (sql/README.md).
 enable_history_tables = true
 
 # Encryption
 # Passphrase used to derive keys for encrypting sensitive data at rest
 # Protects usernames, emails, MFA secrets and signing keys against database compromise
 # IMPORTANT: Customize this in production! Use encryption_key_env to load from environment
-# Set it before the first start and then leave it: re-keying isn't supported yet, so after
-# a change nothing sealed under the old value can be read, and nobody can sign in.
+# Set it before the first start. The server refuses to start with a key that doesn't open
+# what the database already holds. To change it, stop every instance and run
+# ./auth-server --rekey, with the key in use now as encryption_key_previous and the new one
+# as encryption_key; then remove encryption_key_previous (sql/README.md, --rekey).
+# The passphrase is stretched with the password hashing settings below, as they are at the
+# first start; the database records that, and a later change reaches it at the next --rekey.
 encryption_key = customize_me
 # encryption_key_env = MY_ENCRYPTION_KEY
+# encryption_key_previous =
+# encryption_key_previous_env = MY_PREVIOUS_ENCRYPTION_KEY
 
-# Password hashing (argon2id or pbkdf2-sha256) — do NOT change after users exist
+# Password hashing (argon2id or pbkdf2-sha256). Each stored hash names its method,
+# so these can change: a password hashed otherwise, or at an iteration count
+# outside [min, max], is hashed again with these at its next sign-in.
 secret_hashing_algorithm = argon2id
 secret_hash_min_iterations = 4
 secret_hash_max_iterations = 4
 
+# Machine secrets: the secrets of client, resource-server and organization keys,
+# and recovery codes. They're checked on every /token, /introspect and org-key
+# call, so a slow hash stalls a worker each time. Their randomness protects them:
+# a generated one is 256 bits, a recovery code 80, and a supplied one must match
+# machine_secret_pattern. Each setting left out takes the password one's value.
+# Key secrets hashed otherwise are hashed again with these when next used; a
+# recovery code set keeps the method it was made with until it's regenerated.
+machine_secret_hashing_algorithm = pbkdf2-sha256
+machine_secret_hash_min_iterations = 777
+machine_secret_hash_max_iterations = 777
+
 # Password policy
 # Minimum password length (default 1, minimum 1)
 # password_min_length = 8
+
+# Refuse to start on the defaults fit only for trying the server out: encryption_key
+# left at customize_me, which anyone can read, or password_min_length under 8 (NIST's
+# minimum). Set it in production. Off, the server starts on them, warning about the key.
+# strict = true
+
+# Patterns a value must match when it's created or set (POSIX extended, matched
+# against the whole value). They never apply to what's already stored, so an
+# existing user keeps signing in and getting links. Whatever the pattern, values
+# also have length limits, no control characters, and well-formed UTF-8.
+#
+# Unset, usernames and code names take the shape of an email address's local
+# part: letters, digits and . _ + -, with no dot first, last or doubled. Unset,
+# addresses take one conservative real-world shape: that local part (at most 64
+# characters), an @, and dotted labels of letters, digits and inner hyphens
+# ending in an alphabetic or xn-- domain. Passwords and machine secrets have none.
+# An empty value means no pattern. A pattern that lets non-ASCII through takes it
+# as typed: there's no Unicode normalization or case folding, so an é typed two
+# ways is two different names, and only ASCII letters match regardless of case.
+# To allow, say, an apostrophe in addresses:
+# email_pattern = [A-Za-z0-9_+'-]+(\.[A-Za-z0-9_+'-]+)*@[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*\.([A-Za-z]{2,}|xn--[A-Za-z0-9-]+)
+# username_pattern =
+# code_name_pattern =
+# password_pattern =
+# A secret supplied for a client, resource-server or organization key, instead of
+# one the server generates. A generated one is 256 random bits; ask as much of
+# one someone chooses.
+machine_secret_pattern = ^.{32,}$
 
 # Browser session lifetime (in seconds)
 # How long a login session remains valid. Clients can enforce stricter limits
@@ -78,7 +158,11 @@ jwt_clock_skew_seconds = 0
 
 # Database Cleaner - Background thread for purging old data
 # Continuously purges expired sessions, tokens, usage logs, and history records
-# to prevent unbounded database growth
+# to prevent unbounded database growth. It visits one table per interval and
+# deletes batch_size rows at a time, and stays on a table for up to two seconds
+# while its batches come back full. A table it can't clear in that time is
+# logged as a warning; if that keeps happening, the table fills faster than the
+# cleaner keeps up, and a larger batch size or shorter interval helps.
 cleaner_enabled = true
 cleaner_interval_seconds = 10
 cleaner_batch_size = 1000

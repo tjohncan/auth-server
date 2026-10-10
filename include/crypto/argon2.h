@@ -17,7 +17,16 @@
  *   - secret_hash (text)
  */
 
-/* Argon2 parameters */
+/*
+ * Argon2 parameters. The memory cost, lanes and output length are part of what
+ * "argon2id" means wherever it's stored: every hash labeled argon2id$, and
+ * every database whose encryption_params row stretches encryption_key with
+ * argon2id. Changing one here would fail every such hash, and leave every such
+ * database unable to open what it sealed, with --rekey unable to help, since it
+ * derives the old keys the same way. Never change them. Other parameters need a
+ * method name of their own (crypto/password.c), which re-hash on use and
+ * --rekey then roll forward. test-crypto and test-db pin them by known answers.
+ */
 #define ARGON2_SALT_LENGTH       16        /* Salt length in bytes */
 #define ARGON2_HASH_LENGTH       32        /* Hash output length in bytes */
 #define ARGON2_MEMORY_COST       (64*1024) /* Memory in KiB (64 MB) */

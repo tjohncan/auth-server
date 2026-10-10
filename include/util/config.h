@@ -20,16 +20,29 @@ typedef enum {
 
 /* Password hashing algorithm enumeration */
 typedef enum {
+    PASSWORD_HASH_UNSET = -1,  /* machine_secret_hashing_algorithm left out: the user one's */
     PASSWORD_HASH_ARGON2ID,
     PASSWORD_HASH_PBKDF2_SHA256
 } password_hash_algorithm_t;
+
+/* Longest public_base_url config_load accepts. The buffers that hold it with a
+ * path and a token appended are sized with room for it. */
+#define PUBLIC_BASE_URL_MAX 200
 
 /* Configuration structure */
 typedef struct {
     /* Server settings */
     char *host;
     int port;
+    int admin_port;        /* The admin API on loopback TCP too (0: not) */
+    char *admin_socket;    /* The admin API's Unix socket ("" or NULL: none) */
+    int admin_socket_mode; /* Its file mode, which decides who may connect */
     int workers;
+    /* Not a setting: derived from host and port by config_load. The address
+     * browsers and resource servers reach this server at: http://localhost:PORT
+     * when host is localhost, https://HOST otherwise. Every absolute URL the
+     * server hands out starts with it, and it is every access token's iss. */
+    char public_base_url[PUBLIC_BASE_URL_MAX + 1];
 
     /* Database settings */
     db_type_t db_type;
@@ -52,8 +65,26 @@ typedef struct {
     int secret_hash_min_iterations;
     int secret_hash_max_iterations;
 
+    /* Machine secrets (crypto/password.h): each one left out takes the password
+       setting's value, which config_load fills in */
+    password_hash_algorithm_t machine_secret_hashing_algorithm;
+    int machine_secret_hash_min_iterations;
+    int machine_secret_hash_max_iterations;
+
     /* Password policy */
     int password_min_length;  /* Minimum password length (default 1, minimum 1) */
+
+    /* Refuse to start on the shipped defaults fit only for trying the server out
+       (config_check_weak_defaults). Off by default, so a fresh clone runs. */
+    int strict;
+
+    /* Patterns a value created or set must match (util/validation.h): NULL for
+       the default, "" for none */
+    char *username_pattern;
+    char *email_pattern;
+    char *code_name_pattern;
+    char *password_pattern;
+    char *machine_secret_pattern;
 
     /* OAuth2 token limits */
     int max_access_token_ttl_seconds;  /* Maximum TTL for client access tokens (default 59 days) */
@@ -80,6 +111,7 @@ typedef struct {
 
     /* Encryption */
     char *encryption_key;          /* Passphrase for encrypting sensitive data at rest (AES-256-GCM) */
+    char *encryption_key_previous; /* --rekey only: the passphrase the data is sealed under now (NULL: unset) */
 
     /* Logging settings */
     LogLevel log_level;    /* Parsed log level enum (stored directly, no string) */
@@ -94,12 +126,18 @@ typedef struct {
     char *db_password_env; /* ENV var name for db_password */
     char *db_owner_role_env; /* ENV var name for db_owner_role */
     char *encryption_key_env;       /* ENV var name for encryption_key */
+    char *encryption_key_previous_env; /* ENV var name for encryption_key_previous */
     char *server_host_env;  /* ENV var name for server_host */
     char *server_port_env;  /* ENV var name for server_port */
+    char *admin_port_env;   /* ENV var name for admin_port */
+    char *admin_socket_env; /* ENV var name for admin_socket */
     char *mothership_url_env; /* ENV var name for mothership_url */
 
     /* Branding */
     char *mothership_url;  /* Optional parent/brand URL shown on index page */
+
+    /* Which header the proxy in front sets with the client's address (NULL: x-real-ip) */
+    char *client_ip_header;
 
 #ifdef EMAIL_SUPPORT
     /* Email delivery */
@@ -136,6 +174,20 @@ config_t *config_load(const char *config_file);
  * Returns 0 on success, -1 on overflow.
  */
 int config_build_pg_connection_string(const config_t *config, char *out, size_t out_size);
+
+/* The shortest password_min_length strict accepts: NIST SP 800-63B's minimum
+   for a password a person chooses */
+#define STRICT_PASSWORD_MIN_LENGTH 8
+
+/*
+ * config_check_weak_defaults - The shipped defaults fit only for trying the
+ * server out: encryption_key left at customize_me, which anyone can read, and
+ * password_min_length under STRICT_PASSWORD_MIN_LENGTH. Without strict, the key
+ * is a warning and the length nothing; with strict, each is an error.
+ *
+ * Returns: 0, or -1 if strict is set and either is in use
+ */
+int config_check_weak_defaults(const config_t *config);
 
 /*
  * Free configuration structure
