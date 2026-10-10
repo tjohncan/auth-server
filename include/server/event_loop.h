@@ -35,8 +35,9 @@ typedef struct EventLoopPool EventLoopPool;
  * ============================================================================ */
 
 /*
- * Connection states (currently uses READING_HEADERS → WRITING_RESPONSE;
- * others reserved for future use, e.g., HTTP/1.1 keep-alive)
+ * Connection states. A connection goes READING_HEADERS → WRITING_RESPONSE and
+ * closes: one request each (HTTP/1.0, no keep-alive). The states marked Reserved
+ * aren't used.
  */
 typedef enum {
     CONN_STATE_READING_HEADERS,   /* Reading HTTP request (headers + body) */

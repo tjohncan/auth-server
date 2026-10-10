@@ -183,8 +183,7 @@ int config_build_pg_connection_string(const config_t *config, char *out, size_t 
  * config_check_weak_defaults - The shipped defaults fit only for trying the
  * server out: encryption_key left at customize_me, which anyone can read, and
  * password_min_length under STRICT_PASSWORD_MIN_LENGTH. Without strict, the key
- * is a warning and the length nothing, as before strict existed; with strict,
- * each is an error.
+ * is a warning and the length nothing; with strict, each is an error.
  *
  * Returns: 0, or -1 if strict is set and either is in use
  */

@@ -349,7 +349,7 @@ The `client.is_universal` flag enables special public clients (like system manag
   and organization key secrets, and recovery codes) with `machine_secret_hashing_algorithm`, each
   at an iteration count drawn from its range.
 - A password or key secret that verifies under another method, or an iteration count outside its
-  range, is hashed again with today's settings and stored, at its next use, only while the row
+  range, is hashed again as configured and stored, at its next use, only while the row
   still holds the hash that verified. With history on, the replaced hash goes to history like any
   update. Once history is purged (retention, or `--drophistory`), no row holds a retired hash,
   and on PostgreSQL no planner statistics keep a sample of one, in history or out (as for sealed
@@ -364,35 +364,12 @@ The `client.is_universal` flag enables special public clients (like system manag
   on PostgreSQL so does each server's `pg_wal` until its segments are overwritten.
 - Recovery codes aren't hashed again: a code is used once, and its siblings' plaintexts are
   unknown. A new method reaches them when the user regenerates the set.
-- Until then, a secret costs what its old settings cost to check, while a missing account (or an
-  unknown key id, while the machine method is cheap enough to spend a dummy on) costs what today's
-  settings cost. So after a change, whether an account or key exists can be told by timing, for
-  those not used since. Passwords catch up as users sign in. For key secrets, rotate them after
-  changing the machine method: that ends it at once, and moves them to the new method right away.
-
-**Upgrading is one-way: take a backup first.** An older binary rejects a labeled hash, and
-can't derive the field keys of a database whose `encryption_key` is stretched, as one is from
-its first start with nothing sealed, or from `--rekey`. Going back means restoring the backup.
-
-**Hashes made before method labels.** They have no label, and fail verification with an error
-naming this fix, so the labeling must not be missed. Label them once, with the method the server
-was configured with (`secret_hashing_algorithm`, `argon2id` by default), by hand like any schema
-change. Today's binary rejects a labeled hash, and the new one an unlabeled hash, so whichever
-goes first, every sign-in and key authentication fails until the other is done. The order is:
-stop every instance, run the UPDATEs, start the new binary everywhere. A rolling deploy fails
-authentication for the whole roll. With history on, each labeled row gets a history copy dated
-now.
-```sql
--- SQLite; on PostgreSQL the same, with the tables in the security schema
--- (security.user_account and so on) and || as written. Replace argon2id if
--- secret_hashing_algorithm was pbkdf2-sha256.
-UPDATE user_account SET secret_hash = 'argon2id$' || secret_hash
-  WHERE secret_hash IS NOT NULL AND secret_hash NOT LIKE '%$%';
-UPDATE client_key SET secret_hash = 'argon2id$' || secret_hash WHERE secret_hash NOT LIKE '%$%';
-UPDATE resource_server_key SET secret_hash = 'argon2id$' || secret_hash WHERE secret_hash NOT LIKE '%$%';
-UPDATE organization_key SET secret_hash = 'argon2id$' || secret_hash WHERE secret_hash NOT LIKE '%$%';
-UPDATE recovery_code SET secret_hash = 'argon2id$' || secret_hash WHERE secret_hash NOT LIKE '%$%';
-```
+- Until then, a secret costs what the settings it was hashed under cost to check, while a missing
+  account (or an unknown key id, while the machine method is cheap enough to spend a dummy on)
+  costs what the configured settings cost. So after a change, whether an account or key exists can
+  be told by timing, for those not used since. Passwords catch up as users sign in. For key
+  secrets, rotate them after changing the machine method: that ends it at once, and moves them to
+  the new method right away.
 
 ### Log Tables
 
@@ -573,13 +550,13 @@ to the configuration: changing the hashing settings changes nothing until the ne
 new database gets its row at the first start. Someone holding only the database then pays one
 hash under that method for each guess at the passphrase, which matters for a passphrase a person
 chose; a long random one needs no stretch. A database without the row derives its keys by HKDF
-alone, as before `encryption_params` existed, and the server warns about it at every start.
+alone, and the server warns about it at every start.
 
 In one transaction, `--rekey`:
 - opens every sealed value with the old keys and seals it again with the new ones, stretched with
   the configured method and a fresh salt: `user_account.username`, `user_email.email_address`,
   `passwordless_login_token.email_address`, `user_mfa.secret`, and both signing tables' current
-  and prior keys. A signing key in the older plaintext format is left as it is.
+  and prior keys. A signing key stored in plaintext is left as it is.
 - makes the blind indexes again from the opened values (`username_hash`, `email_hash`).
 - records the new stretch in `encryption_params`.
 - writes no history. A history trigger keeps the row as it was, so each change would copy the
@@ -600,12 +577,19 @@ copies of them the same way. `ANALYZE`, which autovacuum runs, would otherwise k
 their values in `pg_statistic`, where no rewrite reaches it, and anyone who may read a table may
 read its sample (the `pg_stats` view). A sample outlives its rows: an `ANALYZE` that finds a
 table emptied leaves the last one in place. The run checks the sealed columns, and reports NOT
-SCRUBBED, naming them, if any has statistics.
+SCRUBBED, naming them, if any has statistics. To clear one, as its table's owner, set its
+statistics target to 0 and change the column to its own type, which drops its sample without
+rewriting anything; then run `--rekey` again, giving the same passphrase as both:
+
+```sql
+alter table security.user_account alter column username set statistics 0;
+alter table security.user_account alter column username type text;
+```
 
 - **Keeping the passphrase.** Give the same passphrase as both: everything is sealed again under
-  keys from a fresh salt and the configured stretch. That's how a database made before
-  `encryption_params` gets its stretch, and how a new hashing method or iteration count takes
-  effect.
+  keys from a fresh salt and the configured stretch. That's how a database without an
+  `encryption_params` row gets its stretch, and how a change of hashing method or iteration
+  count takes effect.
 - **Stopping a run.** Ctrl-C or SIGTERM stops it. Stopped before its COMMIT, it changed nothing:
   run it again as it was. Stopped after, while it scrubs, everything is sealed under the new
   passphrase: run it again giving that one as both, which seals again and scrubs. Not knowing
@@ -637,72 +621,6 @@ SCRUBBED, naming them, if any has statistics.
   grant auth_dbo to auth_service;
   -- ./auth-server --rekey
   revoke auth_dbo from auth_service;
-  ```
-- **Databases made before `encryption_params` existed** need the table, added by hand like any
-  schema change, before `--rekey` will run. The server runs without it as before.
-  ```sql
-  -- SQLite
-  create table encryption_params (
-    singleton integer not null default 1
-  , method text not null
-  , iterations integer not null
-  , salt text not null
-  , created_at text not null default (datetime('now'))
-  , constraint ck_encryption_params_singleton check(singleton = 1)
-  , constraint uix_encryption_params_singleton unique(singleton)
-  );
-
-  -- PostgreSQL, as the owner role (set role auth_dbo)
-  create table keys.encryption_params (
-    singleton boolean not null default true
-  , method text not null
-  , iterations integer not null
-  , salt text not null
-  , created_at timestamp not null default current_timestamp
-  , constraint ck_encryption_params_singleton check(singleton = true)
-  , constraint uix_encryption_params_singleton unique(singleton)
-  );
-  -- hardened per setup_reference.sql: the login role's grant on it
-  grant select, insert, update, delete on keys.encryption_params to auth_service;
-  ```
-- **PostgreSQL databases made before sealed columns and hashes kept no statistics** need that
-  set by hand, like any schema change, history's copies included, and the sample already taken
-  removed. Until then, once autovacuum has sampled them, the run reports NOT SCRUBBED. As a
-  superuser:
-  ```sql
-  alter table keys.auth_request_signing
-    alter column current_secret set statistics 0, alter column prior_secret set statistics 0;
-  alter table keys.access_token_signing
-    alter column current_private_key set statistics 0,
-    alter column prior_private_key set statistics 0;
-  alter table session.passwordless_login_token alter column email_address set statistics 0;
-  alter table security.user_account
-    alter column username set statistics 0, alter column username_hash set statistics 0,
-    alter column secret_hash set statistics 0;
-  alter table security.user_email
-    alter column email_address set statistics 0, alter column email_hash set statistics 0;
-  alter table security.user_mfa alter column secret set statistics 0;
-  alter table security.client_key alter column secret_hash set statistics 0;
-  alter table security.resource_server_key alter column secret_hash set statistics 0;
-  alter table security.organization_key alter column secret_hash set statistics 0;
-  alter table security.recovery_code alter column secret_hash set statistics 0;
-  -- history's copies, where history was made
-  alter table if exists security_history.user_account
-    alter column username set statistics 0, alter column username_hash set statistics 0,
-    alter column secret_hash set statistics 0;
-  alter table if exists security_history.user_email
-    alter column email_address set statistics 0, alter column email_hash set statistics 0;
-  alter table if exists security_history.user_mfa alter column secret set statistics 0;
-  alter table if exists security_history.client_key alter column secret_hash set statistics 0;
-  alter table if exists security_history.resource_server_key
-    alter column secret_hash set statistics 0;
-  alter table if exists security_history.organization_key
-    alter column secret_hash set statistics 0;
-  alter table if exists security_history.recovery_code alter column secret_hash set statistics 0;
-  -- the sample already taken, then the file it was in
-  delete from pg_statistic s using pg_attribute a
-   where a.attrelid = s.starelid and a.attnum = s.staattnum and a.attstattarget = 0;
-  vacuum full pg_statistic;
   ```
 
 ### SQLite-Specific: Incremental Vacuum

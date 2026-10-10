@@ -193,8 +193,8 @@ void test_str_url_encode_decode(void) {
     printf("Decode '%s' -> '%s' (%d bytes)\n", encoded, decoded, dec_len);
 
     /* Only '%' and two hex digits is an escape. A sign or whitespace in their place
-       is not, so it can't smuggle in a byte the client never encoded: "%-1" used to
-       decode to 0xFF and "% 9" to a tab. A malformed escape is copied as it came. */
+       is not, so it can't smuggle in a byte the client never encoded: "%-1" isn't
+       0xFF, nor "% 9" a tab. A malformed escape is copied as it came. */
     const struct { const char *in, *out; } escapes[] = {
         { "%41%4a%4A", "AJJ" },
         { "%-1",  "%-1" },

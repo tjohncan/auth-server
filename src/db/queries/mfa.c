@@ -778,9 +778,8 @@ int recovery_code_verify(db_handle_t *db,
     /* Hash the provided code as the set's codes were: its method, salt and
        iterations */
     if (!set.method[0]) {
-        log_error("Recovery codes whose hashes don't name their method (argon2id$ or "
-                  "pbkdf2-sha256$) need the labeling UPDATEs in sql/README.md, run once with "
-                  "every instance stopped.");
+        log_error("The active recovery code set's hashes don't start with the method that "
+                  "made them (argon2id$ or pbkdf2-sha256$), so no code can be checked");
         OPENSSL_cleanse(&set, sizeof(set));
         return -1;
     }

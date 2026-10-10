@@ -19,8 +19,9 @@
  * (sql/README.md, "Hash methods").
  *
  * Returns: 0 if stored; 1 if the row had changed, or the secret is outside
- *          today's length limits; -1 on error (logged). The old hash stays and
- *          still verifies unless stored, so callers carry on either way.
+ *          the configured length limits; -1 on error (logged). The old hash
+ *          stays and still verifies unless stored, so callers carry on either
+ *          way.
  */
 int secret_rehash(db_handle_t *db, const char *table, long long pin, secret_kind_t kind,
                   const char *secret, const char *verified_hash);

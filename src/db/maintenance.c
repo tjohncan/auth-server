@@ -345,8 +345,7 @@ static int reseal_table(db_handle_t *db, size_t t, const encrypt_keys_t *old_key
 }
 
 /* The signing keys: e1: values, current and prior, re-sealed in both tables.
-   One in the older plaintext format is left as it is. Returns the values done,
-   or -1. */
+   One stored in plaintext is left as it is. Returns the values done, or -1. */
 static int reseal_signing_keys(db_handle_t *db, const encrypt_keys_t *old_keys,
                                const encrypt_keys_t *new_keys) {
     static const struct { const char *table, *select, *update; } TABLES[] = {
@@ -593,9 +592,10 @@ int maintenance_rekey(db_handle_t *db, db_type_t type, const encrypt_keys_t *old
             log_error("Re-keyed, but couldn't read which sealed columns have planner statistics");
         } else if (sampled > 0) {
             log_error("Re-keyed, but not scrubbed: pg_statistic keeps a sample of %s, which may be "
-                      "under the old key (planner statistics, which no rewrite reaches). "
-                      "sql/README.md shows, under --rekey, how to keep sealed columns out of them "
-                      "and remove the sample.", columns);
+                      "under the old key (planner statistics, which no rewrite reaches). Set "
+                      "each one's statistics target to 0 and change it to its own type, which "
+                      "drops its sample, then run --rekey again (sql/README.md, --rekey).",
+                      columns);
         }
         if (kept != 0 || sampled != 0) return -2;
     }

@@ -259,9 +259,8 @@ int crypto_password_verify(secret_kind_t kind, const char *password, size_t pass
     password_hash_algorithm_t algorithm = sep
         ? method_from_name(stored_hash, (size_t)(sep - stored_hash)) : PASSWORD_HASH_UNSET;
     if (algorithm == PASSWORD_HASH_UNSET) {
-        log_error("A stored secret hash doesn't name its method (argon2id$ or pbkdf2-sha256$). "
-                  "Hashes made before method labels need the labeling UPDATEs in sql/README.md, "
-                  "run once with every instance stopped.");
+        log_error("A stored secret hash doesn't start with the method that made it "
+                  "(argon2id$ or pbkdf2-sha256$), so it can't be checked");
         return -1;
     }
 

@@ -203,7 +203,7 @@ cleanup:
  * later format can take "e2:" without guessing.
  *
  * A value that will not open fails every operation that needs the key; nothing is
- * regenerated. The two ways to get there are a row in the older plaintext format,
+ * regenerated. The two ways to get there are a row stored in plaintext (no "e1:"),
  * fixed by deleting the rows, and an encryption_key that differs from the one that
  * stored the row, fixed by restoring that key, which sign-in needs too. The log
  * messages say which.
@@ -235,9 +235,9 @@ static int seal_key_material(const char *plaintext, char *out, size_t out_size) 
 /* Returns a heap copy of the plaintext (caller cleanses and frees), or NULL. */
 static char *open_key_material(const char *stored, const char *table, const char *column) {
     if (strncmp(stored, SIGNING_KEY_SEALED_PREFIX, SIGNING_KEY_SEALED_PREFIX_LEN) != 0) {
-        log_error("Signing key %s.%s is stored unencrypted (written by a build before signing "
-                  "keys were encrypted). Token issuance, /userinfo and JWKS will fail until it "
-                  "is removed: delete the rows in %s and %s; new keys are generated on next use.",
+        log_error("Signing key %s.%s is stored unencrypted (no e1: prefix). Token issuance, "
+                  "/userinfo and JWKS will fail until it is removed: delete the rows in %s "
+                  "and %s; new keys are generated on next use.",
                   table, column, TBL_ACCESS_TOKEN_SIGNING, TBL_AUTH_REQUEST_SIGNING);
         return NULL;
     }
@@ -263,8 +263,8 @@ static char *open_key_material(const char *stored, const char *table, const char
 
 /* Opens one sealed value the statement reads, a signing key's after its prefix.
    Returns 1 if it opens, 0 if it won't, 2 if there's none to try (no row, NULL,
-   or a signing key in the older plaintext format, which proves nothing either
-   way), -1 on error. */
+   or a signing key stored in plaintext, which proves nothing either way), -1
+   on error. */
 static int open_sealed(db_handle_t *db, const char *sql, int prefixed) {
     db_stmt_t *stmt = NULL;
     if (db_prepare(db, &stmt, sql) != 0) {
@@ -847,9 +847,8 @@ int signing_key_get_or_rotate(db_handle_t *db, signing_key_type_t type,
 
     /*
      * Validate the cached row against the database before using it.
-     * current_generated_at is read fresh on every call, so the rotation check
-     * below fires exactly as promptly as it did when this function took the
-     * write lock unconditionally.
+     * current_generated_at is read fresh on every call, so a cached key never
+     * delays the rotation check below.
      */
     signing_key_cache_t *entry = &g_key_cache[type];
     if (entry->key && cache_matches_db(db, type, entry)

@@ -1422,7 +1422,7 @@ config_t *config_load(const char *config_file) {
     }
 
     /* Machine secrets: each setting left out takes the password setting's value,
-       so an auth.conf without them hashes every secret as before */
+       so an auth.conf without them hashes machine secrets as it hashes passwords */
     if (config->machine_secret_hashing_algorithm == PASSWORD_HASH_UNSET) {
         config->machine_secret_hashing_algorithm = config->secret_hashing_algorithm;
     }

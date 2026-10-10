@@ -239,7 +239,7 @@ void test_cors_preflight(Router *router) {
     assert(strcmp(header_value(resp, "Access-Control-Allow-Origin"), "*") == 0);
     /* Every method the router will actually answer on these paths must be listed,
      * or a browser refuses the preflight for the one that is missing. HEAD is
-     * CORS-safelisted so no browser preflights it today, but leaving it out would
+     * CORS-safelisted so no browser preflights it, but leaving it out would
      * be an internal disagreement between this list and what the router does. */
     assert(strstr(header_value(resp, "Access-Control-Allow-Methods"), "GET") != NULL);
     assert(strstr(header_value(resp, "Access-Control-Allow-Methods"), "HEAD") != NULL);
@@ -353,10 +353,9 @@ void test_head_requests(Router *router) {
     printf("✓ HEAD on an unrouted path is 404 with no body\n");
 
     /*
-     * The regression this commit could cause. HEAD is handled after
-     * dispatch_route and before the CORS attachment, precisely so that a HEAD on
-     * a public endpoint keeps the header commit 5 added. Handling it as an early
-     * return, the way OPTIONS is, would silently drop it here.
+     * HEAD is handled after dispatch_route and before the CORS attachment,
+     * precisely so that a HEAD on a public endpoint keeps its CORS header.
+     * Handling it as an early return, the way OPTIONS is, would silently drop it.
      */
     head = request(router, "HEAD /userinfo HTTP/1.0\r\n\r\n");
     assert(head);

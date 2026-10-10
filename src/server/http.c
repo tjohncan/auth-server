@@ -518,10 +518,10 @@ size_t http_find_header_end(const char *buffer, size_t length, size_t already_sc
     size_t from = already_scanned > 3 ? already_scanned - 3 : 0;
 
     /* Redundant since the guard above forces already_scanned < length, which
-       already bounds from at length - 4. It was load-bearing while that guard
-       was `>` rather than `>=`: already_scanned == length gave from = length - 3
-       and this is what kept memmem in bounds. Kept so that relaxing the guard
-       cannot reintroduce an over-read. */
+       already bounds from at length - 4. With `>` there rather than `>=`,
+       already_scanned == length would give from = length - 3, and this is what
+       would keep memmem in bounds: it stays so that relaxing the guard can't
+       introduce an over-read. */
     if (from > length - 4) {
         from = length - 4;
     }
@@ -727,11 +727,11 @@ void http_response_free(HttpResponse *resp) {
 /*
  * A CR or LF anywhere in a header field would terminate the line early during
  * serialization, letting the remainder be read as further headers or as the body —
- * response splitting. Everything reaching these setters today is already
+ * response splitting. Everything that reaches these setters is already
  * control-character-checked (validate_url_field) or percent-encoded (str_url_encode)
  * upstream, but that is a property of a handful of call sites rather than of this
  * layer, and it has to be re-verified by hand every time a header is added. Enforce it
- * once, here, so no call site can reintroduce it.
+ * once, here, so no call site can introduce it.
  *
  * Also rejects NULL, which str_dup() below would otherwise be handed.
  */

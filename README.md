@@ -170,7 +170,7 @@ Each handler domain (admin, session, OAuth, MFA, user provisioning) follows the 
 Entity-based query functions for direct database operations.
 
 - **Files**: `org.c`, `user.c`, `client.c`, `resource_server.c`, `oauth.c`, `mfa.c`, and `secret.c`
-    (a secret hashed again under today's settings, when it's used)
+    (a secret hashed again under the configured settings, when it's used)
 - **Responsibility**: Prepared statements, parameter binding, result extraction
 - **Used by**: Admin handlers, OAuth2 handlers
 - **Design**: Natural keys (code_name, username) instead of internal PINs
@@ -585,7 +585,7 @@ vendor/
     PostgreSQL's server programs (initdb, pg_ctl): from `PG_BIN`, `PATH`, or Debian's and
     Ubuntu's `/usr/lib/postgresql/<version>/bin`. On PostgreSQL, test-db runs the tests written
     for either backend and PostgreSQL's own; the rest are SQLite's. CI runs it against the
-    oldest PostgreSQL still supported, the schema's floor, and the newest (now 14 and 18), side
+    oldest PostgreSQL still supported, the schema's floor, and the newest (14 and 18), side
     by side; its manual Run workflow button takes any list of versions.
 - `make test-email` - Deliver a test email through the deployed "send script" (optional infrastructure)
 

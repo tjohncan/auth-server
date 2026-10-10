@@ -494,7 +494,7 @@ class OAuthClient {
      * Wait for another tab to complete its token refresh
      *
      * Polls storage every 200ms for as long as a lock can be held (LOCK_TTL_MS,
-     * currently 10 seconds). Resolves as soon as the stored tokens change (the
+     * 10 seconds). Resolves as soon as the stored tokens change (the
      * other tab finished refreshing).
      *
      * @private

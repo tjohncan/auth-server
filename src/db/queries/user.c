@@ -440,7 +440,7 @@ int user_verify_password(db_handle_t *db, const char *username,
     int valid = crypto_password_verify(SECRET_USER, password, strlen(password),
                                        salt, iterations, hash, &rehash);
     if (valid == 1 && rehash) {
-        /* Hashed under another method or iteration count than today's settings */
+        /* Hashed under another method or iteration count than the configured ones */
         secret_rehash(db, TBL_USER_ACCOUNT, pin, SECRET_USER, password, hash);
     }
     OPENSSL_cleanse(salt, sizeof(salt));
@@ -528,7 +528,7 @@ int user_verify_password_by_email(db_handle_t *db, const char *email,
     int valid = crypto_password_verify(SECRET_USER, password, strlen(password),
                                        salt, iterations, hash, &rehash);
     if (valid == 1 && rehash) {
-        /* Hashed under another method or iteration count than today's settings */
+        /* Hashed under another method or iteration count than the configured ones */
         secret_rehash(db, TBL_USER_ACCOUNT, pin, SECRET_USER, password, hash);
     }
     OPENSSL_cleanse(salt, sizeof(salt));
@@ -3362,8 +3362,8 @@ int user_find_pending_by_email(db_handle_t *db, const char *email,
         return -1;
     }
 
-    /* No password yet is what pending means. The oldest, if provisioning by an
-       older build made two for one address. */
+    /* No password yet is what pending means. The oldest, should there be two for
+       one address. */
     const char *sql =
         "SELECT U.pin, U.id, U.username, U.is_active, E.pin "
         "FROM " TBL_USER_EMAIL " E "
@@ -3672,8 +3672,8 @@ int user_set_active(db_handle_t *db, const unsigned char *user_id, int active) {
      * tokens, and voids outstanding password-reset, passwordless-login,
      * invitation and email-verification links (an address an attacker added
      * would otherwise still verify, and then take reset links). It does so on
-     * every call, which sweeps up whatever an account deactivated by an older
-     * build still holds.
+     * every call, so deactivating again sweeps up whatever the account still
+     * holds.
      *
      * Reactivating sweeps again. An inactive account can't come by any of these
      * legitimately, so whatever it holds now was created while its deactivation

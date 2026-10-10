@@ -6,9 +6,8 @@
 
 /*
  * The database's record of how encryption_key is stretched (crypto/encrypt.h):
- * one row of encryption_params. A database made before the table existed has
- * neither table nor row until the table is added by hand (sql/README.md), and
- * derives its keys by HKDF alone until it's re-keyed.
+ * one row of encryption_params. A database without the row derives its keys by
+ * HKDF alone until it's re-keyed, and --rekey needs the table.
  */
 
 /* Is there an encryption_params table? 1, 0, or -1 on error */

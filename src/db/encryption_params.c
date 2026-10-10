@@ -126,7 +126,7 @@ int encryption_params_get_or_make(db_handle_t *db, const char *method, int itera
     }
 
     /* Whichever row is there now: this one, another instance's, or none if
-       values were sealed before stretching existed */
+       values are sealed and no row was ever written */
     return encryption_params_load(db, out);
 }
 

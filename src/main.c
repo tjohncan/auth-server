@@ -306,8 +306,8 @@ static int run_rekey(const config_t *config, const char *connection_string) {
     int exists = encryption_params_table_exists(db);
     if (exists != 1) {
         if (exists == 0) {
-            log_error("No encryption_params table: add it first, as sql/README.md shows under "
-                      "--rekey");
+            log_error("No encryption_params table: create it first, as schema.sql defines it "
+                      "(sql/postgresql/ or sql/sqlite/)");
         }
         goto done;
     }
@@ -498,8 +498,8 @@ static int router_request_handler(Connection *conn,
  * The process's field keys: encryption_key stretched as the database's
  * encryption_params row says, then HKDF. A database with nothing sealed yet gets
  * its row now, with the method user secrets are hashed with and their most
- * iterations, so it's stretched from the start. One whose values were sealed
- * before the row existed keeps HKDF alone until --rekey adds the stretch.
+ * iterations, so it's stretched from the start. One with values sealed and no
+ * row keeps HKDF alone until --rekey adds the stretch.
  * Returns 0, or -1 (logged).
  */
 static int init_field_keys(db_handle_t *db, const config_t *config) {

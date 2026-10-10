@@ -1076,7 +1076,7 @@ int oauth_client_authenticate(db_handle_t *db,
     int valid = crypto_password_verify(SECRET_MACHINE, secret, strlen(secret),
                                         salt, iterations, hash, &rehash);
     if (valid == 1 && rehash) {
-        /* Hashed under another method or iteration count than today's settings */
+        /* Hashed under another method or iteration count than the configured ones */
         secret_rehash(db, TBL_CLIENT_KEY, client_key_pin, SECRET_MACHINE, secret, hash);
     }
     OPENSSL_cleanse(salt, sizeof(salt));
@@ -1292,7 +1292,7 @@ int oauth_resource_server_authenticate(db_handle_t *db,
     int valid = crypto_password_verify(SECRET_MACHINE, secret, strlen(secret),
                                         salt, iterations, hash, &rehash);
     if (valid == 1 && rehash) {
-        /* Hashed under another method or iteration count than today's settings */
+        /* Hashed under another method or iteration count than the configured ones */
         secret_rehash(db, TBL_RESOURCE_SERVER_KEY, resource_server_key_pin, SECRET_MACHINE, secret, hash);
     }
     OPENSSL_cleanse(salt, sizeof(salt));
@@ -1325,9 +1325,9 @@ int oauth_resource_server_authenticate(db_handle_t *db,
  * - Deactivating a user, unlinking a user from a client, and unlinking a client
  *   from a resource server do revoke (user_set_active, rs_client_user_unlink,
  *   client_resource_server_delete), and the account and both links are read too:
- *   a token issued while one of those was running escapes its sweep, and so does
- *   anything held from before the sweep existed. The revoking is what stops a
- *   reactivation or a new link from bringing old tokens back.
+ *   a token issued while one of those was running escapes its sweep. The
+ *   revoking is what stops a reactivation or a new link from bringing old tokens
+ *   back.
  * - Revoking a grant revokes its tokens (revoke_grant), and for a token a
  *   refresh made, the grant's first refresh token is read too. On PostgreSQL a
  *   refresh in flight while the grant is revoked makes a refresh token and an
@@ -1375,7 +1375,7 @@ int oauth_introspect_token(db_handle_t *db,
                            unsigned char *out_resource_server_id,
                            long long *out_expires_at,
                            long long *out_issued_at) {
-    (void)token_type_hint;  /* Optional hint per RFC 7662, currently unused */
+    (void)token_type_hint;  /* Optional hint per RFC 7662, not used */
 
     if (!db || !token || !out_active) {
         log_error("Invalid arguments to oauth_introspect_token");

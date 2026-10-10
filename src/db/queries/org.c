@@ -1005,7 +1005,7 @@ int organization_key_verify(db_handle_t *db,
     int valid = crypto_password_verify(SECRET_MACHINE, secret, strlen(secret),
                                        salt, iterations, hash, &rehash);
     if (valid == 1 && rehash) {
-        /* Hashed under another method or iteration count than today's settings */
+        /* Hashed under another method or iteration count than the configured ones */
         secret_rehash(db, TBL_ORGANIZATION_KEY, key_pin, SECRET_MACHINE, secret, hash);
     }
     OPENSSL_cleanse(salt, sizeof(salt));

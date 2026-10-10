@@ -104,7 +104,7 @@ OBJS = $(SRCS:.c=.o)
 
 # The SQLite amalgamation is compiled once, by the %.o rule below, and that object is
 # what the server and the test programs that need SQLite link. Compiling the 9 MB file
-# is most of a full build, and the test programs used to do it once each.
+# is most of a full build.
 DB_VENDOR_OBJS = $(DB_VENDOR_SRCS:.c=.o)
 
 # Target executable

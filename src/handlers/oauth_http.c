@@ -537,8 +537,8 @@ static int build_error_redirect(const char *redirect_uri,
      * encoded_state is sized so the ENCODING can never silently truncate: percent-
      * encoding expands up to 3x, and state reaches us from a 512-byte decode buffer
      * (see the /authorize handler), so 3 * 512 + 1 is the smallest size that always
-     * holds it. At 512 a long state of mostly-reserved characters lost its tail here,
-     * and the client then reported a CSRF state mismatch for what was really a length
+     * holds it. Any less, and a long state of mostly-reserved characters loses its tail
+     * here, and the client reports a CSRF state mismatch for what is really a length
      * problem. Whether the ASSEMBLED location fits is a separate question, and one
      * str_appendf answers explicitly below rather than by truncating. */
     char encoded_error[128];
@@ -894,8 +894,7 @@ HttpResponse *authorize_handler(const HttpRequest *req) {
      *
      * str_url_encode() terminates its buffer even when it returns -1, so dropping that
      * return does not read garbage — it hands the client a *truncated* authorization
-     * code, which /token can never redeem. That is the same silent-truncation failure
-     * S1 fixed one layer down, so fail loudly here instead. */
+     * code, which /token can never redeem. Fail loudly here instead. */
     char encoded_code[2048];
     char encoded_state[1537];  /* 3 * the 512-byte state buffer; see build_error_redirect */
     encoded_state[0] = '\0';

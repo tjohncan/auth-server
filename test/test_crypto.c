@@ -320,7 +320,7 @@ int main(void) {
     }
     log_info("Both refused: PASS\n");
 
-    /* yh3g: a machine secret verifies well under a millisecond under the example
+    /* A machine secret verifies well under a millisecond under the example
        config's method. The best of 20, so a busy machine doesn't fail it. */
     log_info("Test: A machine secret verifies in well under a millisecond");
     double best_ms = 1e9;
@@ -1403,14 +1403,13 @@ int main(void) {
 
     /* Test: redirect_uri longer than JWT_MAX_CLAIM_VALUE_LENGTH
      *
-     * 400 bytes is past the old 255-byte cliff, inside what validate_redirect_uri
-     * permits (500), and inside the claim field itself (auth_request_claims_t
-     * .redirect_uri, char[512]). parse_json_string used to stage every claim through a
-     * fixed char[JWT_MAX_CLAIM_VALUE_LENGTH] regardless of the caller's capacity, so the
-     * encode side wrote a URI the decode side could never read back: /authorize
-     * succeeded and /token then failed 100% of the time as "invalid authorization code",
-     * pointing operators at signatures and clock skew rather than at URI length.
-     * Guards the encode and decode limits against drifting apart again. */
+     * 400 bytes is past JWT_MAX_CLAIM_VALUE_LENGTH (255), inside what
+     * validate_redirect_uri permits (500), and inside the claim field itself
+     * (auth_request_claims_t.redirect_uri, char[512]). Were the decode side to hold
+     * less than the encode side writes, /authorize would succeed and /token fail every
+     * time as "invalid authorization code", pointing operators at signatures and clock
+     * skew rather than at URI length. Guards the encode and decode limits against
+     * drifting apart. */
     log_info("Test: Auth request JWT round-trips a 400-character redirect_uri");
 
     auth_request_claims_t long_claims = ar_claims;

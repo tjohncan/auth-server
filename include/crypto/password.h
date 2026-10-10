@@ -27,8 +27,7 @@
  *   - salt (text)
  *   - hash_iterations (integer)
  *   - secret_hash (text)
- * A hash made before labels existed has none, and fails verification with an
- * error naming the fix: the labeling UPDATEs in sql/README.md.
+ * A hash without a label fails verification, with an error saying so.
  */
 
 typedef enum {

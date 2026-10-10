@@ -804,10 +804,10 @@ static int test_signing_key_encryption(const config_t *config) {
     }
     log_info("  rotation carries the sealed key into prior and it opens (OK)");
 
-    /* 3. Pre-encryption plaintext row: every load fails, nothing is regenerated */
+    /* 3. A plaintext row (no e1: prefix): every load fails, nothing is regenerated */
     if (db_execute_direct(sdb,
-            "UPDATE auth_request_signing SET current_secret = 'legacy-plaintext-secret'") != 0) {
-        log_error("Key encryption: could not plant a legacy row");
+            "UPDATE auth_request_signing SET current_secret = 'plaintext-secret'") != 0) {
+        log_error("Key encryption: could not plant a plaintext row");
         goto done;
     }
     signing_key_thread_cleanup();  /* the cache is keyed on timestamps; force a reload */
@@ -817,11 +817,11 @@ static int test_signing_key_encryption(const config_t *config) {
     }
     if (read_stored_value(sdb, "SELECT current_secret FROM auth_request_signing",
                         stored, sizeof(stored)) != 0 ||
-        strcmp(stored, "legacy-plaintext-secret") != 0) {
-        log_error("Key encryption: the legacy row was overwritten");
+        strcmp(stored, "plaintext-secret") != 0) {
+        log_error("Key encryption: the plaintext row was overwritten");
         goto done;
     }
-    log_info("  plaintext legacy row fails and is left alone (OK)");
+    log_info("  a plaintext row fails and is left alone (OK)");
 
     /* 4. Different encryption_key: fails, row untouched; right key recovers */
     if (encrypt_init("not-the-key-that-sealed-these") != 0) {
@@ -881,8 +881,8 @@ static int key_check_is(db_handle_t *db, const config_t *config, int want_right,
  * that's what says which key sealed the database, then every signing key. A
  * signing key that won't open under the key that opens the users came from
  * elsewhere, and is told apart (-2) so the error names the right fix. A fresh
- * database has nothing to open, and a signing key in the older plaintext format
- * proves nothing, so neither stops a start.
+ * database has nothing to open, and a signing key stored in plaintext proves
+ * nothing, so neither stops a start.
  *
  * Returns 0 on success.
  */
@@ -917,13 +917,13 @@ static int test_encryption_key_check(const config_t *config) {
     }
     log_info("  users only: a username tells the right key from a wrong one (OK)");
 
-    /* 3. Signing keys, the auth-request one in the older plaintext format: it's
+    /* 3. Signing keys, the auth-request one in plaintext: it's
           passed over under the right key; under a wrong one the username decides */
     signing_key_thread_cleanup();
     if (signing_key_get_or_rotate(sdb, SIGNING_KEY_ACCESS_TOKEN, &es) != 0 ||
         signing_key_get_or_rotate(sdb, SIGNING_KEY_AUTH_REQUEST, &hmac) != 0 ||
         db_execute_direct(sdb, "UPDATE auth_request_signing "
-                               "SET current_secret = 'legacy-plaintext-secret'") != 0) {
+                               "SET current_secret = 'plaintext-secret'") != 0) {
         log_error("Key check: could not set up signing keys");
         goto done;
     }
@@ -1212,7 +1212,7 @@ static int stored_method(db_handle_t *db, const char *table, long long pin,
  * Stored hashes name their method, and a secret is hashed with its kind's method
  * (main sets passwords to argon2id, one pass; machine secrets to PBKDF2, 777).
  * One that verifies under another method, or an iteration count outside its
- * kind's range, is hashed again under today's settings and stored: passwords at
+ * kind's range, is hashed again as configured and stored: passwords at
  * sign-in, and client, resource-server and organization key secrets when they
  * authenticate. Within the settings, or on a wrong secret, nothing is stored. A
  * hash with no label fails, changing nothing. Recovery codes are hashed as their
@@ -1284,7 +1284,7 @@ static int test_rehash(const config_t *config) {
     log_info("  new passwords and keys are hashed with their kind's method (OK)");
 
     /* 2. Under another method, at an iteration count within the range: signs in,
-          and is stored under today's method; signing in again stores nothing */
+          and is stored under the configured method; signing in again stores nothing */
     if (plant_hash(sdb, "user_account", 1, "pbkdf2-sha256", 1, "a password") != 0 ||
         user_verify_password(sdb, "rehash", "a password", NULL, NULL) != 1 ||
         stored_method(sdb, "user_account", 1, seen, sizeof(seen)) != 0 ||
@@ -1295,7 +1295,7 @@ static int test_rehash(const config_t *config) {
     if (read_stored_value(sdb, hash_sql, before, sizeof(before)) != 0 ||
         user_verify_password(sdb, "rehash", "a password", NULL, NULL) != 1 ||
         read_stored_value(sdb, hash_sql, after, sizeof(after)) != 0 || strcmp(before, after) != 0) {
-        log_error("Re-hash: a password within today's settings was stored again");
+        log_error("Re-hash: a password within the configured settings was stored again");
         goto done;
     }
     /* The write lands only on the hash that verified: one changed meanwhile stays */
@@ -2149,10 +2149,11 @@ done:
  *     says it didn't scrub (-2), since no table's file was rewritten.
  *   - Planner statistics: ANALYZE takes no sample of a sealed column or a
  *     secret's hash, which schema.sql keeps out, nor of history's copies. One
- *     given statistics, as in a database made before that, has its sample live
- *     in pg_statistic, which no rewrite reaches, so the run says it didn't
- *     scrub. After sql/README.md's step it does, encryption_params and
- *     pg_statistic rewritten too.
+ *     given statistics has its sample live in pg_statistic, which no rewrite
+ *     reaches, so the run says it didn't scrub. Once the column's statistics
+ *     target is back at 0 and the column is changed to its own type, which
+ *     drops the sample, it does, encryption_params and pg_statistic rewritten
+ *     too.
  *   - --drophistory by a role that owns history but not the database: history
  *     goes, and the run says it couldn't rewrite pg_statistic. Run again with
  *     nothing left to drop, it says so again, and run with leave, finishes.
@@ -2255,16 +2256,17 @@ static int test_pg_unscrubbed(const config_t *config) {
         log_error("Unscrubbed: a run leaving a sealed column's statistics returned %d", rc);
         goto done;
     }
-    /* sql/README.md's step, for this column: no statistics, and the sample gone */
+    /* The fix the run names, for this column: no statistics, and the column
+       changed to its own type, which drops the sample. It takes only the
+       table's owner, so it works without a superuser (as on RDS). */
     if (db_execute_direct(sdb, "ALTER TABLE " TBL_USER_ACCOUNT " ALTER COLUMN username "
                                "SET STATISTICS 0;"
-                               "DELETE FROM pg_statistic s USING pg_attribute a "
-                               "WHERE a.attrelid = s.starelid AND a.attnum = s.staattnum "
-                               "AND a.attstattarget = 0") != 0 ||
+                               "ALTER TABLE " TBL_USER_ACCOUNT " ALTER COLUMN username "
+                               "TYPE text") != 0 ||
         read_count(sdb, kept_out_sql) != 0 ||
         read_stored_value(sdb, statistic_node_sql, statistic_node, sizeof(statistic_node)) != 0 ||
         read_stored_value(sdb, params_node_sql, params_node, sizeof(params_node)) != 0) {
-        log_error("Unscrubbed: sql/README.md's step didn't remove username's statistics");
+        log_error("Unscrubbed: the fix didn't remove username's statistics");
         goto done;
     }
     rc = maintenance_rekey(sdb, DB_TYPE_POSTGRESQL, &c, &d, &params_d, &report);
@@ -2273,12 +2275,12 @@ static int test_pg_unscrubbed(const config_t *config) {
         strcmp(node, statistic_node) == 0 ||
         read_stored_value(sdb, params_node_sql, node, sizeof(node)) != 0 ||
         strcmp(node, params_node) == 0) {
-        log_error("Unscrubbed: after sql/README.md's step the run returned %d, or left "
+        log_error("Unscrubbed: after the fix the run returned %d, or left "
                   "pg_statistic or encryption_params unrewritten", rc);
         goto done;
     }
     log_info("  no sealed column or secret's hash has planner statistics, in history either; one "
-             "given some isn't scrubbed, and after the step is, pg_statistic and "
+             "given some isn't scrubbed, and after the fix is, pg_statistic and "
              "encryption_params with it (OK)");
 
     /* 3. --drophistory by the role, owning history but not the database */
@@ -2556,12 +2558,12 @@ done:
  *
  * user_set_active revokes a user's tokens (test_deactivation_revokes), but every
  * liveness query also reads is_active at use time, for the tokens that sweep
- * misses: one issued while the deactivation was running, or anything an account
- * deactivated before the sweep existed still holds. So this flips is_active
- * directly, as such an account was left, and pins the use-time check in both
- * queries, and that a client_credentials token (no user row) is not collateral
- * damage of it. Deactivating the client's organization, or the token's resource
- * server, revokes nothing and is read the same way, for both kinds of token.
+ * misses, such as one issued while the deactivation was running. So this flips
+ * is_active directly, leaving the tokens unrevoked, and pins the use-time check
+ * in both queries, and that a client_credentials token (no user row) is not
+ * collateral damage of it. Deactivating the client's organization, or the
+ * token's resource server, revokes nothing and is read the same way, for both
+ * kinds of token.
  *
  * Returns 0 on success.
  */
@@ -2712,8 +2714,8 @@ done:
  * attacker's included, MFA-complete sessions and all, and every emailed link
  * still in date. user_set_active must close the sessions, revoke the refresh and
  * access tokens and void the password-reset, passwordless-login and invitation
- * links when it deactivates, leave another user's alone, and sweep an account an
- * older build flagged inactive without revoking anything. Reactivating, it must
+ * links when it deactivates, leave another user's alone, and sweep an account
+ * flagged inactive with its tokens left unrevoked. Reactivating, it must
  * close whatever the account came to hold while the deactivation ran.
  *
  * Returns 0 on success.
@@ -3813,7 +3815,7 @@ done:
  * but non-empty blob sqlite3_column_blob returns a live pointer, so a NULL-only
  * guard copies 16 bytes out of a shorter value -- adjacent process memory, into
  * a response. The application never writes such an id; this plants one directly
- * and checks the MFA reads (one of the families fixed together) skip it.
+ * and checks that the MFA reads skip it.
  *
  * Returns 0 on success.
  */
@@ -3855,7 +3857,7 @@ static int test_short_id_blobs(const config_t *config) {
        the path that reaches the malformed row.) */
     mfa_method_t one;
     if (mfa_method_get_by_id(sdb, good_id, &one) != 0) {
-        log_error("Short id: well-formed id no longer resolves");
+        log_error("Short id: a well-formed id doesn't resolve");
         goto done;
     }
     log_info("  well-formed id still resolves (OK)");

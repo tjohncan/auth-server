@@ -1721,10 +1721,10 @@ static int test_provisioning(void) {
     reply_free(&r);
     printf("✓ a deactivated pending account is found, and not invited\n");
 
-    /* Patterns apply to new values only. An address stored before the default
-       existed, which it refuses, still finds its account: by provisioning, and
-       with email support for a reset link. A new value like it is refused. */
-    char legacy[33], legacy_cookie[256], legacy_sql[512];
+    /* Patterns apply to new values only. An address stored while no pattern was
+       set, which the default refuses, still finds its account: by provisioning,
+       and with email support for a reset link. A new value like it is refused. */
+    char obrien[33], obrien_cookie[256], obrien_sql[512];
     validation_patterns_t before = { .email = "" };
     validation_patterns_t configured = {
         .username = g_config->username_pattern, .email = g_config->email_pattern,
@@ -1733,20 +1733,20 @@ static int test_provisioning(void) {
     };
     if (validation_init(&before) != 0) FAIL("could not set the patterns aside");
     r = admin_port("POST", "/api/admin/users", NULL,
-                   "{\"username\":\"legacy\",\"email\":\"o'brien@example.com\","
-                   "\"password\":\"legacy password\"}");
-    int made = r.status == 200 && field(&r, "user_id", legacy, sizeof(legacy)) == 0;
+                   "{\"username\":\"obrien\",\"email\":\"o'brien@example.com\","
+                   "\"password\":\"obrien password\"}");
+    int made = r.status == 200 && field(&r, "user_id", obrien, sizeof(obrien)) == 0;
     reply_free(&r);
     if (validation_init(&configured) != 0) FAIL("could not restore the patterns");
     if (!made) FAIL("could not store an address the default refuses");
-    snprintf(legacy_sql, sizeof(legacy_sql),
+    snprintf(obrien_sql, sizeof(obrien_sql),
              "UPDATE " TBL_USER_EMAIL " SET is_verified = " BOOL_TRUE ", verified_at = " NOW " "
              "WHERE user_account_pin = (SELECT pin FROM " TBL_USER_ACCOUNT " WHERE id = "
-             ID_FROM_HEX("%s") ")", legacy);
-    if (db_execute_direct(db_pool_get_connection(), legacy_sql) != 0) FAIL("could not verify it");
+             ID_FROM_HEX("%s") ")", obrien);
+    if (db_execute_direct(db_pool_get_connection(), obrien_sql) != 0) FAIL("could not verify it");
 
     r = provision(NULL, "o'brien@example.com");
-    if (!provisioned(&r, legacy, 0)) {
+    if (!provisioned(&r, obrien, 0)) {
         FAIL("provisioning by a stored address the default refuses answered %d: %s",
              r.status, r.body);
     }
@@ -1763,10 +1763,10 @@ static int test_provisioning(void) {
     r = provision("oconnor", "o'connor@example.com");
     int new_refused = r.status == 400 && strstr(r.body, "Email must look like");
     reply_free(&r);
-    if (login("legacy", "legacy password", legacy_cookie, sizeof(legacy_cookie)) != 0) {
-        FAIL("legacy sign-in");
+    if (login("obrien", "obrien password", obrien_cookie, sizeof(obrien_cookie)) != 0) {
+        FAIL("the account with the stored address could not sign in");
     }
-    r = post_json("/api/user/emails", legacy_cookie, "{\"email\":\"o'hara@example.com\"}");
+    r = post_json("/api/user/emails", obrien_cookie, "{\"email\":\"o'hara@example.com\"}");
     int add_refused = r.status == 400;
     reply_free(&r);
     if (!new_refused || !add_refused) {

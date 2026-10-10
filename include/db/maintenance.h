@@ -70,7 +70,7 @@ typedef struct {
  *   - Every sealed value is opened with old_keys and sealed again with
  *     new_keys: usernames, addresses (an account's and a passwordless link's),
  *     TOTP secrets, and the e1: signing keys, current and prior. A signing key
- *     in the older plaintext format is left as it is.
+ *     stored in plaintext is left as it is.
  *   - Every blind index (username_hash, email_hash) is recomputed under
  *     new_keys from the opened value, lowercased as on every lookup.
  *   - new_params becomes the encryption_params row.

@@ -174,9 +174,8 @@ jobs:
   # directory, reachable only through its Unix socket, and removes.
   # One job per PostgreSQL version, in parallel with each other and the other
   # jobs: the oldest release PostgreSQL still supports, which sql/README.md
-  # names as the floor, and the newest. Move both as PostgreSQL retires one
-  # (14 on 2026-11-12) and releases one (19, due in 2026-10). The manual button
-  # runs any list of versions.
+  # names as the floor, and the newest. Move both as PostgreSQL retires and
+  # releases versions. The manual button runs any list of versions.
   test-postgresql:
     name: test-postgresql (${{ matrix.postgresql }})
     runs-on: ubuntu-latest

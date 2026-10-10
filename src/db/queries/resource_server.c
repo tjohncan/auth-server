@@ -1260,10 +1260,10 @@ int rs_client_user_unlink(db_handle_t *db, long long client_pin,
     /* Unlinking withdraws the user's access through this client. The use-time
      * checks read the link, but linking the user again would bring back every
      * token the pair still held, so the pair's refresh and access tokens are
-     * revoked as the link goes. On every call, which also sweeps up after an
-     * unlink by an older build. A universal client needs no link to sign anyone
-     * in, so unlinking from one withdraws nothing and revokes nothing. Sessions
-     * stay: they are the user's, not the client's. */
+     * revoked as the link goes. On every call, the link there or not, so calling
+     * it again sweeps up a token issued while an unlink ran. A universal client
+     * needs no link to sign anyone in, so unlinking from one withdraws nothing
+     * and revokes nothing. Sessions stay: they are the user's, not the client's. */
     const char *steps[] = {
         "DELETE FROM " TBL_CLIENT_USER " "
         "WHERE client_pin = " P"1 AND user_account_pin = " P"2",

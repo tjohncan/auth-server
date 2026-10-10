@@ -17,7 +17,7 @@
  * iterations and salt the database records (encryption_params), then
  * HKDF-SHA256 derives the AES key and the blind index's HMAC key from it. A
  * database without that record derives them from the passphrase with HKDF
- * alone, as before stretching existed, until it's re-keyed (--rekey).
+ * alone, until it's re-keyed (--rekey).
  * Encryption: AES-256-GCM with random 12-byte IV per field.
  * Storage format: base64url(IV || ciphertext || 16-byte tag) in TEXT column.
  */

@@ -149,7 +149,7 @@ void test_response_building(void) {
      *
      * A value carrying "\r\n" would close its header line early and let the remainder
      * be read as further headers or as the body — response splitting. Nothing reaches
-     * these setters carrying one today (redirect URIs are control-character validated,
+     * these setters carrying one (redirect URIs are control-character validated,
      * query parameters are percent-encoded), but that is a property of a few call sites
      * rather than of this layer.
      *
@@ -168,7 +168,7 @@ void test_response_building(void) {
     /* unsafe names, both doors */
     http_response_add_header(resp4, "X-Bad-Add\r\nName", "harmless");
     http_response_set_header(resp4, "X-Bad-Set\r\nName", "harmless");
-    /* NULL, both doors — str_dup used to be handed it unchecked */
+    /* NULL, both doors: refused before str_dup sees it */
     http_response_add_header(resp4, "X-Null-Add", NULL);
     http_response_set_header(resp4, "X-Null-Set", NULL);
 
@@ -582,9 +582,9 @@ void test_content_length_scan(void) {
         printf("✓ %s: %d\n", cases[i].what, rc);
     }
 
-    /* The regression (test/fuzz/crashes/http/03). A blank value sent strtol over the
-     * CRLFCRLF into the body, and on past the end of the read buffer when the body's
-     * digits ran that far. The body here is all digits to the last byte. */
+    /* test/fuzz/crashes/http/03: a blank value mustn't send strtol over the CRLFCRLF
+     * into the body, or past the end of the read buffer when the body's digits run
+     * that far. The body here is all digits to the last byte. */
     {
         const char *head = "POST /login HTTP/1.0\r\nHost: x\r\nContent-Length: \r\n\r\n";
         size_t head_len = strlen(head);

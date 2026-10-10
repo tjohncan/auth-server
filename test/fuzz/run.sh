@@ -27,8 +27,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-# Back-compat: the first arg used to be the duration. If it looks like a number,
-# treat it as such and default the target to http.
+# A number alone is a duration, for the http target.
 if [[ "${1:-}" =~ ^[0-9]+$ ]]; then
     TARGET="http"; DURATION="${1}"
 else

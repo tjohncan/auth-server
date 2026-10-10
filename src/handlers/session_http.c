@@ -864,11 +864,11 @@ HttpResponse *verify_email_page_handler(const HttpRequest *req) {
     }
 
     /* Escape the token even though it has already been matched against a stored
-     * SHA-256 hash and so cannot carry attacker bytes. This is uniformity, not a
-     * live XSS fix: template_render does not escape by default — USERNAME_DISPLAY
+     * SHA-256 hash and so cannot carry attacker bytes. This is uniformity, not an
+     * XSS defence: template_render does not escape by default — USERNAME_DISPLAY
      * just above is deliberately raw HTML — so "is this substitution escaped?" has
-     * to be answerable at each call site, and three of the four token pages were
-     * answering it differently from the fourth.
+     * to be answerable at each call site, and the four token pages all answer it
+     * the same way.
      *
      * 128 is ample because the token is 43 characters of base64url, an alphabet
      * holding none of & < > " ' — so escaping is a straight copy. 43 characters that
@@ -1553,7 +1553,7 @@ HttpResponse *passwordless_login_handler(const HttpRequest *req) {
     if (!resp) {
         /* Not a clean unwind: the session row is already committed, so this leaves one
          * behind that no cookie ever reached. It ages out on its own TTL, and the
-         * alternative was dereferencing NULL. */
+         * alternative is dereferencing NULL. */
         log_error("Failed to allocate response for passwordless login");
         OPENSSL_cleanse(cookie_header, sizeof(cookie_header));
         return response_json_error(500, "Internal server error");

@@ -811,8 +811,8 @@ create index idx_recovery_code_set_cleanup
 -- INDEXES - Finding a user's or a client's rows
 -- ============================================================================
 -- Deactivating a user closes their sessions and revokes their tokens and
--- emailed links, finding the rows by user, and none of these tables was indexed
--- that way, so each of those updates read the whole table. (user, client) also
+-- emailed links, finding the rows by user: without these indexes, each of those
+-- updates reads the whole table. (user, client) also
 -- serves a user's rows for one client, and (client, resource server) a client's
 -- access tokens for one resource server: the lookups revoking on unlink needs.
 -- password_reset_token and passwordless_login_token are already covered by
