@@ -9,8 +9,8 @@ on:
   workflow_dispatch:
     inputs:
       postgresql:
-        description: "PostgreSQL major versions for test-postgresql, as a JSON list, e.g. [14, 15, 16, 17, 18]"
-        default: "[14, 18]"
+        description: "PostgreSQL major versions for test-postgresql, as a JSON list, e.g. [15, 16, 17, 18]"
+        default: "[15, 18]"
 
 # A new push to the same PR cancels the in-flight run; runs on main are left to finish.
 concurrency:
@@ -196,7 +196,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        postgresql: ${{ fromJSON(inputs.postgresql || '[14, 18]') }}
+        postgresql: ${{ fromJSON(inputs.postgresql || '[15, 18]') }}
     steps:
       - uses: actions/checkout@v7
 

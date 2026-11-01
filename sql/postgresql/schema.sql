@@ -2,7 +2,7 @@
 -- Auth System - Core Schema DDL (PostgreSQL)
 -- ============================================================================
 -- This file contains table definitions for the OAuth2 authentication system.
--- Designed for PostgreSQL 14+
+-- Designed for PostgreSQL 15+
 --
 -- Companion files:
 --   - ../sqlite/schema.sql (SQLite version of this schema)
