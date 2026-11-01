@@ -3,7 +3,8 @@
 OAuth2 authentication server with enterprise SSO, MFA, and passwordless login support.
 
 **Schema Files:**
-- `sqlite/schema.sql` - SQLite 3.45+ implementation
+- `sqlite/schema.sql` - SQLite implementation, for the releases `vendor/verify-sqlite.sh` approves
+  (SQLite is compiled into the server)
 - `postgresql/schema.sql` - PostgreSQL 14+ implementation
 - `postgresql/setup_reference.sql` - PostgreSQL prerequisite setup and optional hardening
 

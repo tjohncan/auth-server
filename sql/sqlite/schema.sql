@@ -2,7 +2,8 @@
 -- Auth System - Core Schema DDL (SQLite)
 -- ============================================================================
 -- This file contains table definitions for the OAuth2 authentication system.
--- Designed for SQLite 3.45+ (latest amalgamation)
+-- Designed for the SQLite releases vendor/verify-sqlite.sh approves, which the
+-- server compiles in
 --
 -- Companion files:
 --   - ../postgresql/schema.sql (PostgreSQL version of this schema)

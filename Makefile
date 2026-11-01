@@ -133,7 +133,7 @@ HEADERS := $(shell find include -name '*.h')
 $(filter-out vendor/%,$(OBJS)): $(HEADERS)
 
 # Nothing compiles the SQLite amalgamation until vendor/verify-sqlite.sh has checked
-# it against its pinned hashes, however it arrived. Only the object rule compiles it,
+# it against approved hashes, however it arrived. Only the object rule compiles it,
 # and the check runs whenever that rule is considered rather than once per stamp:
 # hashing both files takes a fraction of a second, and a stamp judged by file times
 # would trust a replacement whose times were restored, as unzip, cp -p and tar all do.
