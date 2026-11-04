@@ -185,11 +185,13 @@ static HttpResponse *require_auth_context(const HttpRequest *req, const char *op
 }
 
 /*
- * Optional number and true/false fields of a request body. Each returns 1 if the
- * field is read into *out, and 0 if it's left out, as json_get_int and
- * json_get_bool count that. A value of another kind ("3600" in quotes, 1.5, 1 for
- * true) is neither guessed at nor taken as left out: *bad gets a 400 naming the
- * first such field, which the caller answers before anything else it checks.
+ * The fields of a request body. read_int_field and read_bool_field return 1 if
+ * the field is read into *out, and 0 if it's left out, as json_get_int and
+ * json_get_bool count that; read_text_field returns the text (the caller frees
+ * it), or NULL if it's left out. A value of another kind ("3600" in quotes, 1.5,
+ * 1 for true, 12345 for a name) is neither guessed at nor taken as left out:
+ * *bad gets a 400 naming the first such field, which the caller answers before
+ * anything else it checks.
  */
 static HttpResponse *field_kind_error(const char *field, const char *kind) {
     char message[128];
@@ -207,6 +209,12 @@ static int read_bool_field(const char *body, const char *field, int *out, HttpRe
     int rc = json_get_bool(body, field, out);
     if (rc < 0 && !*bad) *bad = field_kind_error(field, "true or false");
     return rc == 0;
+}
+
+static char *read_text_field(const char *body, const char *field, HttpResponse **bad) {
+    char *text = NULL;
+    if (json_get_text(body, field, &text) < 0 && !*bad) *bad = field_kind_error(field, "text");
+    return text;
 }
 
 /* ============================================================================
@@ -370,11 +378,10 @@ HttpResponse *admin_update_organization_handler(const HttpRequest *req) {
         return response_json_error(400, "Request body required");
     }
 
-    HttpResponse *resp = NULL;
-    char *display_name = json_get_string(req->body, "display_name");
-    char *note = json_get_string(req->body, "note");
+    HttpResponse *resp = NULL, *bad = NULL;
+    char *display_name = read_text_field(req->body, "display_name", &bad);
+    char *note = read_text_field(req->body, "note", &bad);
 
-    HttpResponse *bad = NULL;
     int is_active_val;
     int *is_active = NULL;
     if (read_bool_field(req->body, "is_active", &is_active_val, &bad)) {
@@ -580,12 +587,16 @@ HttpResponse *admin_create_resource_server_handler(const HttpRequest *req) {
         return response_json_error(400, "Request body required");
     }
 
-    HttpResponse *resp = NULL;
-    char *org_id_str = json_get_string(req->body, "organization_id");
-    char *code_name = json_get_string(req->body, "code_name");
-    char *display_name = json_get_string(req->body, "display_name");
-    char *address = json_get_string(req->body, "address");
-    char *note = json_get_string(req->body, "note");
+    HttpResponse *resp = NULL, *bad = NULL;
+    char *org_id_str = read_text_field(req->body, "organization_id", &bad);
+    char *code_name = read_text_field(req->body, "code_name", &bad);
+    char *display_name = read_text_field(req->body, "display_name", &bad);
+    char *address = read_text_field(req->body, "address", &bad);
+    char *note = read_text_field(req->body, "note", &bad);
+    if (bad) {
+        resp = bad;
+        goto cleanup;
+    }
 
     if (!org_id_str || !code_name || !*code_name || !display_name || !*display_name || !address || !*address) {
         resp = response_json_error(400, "organization_id, code_name, display_name, and address are required");
@@ -692,12 +703,11 @@ HttpResponse *admin_update_resource_server_handler(const HttpRequest *req) {
         return response_json_error(400, "Request body required");
     }
 
-    HttpResponse *resp = NULL;
-    char *display_name = json_get_string(req->body, "display_name");
-    char *address = json_get_string(req->body, "address");
-    char *note = json_get_string(req->body, "note");
+    HttpResponse *resp = NULL, *bad = NULL;
+    char *display_name = read_text_field(req->body, "display_name", &bad);
+    char *address = read_text_field(req->body, "address", &bad);
+    char *note = read_text_field(req->body, "note", &bad);
 
-    HttpResponse *bad = NULL;
     int is_active_val;
     int *is_active = NULL;
     if (read_bool_field(req->body, "is_active", &is_active_val, &bad)) {
@@ -950,17 +960,16 @@ HttpResponse *admin_create_client_handler(const HttpRequest *req) {
         return response_json_error(400, "Request body required");
     }
 
-    HttpResponse *resp = NULL;
-    char *org_id_str = json_get_string(req->body, "organization_id");
-    char *code_name = json_get_string(req->body, "code_name");
-    char *display_name = json_get_string(req->body, "display_name");
-    char *client_type = json_get_string(req->body, "client_type");
-    char *grant_type = json_get_string(req->body, "grant_type");
-    char *note = json_get_string(req->body, "note");
+    HttpResponse *resp = NULL, *bad = NULL;
+    char *org_id_str = read_text_field(req->body, "organization_id", &bad);
+    char *code_name = read_text_field(req->body, "code_name", &bad);
+    char *display_name = read_text_field(req->body, "display_name", &bad);
+    char *client_type = read_text_field(req->body, "client_type", &bad);
+    char *grant_type = read_text_field(req->body, "grant_type", &bad);
+    char *note = read_text_field(req->body, "note", &bad);
 
     /* The numbers and true/false fields. Left out, a true/false field is false and
        a duration is -1, no limit, but access_token_ttl_seconds is required (below) */
-    HttpResponse *bad = NULL;
     int access_ttl = 0, require_mfa = 0, issue_refresh = 0;
     int refresh_ttl = -1, max_session = -1, secret_rotation = -1;
     int has_access_ttl = read_int_field(req->body, "access_token_ttl_seconds", &access_ttl, &bad);
@@ -1099,17 +1108,16 @@ HttpResponse *admin_update_client_handler(const HttpRequest *req) {
         return response_json_error(400, "Request body required");
     }
 
-    HttpResponse *resp = NULL;
-    char *display_name = json_get_string(req->body, "display_name");
-    char *note = json_get_string(req->body, "note");
+    const char *body = req->body;
+    HttpResponse *resp = NULL, *bad = NULL;
+    char *display_name = read_text_field(body, "display_name", &bad);
+    char *note = read_text_field(body, "note", &bad);
 
     int require_mfa_val, access_ttl_val, issue_refresh_val, refresh_ttl_val;
     int max_session_val, secret_rotation_val, is_active_val;
     int *require_mfa = NULL, *access_ttl = NULL, *issue_refresh = NULL;
     int *refresh_ttl = NULL, *max_session = NULL, *secret_rotation = NULL, *is_active = NULL;
 
-    const char *body = req->body;
-    HttpResponse *bad = NULL;
     if (read_bool_field(body, "require_mfa", &require_mfa_val, &bad)) require_mfa = &require_mfa_val;
     if (read_int_field(body, "access_token_ttl_seconds", &access_ttl_val, &bad)) access_ttl = &access_ttl_val;
     if (read_bool_field(body, "issue_refresh_tokens", &issue_refresh_val, &bad)) issue_refresh = &issue_refresh_val;
@@ -1252,9 +1260,14 @@ HttpResponse *admin_create_client_redirect_uri_handler(const HttpRequest *req) {
         return response_json_error(400, "Request body required");
     }
 
-    char *client_id_str = json_get_string(req->body, "client_id");
-    char *redirect_uri = json_get_string(req->body, "redirect_uri");
-    char *note = json_get_string(req->body, "note");
+    HttpResponse *bad = NULL;
+    char *client_id_str = read_text_field(req->body, "client_id", &bad);
+    char *redirect_uri = read_text_field(req->body, "redirect_uri", &bad);
+    char *note = read_text_field(req->body, "note", &bad);
+    if (bad) {
+        free(client_id_str); free(redirect_uri); free(note);
+        return bad;
+    }
 
     if (!client_id_str || !redirect_uri) {
         free(client_id_str); free(redirect_uri); free(note);
@@ -1508,8 +1521,13 @@ HttpResponse *admin_create_client_resource_server_link_handler(const HttpRequest
         return response_json_error(400, "Request body required");
     }
 
-    char *client_id_str = json_get_string(req->body, "client_id");
-    char *server_id_str = json_get_string(req->body, "resource_server_id");
+    HttpResponse *bad = NULL;
+    char *client_id_str = read_text_field(req->body, "client_id", &bad);
+    char *server_id_str = read_text_field(req->body, "resource_server_id", &bad);
+    if (bad) {
+        free(client_id_str); free(server_id_str);
+        return bad;
+    }
 
     if (!client_id_str || !server_id_str) {
         free(client_id_str); free(server_id_str);
@@ -1620,9 +1638,16 @@ HttpResponse *admin_create_resource_server_key_handler(const HttpRequest *req) {
         return response_json_error(400, "Request body required");
     }
 
-    char *rs_id_str = json_get_string(req->body, "resource_server_id");
-    char *note = json_get_string(req->body, "note");
-    char *user_secret = json_get_string(req->body, "secret");
+    HttpResponse *bad = NULL;
+    char *rs_id_str = read_text_field(req->body, "resource_server_id", &bad);
+    char *note = read_text_field(req->body, "note", &bad);
+    char *user_secret = read_text_field(req->body, "secret", &bad);
+    if (bad) {
+        free(rs_id_str); free(note);
+        if (user_secret) OPENSSL_cleanse(user_secret, strlen(user_secret));
+        free(user_secret);
+        return bad;
+    }
 
     /* Validate input formats */
     char validation_error[256];
@@ -1884,11 +1909,15 @@ HttpResponse *admin_create_client_key_handler(const HttpRequest *req) {
         return response_json_error(400, "Request body required");
     }
 
-    HttpResponse *resp = NULL;
-    char *client_id_str = json_get_string(req->body, "client_id");
-    char *note = json_get_string(req->body, "note");
-    char *user_secret = json_get_string(req->body, "secret");
+    HttpResponse *resp = NULL, *bad = NULL;
+    char *client_id_str = read_text_field(req->body, "client_id", &bad);
+    char *note = read_text_field(req->body, "note", &bad);
+    char *user_secret = read_text_field(req->body, "secret", &bad);
     char generated_secret[64] = {0};
+    if (bad) {
+        resp = bad;
+        goto cleanup;
+    }
 
     /* Validate input formats */
     char validation_error[256];

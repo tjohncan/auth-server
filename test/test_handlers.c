@@ -799,11 +799,12 @@ static int test_client_credentials(void) {
 }
 
 /*
- * A client's limit or flag sent as another kind of value ("3600" in quotes) is
- * refused, naming the field, on create and on update. Taken as left out, it would
- * give the client no key-age limit, or no MFA, and answer 200. A flag sent as null
- * counts as left out: read as false, an update that doesn't mean to touch MFA
- * would switch it off.
+ * A client field sent as another kind of value ("3600" in quotes, 12345 for a
+ * name) is refused, naming the field, on create and on update. Taken as left out,
+ * it would give the client no key-age limit, or no MFA, or keep its old name, and
+ * answer 200 for whatever else the body changed. A flag sent as null counts as
+ * left out: read as false, an update that doesn't mean to touch MFA would switch
+ * it off.
  */
 static int test_client_field_kinds(void) {
     printf("\n=== A client field of the wrong kind ===\n");
@@ -860,7 +861,20 @@ static int test_client_field_kinds(void) {
     reply_free(&r);
     if (!left) FAIL("require_mfa null turned MFA off, or the display name wasn't applied");
 
-    printf("✓ a client's limit or flag of the wrong kind is refused, and null leaves one as it is\n");
+    /* 4. Text of another kind beside a good field: refused, and nothing changes */
+    r = request("PUT", target, g_admin_cookie, NULL, "application/json",
+                "{\"display_name\":12345,\"require_mfa\":false}");
+    refused = r.status == 400 && strstr(r.body, "display_name");
+    reply_free(&r);
+    if (!refused) FAIL("an update with display_name 12345 wasn't refused naming it");
+    r = request("GET", target, g_admin_cookie, NULL, NULL, NULL);
+    mfa = 0;
+    kept = r.status == 200 && json_get_bool(r.body, "require_mfa", &mfa) == 0 && mfa == 1 &&
+           field(&r, "display_name", name, sizeof(name)) == 0 && strcmp(name, "Renamed") == 0;
+    reply_free(&r);
+    if (!kept) FAIL("a refused update with display_name 12345 changed the client");
+
+    printf("✓ a client field of the wrong kind is refused, and null leaves one as it is\n");
     return 0;
 }
 

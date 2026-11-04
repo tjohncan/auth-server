@@ -388,6 +388,32 @@ int json_get_bool(const char *json, const char *key, int *out_value) {
     return -1;  /* Not a valid boolean */
 }
 
+int json_get_text(const char *json, const char *key, char **out_value) {
+    if (!json || !key || !out_value) return -1;
+    *out_value = NULL;
+
+    const char *key_pos = find_json_key(json, key);
+    if (!key_pos) return 1;  /* left out */
+
+    /* Find the colon after the key */
+    const char *colon = strchr(key_pos, ':');
+    if (!colon) return -1;
+
+    /* Skip whitespace after colon */
+    const char *value_start = colon + 1;
+    while (*value_start == ' ' || *value_start == '\t' || *value_start == '\n' || *value_start == '\r') {
+        value_start++;
+    }
+
+    /* null reads as left out; anything else but a string is another kind */
+    if (strncmp(value_start, "null", 4) == 0 && IS_JSON_DELIM(value_start[4])) return 1;
+    if (*value_start != '"') return -1;
+
+    /* NULL now means a string it can't read: unterminated, or a refused escape */
+    *out_value = json_get_string(json, key);
+    return *out_value ? 0 : -1;
+}
+
 #undef IS_JSON_DELIM
 
 /* ============================================================================

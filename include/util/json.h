@@ -65,6 +65,25 @@ int json_utf8_valid(const char *text, size_t len);
 char *json_get_string(const char *json, const char *key);
 
 /*
+ * json_get_text - Extract a string value from JSON body, telling a field left out
+ * apart from one holding another kind of value
+ *
+ * As json_get_string, for a caller that refuses a value of another kind rather
+ * than taking it as left out, as json_get_int's and json_get_bool's callers do.
+ *
+ * Parameters:
+ *   json      - JSON string to parse
+ *   key       - Key to search for
+ *   out_value - Output: newly allocated string (caller must free) when 0 is
+ *               returned; NULL otherwise
+ *
+ * Returns: 0 on success; 1 if the key isn't there, or its value is null; -1 if
+ *          its value is anything but a string (12345, true, an array), or a
+ *          string json_get_string can't read
+ */
+int json_get_text(const char *json, const char *key, char **out_value);
+
+/*
  * json_get_int - Extract integer value from JSON body
  *
  * Parameters:
