@@ -75,7 +75,9 @@ typedef struct {
     int password_min_length;  /* Minimum password length (default 1, minimum 1) */
 
     /* Refuse to start on the shipped defaults fit only for trying the server out
-       (config_check_weak_defaults). Off by default, so a fresh clone runs. */
+       (config_check_weak_defaults). Off by default, so a fresh clone runs. 1 or 0;
+       -1 exists only inside config_load, for a value it couldn't read, and refuses
+       the start. */
     int strict;
 
     /* Patterns a value created or set must match (util/validation.h): NULL for

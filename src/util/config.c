@@ -503,13 +503,17 @@ static void set_config_value(config_t *config, const char *key, const char *valu
             config->password_min_length = len;
         }
     } else if (strcmp(key, "strict") == 0) {
+        /* A value it can't read isn't kept at the current one, as other settings'
+         * are: strict is there to stop a start on unsafe defaults, so a typo mustn't
+         * leave it quietly off. -1 marks it, and config_load refuses the start
+         * unless AUTH_STRICT, which wins over the file, can be read. */
         if (strcmp(value, "true") == 0 || strcmp(value, "1") == 0) {
             config->strict = 1;
         } else if (strcmp(value, "false") == 0 || strcmp(value, "0") == 0) {
             config->strict = 0;
         } else {
-            log_warn("Invalid strict value '%s', must be true/false or 1/0. Keeping current: %d",
-                    value, config->strict);
+            log_warn("Invalid strict value '%s', must be true/false or 1/0", value);
+            config->strict = -1;
         }
     }
 
@@ -988,15 +992,20 @@ static void apply_env_overrides(config_t *config) {
         log_info("Config override from %s: %s", env_var_name, env_value);
     }
 
-    /* STRICT */
+    /* STRICT. Set but empty counts as unset: docker-compose's ${VAR:-} passes a
+       variable the host didn't set as exactly that. Any other value it can't read
+       marks strict -1, as the file's does (see set_config_value). */
     env_value = getenv("AUTH_STRICT");
-    if (env_value) {
+    if (env_value && *env_value) {
         if (strcmp(env_value, "true") == 0 || strcmp(env_value, "1") == 0) {
             config->strict = 1;
             log_info("Config override from AUTH_STRICT: on");
         } else if (strcmp(env_value, "false") == 0 || strcmp(env_value, "0") == 0) {
             config->strict = 0;
             log_info("Config override from AUTH_STRICT: off");
+        } else {
+            log_warn("Invalid AUTH_STRICT value '%s', must be true/false or 1/0", env_value);
+            config->strict = -1;
         }
     }
 
@@ -1415,6 +1424,13 @@ config_t *config_load(const char *config_file) {
 
     /* Apply environment variable overrides */
     apply_env_overrides(config);
+
+    if (config->strict < 0) {
+        log_error("strict must be true or false (or 1 or 0): the server won't start without "
+                  "knowing whether to refuse unsafe defaults");
+        config_free(config);
+        return NULL;
+    }
 
     if (set_public_base_url(config) != 0) {
         config_free(config);

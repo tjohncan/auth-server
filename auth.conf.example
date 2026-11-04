@@ -110,6 +110,7 @@ machine_secret_hash_max_iterations = 777
 # Refuse to start on the defaults fit only for trying the server out: encryption_key
 # left at customize_me, which anyone can read, or password_min_length under 8 (NIST's
 # minimum). Set it in production. Off, the server starts on them, warning about the key.
+# A value other than true/false or 1/0, here or in AUTH_STRICT, refuses the start too.
 # strict = true
 
 # Patterns a value must match when it's created or set (POSIX extended, matched

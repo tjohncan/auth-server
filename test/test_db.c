@@ -1172,6 +1172,21 @@ static int test_hashing_config(void) {
     }
     log_info("  strict: off by default; on, the shipped key or a password minimum under 8 "
              "refuses the start (OK)");
+
+    /* A strict value it can't read refuses the start, in the file or in
+       AUTH_STRICT, which wins over the file */
+    config_t *typo = config_from("strict = yes\n");
+    setenv("AUTH_STRICT", "on", 1);
+    config_t *env_typo = config_from("strict = true\n");
+    unsetenv("AUTH_STRICT");
+    int refused = !typo && !env_typo;
+    config_free(typo);
+    config_free(env_typo);
+    if (!refused) {
+        log_error("Hashing config: a strict value it can't read didn't refuse the start");
+        return 1;
+    }
+    log_info("  strict: a value it can't read refuses the start, in the file or AUTH_STRICT (OK)");
     log_info("Hashing config tests passed!");
     return 0;
 }
