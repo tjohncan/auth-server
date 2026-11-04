@@ -1215,8 +1215,9 @@ static void apply_env_overrides(config_t *config) {
  */
 static int set_public_base_url(config_t *config) {
     if (config->host[0] == '\0') {
-        log_error("server_host is empty: the server's public address, https:// and the "
-                  "host, needs one");
+        log_error("server_host is empty (in auth.conf, or %s): the server's public address, "
+                  "https:// and the host, needs one",
+                  config->server_host_env ? config->server_host_env : "AUTH_SERVER_HOST");
         return -1;
     }
     size_t size = sizeof(config->public_base_url);
@@ -1459,6 +1460,14 @@ config_t *config_load(const char *config_file) {
     if (config->strict < 0) {
         log_error("strict must be true or false (or 1 or 0): the server won't start without "
                   "knowing whether to refuse unsafe defaults");
+        config_free(config);
+        return NULL;
+    }
+
+    /* SQLite takes an empty file name for a temporary database, which keeps nothing */
+    if (config->db_type == DB_TYPE_SQLITE && config->db_path[0] == '\0') {
+        log_error("db_path is empty (in auth.conf): SQLite would open a temporary database, "
+                  "and keep nothing");
         config_free(config);
         return NULL;
     }

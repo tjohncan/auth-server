@@ -1111,15 +1111,17 @@ static config_t *config_from(const char *lines) {
 }
 
 /*
- * The machine-secret hashing settings: each one left out takes the password
- * setting's value, so an auth.conf from before they existed hashes every secret
- * as it did. Set, they're the machine secrets' alone, held to the method's
- * iteration limit like the password ones.
+ * Loading the configuration. The machine-secret hashing settings: each one left
+ * out takes the password setting's value, so an auth.conf from before they existed
+ * hashes every secret as it did. Set, they're the machine secrets' alone, held to
+ * the method's iteration limit like the password ones. Then a config file that
+ * can't be read, the admin API's listeners, strict, and the settings that can't be
+ * empty.
  *
  * Returns 0 on success.
  */
-static int test_hashing_config(void) {
-    log_info("=== Hashing config tests");
+static int test_config(void) {
+    log_info("=== Config tests");
 
     const char *user = "secret_hashing_algorithm = pbkdf2-sha256\n"
                        "secret_hash_min_iterations = 1000\n"
@@ -1146,7 +1148,7 @@ static int test_hashing_config(void) {
         none->machine_secret_hash_min_iterations >= 1;
     config_free(none);
     if (!ok_none) {
-        log_error("Hashing config: without a config file, the machine settings weren't filled in");
+        log_error("Config: without a config file, the machine settings weren't filled in");
         return 1;
     }
 
@@ -1154,14 +1156,14 @@ static int test_hashing_config(void) {
        source is missing: refused, not read as nothing */
     char dir[] = "/tmp/test-db-config-dir.XXXXXX";
     if (!mkdtemp(dir)) {
-        log_error("Hashing config: could not make a directory");
+        log_error("Config: could not make a directory");
         return 1;
     }
     config_t *as_dir = config_load(dir);
     rmdir(dir);
     if (as_dir) {
         config_free(as_dir);
-        log_error("Hashing config: a directory was loaded as a config file");
+        log_error("Config: a directory was loaded as a config file");
         return 1;
     }
 
@@ -1169,7 +1171,7 @@ static int test_hashing_config(void) {
        not taken for no file */
     char linked[] = "/tmp/test-db-config-link.XXXXXX";
     if (!mkdtemp(linked)) {
-        log_error("Hashing config: could not make a directory");
+        log_error("Config: could not make a directory");
         return 1;
     }
     char link_path[64], target[64];
@@ -1181,7 +1183,7 @@ static int test_hashing_config(void) {
     rmdir(linked);
     if (!linked_ok || dangling) {
         config_free(dangling);
-        log_error("Hashing config: a link to a missing file was taken for no config file");
+        log_error("Config: a link to a missing file was taken for no config file");
         return 1;
     }
 
@@ -1191,7 +1193,7 @@ static int test_hashing_config(void) {
         char unreadable[] = "/tmp/test-db-config-unreadable.XXXXXX";
         int fd = mkstemp(unreadable);
         if (fd < 0) {
-            log_error("Hashing config: could not make a file");
+            log_error("Config: could not make a file");
             return 1;
         }
         close(fd);
@@ -1200,7 +1202,7 @@ static int test_hashing_config(void) {
         unlink(unreadable);
         if (refused) {
             config_free(refused);
-            log_error("Hashing config: an unreadable config file was taken for a missing one");
+            log_error("Config: an unreadable config file was taken for a missing one");
             return 1;
         }
     }
@@ -1218,7 +1220,7 @@ static int test_hashing_config(void) {
     config_free(b);
     config_free(c);
     if (!ok) {
-        log_error("Hashing config: machine settings weren't filled in from the password ones, "
+        log_error("Config: machine settings weren't filled in from the password ones, "
                   "kept apart, or held to the method's limit");
         return 1;
     }
@@ -1240,7 +1242,7 @@ static int test_hashing_config(void) {
     config_free(bad);
     config_free(off);
     if (!ok_admin) {
-        log_error("Hashing config: the admin listener settings didn't default or parse as documented");
+        log_error("Config: the admin listener settings didn't default or parse as documented");
         return 1;
     }
     log_info("  admin API: the socket by default (0600), no TCP port; modes octal (OK)");
@@ -1262,7 +1264,7 @@ static int test_hashing_config(void) {
     config_free(lax);
     config_free(strict);
     if (!ok_strict) {
-        log_error("Hashing config: strict didn't refuse the shipped key or a short password "
+        log_error("Config: strict didn't refuse the shipped key or a short password "
                   "minimum, or refused what it shouldn't");
         return 1;
     }
@@ -1279,7 +1281,7 @@ static int test_hashing_config(void) {
     config_free(typo);
     config_free(env_typo);
     if (!refused) {
-        log_error("Hashing config: a strict value it can't read didn't refuse the start");
+        log_error("Config: a strict value it can't read didn't refuse the start");
         return 1;
     }
     log_info("  strict: a value it can't read refuses the start, in the file or AUTH_STRICT (OK)");
@@ -1294,11 +1296,25 @@ static int test_hashing_config(void) {
     config_free(blank);
     config_free(env_blank);
     if (!refused) {
-        log_error("Hashing config: an empty server_host didn't refuse the start");
+        log_error("Config: an empty server_host didn't refuse the start");
         return 1;
     }
     log_info("  server_host: empty refuses the start, in the file or AUTH_SERVER_HOST (OK)");
-    log_info("Hashing config tests passed!");
+
+    /* An empty db_path refuses the start with SQLite, which would open a temporary
+       database; a PostgreSQL configuration doesn't use it */
+    config_t *no_path = config_from("db_path =\n");
+    config_t *pg_no_path = config_from("db_type = postgresql\ndb_path =\n");
+    int scoped = !no_path && pg_no_path;
+    config_free(no_path);
+    config_free(pg_no_path);
+    if (!scoped) {
+        log_error("Config: an empty db_path didn't refuse the start with SQLite, or refused "
+                  "it with PostgreSQL");
+        return 1;
+    }
+    log_info("  db_path: empty refuses the start with SQLite (OK)");
+    log_info("Config tests passed!");
     return 0;
 }
 
@@ -4005,9 +4021,9 @@ static int run_instance_lock(const config_t *config) {
     return test_instance_lock();
 }
 
-static int run_hashing_config(const config_t *config) {
+static int run_config(const config_t *config) {
     (void)config;
-    return test_hashing_config();
+    return test_config();
 }
 
 /* Every test, in order. Those for either backend run on both; the others write
@@ -4033,7 +4049,7 @@ static const struct {
     { test_encryption_key_check, 0 },
     { test_encryption_params, 1 },
     { test_rekey, 1 },
-    { run_hashing_config, 0 },
+    { run_config, 0 },
     { test_rehash, 0 },
     { test_single_use, 0 },
     { test_email_removal_voids_links, 0 },

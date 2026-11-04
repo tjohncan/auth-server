@@ -50,7 +50,8 @@ admin_socket_mode = 0600
 # Database — "sqlite" or "postgresql"
 db_type = sqlite
 
-# SQLite
+# SQLite: the database file. Empty refuses to start, since SQLite would take it for a
+# temporary database, which keeps nothing.
 db_path = ./data/auth.db
 
 # PostgreSQL (used when db_type = postgresql)

@@ -680,9 +680,9 @@ A session that still owes MFA gets `403 {"error": "MFA verification required"}`,
 failure gets `401`.
 
 In this section's request bodies, a number field takes a whole number, and a true/false field
-takes `true` or `false`. A value of another kind, such as `"3600"` in quotes, `1.5` or `1` for true, is
-refused with `400`, naming the field, rather than taken as left out. A field sent as `null`
-counts as left out, as if it weren't in the body.
+takes `true` or `false`. A value of another kind, such as `"3600"` in quotes, `1.5` or `1` for
+true, is refused with `400`, naming the field, rather than taken as left out. A field sent as
+`null` counts as left out, as if it weren't in the body.
 
 ### Organizations
 

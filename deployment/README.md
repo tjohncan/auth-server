@@ -227,7 +227,8 @@ read is logged as a warning and the setting keeps its value (for `strict`, the s
 start instead). Set but empty, a variable counts as unset, which is how docker-compose's
 `${VAR:-}` passes one the host didn't set; a text setting is the exception, taking empty as its
 value (an empty `AUTH_ADMIN_SOCKET` means no socket). An empty `server_host`, from the file or
-`AUTH_SERVER_HOST`, refuses the start: the server's public address is built from it.
+`AUTH_SERVER_HOST`, refuses the start: the server's public address is built from it. So does
+an empty `db_path` with SQLite, which would otherwise open a temporary database.
 
 | Environment Variable  | auth.conf key    | Description              | Default        |
 |-----------------------|------------------|--------------------------|----------------|
