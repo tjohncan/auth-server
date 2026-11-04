@@ -1447,6 +1447,51 @@ static int test_usernames(void) {
     return 0;
 }
 
+/* A trigger that makes every org-admin grant fail, and its removal */
+#ifdef DB_BACKEND_POSTGRESQL
+#define REFUSE_ORG_ADMIN \
+    "CREATE FUNCTION refuse_org_admin() RETURNS trigger LANGUAGE plpgsql " \
+    "AS $$ BEGIN RAISE EXCEPTION 'refused'; END $$; " \
+    "CREATE TRIGGER refuse_org_admin BEFORE INSERT ON " TBL_ORGANIZATION_ADMIN " " \
+    "FOR EACH ROW EXECUTE FUNCTION refuse_org_admin()"
+#define ALLOW_ORG_ADMIN "DROP FUNCTION refuse_org_admin() CASCADE"
+#else
+#define REFUSE_ORG_ADMIN \
+    "CREATE TRIGGER refuse_org_admin BEFORE INSERT ON " TBL_ORGANIZATION_ADMIN " " \
+    "BEGIN SELECT RAISE(FAIL, 'refused'); END"
+#define ALLOW_ORG_ADMIN "DROP TRIGGER refuse_org_admin"
+#endif
+
+/*
+ * A bootstrap that fails part-way makes nothing. With its last step, the
+ * org-admin grant, refused, it answers 500 and leaves neither the organization
+ * nor its admin behind, so the same bootstrap runs once the cause is gone.
+ */
+static int test_failed_bootstrap(void) {
+    printf("\n=== A failed bootstrap ===\n");
+
+    const char *body = "{\"org_code_name\":\"third\",\"username\":\"third_admin\","
+                       "\"password\":\"correct horse battery\"}";
+    db_handle_t *conn = db_pool_get_connection();
+    if (db_execute_direct(conn, REFUSE_ORG_ADMIN) != 0) FAIL("could not make the grant refuse");
+    int status = post_status("/api/admin/bootstrap", body);
+    if (db_execute_direct(conn, ALLOW_ORG_ADMIN) != 0) FAIL("could not drop the trigger");
+
+    char found[8];
+    int org = query_text("SELECT 1 FROM " TBL_ORGANIZATION " WHERE code_name = 'third'",
+                         found, sizeof(found)) == 0;
+    int admin = user_username_exists(conn, "third_admin") != 0;
+    if (status != 500 || org || admin) {
+        FAIL("a bootstrap refused at its last step answered %d%s%s", status,
+             org ? ", leaving the organization" : "", admin ? ", leaving its admin" : "");
+    }
+    status = post_status("/api/admin/bootstrap", body);
+    if (status != 200) FAIL("the same bootstrap, once the grant was allowed, answered %d", status);
+
+    printf("✓ a bootstrap refused at its last step makes nothing, and runs again\n");
+    return 0;
+}
+
 /*
  * The operator lists a user's addresses, with when each was added and
  * verified, and removes one the user doesn't recognize; one not on the account
@@ -2042,7 +2087,8 @@ int main(void) {
                  test_client_credentials() || test_client_field_kinds() ||
                  test_mfa_gates() || test_mfa_daily_cap() ||
                  test_localhost_only() || test_admin_socket_caller() ||
-                 test_account_recovery() || test_usernames() || test_operator_addresses() ||
+                 test_account_recovery() || test_usernames() || test_failed_bootstrap() ||
+                 test_operator_addresses() ||
                  test_form_password_length() ||
 #ifdef EMAIL_SUPPORT
                  test_email_links() ||

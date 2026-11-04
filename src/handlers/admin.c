@@ -1,4 +1,5 @@
 #include "handlers/admin.h"
+#include "db/db_sql.h"
 #include "db/queries/org.h"
 #include "db/queries/client.h"
 #include "db/queries/resource_server.h"
@@ -47,11 +48,21 @@ int admin_bootstrap(db_handle_t *db,
     snprintf(mgmt_api_address, sizeof(mgmt_api_address), "%s/api", config->public_base_url);
     snprintf(mgmt_ui_redirect, sizeof(mgmt_ui_redirect), "%s/callback", config->public_base_url);
 
+    /* Every write or none. A failure part-way would leave an organization behind,
+       and a retry would answer "Organization already exists" until it was removed
+       by hand. None of the steps opens a transaction of its own: user_create does
+       only for an email address, and bootstrap gives none. The admin password is
+       hashed inside, once, at setup. */
+    if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
+        log_error("Bootstrap failed: could not begin a transaction");
+        return -1;
+    }
+
     /* Create organization */
     long long org_pin;
     if (org_create(db, org_code_name, org_display_name, "Management API + UI", &org_pin, NULL) != 0) {
         log_error("Bootstrap failed: could not create organization");
-        return -1;
+        goto rollback;
     }
 
     /* Create management API resource server */
@@ -61,7 +72,7 @@ int admin_bootstrap(db_handle_t *db,
                                           "OAuth2 resource server for management operations",
                                           &mgmt_api_pin) != 0) {
         log_error("Bootstrap failed: could not create management API resource server");
-        return -1;
+        goto rollback;
     }
 
     /* Create management UI client (public, universal, authorization_code) */
@@ -79,36 +90,45 @@ int admin_bootstrap(db_handle_t *db,
                                  1,      /* is_universal = true */
                                  mgmt_ui_id, &mgmt_ui_pin) != 0) {
         log_error("Bootstrap failed: could not create management UI client");
-        return -1;
+        goto rollback;
     }
 
     /* Add redirect URI for management UI */
     if (admin_add_client_redirect_uri_bootstrap(db, mgmt_ui_id, mgmt_ui_redirect, "Default callback") != 0) {
         log_error("Bootstrap failed: could not add redirect URI");
-        return -1;
+        goto rollback;
     }
 
     /* Link management UI client to management API resource server */
     if (admin_link_client_resource_server_bootstrap(db, org_code_name, mgmt_ui_id, mgmt_api_address) != 0) {
         log_error("Bootstrap failed: could not link client to resource server");
-        return -1;
+        goto rollback;
     }
 
     /* Create first admin user (email can be added later via user profile) */
     unsigned char user_id[16];
     if (user_create(db, username, NULL, password, user_id) != 0) {
         log_error("Bootstrap failed: could not create admin user");
-        return -1;
+        goto rollback;
     }
 
     /* Make user admin of organization */
     if (user_make_org_admin(db, user_id, org_code_name) != 0) {
         log_error("Bootstrap failed: could not grant org admin privileges");
-        return -1;
+        goto rollback;
+    }
+
+    if (db_execute_trusted(db, "COMMIT") != 0) {
+        log_error("Bootstrap failed: could not commit");
+        goto rollback;
     }
 
     log_info("Bootstrap complete: org='%s', user='%s'", org_code_name, username);
     return 0;
+
+rollback:
+    db_execute_trusted(db, "ROLLBACK");
+    return -1;
 }
 
 /* ============================================================================

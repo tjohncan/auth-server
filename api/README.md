@@ -104,7 +104,8 @@ Bootstrap the authentication system with initial organization and management UI.
 
 **Note**: NOT idempotent - fails if requested organization code_name or username already exists.
 A deactivated account's username counts as existing: the account keeps it, and can be
-reactivated.
+reactivated. A bootstrap that fails part-way (a `500`) makes nothing, so the same request can
+be sent again once the cause is fixed.
 
 **Request Body**:
 ```json
