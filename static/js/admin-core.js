@@ -286,11 +286,14 @@ function formatDuration(seconds) {
     return `${seconds} seconds`;
 }
 
-function formDuration(label, name, value, presets, required = false) {
+/* A duration's presets, then Custom... for a number of seconds from min up. A
+   stored value that isn't a preset shows in the custom box, so the form shows
+   what saving sends; one under min is flagged there, and the form won't submit. */
+function formDuration(label, name, value, presets, required = false, min = 1) {
     const req = required ? ' <span class="text-error">*</span>' : '';
     const numValue = parseInt(value, 10) || 0;
     const isPreset = presets.some(p => p.value === numValue);
-    const showCustom = !isPreset && numValue > 0;
+    const showCustom = !isPreset;
 
     const opts = presets.map(p =>
         `<option value="${p.value}" ${p.value === numValue ? 'selected' : ''}>${p.label || formatDuration(p.value)}</option>`
@@ -300,11 +303,11 @@ function formDuration(label, name, value, presets, required = false) {
         <div class="mb-md">
             <label class="form-label">${escapeHtml(label)}${req}</label>
             <div class="flex-center">
-                <select data-duration-for="${name}" class="form-input flex-fill">
+                <select data-duration-for="${name}" data-duration-min="${min}" class="form-input flex-fill">
                     ${opts}
                     <option value="custom" ${showCustom ? 'selected' : ''}>Custom...</option>
                 </select>
-                <input type="number" name="${name}" value="${numValue}"${showCustom ? ' min="1"' : ''}
+                <input type="number" name="${name}" value="${numValue}"${showCustom ? ` min="${min}"` : ''}
                        class="form-input input-narrow${showCustom ? '' : ' hidden'}">
                 <span class="text-muted text-sm${showCustom ? '' : ' hidden'}" data-duration-unit="${name}">seconds</span>
             </div>

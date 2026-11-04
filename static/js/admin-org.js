@@ -19,7 +19,10 @@ const orgMgmt = {
     clientFilter: 'active',
 };
 
-/* Duration presets for seconds fields */
+/* Duration presets for seconds fields. -1 is Unlimited, where the server takes it;
+   the custom box takes a number of seconds from what the server allows
+   (formDuration's min): 0 up for the token lifetimes and key age, 1 up for the
+   session limit. */
 const DURATION_PRESETS = {
     access_token: [
         { value: 300, label: '5 minutes' },
@@ -29,6 +32,7 @@ const DURATION_PRESETS = {
         { value: 7200, label: '2 hours' },
     ],
     refresh_token: [
+        { value: -1, label: 'Unlimited' },
         { value: 86400, label: '1 day' },
         { value: 604800, label: '7 days' },
         { value: 2592000, label: '30 days' },
@@ -62,7 +66,7 @@ document.addEventListener('change', (e) => {
     if (!input) return;
     if (select.value === 'custom') {
         input.classList.remove('hidden');
-        input.setAttribute('min', '1');
+        input.setAttribute('min', select.dataset.durationMin || '1');
         if (unit) unit.classList.remove('hidden');
         input.value = '';
         input.focus();
@@ -642,15 +646,15 @@ async function createClient(orgId) {
                 { value: 'confidential_ac', label: 'Confidential (Authorization Code)' },
                 { value: 'confidential_cc', label: 'Confidential (Client Credentials)' }
             ], 'public', true)}
-            ${formDuration('Access Token TTL', 'access_token_ttl_seconds', 3600, DURATION_PRESETS.access_token, true)}
+            ${formDuration('Access Token TTL', 'access_token_ttl_seconds', 3600, DURATION_PRESETS.access_token, true, 0)}
             <div id="authCodeFields">
                 ${formCheckbox('Issue Refresh Tokens', 'issue_refresh_tokens', true)}
-                ${formDuration('Refresh Token TTL', 'refresh_token_ttl_seconds', 2592000, DURATION_PRESETS.refresh_token)}
+                ${formDuration('Refresh Token TTL', 'refresh_token_ttl_seconds', 2592000, DURATION_PRESETS.refresh_token, false, 0)}
                 ${formDuration('Maximum Session Duration', 'maximum_session_seconds', 604800, DURATION_PRESETS.session)}
                 ${formCheckbox('Require MFA', 'require_mfa', false)}
             </div>
             <div id="confidentialFields" class="hidden">
-                ${formDuration('Maximum Key Age (Secret Rotation)', 'secret_rotation_seconds', -1, DURATION_PRESETS.rotation)}
+                ${formDuration('Maximum Key Age (Secret Rotation)', 'secret_rotation_seconds', -1, DURATION_PRESETS.rotation, false, 0)}
             </div>
             ${formTextarea('Note', 'note', '', false, 2000)}
             <div class="modal-actions">
@@ -710,15 +714,15 @@ async function editClient(clientId) {
     const { modal, close } = showModal('Edit Client', `
         <form id="editClientForm">
             ${formField('Display Name', 'display_name', client.display_name, 'text', true, false, 200)}
-            ${formDuration('Access Token TTL', 'access_token_ttl_seconds', client.access_token_ttl_seconds, DURATION_PRESETS.access_token, true)}
+            ${formDuration('Access Token TTL', 'access_token_ttl_seconds', client.access_token_ttl_seconds, DURATION_PRESETS.access_token, true, 0)}
             ${client.grant_type === 'authorization_code' ? `
                 ${formCheckbox('Issue Refresh Tokens', 'issue_refresh_tokens', client.issue_refresh_tokens)}
-                ${formDuration('Refresh Token TTL', 'refresh_token_ttl_seconds', client.refresh_token_ttl_seconds, DURATION_PRESETS.refresh_token)}
+                ${formDuration('Refresh Token TTL', 'refresh_token_ttl_seconds', client.refresh_token_ttl_seconds, DURATION_PRESETS.refresh_token, false, 0)}
                 ${formDuration('Maximum Session Duration', 'maximum_session_seconds', client.maximum_session_seconds, DURATION_PRESETS.session)}
                 ${formCheckbox('Require MFA', 'require_mfa', client.require_mfa)}
             ` : ''}
             ${client.client_type === 'confidential' ? `
-                ${formDuration('Maximum Key Age (Secret Rotation)', 'secret_rotation_seconds', client.secret_rotation_seconds, DURATION_PRESETS.rotation)}
+                ${formDuration('Maximum Key Age (Secret Rotation)', 'secret_rotation_seconds', client.secret_rotation_seconds, DURATION_PRESETS.rotation, false, 0)}
             ` : ''}
             ${formTextarea('Note', 'note', client.note || '', false, 2000)}
             ${formCheckbox('Active', 'is_active', client.is_active)}
