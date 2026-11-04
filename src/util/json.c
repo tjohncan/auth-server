@@ -382,8 +382,7 @@ int json_get_bool(const char *json, const char *key, int *out_value) {
         *out_value = 0;
         return 0;
     } else if (strncmp(value_start, "null", 4) == 0 && IS_JSON_DELIM(value_start[4])) {
-        *out_value = 0;
-        return 0;
+        return 1;  /* null reads as left out, not false */
     }
 
     return -1;  /* Not a valid boolean */

@@ -801,7 +801,9 @@ static int test_client_credentials(void) {
 /*
  * A client's limit or flag sent as another kind of value ("3600" in quotes) is
  * refused, naming the field, on create and on update. Taken as left out, it would
- * give the client no key-age limit, or no MFA, and answer 200.
+ * give the client no key-age limit, or no MFA, and answer 200. A flag sent as null
+ * counts as left out: read as false, an update that doesn't mean to touch MFA
+ * would switch it off.
  */
 static int test_client_field_kinds(void) {
     printf("\n=== A client field of the wrong kind ===\n");
@@ -826,7 +828,7 @@ static int test_client_field_kinds(void) {
     snprintf(json, sizeof(json), "{\"organization_id\":\"%s\",\"code_name\":\"kinds\","
              "\"display_name\":\"Kinds\",\"client_type\":\"confidential\","
              "\"grant_type\":\"authorization_code\",\"access_token_ttl_seconds\":600,"
-             "\"secret_rotation_seconds\":3600}", g_org_id);
+             "\"secret_rotation_seconds\":3600,\"require_mfa\":true}", g_org_id);
     if (admin_create("/api/admin/clients", json, "id", id, sizeof(id)) != 0) return 1;
 
     /* 2. Update: refused beside a good field, and nothing changes */
@@ -845,7 +847,20 @@ static int test_client_field_kinds(void) {
     reply_free(&r);
     if (!kept) FAIL("a refused update changed the client (key age %d)", age);
 
-    printf("✓ a client's limit or flag of the wrong kind is refused, on create and update\n");
+    /* 3. A flag sent as null beside a good field: the flag is left as it is */
+    r = request("PUT", target, g_admin_cookie, NULL, "application/json",
+                "{\"display_name\":\"Renamed\",\"require_mfa\":null}");
+    int applied = r.status == 200;
+    reply_free(&r);
+    if (!applied) FAIL("an update with require_mfa null beside a display name was refused");
+    r = request("GET", target, g_admin_cookie, NULL, NULL, NULL);
+    int mfa = 0;
+    int left = r.status == 200 && json_get_bool(r.body, "require_mfa", &mfa) == 0 && mfa == 1 &&
+               field(&r, "display_name", name, sizeof(name)) == 0 && strcmp(name, "Renamed") == 0;
+    reply_free(&r);
+    if (!left) FAIL("require_mfa null turned MFA off, or the display name wasn't applied");
+
+    printf("✓ a client's limit or flag of the wrong kind is refused, and null leaves one as it is\n");
     return 0;
 }
 

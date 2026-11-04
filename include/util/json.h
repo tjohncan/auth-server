@@ -82,16 +82,16 @@ int json_get_int(const char *json, const char *key, int *out_value);
 /*
  * json_get_bool - Extract boolean value from JSON body
  *
- * Parses true, false, or null values.
- *
  * Parameters:
  *   json      - JSON string to parse
  *   key       - Key to search for
- *   out_value - Output: 1 for true, 0 for false/null, set only when 0 is returned
+ *   out_value - Output: 1 for true, 0 for false, set only when 0 is returned
  *
- * Returns: 0 on success; 1 if the key isn't there; -1 if its value is anything
- *          but true, false or null ("true" in quotes, 1). As for json_get_int, a
- *          caller should refuse -1 rather than take it as left out.
+ * Returns: 0 on success; 1 if the key isn't there, or its value is null (never
+ *          false: a caller that sends null for a field it isn't changing mustn't
+ *          switch it off); -1 if its value is anything but true, false or null
+ *          ("true" in quotes, 1). As for json_get_int, a caller should refuse -1
+ *          rather than take it as left out.
  */
 int json_get_bool(const char *json, const char *key, int *out_value);
 

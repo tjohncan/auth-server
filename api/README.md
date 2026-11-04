@@ -681,8 +681,8 @@ failure gets `401`.
 
 In this section's request bodies, a number field takes a whole number, and a true/false field
 takes `true` or `false`. A value of another kind, such as `"3600"` in quotes, `1.5` or `1` for true, is
-refused with `400`, naming the field, rather than taken as left out. A number field sent as
-`null` counts as left out.
+refused with `400`, naming the field, rather than taken as left out. A field sent as `null`
+counts as left out, as if it weren't in the body.
 
 ### Organizations
 
@@ -759,9 +759,9 @@ The durations are in seconds, 0 included:
 - `maximum_session_seconds`: 1 or more, or -1 for no limit.
 
 Left out on create, the last three are no limit. A value outside these, or one that isn't a
-whole number, is refused with `400`, naming the field. The access-token limit is a server setting, so a client can hold a larger
-value from before it was lowered: its tokens are issued at the limit, and `expires_in` reports
-it.
+whole number, is refused with `400`, naming the field. The access-token limit is a server
+setting, so a client can hold a larger value from before it was lowered: its tokens are issued
+at the limit, and `expires_in` reports it.
 
 **PUT /api/admin/clients**
 Update client configuration.
