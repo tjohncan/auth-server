@@ -1636,10 +1636,6 @@ int user_create_email_verification_token(db_handle_t *db,
         return -1;
     }
 
-    /* Format TTL as string for INTERVAL_SECONDS macro */
-    char ttl_str[16];
-    snprintf(ttl_str, sizeof(ttl_str), "%d", ttl_seconds);
-
     /* INSERT-SELECT with rate limit guard:
      * Inserts only if the email exists for this user AND fewer than 5
      * active tokens exist. Uses RETURNING to detect success. */
@@ -1677,7 +1673,7 @@ int user_create_email_verification_token(db_handle_t *db,
 
     db_bind_blob(stmt, 1, id, sizeof(id));
     db_bind_text(stmt, 2, token_hash, -1);
-    db_bind_text(stmt, 3, ttl_str, -1);
+    db_bind_int(stmt, 3, ttl_seconds);
     db_bind_text_or_null(stmt, 4, source_ip);
     db_bind_int64(stmt, 5, user_account_pin);
     db_bind_text(stmt, 6, email_hash, -1);
@@ -2057,9 +2053,6 @@ int user_create_password_reset_token(db_handle_t *db, const char *email,
         return -1;
     }
 
-    char ttl_str[16];
-    snprintf(ttl_str, sizeof(ttl_str), "%d", ttl_seconds);
-
     /* INSERT-SELECT: resolve verified email → user_account_pin, rate limit */
     const char *sql =
         "INSERT INTO " TBL_PASSWORD_RESET_TOKEN " "
@@ -2094,7 +2087,7 @@ int user_create_password_reset_token(db_handle_t *db, const char *email,
 
     db_bind_blob(stmt, 1, id, sizeof(id));
     db_bind_text(stmt, 2, token_hash, -1);
-    db_bind_text(stmt, 3, ttl_str, -1);
+    db_bind_int(stmt, 3, ttl_seconds);
     db_bind_text_or_null(stmt, 4, source_ip);
     db_bind_text(stmt, 5, email_hash, -1);
 
@@ -2345,9 +2338,6 @@ int user_create_passwordless_login_token(db_handle_t *db, const char *email,
         return -1;
     }
 
-    char ttl_str[16];
-    snprintf(ttl_str, sizeof(ttl_str), "%d", ttl_seconds);
-
     /* Encrypt plaintext email for storage */
     char encrypted_email[512];
     if (encrypt_field(email, encrypted_email, sizeof(encrypted_email)) != 0) {
@@ -2392,7 +2382,7 @@ int user_create_passwordless_login_token(db_handle_t *db, const char *email,
     db_bind_blob(stmt, 1, id, sizeof(id));
     db_bind_text(stmt, 2, encrypted_email, -1);
     db_bind_text(stmt, 3, token_hash, -1);
-    db_bind_text(stmt, 4, ttl_str, -1);
+    db_bind_int(stmt, 4, ttl_seconds);
     db_bind_text_or_null(stmt, 5, source_ip);
     if (return_to && return_to[0]) {
         db_bind_text(stmt, 6, return_to, -1);
@@ -2689,9 +2679,6 @@ int user_create_invitation_token(db_handle_t *db,
         return -1;
     }
 
-    char ttl_str[16];
-    snprintf(ttl_str, sizeof(ttl_str), "%d", ttl_seconds);
-
     char token_hash[SHA256_HEX_LENGTH];
     if (crypto_sha256_hex(token, strlen(token), token_hash, sizeof(token_hash)) != 0) {
         log_error("Failed to hash invitation token");
@@ -2731,7 +2718,7 @@ int user_create_invitation_token(db_handle_t *db,
         db_bind_null(stmt, 3);
     }
     db_bind_text(stmt, 4, token_hash, -1);
-    db_bind_text(stmt, 5, ttl_str, -1);
+    db_bind_int(stmt, 5, ttl_seconds);
     db_bind_text_or_null(stmt, 6, source_ip);
 
     int rc = db_step(stmt);

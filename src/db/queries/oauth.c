@@ -196,10 +196,6 @@ int oauth_session_create(db_handle_t *db, long long user_account_pin,
         return -1;
     }
 
-    /* Build TTL string for SQL */
-    char ttl_str[32];
-    snprintf(ttl_str, sizeof(ttl_str), "%d", ttl_seconds);
-
     const char *sql =
         "INSERT INTO " TBL_BROWSER " "
         "(id, user_account_pin, session_token, started_at, authenticated_at, "
@@ -243,7 +239,7 @@ int oauth_session_create(db_handle_t *db, long long user_account_pin,
         db_bind_null(stmt, 6);
     }
 
-    db_bind_text(stmt, 7, ttl_str, -1);
+    db_bind_int(stmt, 7, ttl_seconds);
 
     /* Execute and get returned id */
     int rc = db_step(stmt);
@@ -469,10 +465,6 @@ int oauth_auth_code_create(db_handle_t *db, long long client_pin,
         return -1;
     }
 
-    /* Build TTL string for SQL */
-    char ttl_str[32];
-    snprintf(ttl_str, sizeof(ttl_str), "%d", ttl_seconds);
-
     const char *sql =
         "INSERT INTO " TBL_AUTHORIZATION_CODE " "
         "(id, client_pin, user_account_pin, code, "
@@ -507,7 +499,7 @@ int oauth_auth_code_create(db_handle_t *db, long long client_pin,
 
     db_bind_text_or_null(stmt, 6, code_challenge_method);
 
-    db_bind_text(stmt, 7, ttl_str, -1);
+    db_bind_int(stmt, 7, ttl_seconds);
 
     /* Execute and get returned id */
     int rc = db_step(stmt);
@@ -640,10 +632,6 @@ int oauth_token_create_access(db_handle_t *db, long long resource_server_pin,
         return -1;
     }
 
-    /* Build TTL string for SQL */
-    char ttl_str[32];
-    snprintf(ttl_str, sizeof(ttl_str), "%d", ttl_seconds);
-
     const char *sql =
         "INSERT INTO " TBL_ACCESS_TOKEN " "
         "(id, resource_server_pin, client_pin, user_account_pin, "
@@ -700,7 +688,7 @@ int oauth_token_create_access(db_handle_t *db, long long resource_server_pin,
     /* Bind scopes (optional) */
     db_bind_text_or_null(stmt, 8, scopes);
 
-    db_bind_text(stmt, 9, ttl_str, -1);
+    db_bind_int(stmt, 9, ttl_seconds);
 
     /* Execute and get returned id */
     int rc = db_step(stmt);
@@ -738,10 +726,6 @@ int oauth_token_create_refresh(db_handle_t *db, long long client_pin,
         return -1;
     }
 
-    /* Build TTL string for SQL */
-    char ttl_str[32];
-    snprintf(ttl_str, sizeof(ttl_str), "%d", ttl_seconds);
-
     const char *sql =
         "INSERT INTO " TBL_REFRESH_TOKEN " "
         "(id, client_pin, user_account_pin, authorization_code_id, "
@@ -778,7 +762,7 @@ int oauth_token_create_refresh(db_handle_t *db, long long client_pin,
     /* Bind scopes (optional) */
     db_bind_text_or_null(stmt, 6, scopes);
 
-    db_bind_text(stmt, 7, ttl_str, -1);
+    db_bind_int(stmt, 7, ttl_seconds);
 
     /* Execute and get returned id */
     int rc = db_step(stmt);
@@ -912,9 +896,6 @@ int oauth_token_rotate_refresh(db_handle_t *db, const char *old_token,
             return -1;
         }
 
-        char ttl_str[32];
-        snprintf(ttl_str, sizeof(ttl_str), "%d", ttl_seconds);
-
         const char *insert_sql =
             "INSERT INTO " TBL_REFRESH_TOKEN " "
             "(id, client_pin, user_account_pin, authorization_code_id, "
@@ -947,7 +928,7 @@ int oauth_token_rotate_refresh(db_handle_t *db, const char *old_token,
             db_bind_null(insert_stmt, 8);
         }
 
-        db_bind_text(insert_stmt, 9, ttl_str, -1);
+        db_bind_int(insert_stmt, 9, ttl_seconds);
 
         int insert_rc = db_step(insert_stmt);
 

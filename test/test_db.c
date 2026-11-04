@@ -341,6 +341,102 @@ done:
     return failed;
 }
 
+/* A refresh token's expiry less its issue, in seconds, into *out: -1 for a NULL
+   expiry. Returns 0, or -1 if the row couldn't be read. */
+static int refresh_lifetime(db_handle_t *db, const unsigned char *id, int *out) {
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, "SELECT CAST(" UNIX_TS("expected_expiry") " - "
+                              UNIX_TS("issued_at") " AS INTEGER) "
+                              "FROM " TBL_REFRESH_TOKEN " WHERE id = " P"1") != 0) {
+        return -1;
+    }
+    db_bind_blob(stmt, 1, id, 16);
+    int rc = db_step(stmt);
+    if (rc == DB_ROW) *out = db_column_type(stmt, 0) == DB_NULL ? -1 : db_column_int(stmt, 0);
+    db_finalize(stmt);
+    return rc == DB_ROW ? 0 : -1;
+}
+
+/*
+ * A refresh token's lifetime, as made and as rotated: -1 is none (its expiry is
+ * NULL, so it rotates whenever it's used), and any other number of seconds is
+ * that long from issue, 0 included (expired as issued, so it never rotates).
+ * On both backends, which share the SQL (see INTERVAL_SECONDS in db_sql.h).
+ *
+ * Returns 0 on success.
+ */
+static int test_refresh_lifetime(const config_t *config) {
+    log_info("=== Refresh token lifetime tests");
+
+    db_handle_t *sdb = open_test_db(config);
+    if (!sdb) {
+        log_error("Refresh lifetime: could not open a test database");
+        return 1;
+    }
+
+    int failed = 1;
+
+    /* FIXTURE_ORG_RS_CLIENT's organization and client, and a user, as both
+       backends take them */
+    if (db_execute_direct(sdb,
+            "INSERT INTO " TBL_ORGANIZATION " (id, code_name, display_name) "
+            "  VALUES (" ID_FROM_HEX("00000000000000000000000000000001") ", 'org', 'Org');"
+            "INSERT INTO " TBL_CLIENT " (id, organization_pin, code_name, client_type, "
+            "                            grant_type, display_name, access_token_ttl_seconds) "
+            "  VALUES (" ID_FROM_HEX("00000000000000000000000000000003") ", 1, 'cl', "
+            "          'confidential', 'authorization_code', 'Client', 3600);"
+            "INSERT INTO " TBL_USER_ACCOUNT " (id) "
+            "  VALUES (" ID_FROM_HEX("00000000000000000000000000000004") ");") != 0) {
+        log_error("Refresh lifetime: could not insert fixtures");
+        goto done;
+    }
+    const unsigned char user_id[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x04};
+
+    /* Each lifetime: the token made with it, then rotated with it again */
+    const int lifetimes[3] = { -1, 0, 3600 };
+    for (int i = 0; i < 3; i++) {
+        char code[32], made[32], rotated[32];
+        unsigned char code_id[16], made_id[16], rotated_id[16];
+        oauth_refresh_token_data_t data;
+        snprintf(code, sizeof(code), "lifetime-code-%d", i);
+        snprintf(made, sizeof(made), "lifetime-made-%d", i);
+        snprintf(rotated, sizeof(rotated), "lifetime-rotated-%d", i);
+        int made_life = -2, rotated_life = -2;
+        if (oauth_auth_code_create(sdb, 1, FIXTURE_CLIENT_ID, 1, user_id, code,
+                                   NULL, NULL, 600, code_id) != 0 ||
+            oauth_token_create_refresh(sdb, 1, 1, code_id, made, "read", lifetimes[i],
+                                       made_id) != 0 ||
+            refresh_lifetime(sdb, made_id, &made_life) != 0) {
+            log_error("Refresh lifetime: could not make a token with lifetime %d", lifetimes[i]);
+            goto done;
+        }
+        int rotate_rc = oauth_token_rotate_refresh(sdb, made, rotated, lifetimes[i], &data,
+                                                   rotated_id);
+        if (rotate_rc == 0 && refresh_lifetime(sdb, rotated_id, &rotated_life) != 0) {
+            log_error("Refresh lifetime: could not read the rotated token");
+            goto done;
+        }
+        int rotates = lifetimes[i] != 0;
+        if (made_life != lifetimes[i] || (rotate_rc == 0) != rotates ||
+            (rotates && rotated_life != lifetimes[i])) {
+            log_error("Refresh lifetime %d: made with %d, rotation answered %d, rotated with %d",
+                      lifetimes[i], made_life, rotate_rc, rotated_life);
+            goto done;
+        }
+    }
+    log_info("  -1 is no expiry, made and rotated; 3600 an hour from issue; 0 expired as "
+             "issued, never rotating (OK)");
+
+    failed = 0;
+
+done:
+    db_disconnect(sdb);
+    if (!failed) {
+        log_info("Refresh token lifetime tests passed!");
+    }
+    return failed;
+}
+
 /*
  * Two guarantees the schema makes and the code leans on without checking:
  * foreign keys are enforced -- SQLite leaves them off unless each connection
@@ -3907,6 +4003,7 @@ static const struct {
 } TESTS[] = {
     { test_storage_at_rest, 0 },
     { test_credential_lifetimes, 0 },
+    { test_refresh_lifetime, 1 },
     { test_schema_constraints, 0 },
     { test_history_tables, 1 },
     { test_drop_history, 1 },
