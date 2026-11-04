@@ -1386,6 +1386,68 @@ static int test_account_recovery(void) {
 }
 
 /*
+ * A deactivated account keeps its username, as the unique index has it: the
+ * account can be reactivated, and apps know it by that name. So the name is
+ * taken for a new user and for a new organization's admin, and that bootstrap
+ * makes nothing. The username change takes a name no other account holds, and
+ * the caller's own in another case.
+ */
+static int test_usernames(void) {
+    printf("\n=== Usernames ===\n");
+
+    char user_id[33], json[256], found[8], cookie[256];
+    Reply r = admin_port("POST", "/api/admin/users", NULL,
+                        "{\"username\":\"dormant\",\"password\":\"dormant password\"}");
+    int created = r.status == 200 && field(&r, "user_id", user_id, sizeof(user_id)) == 0;
+    reply_free(&r);
+    snprintf(json, sizeof(json), "{\"user_id\":\"%s\"}", user_id);
+    if (!created || post_status("/api/admin/users/deactivate", json) != 200) {
+        FAIL("could not create and deactivate the user");
+    }
+
+    /* 1. Its name, in another case, for a new user and a new organization's admin */
+    int status = post_status("/api/admin/users",
+                             "{\"username\":\"Dormant\",\"password\":\"another password\"}");
+    if (status != 409) FAIL("a new user with a deactivated account's name answered %d", status);
+    status = post_status("/api/admin/bootstrap", "{\"org_code_name\":\"second\","
+                         "\"username\":\"Dormant\",\"password\":\"correct horse battery\"}");
+    int made = query_text("SELECT 1 FROM " TBL_ORGANIZATION " WHERE code_name = 'second'",
+                          found, sizeof(found)) == 0;
+    if (status != 409 || made) {
+        FAIL("a bootstrap with a deactivated account's name answered %d%s", status,
+             made ? ", and made the organization" : "");
+    }
+    printf("✓ a deactivated account's name is taken for a new user and a bootstrap\n");
+
+    /* 2. The username change */
+    r = admin_port("POST", "/api/admin/users", NULL,
+                   "{\"username\":\"renamer\",\"password\":\"renamer password\"}");
+    status = r.status;
+    reply_free(&r);
+    if (status != 200 || login("renamer", "renamer password", cookie, sizeof(cookie)) != 0) {
+        FAIL("could not create and sign in the user");
+    }
+    const struct { const char *name; int want; } changes[] = {
+        { "Dormant", 409 },  /* a deactivated account's */
+        { "admin", 409 },    /* an active account's */
+        { "Renamer", 200 },  /* the caller's own, in another case */
+    };
+    for (size_t i = 0; i < sizeof(changes) / sizeof(changes[0]); i++) {
+        snprintf(json, sizeof(json), "{\"new_username\":\"%s\"}", changes[i].name);
+        r = post_json("/api/user/username", cookie, json);
+        status = r.status;
+        reply_free(&r);
+        if (status != changes[i].want) {
+            FAIL("changing the username to %s answered %d, not %d", changes[i].name, status,
+                 changes[i].want);
+        }
+    }
+    printf("✓ the username change refuses another account's name with 409, and takes its own\n");
+
+    return 0;
+}
+
+/*
  * The operator lists a user's addresses, with when each was added and
  * verified, and removes one the user doesn't recognize; one not on the account
  * is a 404, not a silent success. With email support, the removed address no
@@ -1980,7 +2042,7 @@ int main(void) {
                  test_client_credentials() || test_client_field_kinds() ||
                  test_mfa_gates() || test_mfa_daily_cap() ||
                  test_localhost_only() || test_admin_socket_caller() ||
-                 test_account_recovery() || test_operator_addresses() ||
+                 test_account_recovery() || test_usernames() || test_operator_addresses() ||
                  test_form_password_length() ||
 #ifdef EMAIL_SUPPORT
                  test_email_links() ||

@@ -103,6 +103,8 @@ Bootstrap the authentication system with initial organization and management UI.
    management API resource server, management UI client, and first admin user.
 
 **Note**: NOT idempotent - fails if requested organization code_name or username already exists.
+A deactivated account's username counts as existing: the account keeps it, and can be
+reactivated.
 
 **Request Body**:
 ```json
@@ -238,7 +240,8 @@ Create a user account (not attached to any organization or client).
 
 **Purpose**: Create user who can later be granted org admin privileges or added to clients.
 
-**Idempotency**: NOT idempotent - fails if username or email already exists.
+**Idempotency**: NOT idempotent - fails if username or email already exists, a deactivated
+account's included.
 
 **Request Body**:
 ```json
@@ -2035,7 +2038,7 @@ Change current user's username.
 }
 ```
 
-- **409 Conflict** (username taken):
+- **409 Conflict** (another account holds the username, a deactivated one included):
 ```json
 {
   "error": "Username already taken"
@@ -2053,7 +2056,8 @@ Change current user's username.
 - Not empty, at most 100 characters, no spaces, no `@`, well-formed UTF-8
 - Matches `username_pattern`: by default letters, digits and `. _ + -`, with no dot first, last
   or doubled (the rules at the top of this document)
-- Must be unique (case-insensitive)
+- Must be unique (case-insensitive) across every account, deactivated ones included. Your own
+  name in another case is yours to take.
 
 **Example**:
 ```bash

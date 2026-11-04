@@ -557,7 +557,7 @@ HttpResponse *change_username_handler(const HttpRequest *req) {
     if (result == 1) {
         return response_json_ok("{\"message\":\"Username changed successfully\"}");
     } else if (result == 0) {
-        return response_json_error(400, "Invalid username change");
+        return response_json_error(409, "Username already taken");
     } else {
         return response_json_error(500, "Failed to change username");
     }

@@ -36,9 +36,10 @@ int user_username_exists(db_handle_t *db, const char *username) {
         return -1;
     }
 
+    /* Every account, active or not, as the unique index counts them (user.h) */
     const char *sql =
         "SELECT 1 FROM " TBL_USER_ACCOUNT " "
-        "WHERE username_hash = " P"1 AND is_active = " BOOL_TRUE " "
+        "WHERE username_hash = " P"1 "
         "LIMIT 1";
 
     db_stmt_t *stmt = NULL;
@@ -1473,17 +1474,7 @@ int user_change_username(db_handle_t *db, long long user_account_pin,
     char error_msg[256];
     if (validate_username(new_username, error_msg, sizeof(error_msg)) != 0) {
         log_info("Username validation failed: %s", error_msg);
-        return 0;
-    }
-
-    /* Check if username is already taken */
-    int exists = user_username_exists(db, new_username);
-    if (exists < 0) {
-        log_error("Failed to check username existence");
         return -1;
-    }
-    if (exists == 1) {
-        return 0;  /* Username taken */
     }
 
     /* Encrypt new username and compute hash */
@@ -1500,7 +1491,10 @@ int user_change_username(db_handle_t *db, long long user_account_pin,
         return -1;
     }
 
-    /* Update username (NOT EXISTS guards against TOCTOU race on uniqueness) */
+    /* Update username. NOT EXISTS is the uniqueness check, over every other account,
+       deactivated ones included, as the unique index counts them. It leaves out the
+       caller's own account, so changing only the case of your own name goes through;
+       user_username_exists can't, so it isn't asked first. */
     const char *update_sql =
         "UPDATE " TBL_USER_ACCOUNT " "
         "SET username = " P"1, "
