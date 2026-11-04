@@ -1626,13 +1626,6 @@ HttpResponse *passwordless_login_toggle_handler(const HttpRequest *req) {
 
 HttpResponse *logout_handler(const HttpRequest *req) {
 
-    /* Get database connection */
-    db_handle_t *db = db_pool_get_connection();
-    if (!db) {
-        log_error("Failed to get database connection");
-        return response_json_error(500, "Database connection failed");
-    }
-
     /* Get session cookie */
     char *session_token = NULL;
     const char *cookie_header = http_request_get_header(req, "Cookie");
@@ -1644,8 +1637,10 @@ HttpResponse *logout_handler(const HttpRequest *req) {
         return response_json_error(401, "No session to logout");
     }
 
-    /* Close session in database: 0 closed it, 1 found none open, -1 failed */
-    int result = oauth_session_close(db, session_token);
+    /* Close session in database: 0 closed it, 1 found none open, -1 failed,
+     * no connection included (db_pool_get_connection logs that) */
+    db_handle_t *db = db_pool_get_connection();
+    int result = db ? oauth_session_close(db, session_token) : -1;
     cleanse_free(session_token);
 
     /* The cookie is cleared with the 500 too. Keeping it on a failure would
