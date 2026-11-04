@@ -67,6 +67,7 @@ document.addEventListener('change', (e) => {
     if (select.value === 'custom') {
         input.classList.remove('hidden');
         input.setAttribute('min', select.dataset.durationMin || '1');
+        input.required = true;
         if (unit) unit.classList.remove('hidden');
         input.value = '';
         input.focus();
@@ -74,6 +75,7 @@ document.addEventListener('change', (e) => {
         input.value = select.value;
         input.classList.add('hidden');
         input.removeAttribute('min');
+        input.required = false;
         if (unit) unit.classList.add('hidden');
     }
 });

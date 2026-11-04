@@ -286,9 +286,11 @@ function formatDuration(seconds) {
     return `${seconds} seconds`;
 }
 
-/* A duration's presets, then Custom... for a number of seconds from min up. A
-   stored value that isn't a preset shows in the custom box, so the form shows
-   what saving sends; one under min is flagged there, and the form won't submit. */
+/* A duration's presets, then Custom... for a number of seconds from min up, which
+   the box then requires: an empty one would send null, which the server takes as
+   left out. A stored value that isn't a preset shows in the custom box, so the
+   form shows what saving sends; one under min is flagged there, and the form
+   won't submit. */
 function formDuration(label, name, value, presets, required = false, min = 1) {
     const req = required ? ' <span class="text-error">*</span>' : '';
     const numValue = parseInt(value, 10) || 0;
@@ -307,7 +309,7 @@ function formDuration(label, name, value, presets, required = false, min = 1) {
                     ${opts}
                     <option value="custom" ${showCustom ? 'selected' : ''}>Custom...</option>
                 </select>
-                <input type="number" name="${name}" value="${numValue}"${showCustom ? ` min="${min}"` : ''}
+                <input type="number" name="${name}" value="${numValue}"${showCustom ? ` min="${min}" required` : ''}
                        class="form-input input-narrow${showCustom ? '' : ' hidden'}">
                 <span class="text-muted text-sm${showCustom ? '' : ' hidden'}" data-duration-unit="${name}">seconds</span>
             </div>

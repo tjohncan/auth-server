@@ -798,6 +798,57 @@ static int test_client_credentials(void) {
     return 0;
 }
 
+/*
+ * A client's limit or flag sent as another kind of value ("3600" in quotes) is
+ * refused, naming the field, on create and on update. Taken as left out, it would
+ * give the client no key-age limit, or no MFA, and answer 200.
+ */
+static int test_client_field_kinds(void) {
+    printf("\n=== A client field of the wrong kind ===\n");
+
+    /* 1. Create: refused, and nothing made, so the code name is still free */
+    const char *sent[2][2] = {
+        { "secret_rotation_seconds", "\"3600\"" },
+        { "require_mfa", "\"true\"" },
+    };
+    char json[512], id[33];
+    for (size_t i = 0; i < 2; i++) {
+        snprintf(json, sizeof(json), "{\"organization_id\":\"%s\",\"code_name\":\"kinds\","
+                 "\"display_name\":\"Kinds\",\"client_type\":\"confidential\","
+                 "\"grant_type\":\"authorization_code\",\"access_token_ttl_seconds\":600,"
+                 "\"%s\":%s}", g_org_id, sent[i][0], sent[i][1]);
+        Reply r = post_json("/api/admin/clients", g_admin_cookie, json);
+        int refused = r.status == 400 && strstr(r.body, sent[i][0]);
+        if (!refused) FAIL("creating a client with %s %s answered %d: %s",
+                           sent[i][0], sent[i][1], r.status, r.body);
+        reply_free(&r);
+    }
+    snprintf(json, sizeof(json), "{\"organization_id\":\"%s\",\"code_name\":\"kinds\","
+             "\"display_name\":\"Kinds\",\"client_type\":\"confidential\","
+             "\"grant_type\":\"authorization_code\",\"access_token_ttl_seconds\":600,"
+             "\"secret_rotation_seconds\":3600}", g_org_id);
+    if (admin_create("/api/admin/clients", json, "id", id, sizeof(id)) != 0) return 1;
+
+    /* 2. Update: refused beside a good field, and nothing changes */
+    char target[128], name[64];
+    snprintf(target, sizeof(target), "/api/admin/clients?id=%s", id);
+    Reply r = request("PUT", target, g_admin_cookie, NULL, "application/json",
+                      "{\"display_name\":\"Renamed\",\"secret_rotation_seconds\":\"60\"}");
+    int refused = r.status == 400 && strstr(r.body, "secret_rotation_seconds");
+    if (!refused) FAIL("an update with a key age in quotes answered %d: %s", r.status, r.body);
+    reply_free(&r);
+    r = request("GET", target, g_admin_cookie, NULL, NULL, NULL);
+    int age = 0;
+    int kept = r.status == 200 && json_get_int(r.body, "secret_rotation_seconds", &age) == 0 &&
+               age == 3600 && field(&r, "display_name", name, sizeof(name)) == 0 &&
+               strcmp(name, "Kinds") == 0;
+    reply_free(&r);
+    if (!kept) FAIL("a refused update changed the client (key age %d)", age);
+
+    printf("✓ a client's limit or flag of the wrong kind is refused, on create and update\n");
+    return 0;
+}
+
 /* ============================================================================
  * MFA gates
  * ============================================================================ */
@@ -1897,7 +1948,8 @@ int main(void) {
 
     int failed = setup() || test_logout() || test_authorization_code_flow() ||
                  test_redirect_uris() || test_issuer() ||
-                 test_client_credentials() || test_mfa_gates() || test_mfa_daily_cap() ||
+                 test_client_credentials() || test_client_field_kinds() ||
+                 test_mfa_gates() || test_mfa_daily_cap() ||
                  test_localhost_only() || test_admin_socket_caller() ||
                  test_account_recovery() || test_operator_addresses() ||
                  test_form_password_length() ||

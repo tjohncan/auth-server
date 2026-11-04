@@ -184,6 +184,31 @@ static HttpResponse *require_auth_context(const HttpRequest *req, const char *op
     return response_json_error(401, "Authentication required");
 }
 
+/*
+ * Optional number and true/false fields of a request body. Each returns 1 if the
+ * field is read into *out, and 0 if it's left out, as json_get_int and
+ * json_get_bool count that. A value of another kind ("3600" in quotes, 1.5, 1 for
+ * true) is neither guessed at nor taken as left out: *bad gets a 400 naming the
+ * first such field, which the caller answers before anything else it checks.
+ */
+static HttpResponse *field_kind_error(const char *field, const char *kind) {
+    char message[128];
+    snprintf(message, sizeof(message), "%s must be %s", field, kind);
+    return response_json_error(400, message);
+}
+
+static int read_int_field(const char *body, const char *field, int *out, HttpResponse **bad) {
+    int rc = json_get_int(body, field, out);
+    if (rc < 0 && !*bad) *bad = field_kind_error(field, "a whole number");
+    return rc == 0;
+}
+
+static int read_bool_field(const char *body, const char *field, int *out, HttpResponse **bad) {
+    int rc = json_get_bool(body, field, out);
+    if (rc < 0 && !*bad) *bad = field_kind_error(field, "true or false");
+    return rc == 0;
+}
+
 /* ============================================================================
  * Organizations Endpoints
  * ========================================================================== */
@@ -349,10 +374,15 @@ HttpResponse *admin_update_organization_handler(const HttpRequest *req) {
     char *display_name = json_get_string(req->body, "display_name");
     char *note = json_get_string(req->body, "note");
 
+    HttpResponse *bad = NULL;
     int is_active_val;
     int *is_active = NULL;
-    if (json_get_bool(req->body, "is_active", &is_active_val) == 0) {
+    if (read_bool_field(req->body, "is_active", &is_active_val, &bad)) {
         is_active = &is_active_val;
+    }
+    if (bad) {
+        resp = bad;
+        goto cleanup;
     }
 
     /* Validate input formats */
@@ -667,16 +697,21 @@ HttpResponse *admin_update_resource_server_handler(const HttpRequest *req) {
     char *address = json_get_string(req->body, "address");
     char *note = json_get_string(req->body, "note");
 
+    HttpResponse *bad = NULL;
     int is_active_val;
     int *is_active = NULL;
-    if (json_get_bool(req->body, "is_active", &is_active_val) == 0) {
+    if (read_bool_field(req->body, "is_active", &is_active_val, &bad)) {
         is_active = &is_active_val;
     }
 
     int allow_user_provisioning_val;
     int *allow_user_provisioning = NULL;
-    if (json_get_bool(req->body, "allow_user_provisioning", &allow_user_provisioning_val) == 0) {
+    if (read_bool_field(req->body, "allow_user_provisioning", &allow_user_provisioning_val, &bad)) {
         allow_user_provisioning = &allow_user_provisioning_val;
+    }
+    if (bad) {
+        resp = bad;
+        goto cleanup;
     }
 
     /* Validate input formats */
@@ -923,10 +958,24 @@ HttpResponse *admin_create_client_handler(const HttpRequest *req) {
     char *grant_type = json_get_string(req->body, "grant_type");
     char *note = json_get_string(req->body, "note");
 
-    int require_mfa = 0, access_ttl, issue_refresh = 0, refresh_ttl, max_session, secret_rotation;
+    /* The numbers and true/false fields. Left out, a true/false field is false and
+       a duration is -1, no limit, but access_token_ttl_seconds is required (below) */
+    HttpResponse *bad = NULL;
+    int access_ttl = 0, require_mfa = 0, issue_refresh = 0;
+    int refresh_ttl = -1, max_session = -1, secret_rotation = -1;
+    int has_access_ttl = read_int_field(req->body, "access_token_ttl_seconds", &access_ttl, &bad);
+    read_bool_field(req->body, "require_mfa", &require_mfa, &bad);
+    read_bool_field(req->body, "issue_refresh_tokens", &issue_refresh, &bad);
+    read_int_field(req->body, "refresh_token_ttl_seconds", &refresh_ttl, &bad);
+    read_int_field(req->body, "maximum_session_seconds", &max_session, &bad);
+    read_int_field(req->body, "secret_rotation_seconds", &secret_rotation, &bad);
+    if (bad) {
+        resp = bad;
+        goto cleanup;
+    }
+
     if (!org_id_str || !code_name || !*code_name || !display_name || !*display_name ||
-        !client_type || !*client_type || !grant_type || !*grant_type ||
-        json_get_int(req->body, "access_token_ttl_seconds", &access_ttl) != 0) {
+        !client_type || !*client_type || !grant_type || !*grant_type || !has_access_ttl) {
         resp = response_json_error(400, "Missing required fields");
         goto cleanup;
     }
@@ -965,13 +1014,6 @@ HttpResponse *admin_create_client_handler(const HttpRequest *req) {
         resp = response_json_error(400, "A public client's grant_type must be authorization_code");
         goto cleanup;
     }
-
-    /* Optional fields: false if not provided, and the durations -1, no limit */
-    json_get_bool(req->body, "require_mfa", &require_mfa);
-    json_get_bool(req->body, "issue_refresh_tokens", &issue_refresh);
-    if (json_get_int(req->body, "refresh_token_ttl_seconds", &refresh_ttl) != 0) refresh_ttl = -1;
-    if (json_get_int(req->body, "maximum_session_seconds", &max_session) != 0) max_session = -1;
-    if (json_get_int(req->body, "secret_rotation_seconds", &secret_rotation) != 0) secret_rotation = -1;
 
     const int *durations[4] = { &access_ttl, &refresh_ttl, &max_session, &secret_rotation };
     resp = check_client_durations(durations);
@@ -1066,13 +1108,19 @@ HttpResponse *admin_update_client_handler(const HttpRequest *req) {
     int *require_mfa = NULL, *access_ttl = NULL, *issue_refresh = NULL;
     int *refresh_ttl = NULL, *max_session = NULL, *secret_rotation = NULL, *is_active = NULL;
 
-    if (json_get_bool(req->body, "require_mfa", &require_mfa_val) == 0) require_mfa = &require_mfa_val;
-    if (json_get_int(req->body, "access_token_ttl_seconds", &access_ttl_val) == 0) access_ttl = &access_ttl_val;
-    if (json_get_bool(req->body, "issue_refresh_tokens", &issue_refresh_val) == 0) issue_refresh = &issue_refresh_val;
-    if (json_get_int(req->body, "refresh_token_ttl_seconds", &refresh_ttl_val) == 0) refresh_ttl = &refresh_ttl_val;
-    if (json_get_int(req->body, "maximum_session_seconds", &max_session_val) == 0) max_session = &max_session_val;
-    if (json_get_int(req->body, "secret_rotation_seconds", &secret_rotation_val) == 0) secret_rotation = &secret_rotation_val;
-    if (json_get_bool(req->body, "is_active", &is_active_val) == 0) is_active = &is_active_val;
+    const char *body = req->body;
+    HttpResponse *bad = NULL;
+    if (read_bool_field(body, "require_mfa", &require_mfa_val, &bad)) require_mfa = &require_mfa_val;
+    if (read_int_field(body, "access_token_ttl_seconds", &access_ttl_val, &bad)) access_ttl = &access_ttl_val;
+    if (read_bool_field(body, "issue_refresh_tokens", &issue_refresh_val, &bad)) issue_refresh = &issue_refresh_val;
+    if (read_int_field(body, "refresh_token_ttl_seconds", &refresh_ttl_val, &bad)) refresh_ttl = &refresh_ttl_val;
+    if (read_int_field(body, "maximum_session_seconds", &max_session_val, &bad)) max_session = &max_session_val;
+    if (read_int_field(body, "secret_rotation_seconds", &secret_rotation_val, &bad)) secret_rotation = &secret_rotation_val;
+    if (read_bool_field(body, "is_active", &is_active_val, &bad)) is_active = &is_active_val;
+    if (bad) {
+        resp = bad;
+        goto cleanup;
+    }
 
     /* Validate input formats */
     char validation_error[256];

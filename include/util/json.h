@@ -70,9 +70,12 @@ char *json_get_string(const char *json, const char *key);
  * Parameters:
  *   json      - JSON string to parse
  *   key       - Key to search for
- *   out_value - Output: parsed integer value
+ *   out_value - Output: parsed integer value, set only when 0 is returned
  *
- * Returns: 0 on success, -1 if key not found or value not an integer
+ * Returns: 0 on success; 1 if the key isn't there, or its value is null; -1 if
+ *          its value is anything but a whole number in int's range ("3600" in
+ *          quotes, 1.5, 1e3, true). A caller that takes 1 as "left out" should
+ *          refuse -1, not take it as left out too.
  */
 int json_get_int(const char *json, const char *key, int *out_value);
 
@@ -84,9 +87,11 @@ int json_get_int(const char *json, const char *key, int *out_value);
  * Parameters:
  *   json      - JSON string to parse
  *   key       - Key to search for
- *   out_value - Output: 1 for true, 0 for false/null
+ *   out_value - Output: 1 for true, 0 for false/null, set only when 0 is returned
  *
- * Returns: 0 on success, -1 if key not found or value not a boolean
+ * Returns: 0 on success; 1 if the key isn't there; -1 if its value is anything
+ *          but true, false or null ("true" in quotes, 1). As for json_get_int, a
+ *          caller should refuse -1 rather than take it as left out.
  */
 int json_get_bool(const char *json, const char *key, int *out_value);
 
