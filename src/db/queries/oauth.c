@@ -1089,8 +1089,8 @@ int oauth_client_authenticate(db_handle_t *db,
         return 0;
     }
 
-    /* Check key rotation expiry */
-    if (secret_rotation_seconds > 0) {
+    /* Check key rotation expiry (-1, stored as NULL, is no limit) */
+    if (secret_rotation_seconds >= 0) {
         time_t key_age = time(NULL) - key_generated_at;
         if (key_age > secret_rotation_seconds) {
             char client_id_hex[33];

@@ -852,6 +852,45 @@ HttpResponse *admin_get_clients_handler(const HttpRequest *req) {
 }
 
 /*
+ * A client's durations, in seconds, and what each takes: from its lowest value
+ * up, 0 counting as zero seconds like any other number; and -1, no limit (stored
+ * as NULL), for all but the access token's. The session limit starts at 1: it's
+ * checked at /authorize, where 0 would send every sign-in straight back to sign
+ * in again. Anything else is refused, naming the field.
+ */
+static const struct {
+    const char *field;
+    int lowest;
+    int no_limit;  /* takes -1 */
+} CLIENT_DURATIONS[4] = {
+    { "access_token_ttl_seconds",  0, 0 },
+    { "refresh_token_ttl_seconds", 0, 1 },
+    { "maximum_session_seconds",   1, 1 },
+    { "secret_rotation_seconds",   0, 1 },
+};
+
+/* values: the durations in CLIENT_DURATIONS' order, NULL for one not sent.
+   Returns the 400 to answer, or NULL if each is one its field takes. */
+static HttpResponse *check_client_durations(const int *values[4]) {
+    for (size_t i = 0; i < 4; i++) {
+        if (!values[i] || *values[i] >= CLIENT_DURATIONS[i].lowest ||
+            (CLIENT_DURATIONS[i].no_limit && *values[i] == -1)) {
+            continue;
+        }
+        char message[128];
+        if (CLIENT_DURATIONS[i].no_limit) {
+            snprintf(message, sizeof(message), "%s must be -1 (no limit), or %d or more",
+                     CLIENT_DURATIONS[i].field, CLIENT_DURATIONS[i].lowest);
+        } else {
+            snprintf(message, sizeof(message), "%s must be %d or more",
+                     CLIENT_DURATIONS[i].field, CLIENT_DURATIONS[i].lowest);
+        }
+        return response_json_error(400, message);
+    }
+    return NULL;
+}
+
+/*
  * POST /api/admin/clients
  *
  * Body: organization_id, code_name, display_name, client_type, grant_type,
@@ -909,19 +948,40 @@ HttpResponse *admin_create_client_handler(const HttpRequest *req) {
         goto cleanup;
     }
 
+    /* The types and their pairs the schema's CHECKs allow, checked here so a
+       wrong one answers 400 naming it, not the failed insert's 409 */
+    if (strcmp(client_type, "public") != 0 && strcmp(client_type, "confidential") != 0) {
+        resp = response_json_error(400, "client_type must be public or confidential");
+        goto cleanup;
+    }
+    if (strcmp(grant_type, "authorization_code") != 0 &&
+        strcmp(grant_type, "client_credentials") != 0) {
+        resp = response_json_error(400,
+                                   "grant_type must be authorization_code or client_credentials");
+        goto cleanup;
+    }
+    if (strcmp(client_type, "public") == 0 && strcmp(grant_type, "authorization_code") != 0) {
+        resp = response_json_error(400, "A public client's grant_type must be authorization_code");
+        goto cleanup;
+    }
+
+    /* Optional fields: false if not provided, and the durations -1, no limit */
+    json_get_bool(req->body, "require_mfa", &require_mfa);
+    json_get_bool(req->body, "issue_refresh_tokens", &issue_refresh);
+    if (json_get_int(req->body, "refresh_token_ttl_seconds", &refresh_ttl) != 0) refresh_ttl = -1;
+    if (json_get_int(req->body, "maximum_session_seconds", &max_session) != 0) max_session = -1;
+    if (json_get_int(req->body, "secret_rotation_seconds", &secret_rotation) != 0) secret_rotation = -1;
+
+    const int *durations[4] = { &access_ttl, &refresh_ttl, &max_session, &secret_rotation };
+    resp = check_client_durations(durations);
+    if (resp) goto cleanup;
+
     if (access_ttl > g_config->max_access_token_ttl_seconds) {
         snprintf(validation_error, sizeof(validation_error),
                  "access_token_ttl_seconds cannot exceed %d", g_config->max_access_token_ttl_seconds);
         resp = response_json_error(400, validation_error);
         goto cleanup;
     }
-
-    /* Optional fields - default to 0/false if not provided */
-    json_get_bool(req->body, "require_mfa", &require_mfa);
-    json_get_bool(req->body, "issue_refresh_tokens", &issue_refresh);
-    if (json_get_int(req->body, "refresh_token_ttl_seconds", &refresh_ttl) != 0) refresh_ttl = -1;
-    if (json_get_int(req->body, "maximum_session_seconds", &max_session) != 0) max_session = -1;
-    if (json_get_int(req->body, "secret_rotation_seconds", &secret_rotation) != 0) secret_rotation = -1;
 
     unsigned char org_id[16], client_id[16];
     if (hex_to_bytes(org_id_str, org_id, 16) != 0) {
@@ -1031,6 +1091,10 @@ HttpResponse *admin_update_client_handler(const HttpRequest *req) {
         resp = response_json_error(400, "At least one field must be provided");
         goto cleanup;
     }
+
+    const int *durations[4] = { access_ttl, refresh_ttl, max_session, secret_rotation };
+    resp = check_client_durations(durations);
+    if (resp) goto cleanup;
 
     if (access_ttl && *access_ttl > g_config->max_access_token_ttl_seconds) {
         snprintf(validation_error, sizeof(validation_error),

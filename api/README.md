@@ -744,9 +744,19 @@ Body: `organization_id`, `code_name`, `display_name`, `client_type`, `grant_type
     `maximum_session_seconds` (enforced at `/authorize` — sessions older than this are rejected),
     `secret_rotation_seconds` (enforced at authentication — client keys older than this are rejected)
 
-`access_token_ttl_seconds` may not exceed the server's `max_access_token_ttl_seconds`
-(default 59 days); a larger value is refused with `400`. A client stored with a larger value
-before the limit existed gets tokens issued at the limit, and `expires_in` reports it.
+`client_type` is `public` or `confidential`, and `grant_type` is `authorization_code` or
+`client_credentials`; a public client takes only `authorization_code`.
+
+The durations are in seconds, 0 included:
+- `access_token_ttl_seconds`: 0 up to the server's `max_access_token_ttl_seconds` (default
+  59 days).
+- `refresh_token_ttl_seconds` and `secret_rotation_seconds`: 0 or more, or -1 for no limit.
+- `maximum_session_seconds`: 1 or more, or -1 for no limit.
+
+Left out on create, the last three are no limit. A value outside these is refused with `400`,
+naming the field. The access-token limit is a server setting, so a client can hold a larger
+value from before it was lowered: its tokens are issued at the limit, and `expires_in` reports
+it.
 
 **PUT /api/admin/clients**
 Update client configuration.
@@ -754,9 +764,9 @@ Update client configuration.
 Query: `id` (required)
 Body: `display_name`, `note`, TTL/MFA settings, `is_active` (all optional)
 
-`access_token_ttl_seconds` has the same limit as on create. The console's edit form sends the
-stored TTL back with every change, so a client stored over the limit can't be edited there
-until its TTL is lowered.
+The durations follow the same rules as on create. The console's edit form sends the stored
+TTL back with every change, so a client stored over the access-token limit can't be edited
+there until its TTL is lowered.
 
 ### Client Redirect URIs
 
