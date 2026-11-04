@@ -63,7 +63,11 @@ For multi-server deployments, use a load balancer with managed certificates inst
 ```bash
 cd deployment
 cp .env.example .env
-# Edit .env with your domain, database settings, etc.
+# Edit .env with your domain, database settings, etc. The compose file always passes
+# DB_BACKEND, POSTGRES_* and AFFILIATE to the server, as AUTH_DB_* and AUTH_MOTHERSHIP_URL,
+# set in .env or not (unset, each is a default or empty), and a variable wins over
+# auth.conf: set those here, not in auth.conf's db_* keys and mothership_url. The rest,
+# email's settings included, go in auth.conf.
 
 # The server's own settings, at the project root. The compose file mounts ../auth.conf and
 # ../data; a mount whose source is missing comes up as an empty directory, which the server
