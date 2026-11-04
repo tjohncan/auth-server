@@ -1283,6 +1283,21 @@ static int test_hashing_config(void) {
         return 1;
     }
     log_info("  strict: a value it can't read refuses the start, in the file or AUTH_STRICT (OK)");
+
+    /* An empty server_host refuses the start, from the file or from AUTH_SERVER_HOST:
+       the server's public address is built from it, and an empty text variable is a value */
+    config_t *blank = config_from("server_host =\n");
+    setenv("AUTH_SERVER_HOST", "", 1);
+    config_t *env_blank = config_from("server_host = auth.example.com\n");
+    unsetenv("AUTH_SERVER_HOST");
+    refused = !blank && !env_blank;
+    config_free(blank);
+    config_free(env_blank);
+    if (!refused) {
+        log_error("Hashing config: an empty server_host didn't refuse the start");
+        return 1;
+    }
+    log_info("  server_host: empty refuses the start, in the file or AUTH_SERVER_HOST (OK)");
     log_info("Hashing config tests passed!");
     return 0;
 }

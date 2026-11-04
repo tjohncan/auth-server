@@ -9,7 +9,8 @@ log_level = info
 
 # Public identity of this server — used to build URLs (JWT `iss` claim, email links,
 # TOTP issuer). localhost means http://localhost:<server_port>, reached directly; any
-# other name means https://<name>, through a TLS proxy on the default port.
+# other name means https://<name>, through a TLS proxy on the default port. Empty, here
+# or in AUTH_SERVER_HOST, refuses the start.
 # This is NOT a bind address: the server always listens on all interfaces, so that
 # an edge proxy or load balancer on another host can reach it. Firewall the port;
 # do not rely on this setting to restrict access.

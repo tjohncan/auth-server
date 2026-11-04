@@ -782,7 +782,8 @@ static void set_config_value(config_t *config, const char *key, const char *valu
  * empty can't be a value, as for a number, true/false or a choice:
  * docker-compose's ${VAR:-} passes a host variable that isn't set as exactly
  * that. A text setting takes empty as its value, as in the file (an empty
- * admin_socket is none).
+ * admin_socket is none); an empty server_host, from either, then refuses the
+ * start (set_public_base_url).
  */
 static void apply_env_overrides(config_t *config) {
     char *env_value;
@@ -1208,9 +1209,16 @@ static void apply_env_overrides(config_t *config) {
 /*
  * Derive public_base_url (see config.h) once host and port are final. localhost
  * is a development setup reached directly, so http and the listen port; any other
- * host is reached through the TLS-terminating proxy, on the default port.
+ * host is reached through the TLS-terminating proxy, on the default port. An empty
+ * host refuses the start: token issuers, links in emails and the console's
+ * addresses (stored at bootstrap) would all be "https://".
  */
 static int set_public_base_url(config_t *config) {
+    if (config->host[0] == '\0') {
+        log_error("server_host is empty: the server's public address, https:// and the "
+                  "host, needs one");
+        return -1;
+    }
     size_t size = sizeof(config->public_base_url);
     int n = strcmp(config->host, "localhost") == 0
         ? snprintf(config->public_base_url, size, "http://localhost:%d", config->port)
