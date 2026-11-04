@@ -855,8 +855,9 @@ HttpResponse *admin_get_clients_handler(const HttpRequest *req) {
  * A client's durations, in seconds, and what each takes: from its lowest value
  * up, 0 counting as zero seconds like any other number; and -1, no limit (stored
  * as NULL), for all but the access token's. The session limit starts at 1: it's
- * checked at /authorize, where 0 would send every sign-in straight back to sign
- * in again. Anything else is refused, naming the field.
+ * checked at /authorize, where 0 would accept a session only in the second it
+ * began, and send the rest straight back to sign in. Anything else is refused,
+ * naming the field.
  */
 static const struct {
     const char *field;

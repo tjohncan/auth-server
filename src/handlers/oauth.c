@@ -215,8 +215,9 @@ int oauth_authorize(db_handle_t *db,
         return -3;  /* MFA required */
     }
 
-    /* Step 6: Check maximum session duration for this client */
-    if (client.maximum_session_seconds > 0) {
+    /* Step 6: Check maximum session duration for this client (-1, stored as NULL,
+     * is no limit) */
+    if (client.maximum_session_seconds >= 0) {
         time_t session_age = time(NULL) - session.started_at;
         if (session_age > client.maximum_session_seconds) {
             log_info("Session too old for client %s: age=%ld, max=%d",
