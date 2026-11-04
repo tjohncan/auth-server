@@ -57,24 +57,24 @@
 #define MAX_LINE_LENGTH 1024
 
 /*
- * Parse log level string to LogLevel enum
- * Returns: LogLevel on success, LOG_INFO on unknown value
+ * Parse a log level name (debug, info, warn, error) into *out
+ * Returns: 0 on success, -1 for any other name, leaving *out as it was
  */
-static LogLevel parse_log_level(const char *level_str) {
-    if (!level_str) return LOG_INFO;
+static int parse_log_level(const char *level_str, LogLevel *out) {
+    if (!level_str) return -1;
 
     if (strcmp(level_str, "debug") == 0) {
-        return LOG_DEBUG;
+        *out = LOG_DEBUG;
     } else if (strcmp(level_str, "info") == 0) {
-        return LOG_INFO;
+        *out = LOG_INFO;
     } else if (strcmp(level_str, "warn") == 0) {
-        return LOG_WARN;
+        *out = LOG_WARN;
     } else if (strcmp(level_str, "error") == 0) {
-        return LOG_ERROR;
+        *out = LOG_ERROR;
     } else {
-        log_warn("Unknown log level '%s', defaulting to 'info'", level_str);
-        return LOG_INFO;
+        return -1;
     }
+    return 0;
 }
 
 /*
@@ -680,7 +680,9 @@ static void set_config_value(config_t *config, const char *key, const char *valu
     /* Logging settings */
     else if (strcmp(key, "log_level") == 0) {
         /* Parse string to enum immediately, don't store string */
-        config->log_level = parse_log_level(value);
+        if (parse_log_level(value, &config->log_level) != 0) {
+            log_warn("Unknown log_level '%s', keeping current value", value);
+        }
     } else if (strcmp(key, "log_level_env") == 0) {
         new_value = str_dup(value);
         if (new_value) {
@@ -773,6 +775,14 @@ static void set_config_value(config_t *config, const char *key, const char *valu
 
 /*
  * Apply environment variable overrides
+ *
+ * A variable wins over the file, and is read by the file's rules: a value it
+ * can't read is warned about, and the setting keeps its value (strict refuses
+ * the start instead; see set_config_value). Set but empty counts as unset where
+ * empty can't be a value, as for a number, true/false or a choice:
+ * docker-compose's ${VAR:-} passes a host variable that isn't set as exactly
+ * that. A text setting takes empty as its value, as in the file (an empty
+ * admin_socket is none).
  */
 static void apply_env_overrides(config_t *config) {
     char *env_value;
@@ -795,7 +805,7 @@ static void apply_env_overrides(config_t *config) {
     /* SERVER_PORT */
     env_var_name = config->server_port_env ? config->server_port_env : "AUTH_SERVER_PORT";
     env_value = getenv(env_var_name);
-    if (env_value) {
+    if (env_value && *env_value) {
         int port = 0;
         parse_int(env_value, &port);
         if (port > 0 && port <= 65535) {
@@ -809,7 +819,7 @@ static void apply_env_overrides(config_t *config) {
     /* ADMIN_PORT */
     env_var_name = config->admin_port_env ? config->admin_port_env : "AUTH_ADMIN_PORT";
     env_value = getenv(env_var_name);
-    if (env_value) {
+    if (env_value && *env_value) {
         int port = -1;
         parse_int(env_value, &port);
         if (port >= 0 && port <= 65535) {
@@ -837,13 +847,15 @@ static void apply_env_overrides(config_t *config) {
     /* DB_TYPE: Use custom env var name if specified, else default AUTH_DB_TYPE */
     env_var_name = config->db_type_env ? config->db_type_env : "AUTH_DB_TYPE";
     env_value = getenv(env_var_name);
-    if (env_value) {
+    if (env_value && *env_value) {
         if (strcmp(env_value, "sqlite") == 0) {
             config->db_type = DB_TYPE_SQLITE;
             log_info("Config override from %s: sqlite", env_var_name);
         } else if (strcmp(env_value, "postgresql") == 0) {
             config->db_type = DB_TYPE_POSTGRESQL;
             log_info("Config override from %s: postgresql", env_var_name);
+        } else {
+            log_warn("Unknown %s '%s', keeping current value", env_var_name, env_value);
         }
     }
 
@@ -864,7 +876,7 @@ static void apply_env_overrides(config_t *config) {
     /* DB_PORT */
     env_var_name = config->db_port_env ? config->db_port_env : "AUTH_DB_PORT";
     env_value = getenv(env_var_name);
-    if (env_value) {
+    if (env_value && *env_value) {
         int port = 0;
         parse_int(env_value, &port);
         if (port > 0 && port <= 65535) {
@@ -986,15 +998,17 @@ static void apply_env_overrides(config_t *config) {
     /* LOG_LEVEL */
     env_var_name = config->log_level_env ? config->log_level_env : "AUTH_LOG_LEVEL";
     env_value = getenv(env_var_name);
-    if (env_value) {
+    if (env_value && *env_value) {
         /* Parse string to enum immediately, don't store string */
-        config->log_level = parse_log_level(env_value);
-        log_info("Config override from %s: %s", env_var_name, env_value);
+        if (parse_log_level(env_value, &config->log_level) == 0) {
+            log_info("Config override from %s: %s", env_var_name, env_value);
+        } else {
+            log_warn("Unknown %s '%s', keeping current value", env_var_name, env_value);
+        }
     }
 
-    /* STRICT. Set but empty counts as unset: docker-compose's ${VAR:-} passes a
-       variable the host didn't set as exactly that. Any other value it can't read
-       marks strict -1, as the file's does (see set_config_value). */
+    /* STRICT: a value it can't read marks strict -1, as the file's does (see
+       set_config_value) */
     env_value = getenv("AUTH_STRICT");
     if (env_value && *env_value) {
         if (strcmp(env_value, "true") == 0 || strcmp(env_value, "1") == 0) {
@@ -1011,19 +1025,22 @@ static void apply_env_overrides(config_t *config) {
 
     /* CLEANER_ENABLED */
     env_value = getenv("AUTH_CLEANER_ENABLED");
-    if (env_value) {
+    if (env_value && *env_value) {
         if (strcmp(env_value, "true") == 0 || strcmp(env_value, "1") == 0) {
             config->cleaner_enabled = 1;
             log_info("Config override from AUTH_CLEANER_ENABLED: enabled");
         } else if (strcmp(env_value, "false") == 0 || strcmp(env_value, "0") == 0) {
             config->cleaner_enabled = 0;
             log_info("Config override from AUTH_CLEANER_ENABLED: disabled");
+        } else {
+            log_warn("Invalid AUTH_CLEANER_ENABLED value '%s', must be true/false or 1/0. "
+                     "Keeping current: %d", env_value, config->cleaner_enabled);
         }
     }
 
     /* CLEANER_INTERVAL_SECONDS */
     env_value = getenv("AUTH_CLEANER_INTERVAL_SECONDS");
-    if (env_value) {
+    if (env_value && *env_value) {
         int interval = 0;
         parse_int(env_value, &interval);
         if (interval >= 1) {
@@ -1036,7 +1053,7 @@ static void apply_env_overrides(config_t *config) {
 
     /* CLEANER_BATCH_SIZE */
     env_value = getenv("AUTH_CLEANER_BATCH_SIZE");
-    if (env_value) {
+    if (env_value && *env_value) {
         int batch = 0;
         parse_int(env_value, &batch);
         if (batch >= 1) {
@@ -1049,7 +1066,7 @@ static void apply_env_overrides(config_t *config) {
 
     /* CLEANER_SQLITE_VACUUM_PAGES */
     env_value = getenv("AUTH_CLEANER_SQLITE_VACUUM_PAGES");
-    if (env_value) {
+    if (env_value && *env_value) {
         int pages = 0;
         parse_int(env_value, &pages);
         if (pages >= 1) {
@@ -1062,19 +1079,22 @@ static void apply_env_overrides(config_t *config) {
 
     /* CLEANER_POSTGRES_VACUUM_ENABLED */
     env_value = getenv("AUTH_CLEANER_POSTGRES_VACUUM_ENABLED");
-    if (env_value) {
+    if (env_value && *env_value) {
         if (strcmp(env_value, "true") == 0 || strcmp(env_value, "1") == 0) {
             config->cleaner_postgres_vacuum_enabled = 1;
             log_info("Config override from AUTH_CLEANER_POSTGRES_VACUUM_ENABLED: enabled");
         } else if (strcmp(env_value, "false") == 0 || strcmp(env_value, "0") == 0) {
             config->cleaner_postgres_vacuum_enabled = 0;
             log_info("Config override from AUTH_CLEANER_POSTGRES_VACUUM_ENABLED: disabled");
+        } else {
+            log_warn("Invalid AUTH_CLEANER_POSTGRES_VACUUM_ENABLED value '%s', must be true/false "
+                     "or 1/0. Keeping current: %d", env_value, config->cleaner_postgres_vacuum_enabled);
         }
     }
 
     /* RETENTION_USAGE_LOGS_DAYS */
     env_value = getenv("AUTH_RETENTION_USAGE_LOGS_DAYS");
-    if (env_value) {
+    if (env_value && *env_value) {
         int days = 0;
         parse_int(env_value, &days);
         if (days >= 1) {
@@ -1087,7 +1107,7 @@ static void apply_env_overrides(config_t *config) {
 
     /* RETENTION_HISTORY_DAYS */
     env_value = getenv("AUTH_RETENTION_HISTORY_DAYS");
-    if (env_value) {
+    if (env_value && *env_value) {
         int days = 0;
         parse_int(env_value, &days);
         if (days >= 1) {
@@ -1100,7 +1120,7 @@ static void apply_env_overrides(config_t *config) {
 
     /* RETENTION_SESSIONS_GRACE_DAYS */
     env_value = getenv("AUTH_RETENTION_SESSIONS_GRACE_DAYS");
-    if (env_value) {
+    if (env_value && *env_value) {
         int days = 0;
         parse_int(env_value, &days);
         if (days >= 1) {
@@ -1113,7 +1133,7 @@ static void apply_env_overrides(config_t *config) {
 
     /* RETENTION_TOKENS_GRACE_DAYS */
     env_value = getenv("AUTH_RETENTION_TOKENS_GRACE_DAYS");
-    if (env_value) {
+    if (env_value && *env_value) {
         int days = 0;
         parse_int(env_value, &days);
         if (days >= 1) {
@@ -1171,13 +1191,16 @@ static void apply_env_overrides(config_t *config) {
 
     /* ENABLE_HISTORY_TABLES */
     env_value = getenv("AUTH_ENABLE_HISTORY_TABLES");
-    if (env_value) {
+    if (env_value && *env_value) {
         if (strcmp(env_value, "true") == 0 || strcmp(env_value, "1") == 0) {
             config->enable_history_tables = 1;
             log_info("Config override from AUTH_ENABLE_HISTORY_TABLES: enabled");
         } else if (strcmp(env_value, "false") == 0 || strcmp(env_value, "0") == 0) {
             config->enable_history_tables = 0;
             log_info("Config override from AUTH_ENABLE_HISTORY_TABLES: disabled");
+        } else {
+            log_warn("Invalid AUTH_ENABLE_HISTORY_TABLES value '%s', must be true/false or 1/0. "
+                     "Keeping current: %d", env_value, config->enable_history_tables);
         }
     }
 }
@@ -1302,7 +1325,7 @@ config_t *config_load(const char *config_file) {
     config->retention_tokens_grace_days = DEFAULT_RETENTION_TOKENS_GRACE_DAYS;
 
     /* Logging defaults */
-    config->log_level = parse_log_level(DEFAULT_LOG_LEVEL);
+    parse_log_level(DEFAULT_LOG_LEVEL, &config->log_level);
     config->log_level_env = NULL;
 
     config->schema_dir = str_dup(DEFAULT_SCHEMA_DIR);

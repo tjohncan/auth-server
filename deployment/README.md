@@ -218,7 +218,11 @@ systemctl status auth-server
 
 The server loads `auth.conf` from its working directory. These settings can also be set by
 environment variable, which wins over the file (useful for Docker and secrets management); the
-rest go in `auth.conf`.
+rest go in `auth.conf`. A variable is read as its `auth.conf` key is: a value the server can't
+read is logged as a warning and the setting keeps its value (for `strict`, the server refuses to
+start instead). Set but empty, a variable counts as unset, which is how docker-compose's
+`${VAR:-}` passes one the host didn't set; a text setting is the exception, taking empty as its
+value (an empty `AUTH_ADMIN_SOCKET` means no socket).
 
 | Environment Variable  | auth.conf key    | Description              | Default        |
 |-----------------------|------------------|--------------------------|----------------|
