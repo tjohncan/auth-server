@@ -144,7 +144,8 @@ int oauth_session_get_by_token(db_handle_t *db, const char *session_token,
  *   db            - Database handle
  *   session_token - Session token from cookie
  *
- * Returns: 0 on success (session closed), -1 on error or not found
+ * Returns: 0 on success (session closed), 1 if no open session has this token
+ *          (closed already, or unknown), -1 on error
  */
 int oauth_session_close(db_handle_t *db, const char *session_token);
 

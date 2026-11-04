@@ -1644,16 +1644,17 @@ HttpResponse *logout_handler(const HttpRequest *req) {
         return response_json_error(401, "No session to logout");
     }
 
-    /* Close session in database */
+    /* Close session in database: 0 closed it, 1 found none open, -1 failed */
     int result = oauth_session_close(db, session_token);
     cleanse_free(session_token);
 
-    if (result != 0) {
-        return response_json_error(500, "Failed to close session");
-    }
-
-    /* Build response with Set-Cookie header to clear cookie */
-    HttpResponse *response = response_json_ok("{\"message\":\"Logged out successfully\"}");
+    /* The cookie is cleared with the 500 too. Keeping it on a failure would
+     * allow a retry, but the console doesn't retry, and the browser would be
+     * left holding a live session after the user logged out. A session that
+     * couldn't be closed stays open until it expires; the 500 reports that. */
+    HttpResponse *response = result < 0
+        ? response_json_error(500, "Failed to close session")
+        : response_json_ok("{\"message\":\"Logged out successfully\"}");
 
     if (response) {
         char clear_cookie[256];

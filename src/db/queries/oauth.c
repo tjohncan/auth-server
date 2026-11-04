@@ -399,7 +399,7 @@ int oauth_session_close(db_handle_t *db, const char *session_token) {
     } else if (rc == DB_DONE) {
         db_finalize(stmt);
         log_debug("Session not found or already closed");
-        return -1;
+        return 1;
     } else {
         log_error("Error closing session");
         db_finalize(stmt);

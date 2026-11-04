@@ -2117,21 +2117,36 @@ Log out current user (close browser session).
 }
 ```
 
-**Response Headers**:
+A session that's already closed, or unknown, gets the same answer: there's nothing left to
+close.
+
+**Response Headers** (with the 200, and with the 500 below):
 ```
 Set-Cookie: __Host-session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0
 ```
 
-**Error Response** (401 Unauthorized):
+**Error Responses**:
+
+- **401 Unauthorized** (the request carries no session cookie):
 ```json
 {
   "error": "No session to logout"
 }
 ```
 
+- **500 Internal Server Error** (the database couldn't close the session):
+```json
+{
+  "error": "Failed to close session"
+}
+```
+The cookie is cleared all the same, so the browser doesn't keep a session the user logged out
+of. The session itself stays open until it expires.
+
 **Security**:
 - Marks session as closed in database (`is_closed = TRUE`, `closed_at = now()`)
-- Clears session cookie via `Set-Cookie` header with `Max-Age=0`
+- Clears the session cookie (`Set-Cookie` with `Max-Age=0`), also when the session couldn't be
+  closed
 - Even if cookie persists client-side, closed sessions are rejected server-side
 - Client should also clear OAuth tokens from localStorage
 

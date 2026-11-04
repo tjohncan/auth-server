@@ -274,6 +274,46 @@ static int setup(void) {
 }
 
 /* ============================================================================
+ * Logout
+ * ============================================================================ */
+
+/*
+ * Logging out closes the session, so its cookie is refused even if the browser
+ * kept it. Logging out again with that cookie also answers 200, since nothing
+ * is left open, and both answers clear the cookie.
+ */
+static int test_logout(void) {
+    printf("\n=== Logout ===\n");
+
+    char cookie[256];
+    Reply r = admin_port("POST", "/api/admin/users", NULL,
+                        "{\"username\":\"leaving\",\"password\":\"leaving password\"}");
+    int status = r.status;
+    reply_free(&r);
+    if (status != 200 || login("leaving", "leaving password", cookie, sizeof(cookie)) != 0) {
+        FAIL("could not create and sign in the user");
+    }
+
+    for (int i = 1; i <= 2; i++) {
+        r = request("POST", "/logout", cookie, NULL, NULL, "");
+        status = r.status;
+        int cleared = r.cookie && strcmp(r.cookie, SESSION_COOKIE_NAME "=") == 0;
+        reply_free(&r);
+        if (status != 200 || !cleared) {
+            FAIL("logout %d answered %d, %s", i, status,
+                 cleared ? "clearing the cookie" : "leaving the cookie");
+        }
+    }
+    r = request("GET", "/api/user/profile", cookie, NULL, NULL, NULL);
+    status = r.status;
+    reply_free(&r);
+    if (status != 401) FAIL("the closed session's cookie got %d", status);
+    printf("✓ logout clears the cookie, a second time too, and the closed session is refused\n");
+
+    return 0;
+}
+
+/* ============================================================================
  * Authorization code with PKCE, and refresh-token rotation
  * ============================================================================ */
 
@@ -1855,8 +1895,8 @@ int main(void) {
     g_router = router_create();
     register_routes(g_router);
 
-    int failed = setup() || test_authorization_code_flow() || test_redirect_uris() ||
-                 test_issuer() ||
+    int failed = setup() || test_logout() || test_authorization_code_flow() ||
+                 test_redirect_uris() || test_issuer() ||
                  test_client_credentials() || test_mfa_gates() || test_mfa_daily_cap() ||
                  test_localhost_only() || test_admin_socket_caller() ||
                  test_account_recovery() || test_operator_addresses() ||
