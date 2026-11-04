@@ -295,17 +295,15 @@ static void set_config_value(config_t *config, const char *key, const char *valu
             log_warn("Unknown db_type '%s', keeping current value", value);
         }
     } else if (strcmp(key, "db_path") == 0) {
-        /* Reject obvious path traversal attempts (defense in depth) */
-        if (strstr(value, "..") != NULL) {
-            log_warn("Rejected db_path with path traversal sequence: %s", value);
+        /* Taken as written, relative or absolute, ".." included. auth.conf is the
+           operator's own file, so refusing ".." would guard against nothing, and
+           falling back to the default would start the server on another database */
+        new_value = str_dup(value);
+        if (new_value) {
+            free(config->db_path);
+            config->db_path = new_value;
         } else {
-            new_value = str_dup(value);
-            if (new_value) {
-                free(config->db_path);
-                config->db_path = new_value;
-            } else {
-                log_error("Failed to allocate memory for db_path");
-            }
+            log_error("Failed to allocate memory for db_path");
         }
     } else if (strcmp(key, "db_host") == 0) {
         new_value = str_dup(value);
@@ -420,17 +418,15 @@ static void set_config_value(config_t *config, const char *key, const char *valu
     }
     /* Paths */
     else if (strcmp(key, "schema_dir") == 0) {
-        /* Reject obvious path traversal attempts (defense in depth) */
-        if (strstr(value, "..") != NULL) {
-            log_warn("Rejected schema_dir with path traversal sequence: %s", value);
+        /* Taken as written: db_init's validate_schema_dir refuses an absolute path or
+           one with "..", at every start. Refusing it here as well would only fall back
+           to the default without a word */
+        new_value = str_dup(value);
+        if (new_value) {
+            free(config->schema_dir);
+            config->schema_dir = new_value;
         } else {
-            new_value = str_dup(value);
-            if (new_value) {
-                free(config->schema_dir);
-                config->schema_dir = new_value;
-            } else {
-                log_error("Failed to allocate memory for schema_dir");
-            }
+            log_error("Failed to allocate memory for schema_dir");
         }
     }
     /* Database features */

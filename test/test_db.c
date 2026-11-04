@@ -1302,18 +1302,22 @@ static int test_config(void) {
     log_info("  server_host: empty refuses the start, in the file or AUTH_SERVER_HOST (OK)");
 
     /* An empty db_path refuses the start with SQLite, which would open a temporary
-       database; a PostgreSQL configuration doesn't use it */
+       database; a PostgreSQL configuration doesn't use it. Any other path is taken
+       as written, ".." included: falling back to the default would start the server
+       on another database */
     config_t *no_path = config_from("db_path =\n");
     config_t *pg_no_path = config_from("db_type = postgresql\ndb_path =\n");
-    int scoped = !no_path && pg_no_path;
+    config_t *up = config_from("db_path = ../shared/auth.db\n");
+    int scoped = !no_path && pg_no_path && up && strcmp(up->db_path, "../shared/auth.db") == 0;
     config_free(no_path);
     config_free(pg_no_path);
+    config_free(up);
     if (!scoped) {
         log_error("Config: an empty db_path didn't refuse the start with SQLite, or refused "
-                  "it with PostgreSQL");
+                  "it with PostgreSQL, or a path with \"..\" wasn't taken as written");
         return 1;
     }
-    log_info("  db_path: empty refuses the start with SQLite (OK)");
+    log_info("  db_path: empty refuses the start with SQLite; \"..\" is taken as written (OK)");
     log_info("Config tests passed!");
     return 0;
 }

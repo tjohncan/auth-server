@@ -50,8 +50,9 @@ admin_socket_mode = 0600
 # Database — "sqlite" or "postgresql"
 db_type = sqlite
 
-# SQLite: the database file. Empty refuses to start, since SQLite would take it for a
-# temporary database, which keeps nothing.
+# SQLite: the database file, relative to the server's working directory or absolute.
+# Empty refuses to start, since SQLite would take it for a temporary database, which
+# keeps nothing.
 db_path = ./data/auth.db
 
 # PostgreSQL (used when db_type = postgresql)
@@ -64,6 +65,8 @@ db_path = ./data/auth.db
 # If not set, falls back to db_user (SET ROLE becomes a no-op)
 db_owner_role = auth_dbo
 
+# The schema files, relative to the server's working directory: an absolute path, or
+# one with "..", refuses to start.
 schema_dir = ./sql
 
 # Enable history tables for auditing UPDATE/DELETE operations
