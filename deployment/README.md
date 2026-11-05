@@ -64,10 +64,12 @@ For multi-server deployments, use a load balancer with managed certificates inst
 cd deployment
 cp .env.example .env
 # Edit .env with your domain, database settings, etc. The compose file always passes
-# DB_BACKEND, POSTGRES_* and AFFILIATE to the server, as AUTH_DB_* and AUTH_MOTHERSHIP_URL,
-# set in .env or not (unset, each is a default or empty), and a variable wins over
-# auth.conf: set those here, not in auth.conf's db_* keys and mothership_url. The rest,
-# email's settings included, go in auth.conf.
+# DB_BACKEND and POSTGRES_* to the server as AUTH_DB_TYPE, _HOST, _PORT, _NAME, _USER and
+# _PASSWORD, and AFFILIATE as AUTH_MOTHERSHIP_URL. It passes each whether .env sets it or not
+# (unset, each is a default or empty), and a variable wins over auth.conf. So set those here,
+# not in auth.conf's db_type, db_host, db_port, db_name, db_user, db_password and
+# mothership_url. The image also sets AUTH_SERVER_PORT=8080, which compose and nginx expect.
+# The rest go in auth.conf, including email's settings, db_path and db_owner_role.
 
 # The server's own settings, at the project root. The compose file mounts ../auth.conf and
 # ../data; a mount whose source is missing comes up as an empty directory, which the server

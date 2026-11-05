@@ -111,6 +111,12 @@ A deactivated account's username counts as existing: the account keeps it, and c
 reactivated. A bootstrap that fails part-way (a `500`) makes nothing, so the same request can
 be sent again once the cause is fixed.
 
+Reactivating takes the account's `user_id` (`POST /api/admin/users/activate`). Nothing on the
+admin listener finds the id from the name: use the one `POST /api/admin/users` returned when
+the account was made. Alternatively, a resource server allowed to provision users can find it
+by name with `POST /api/rs/users`, which returns an existing account, a deactivated one
+included, rather than making another.
+
 **Request Body**:
 ```json
 {
@@ -148,9 +154,19 @@ be sent again once the cause is fixed.
 {"error": "Organization 'system' already exists. Use a different org_code_name."}
 ```
 
+- **409 Conflict** (the username exists, a deactivated account's included):
+```json
+{"error": "Username 'admin' already exists. Use a different username."}
+```
+
 - **400 Bad Request** (validation error):
 ```json
 {"error": "username and password are required"}
+```
+
+- **500 Internal Server Error** (a step failed part-way; nothing is left made):
+```json
+{"error": "Bootstrap failed"}
 ```
 
 **Creates**:

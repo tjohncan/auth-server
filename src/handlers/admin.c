@@ -52,7 +52,7 @@ int admin_bootstrap(db_handle_t *db,
        and a retry would answer "Organization already exists" until it was removed
        by hand. None of the steps opens a transaction of its own: user_create does
        only for an email address, and bootstrap gives none. The admin password is
-       hashed inside, once, at setup. */
+       hashed inside, once per bootstrap. */
     if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
         log_error("Bootstrap failed: could not begin a transaction");
         return -1;
