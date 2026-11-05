@@ -38,10 +38,8 @@ server {
     ssl_session_timeout 1d;
     ssl_session_cache shared:SSL:50m;
     ssl_session_tickets off;
-    ssl_stapling on;
-    ssl_stapling_verify on;
-    resolver 8.8.8.8 8.8.4.4 valid=300s;
-    resolver_timeout 5s;
+    # No OCSP stapling: Let's Encrypt certificates name no OCSP responder, so
+    # there's nothing to staple, and nginx would only warn about it.
 
     # Security headers (repeated from nginx.conf http block — server-level
     # add_header directives override http-level ones, so we must be explicit)
