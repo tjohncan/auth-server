@@ -527,18 +527,39 @@ function showMFAConfirm(methodId, secret, qrUrl) {
         </form>
     `);
 
-    QRCode.render(qrUrl, document.getElementById('qrCodeContainer'), {
-        size: 240, padding: 2, darkColor: '#ffffff', lightColor: '#2a2a2a', ecLevel: 'H'
-    });
+    /* Level H first, the most damage-tolerant; M holds about twice as much, for a
+       long host and username. A code too long for either is left to the manual
+       entry secret, opened for it. The code form below works either way. */
+    const qrContainer = document.getElementById('qrCodeContainer');
+    let drawn = false;
+    for (const ecLevel of ['H', 'M']) {
+        try {
+            QRCode.render(qrUrl, qrContainer, {
+                size: 240, padding: 2, darkColor: '#ffffff', lightColor: '#2a2a2a', ecLevel
+            });
+            drawn = true;
+            break;
+        } catch (error) {
+            console.warn('QR code at level ' + ecLevel + ': ' + error.message);
+        }
+    }
 
-    document.getElementById('invertQRButton').addEventListener('click', function() {
-        const svg = document.querySelector('#qrCodeContainer svg');
-        const bg = svg.querySelector('rect');
-        const path = svg.querySelector('path');
-        const tmp = bg.getAttribute('fill');
-        bg.setAttribute('fill', path.getAttribute('fill'));
-        path.setAttribute('fill', tmp);
-    });
+    const invertButton = document.getElementById('invertQRButton');
+    if (drawn) {
+        invertButton.addEventListener('click', function() {
+            const svg = qrContainer.querySelector('svg');
+            const bg = svg.querySelector('rect');
+            const path = svg.querySelector('path');
+            const tmp = bg.getAttribute('fill');
+            bg.setAttribute('fill', path.getAttribute('fill'));
+            path.setAttribute('fill', tmp);
+        });
+    } else {
+        qrContainer.textContent = 'This code is too long to draw. Enter the secret below ' +
+            'in your authenticator app instead.';
+        invertButton.parentElement.remove();
+        modal.querySelector('details').open = true;
+    }
 
     setupDigitInputs(document.querySelectorAll('#mfaConfirmForm .totp-digit'));
     attachMFAConfirmHandler('mfaConfirmForm', methodId, close);

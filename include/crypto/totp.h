@@ -74,7 +74,8 @@ int crypto_totp_verify(const char *secret, const char *code, time_t current_time
  * ============================================================================ */
 
 /* Generate otpauth:// URL for QR code enrollment
- * Format: otpauth://totp/Issuer:username?secret=XXX&issuer=Issuer
+ * Format: otpauth://totp/Issuer:username?secret=XXX&issuer=Issuer, or with an
+ * empty username, otpauth://totp/Issuer?secret=XXX&issuer=Issuer
  * Returns: 0 on success, -1 on error */
 int crypto_totp_generate_qr_url(const char *secret, const char *username,
                                  const char *issuer, char *out_url, size_t url_size);
