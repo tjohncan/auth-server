@@ -1286,20 +1286,27 @@ static int test_config(void) {
     }
     log_info("  strict: a value it can't read refuses the start, in the file or AUTH_STRICT (OK)");
 
-    /* An empty server_host refuses the start, from the file or from AUTH_SERVER_HOST:
-       the server's public address is built from it, and an empty text variable is a value */
+    /* An empty server_host refuses the start, from the file or from AUTH_SERVER_HOST,
+       which is trimmed as the file's value is: the server's public address is built
+       from it, and an empty text variable is a value */
     config_t *blank = config_from("server_host =\n");
-    setenv("AUTH_SERVER_HOST", "", 1);
+    setenv("AUTH_SERVER_HOST", "  ", 1);
     config_t *env_blank = config_from("server_host = auth.example.com\n");
+    setenv("AUTH_SERVER_HOST", "auth.example.com ", 1);
+    config_t *padded = config_from("server_host = localhost\n");
     unsetenv("AUTH_SERVER_HOST");
-    refused = !blank && !env_blank;
+    int ok_host = !blank && !env_blank && padded &&
+                  strcmp(padded->public_base_url, "https://auth.example.com") == 0;
     config_free(blank);
     config_free(env_blank);
-    if (!refused) {
-        log_error("Config: an empty server_host didn't refuse the start");
+    config_free(padded);
+    if (!ok_host) {
+        log_error("Config: an empty server_host didn't refuse the start, or AUTH_SERVER_HOST "
+                  "wasn't trimmed");
         return 1;
     }
-    log_info("  server_host: empty refuses the start, in the file or AUTH_SERVER_HOST (OK)");
+    log_info("  server_host: empty refuses the start, in the file or AUTH_SERVER_HOST, which is "
+             "trimmed (OK)");
 
     /* An empty db_path refuses the start with SQLite, which would open a temporary
        database; a PostgreSQL configuration doesn't use it. Any other path is taken

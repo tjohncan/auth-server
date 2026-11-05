@@ -226,9 +226,11 @@ rest go in `auth.conf`. A variable is read as its `auth.conf` key is: a value th
 read is logged as a warning and the setting keeps its value (for `strict`, the server refuses to
 start instead). Set but empty, a variable counts as unset, which is how docker-compose's
 `${VAR:-}` passes one the host didn't set; a text setting is the exception, taking empty as its
-value (an empty `AUTH_ADMIN_SOCKET` means no socket). An empty `server_host`, from the file or
-`AUTH_SERVER_HOST`, refuses the start: the server's public address is built from it. So does
-an empty `db_path` with SQLite, which would otherwise open a temporary database.
+value (an empty `AUTH_ADMIN_SOCKET` means no socket). A text variable is taken as it is, spaces
+included, since a secret's spaces are its own; `AUTH_SERVER_HOST` is the exception, trimmed as
+the file trims every value. An empty `server_host`, from the file or `AUTH_SERVER_HOST`, refuses
+the start: the server's public address is built from it. So does an empty `db_path` with
+SQLite, which would otherwise open a temporary database.
 
 | Environment Variable  | auth.conf key    | Description              | Default        |
 |-----------------------|------------------|--------------------------|----------------|

@@ -791,6 +791,11 @@ static void apply_env_overrides(config_t *config) {
     if (env_value) {
         char *new_value = str_dup(env_value);
         if (new_value) {
+            /* Trimmed, as the file's value is: a host name has no spaces, so one
+               of only spaces is empty, and refused (set_public_base_url), and a
+               trailing one would end up in every URL built from it. The other
+               text variables keep theirs, as a secret's spaces are its own. */
+            trim(new_value);
             free(config->host);
             config->host = new_value;
             log_info("Config override from %s", env_var_name);
