@@ -92,7 +92,8 @@ Lookup tables for valid values.
 **Tables:**
 - `grant_type` - OAuth2 grant type descriptions
 - `client_type` - Public vs confidential client types
-- `code_challenge_method` - PKCE methods (plain, S256)
+- `code_challenge_method` - PKCE methods: the table lists plain and S256, and the server
+  accepts only S256
 - `mfa_method` - Available MFA types (TOTP; SMS reserved for future use)
 
 ### Keys Domain

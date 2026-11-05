@@ -5,13 +5,14 @@
 #include <time.h>
 
 /*
- * JWT (JSON Web Token) for OAuth2 Access Tokens
+ * JWTs (JSON Web Tokens)
  *
- * Implements HS256 (HMAC-SHA256) signed JWTs for OAuth2 access tokens.
+ * Access tokens are ES256 (ECDSA P-256) JWTs, jwt_encode_es256 and
+ * jwt_decode_es256, which resource servers can check against the server's JWKS.
+ * Authorization codes are HS256 (HMAC-SHA256) JWTs, jwt_encode_auth_request and
+ * jwt_decode_auth_request: the server's own, which only it checks, under a secret
+ * it keeps. jwt_encode and jwt_decode are a plain HS256 pair.
  * Format: base64url(header).base64url(payload).base64url(signature)
- *
- * Fixed header: {"alg":"HS256","typ":"JWT"}
- * Payload contains OAuth2 claims (sub, aud, exp, iat, scope, client_id)
  */
 
 /* Maximum sizes for JWT components */
@@ -40,7 +41,7 @@ typedef struct {
 } jwt_claims_t;
 
 /*
- * Create and sign a JWT access token
+ * Create and sign an HS256 JWT
  *
  * Generates a JWT with HS256 signature using provided claims and secret.
  * Sets iat (issued at) to current time if not already set.
@@ -71,7 +72,7 @@ int jwt_encode(const jwt_claims_t *claims,
               char *out_token, size_t token_len);
 
 /*
- * Decode and verify a JWT access token
+ * Decode and verify an HS256 JWT
  *
  * Parses JWT, validates signature, checks expiration, and extracts claims.
  * Returns error if signature invalid or token expired.

@@ -32,11 +32,16 @@ those responsibilities belong to the infrastructure layer in front of it.
 Internal traffic between the proxy and auth-server is unencrypted within the trusted network.
 
 **Rate limiting** is handled by nginx (`limit_req_zone`, configured at 10 req/s per IP with
-burst of 20) or a cloud WAF. This is a deliberate architectural choice: rate limiting at
+burst of 20; and per IP, 10 a minute for sign-ins and recovery codes, `POST /login` and
+`POST /api/user/mfa/recover`, and 30 a minute for `/revoke`) or a cloud WAF. This is a deliberate architectural choice: rate limiting at
 the infrastructure edge is simpler, more efficient, and easier to tune than application-level
 throttling. The server's job is authentication logic, not traffic policing.
 
 ## Quick Start (Local Development)
+
+Run this way, with no `auth.conf`, the server takes its defaults, the published placeholder
+`encryption_key` included: for trying it out, not for keeping data. For anything that
+stays, start from `auth.conf.example`, as the production setup below does.
 
 ```bash
 # From project root

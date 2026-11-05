@@ -998,7 +998,10 @@ doesn't meet the secret rules (`machine_secret_pattern` and the length limits).
 **GET /api/admin/organization-keys** (Dual-auth: the admin listener, or an org key)
 List organization API keys.
 
-Query: `organization_code_name` (required), `limit`, `offset`, `is_active`
+Query: `organization_code_name`, `limit`, `offset`, `is_active`
+
+On the admin listener, `organization_code_name` is required. With an org key it's optional:
+the key names its own organization, and another organization's code name is refused.
 
 Response:
 ```json
@@ -1103,6 +1106,8 @@ Content-Type: application/json
 
 {"message": "Login successful"}
 ```
+
+The cookie's `Max-Age` is `session_ttl_seconds`, 604800 (seven days) by default.
 
 **Success Response — user requires MFA** (200 OK):
 ```http
@@ -3289,6 +3294,9 @@ curl -X GET http://localhost:8080/api/rs/users \
 Link a user to a client. Idempotent — succeeds if already linked.
 
 The client must be linked to the authenticated resource server via `client_resource_server`.
+
+Links can be set up while the client is deactivated, as a client is prepared before it goes
+live: they take effect when the client is reactivated. Removing one works the same way.
 
 **Request Body**:
 ```json

@@ -63,6 +63,9 @@ db_path = ./data/auth.db
 # db_password = CHANGE_ME
 # Schema owner role for SET ROLE during first-run initialization
 # If not set, falls back to db_user (SET ROLE becomes a no-op)
+# Set even while the rest of this block is commented: it's the owner role
+# sql/postgresql/setup_reference.sql makes, so a deployment set up from that file
+# gets its schema owned as intended without touching this line. SQLite ignores it.
 db_owner_role = auth_dbo
 
 # The schema files, relative to the server's working directory: an absolute path, or
@@ -71,6 +74,9 @@ schema_dir = ./sql
 
 # Enable history tables for auditing UPDATE/DELETE operations
 # History tables track changes to tables with 'pin' primary keys in lookup/security schemas
+# On here: an audit trail of every change is worth keeping from the first start, and the
+# cleaner keeps it retention_history_days (below). The test suites run with this file's
+# value too, since CI copies it.
 # Turning this off doesn't remove history already made, nor stop its triggers writing: with
 # every instance stopped, run ./auth-server --drophistory (sql/README.md).
 enable_history_tables = true
