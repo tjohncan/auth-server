@@ -141,9 +141,6 @@ static HttpResponse *rs_error_response(int rc, const char *context) {
 
 HttpResponse *rs_provision_user_handler(const HttpRequest *req) {
 
-    if (req->method != HTTP_POST)
-        return response_method_not_allowed("POST");
-
     rs_auth_t auth;
     HttpResponse *err = rs_authenticate(req, "rs_provision_user", &auth);
     if (err) return err;
@@ -306,9 +303,6 @@ HttpResponse *rs_lookup_user_handler(const HttpRequest *req) {
 
 HttpResponse *rs_link_client_user_handler(const HttpRequest *req) {
 
-    if (req->method != HTTP_POST)
-        return response_method_not_allowed("POST");
-
     rs_auth_t auth;
     HttpResponse *err = rs_authenticate(req, "rs_link_client_user", &auth);
     if (err) return err;
@@ -347,9 +341,6 @@ HttpResponse *rs_link_client_user_handler(const HttpRequest *req) {
 }
 
 HttpResponse *rs_unlink_client_user_handler(const HttpRequest *req) {
-
-    if (req->method != HTTP_DELETE)
-        return response_method_not_allowed("DELETE");
 
     rs_auth_t auth;
     HttpResponse *err = rs_authenticate(req, "rs_unlink_client_user", &auth);

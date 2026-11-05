@@ -2,6 +2,10 @@
 
 HTTP endpoints for the OAuth2 authentication server.
 
+A path the server serves, asked with a method it doesn't take, answers
+`405 {"error": "Method not allowed"}` with an `Allow` header naming the methods it does
+(`HEAD` comes with `GET`). A path it doesn't serve answers `404`.
+
 Any request body that is not form-encoded is checked for JSON string escapes before the
 endpoint runs. A body containing an escape that cannot be decoded (an escaped NUL, a lone
 UTF-16 surrogate, a malformed or unknown escape) is refused with

@@ -1203,10 +1203,6 @@ HttpResponse *revoke_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/x-www-form-urlencoded");
     if (ct_err) return ct_err;
 
-    if (req->method != HTTP_POST) {
-        return response_method_not_allowed("POST");
-    }
-
     /* Get database connection */
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -1332,10 +1328,6 @@ HttpResponse *revoke_handler(const HttpRequest *req) {
 HttpResponse *introspect_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/x-www-form-urlencoded");
     if (ct_err) return ct_err;
-
-    if (req->method != HTTP_POST) {
-        return response_method_not_allowed("POST");
-    }
 
     /* Get database connection */
     db_handle_t *db = db_pool_get_connection();
