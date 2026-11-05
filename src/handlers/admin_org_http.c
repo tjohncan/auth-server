@@ -184,39 +184,6 @@ static HttpResponse *require_auth_context(const HttpRequest *req, const char *op
     return response_json_error(401, "Authentication required");
 }
 
-/*
- * The fields of a request body. read_int_field and read_bool_field return 1 if
- * the field is read into *out, and 0 if it's left out, as json_get_int and
- * json_get_bool count that; read_text_field returns the text (the caller frees
- * it), or NULL if it's left out. A value of another kind ("3600" in quotes, 1.5,
- * 1 for true, 12345 for a name) is neither guessed at nor taken as left out:
- * *bad gets a 400 naming the first such field, which the caller answers before
- * anything else it checks.
- */
-static HttpResponse *field_kind_error(const char *field, const char *kind) {
-    char message[128];
-    snprintf(message, sizeof(message), "%s must be %s", field, kind);
-    return response_json_error(400, message);
-}
-
-static int read_int_field(const char *body, const char *field, int *out, HttpResponse **bad) {
-    int rc = json_get_int(body, field, out);
-    if (rc < 0 && !*bad) *bad = field_kind_error(field, "a whole number");
-    return rc == 0;
-}
-
-static int read_bool_field(const char *body, const char *field, int *out, HttpResponse **bad) {
-    int rc = json_get_bool(body, field, out);
-    if (rc < 0 && !*bad) *bad = field_kind_error(field, "true or false");
-    return rc == 0;
-}
-
-static char *read_text_field(const char *body, const char *field, HttpResponse **bad) {
-    char *text = NULL;
-    if (json_get_text(body, field, &text) < 0 && !*bad) *bad = field_kind_error(field, "text");
-    return text;
-}
-
 /* ============================================================================
  * Organizations Endpoints
  * ========================================================================== */

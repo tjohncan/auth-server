@@ -72,6 +72,10 @@ It exits 0 for a 2xx answer, 1 for any other (its status on standard error), and
 couldn't be made. curl works as well:
 `curl --unix-socket ./data/admin.sock -H 'Content-Type: application/json' -d @body.json http://localhost/api/admin/...`
 
+Request bodies here follow the same rule as in the Organization Management API below. A field
+of another kind, such as `12345` for a name or secret, is refused with `400`, naming the field.
+A field sent as `null` counts as left out, so it takes its default, where it has one.
+
 ### Security Model
 
 - **Access Control**: a listener of their own. On the socket, its file's mode decides who may

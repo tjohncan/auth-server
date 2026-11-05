@@ -121,6 +121,19 @@ HttpResponse *response_json_ok(const char *json);
 /* Create error response with JSON error format: {"error":"message"} */
 HttpResponse *response_json_error(int status_code, const char *message);
 
+/*
+ * The fields of an admin request body, on either listener. read_int_field and
+ * read_bool_field return 1 if the field is read into *out, and 0 if it's left
+ * out, as json_get_int and json_get_bool count that; read_text_field returns the
+ * text (the caller frees it), or NULL if it's left out. A value of another kind
+ * ("3600" in quotes, 1.5, 1 for true, 12345 for a name) is neither guessed at nor
+ * taken as left out: *bad gets a 400 naming the first such field, which the
+ * caller answers before anything else it checks.
+ */
+int read_int_field(const char *body, const char *field, int *out, HttpResponse **bad);
+int read_bool_field(const char *body, const char *field, int *out, HttpResponse **bad);
+char *read_text_field(const char *body, const char *field, HttpResponse **bad);
+
 /* Create 405 Method Not Allowed with Allow header (RFC 7231 Section 6.5.5) */
 HttpResponse *response_method_not_allowed(const char *allowed);
 

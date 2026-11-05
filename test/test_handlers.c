@@ -799,15 +799,15 @@ static int test_client_credentials(void) {
 }
 
 /*
- * A client field sent as another kind of value ("3600" in quotes, 12345 for a
- * name) is refused, naming the field, on create and on update. Taken as left out,
- * it would give the client no key-age limit, or no MFA, or keep its old name, and
- * answer 200 for whatever else the body changed. A flag sent as null counts as
- * left out: read as false, an update that doesn't mean to touch MFA would switch
- * it off.
+ * A field sent as another kind of value ("3600" in quotes, 12345 for a name) is
+ * refused, naming the field: a client's on create and on update, and the admin
+ * listener's alike. Taken as left out, it would give the client no key-age
+ * limit, or no MFA, or keep its old name, and answer 200 for whatever else the
+ * body changed. A flag sent as null counts as left out: read as false, an update
+ * that doesn't mean to touch MFA would switch it off.
  */
-static int test_client_field_kinds(void) {
-    printf("\n=== A client field of the wrong kind ===\n");
+static int test_field_kinds(void) {
+    printf("\n=== A field of the wrong kind ===\n");
 
     /* 1. Create: refused, and nothing made, so the code name is still free */
     const char *sent[2][2] = {
@@ -874,7 +874,15 @@ static int test_client_field_kinds(void) {
     reply_free(&r);
     if (!kept) FAIL("a refused update with display_name 12345 changed the client");
 
-    printf("✓ a client field of the wrong kind is refused, and null leaves one as it is\n");
+    /* 5. The admin listener's bodies too: an organization key's secret as a number,
+          which a generated secret would otherwise stand in for */
+    r = admin_port("POST", "/api/admin/organization-keys", NULL,
+                   "{\"organization_code_name\":\"system\",\"secret\":12345678}");
+    refused = r.status == 400 && strstr(r.body, "secret must be text");
+    reply_free(&r);
+    if (!refused) FAIL("an organization key with a numeric secret wasn't refused naming it");
+
+    printf("✓ a field of the wrong kind is refused, and null leaves one as it is\n");
     return 0;
 }
 
@@ -2084,7 +2092,7 @@ int main(void) {
 
     int failed = setup() || test_logout() || test_authorization_code_flow() ||
                  test_redirect_uris() || test_issuer() ||
-                 test_client_credentials() || test_client_field_kinds() ||
+                 test_client_credentials() || test_field_kinds() ||
                  test_mfa_gates() || test_mfa_daily_cap() ||
                  test_localhost_only() || test_admin_socket_caller() ||
                  test_account_recovery() || test_usernames() || test_failed_bootstrap() ||

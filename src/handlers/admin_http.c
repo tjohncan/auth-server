@@ -119,22 +119,25 @@ HttpResponse *admin_bootstrap_handler(const HttpRequest *req) {
         return response_json_error(400, "Request body required");
     }
 
-    /* Extract parameters with defaults */
-    char *org_code_name = json_get_string(req->body, "org_code_name");
+    /* Extract parameters; the organization's names have defaults when left out,
+       but one of another kind is refused, not replaced by the default */
+    HttpResponse *resp = NULL, *bad = NULL;
+    char *org_code_name = read_text_field(req->body, "org_code_name", &bad);
+    char *org_display_name = read_text_field(req->body, "org_display_name", &bad);
+    char *username = read_text_field(req->body, "username", &bad);
+    char *password = read_text_field(req->body, "password", &bad);
+    if (bad) {
+        resp = bad;
+        goto cleanup;
+    }
     if (!org_code_name) {
         org_code_name = str_dup("system");
     }
-
-    char *org_display_name = json_get_string(req->body, "org_display_name");
     if (!org_display_name) {
         org_display_name = str_dup("System Organization");
     }
 
-    char *username = json_get_string(req->body, "username");
-    char *password = json_get_string(req->body, "password");
-
     /* Validate required fields */
-    HttpResponse *resp = NULL;
     char validation_error[256];
 
     if (!username || !password) {
@@ -236,10 +239,14 @@ HttpResponse *admin_create_organization_handler(const HttpRequest *req) {
         return response_json_error(400, "Request body required");
     }
 
-    HttpResponse *resp = NULL;
-    char *code_name = json_get_string(req->body, "code_name");
-    char *display_name = json_get_string(req->body, "display_name");
-    char *note = json_get_string(req->body, "note");
+    HttpResponse *resp = NULL, *bad = NULL;
+    char *code_name = read_text_field(req->body, "code_name", &bad);
+    char *display_name = read_text_field(req->body, "display_name", &bad);
+    char *note = read_text_field(req->body, "note", &bad);
+    if (bad) {
+        resp = bad;
+        goto cleanup;
+    }
 
     /* Validate required fields */
     if (!code_name || !*code_name || !display_name || !*display_name) {
@@ -317,10 +324,14 @@ HttpResponse *admin_create_user_handler(const HttpRequest *req) {
         return response_json_error(400, "Request body required");
     }
 
-    HttpResponse *resp = NULL;
-    char *username = json_get_string(req->body, "username");
-    char *email = json_get_string(req->body, "email");
-    char *password = json_get_string(req->body, "password");
+    HttpResponse *resp = NULL, *bad = NULL;
+    char *username = read_text_field(req->body, "username", &bad);
+    char *email = read_text_field(req->body, "email", &bad);
+    char *password = read_text_field(req->body, "password", &bad);
+    if (bad) {
+        resp = bad;
+        goto cleanup;
+    }
 
     /* Validate required fields. A username is one: an address given here goes on
        the account unverified, and nothing sends it a link, so it can't be signed
@@ -402,9 +413,13 @@ HttpResponse *admin_make_org_admin_handler(const HttpRequest *req) {
         return response_json_error(400, "Request body required");
     }
 
-    HttpResponse *resp = NULL;
-    char *username = json_get_string(req->body, "username");
-    char *org_code_name = json_get_string(req->body, "org_code_name");
+    HttpResponse *resp = NULL, *bad = NULL;
+    char *username = read_text_field(req->body, "username", &bad);
+    char *org_code_name = read_text_field(req->body, "org_code_name", &bad);
+    if (bad) {
+        resp = bad;
+        goto cleanup;
+    }
 
     /* Validate required fields */
     if (!username || !org_code_name) {
@@ -546,11 +561,15 @@ HttpResponse *admin_create_organization_key_handler(const HttpRequest *req) {
         return response_json_error(400, "Request body required");
     }
 
-    HttpResponse *resp = NULL;
-    char *org_code_name = json_get_string(req->body, "organization_code_name");
-    char *user_secret = json_get_string(req->body, "secret");
-    char *note = json_get_string(req->body, "note");
+    HttpResponse *resp = NULL, *bad = NULL;
+    char *org_code_name = read_text_field(req->body, "organization_code_name", &bad);
+    char *user_secret = read_text_field(req->body, "secret", &bad);
+    char *note = read_text_field(req->body, "note", &bad);
     char generated_secret[64] = {0};
+    if (bad) {
+        resp = bad;
+        goto cleanup;
+    }
 
     /* Validate required fields */
     if (!org_code_name) {
@@ -836,7 +855,9 @@ static HttpResponse *server_user_request(const HttpRequest *req, db_handle_t **o
         return response_json_error(500, "Internal server error");
     }
 
-    char *user_id_str = json_get_string(req->body ? req->body : "", "user_id");
+    HttpResponse *bad = NULL;
+    char *user_id_str = read_text_field(req->body ? req->body : "", "user_id", &bad);
+    if (bad) return bad;
     if (!user_id_str)
         return response_json_error(400, "user_id required");
 
@@ -904,7 +925,9 @@ HttpResponse *server_set_user_password_handler(const HttpRequest *req) {
     HttpResponse *req_err = server_user_request(req, &db, user_id);
     if (req_err) return req_err;
 
-    char *password = json_get_string(req->body ? req->body : "", "password");
+    HttpResponse *bad = NULL;
+    char *password = read_text_field(req->body ? req->body : "", "password", &bad);
+    if (bad) return bad;
     if (!password) return response_json_error(400, "password required");
 
     char validation_error[256];
@@ -996,7 +1019,9 @@ HttpResponse *server_delete_user_email_handler(const HttpRequest *req) {
     HttpResponse *req_err = server_user_request(req, &db, user_id);
     if (req_err) return req_err;
 
-    char *email = json_get_string(req->body ? req->body : "", "email");
+    HttpResponse *bad = NULL;
+    char *email = read_text_field(req->body ? req->body : "", "email", &bad);
+    if (bad) return bad;
     if (!email) return response_json_error(400, "email required");
 
     user_identity_t user;
