@@ -1044,21 +1044,6 @@ int oauth_client_credentials(db_handle_t *db,
  * Handler wrappers for authentication, revocation, and introspection
  * ========================================================================== */
 
-int oauth_handler_client_authenticate(db_handle_t *db,
-                                       const unsigned char *client_id,
-                                       const unsigned char *client_key_id,
-                                       const char *secret,
-                                       long long *out_pin,
-                                       long long *out_key_pin) {
-    if (!db || !client_id || !client_key_id || !secret || !out_pin) {
-        log_error("Invalid arguments to oauth_handler_client_authenticate");
-        return -1;
-    }
-
-    return oauth_client_authenticate(db, client_id, client_key_id, secret,
-                                      out_pin, out_key_pin);
-}
-
 int oauth_handler_resource_server_authenticate(db_handle_t *db,
                                                 const unsigned char *resource_server_id,
                                                 const unsigned char *resource_server_key_id,

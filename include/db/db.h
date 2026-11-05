@@ -76,16 +76,6 @@ int db_query(db_handle_t *db, db_result_t **result, const char *sql, ...)
 int db_result_row_count(db_result_t *result);
 
 /*
- * Get number of columns in result
- */
-int db_result_column_count(db_result_t *result);
-
-/*
- * Get column name by index (0-based)
- */
-const char *db_result_column_name(db_result_t *result, int col_index);
-
-/*
  * Get value at row/column (0-based)
  * Returns NULL if value is NULL or indices out of bounds
  */
@@ -95,11 +85,6 @@ const char *db_result_get(db_result_t *result, int row, int col);
  * Free result set
  */
 void db_result_free(db_result_t *result);
-
-/*
- * Get last error message
- */
-const char *db_error(db_handle_t *db);
 
 /* ============================================================================
  * Prepared Statement API - Safe parameterized queries

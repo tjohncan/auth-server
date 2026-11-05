@@ -11,14 +11,6 @@
  */
 
 /*
- * Check if active client with code_name exists in organization
- *
- * Returns: 1 if exists, 0 if not exists, -1 on error
- */
-int client_code_name_exists(db_handle_t *db, const char *org_code_name,
-                            const char *code_name);
-
-/*
  * Create client (bootstrap use)
  *
  * Creates client record within an organization.

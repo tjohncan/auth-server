@@ -9,41 +9,6 @@
 #include <stdio.h>
 #include <string.h>
 
-int client_code_name_exists(db_handle_t *db, const char *org_code_name,
-                            const char *code_name) {
-    if (!db || !org_code_name || !code_name) {
-        log_error("Invalid arguments to client_code_name_exists");
-        return -1;
-    }
-
-    const char *sql =
-        "SELECT 1 FROM " TBL_CLIENT " A "
-        "JOIN " TBL_ORGANIZATION " B ON A.organization_pin = B.pin "
-        "WHERE B.code_name = " P"1 AND A.code_name = " P"2 AND A.is_active = " BOOL_TRUE " "
-        "LIMIT 1";
-
-    db_stmt_t *stmt = NULL;
-    if (db_prepare(db, &stmt, sql) != 0) {
-        log_error("Failed to prepare client_code_name_exists statement");
-        return -1;
-    }
-
-    db_bind_text(stmt, 1, org_code_name, -1);
-    db_bind_text(stmt, 2, code_name, -1);
-
-    int rc = db_step(stmt);
-    db_finalize(stmt);
-
-    if (rc == DB_ROW) {
-        return 1;  /* Exists */
-    } else if (rc == DB_DONE) {
-        return 0;  /* Does not exist */
-    } else {
-        log_error("Error checking client code_name existence");
-        return -1;
-    }
-}
-
 int client_create_bootstrap(db_handle_t *db, const char *org_code_name,
                              const char *code_name, const char *display_name,
                              const char *client_type, const char *grant_type,

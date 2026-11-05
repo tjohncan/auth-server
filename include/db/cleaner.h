@@ -40,11 +40,6 @@ typedef struct {
 } cleaner_config_t;
 
 /*
- * Initialize cleaner config with defaults
- */
-void cleaner_config_defaults(cleaner_config_t *config);
-
-/*
  * Load cleaner config from main config_t structure
  * Extracts cleaner-specific settings from the global config
  */

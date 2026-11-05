@@ -38,7 +38,6 @@ struct db_handle_t {
 struct db_result_t {
     int row_count;
     int column_count;
-    char **column_names;  /* Array of column names */
     char ***data;         /* 2D array: data[row][col] */
 };
 
@@ -187,14 +186,6 @@ static void cleanup_partial_result(db_result_t *res, char ***temp_data,
         free(temp_data);
     }
 
-    /* Free column names */
-    if (res->column_names) {
-        for (int i = 0; i < col_count; i++) {
-            free(res->column_names[i]);
-        }
-        free(res->column_names);
-    }
-
     free(res);
 }
 
@@ -231,26 +222,6 @@ static int sqlite_query(db_handle_t *db, db_result_t **result, const char *sql) 
 
     res->column_count = col_count;
     res->row_count = 0;
-
-    /* Store column names */
-    res->column_names = calloc(col_count, sizeof(char *));
-    if (!res->column_names) {
-        log_error("Failed to allocate column names");
-        free(res);
-        sqlite3_finalize(stmt);
-        return -1;
-    }
-
-    for (int i = 0; i < col_count; i++) {
-        const char *name = sqlite3_column_name(stmt, i);
-        res->column_names[i] = str_dup(name ? name : "");
-        if (!res->column_names[i]) {
-            log_error("Failed to duplicate column name at index %d", i);
-            cleanup_partial_result(res, NULL, 0, col_count);
-            sqlite3_finalize(stmt);
-            return -1;
-        }
-    }
 
     /* Count rows first */
     int capacity = 16;  /* Initial capacity */
@@ -789,32 +760,10 @@ static int pg_query(db_handle_t *db, const char *sql, db_result_t **out) {
     result->row_count = row_count;
     result->column_count = col_count;
 
-    /* Column names */
-    result->column_names = calloc(col_count, sizeof(char *));
-    if (!result->column_names) {
-        log_error("Failed to allocate column names");
-        free(result);
-        PQclear(pg_result);
-        return -1;
-    }
-
-    for (int i = 0; i < col_count; i++) {
-        result->column_names[i] = str_dup(PQfname(pg_result, i));
-        if (!result->column_names[i]) {
-            for (int j = 0; j < i; j++) free(result->column_names[j]);
-            free(result->column_names);
-            free(result);
-            PQclear(pg_result);
-            return -1;
-        }
-    }
-
     /* Row data */
     if (row_count > 0) {
         result->data = calloc(row_count, sizeof(char **));
         if (!result->data) {
-            for (int i = 0; i < col_count; i++) free(result->column_names[i]);
-            free(result->column_names);
             free(result);
             PQclear(pg_result);
             return -1;
@@ -1595,17 +1544,6 @@ int db_result_row_count(db_result_t *result) {
     return result ? result->row_count : 0;
 }
 
-int db_result_column_count(db_result_t *result) {
-    return result ? result->column_count : 0;
-}
-
-const char *db_result_column_name(db_result_t *result, int col_index) {
-    if (!result || col_index < 0 || col_index >= result->column_count) {
-        return NULL;
-    }
-    return result->column_names[col_index];
-}
-
 const char *db_result_get(db_result_t *result, int row, int col) {
     if (!result || row < 0 || row >= result->row_count ||
         col < 0 || col >= result->column_count) {
@@ -1632,19 +1570,7 @@ void db_result_free(db_result_t *result) {
         free(result->data);
     }
 
-    /* Free column names */
-    if (result->column_names) {
-        for (int i = 0; i < result->column_count; i++) {
-            free(result->column_names[i]);
-        }
-        free(result->column_names);
-    }
-
     free(result);
-}
-
-const char *db_error(db_handle_t *db) {
-    return db ? db->error_msg : "No database handle";
 }
 
 /* ============================================================================

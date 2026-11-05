@@ -67,23 +67,6 @@ static int cleaner_has_room(const char *table_name) {
 }
 
 /*
- * Default config values
- */
-void cleaner_config_defaults(cleaner_config_t *config) {
-    config->db_type = DB_TYPE_SQLITE;
-    config->connection_string = NULL;
-    config->enabled = 1;
-    config->interval_seconds = 10;
-    config->batch_size = 1000;
-    config->sqlite_vacuum_pages = 100;
-    config->postgres_vacuum_enabled = 1;
-    config->retention_usage_days = 60;
-    config->retention_history_days = 90;
-    config->retention_sessions_grace_days = 8;
-    config->retention_tokens_grace_days = 8;
-}
-
-/*
  * Load cleaner config from main config
  */
 void cleaner_config_from_main_config(cleaner_config_t *cleaner_cfg,

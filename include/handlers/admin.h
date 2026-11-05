@@ -154,28 +154,6 @@ int admin_update_organization(db_handle_t *db, long long user_account_pin,
  * RESOURCE SERVER OPERATIONS
  * ========================================================================== */
 
-/*
- * Create resource server
- *
- * Validates code_name and address uniqueness within org, then creates.
- *
- * Parameters:
- *   db            - Database handle
- *   org_code_name - Organization code name (must exist)
- *   code_name     - Unique resource server code name within org
- *   display_name  - Human-readable name
- *   address       - API base URL
- *   note          - Optional description (can be NULL)
- *
- * Returns: 0 on success, -1 on error
- */
-int admin_create_resource_server_bootstrap(db_handle_t *db,
-                                            const char *org_code_name,
-                                            const char *code_name,
-                                            const char *display_name,
-                                            const char *address,
-                                            const char *note);
-
 typedef resource_server_data_t admin_resource_server_t;
 
 int admin_list_resource_servers(db_handle_t *db, long long user_account_pin,
@@ -221,47 +199,6 @@ int admin_update_resource_server(db_handle_t *db, long long user_account_pin,
 /* ============================================================================
  * CLIENT OPERATIONS
  * ========================================================================== */
-
-/*
- * Create client (bootstrap use)
- *
- * Validates code_name uniqueness within org, then creates client.
- * Full parameter list for all possible client configurations.
- *
- * Parameters:
- *   db                          - Database handle
- *   org_code_name               - Organization code name (must exist)
- *   code_name                   - Unique client code name within org
- *   display_name                - Human-readable name
- *   client_type                 - "public" or "confidential"
- *   grant_type                  - "authorization_code" or "client_credentials"
- *   note                        - Optional description (can be NULL)
- *   require_mfa                 - 1 to require MFA, 0 otherwise
- *   access_token_ttl_seconds    - Access token lifetime
- *   issue_refresh_tokens        - 1 to issue refresh tokens, 0 otherwise
- *   refresh_token_ttl_seconds   - Refresh token lifetime (use -1 for NULL)
- *   maximum_session_seconds     - Maximum session duration (use -1 for NULL)
- *   secret_rotation_seconds     - Secret rotation interval (use -1 for NULL)
- *   is_universal                - 1 if universal client, 0 otherwise
- *   out_client_id               - Output: 16-byte client UUID
- *
- * Returns: 0 on success, -1 on error
- */
-int admin_create_client_bootstrap(db_handle_t *db,
-                                   const char *org_code_name,
-                                   const char *code_name,
-                                   const char *display_name,
-                                   const char *client_type,
-                                   const char *grant_type,
-                                   const char *note,
-                                   int require_mfa,
-                                   int access_token_ttl_seconds,
-                                   int issue_refresh_tokens,
-                                   int refresh_token_ttl_seconds,
-                                   int maximum_session_seconds,
-                                   int secret_rotation_seconds,
-                                   int is_universal,
-                                   unsigned char *out_client_id);
 
 /*
  * Add redirect URI to client (bootstrap use)

@@ -11,22 +11,6 @@
  */
 
 /*
- * Check if active resource server with code_name exists in organization
- *
- * Returns: 1 if exists, 0 if not exists, -1 on error
- */
-int resource_server_code_name_exists(db_handle_t *db, const char *org_code_name,
-                                     const char *code_name);
-
-/*
- * Check if active resource server with address exists in organization
- *
- * Returns: 1 if exists, 0 if not exists, -1 on error
- */
-int resource_server_address_exists(db_handle_t *db, const char *org_code_name,
-                                   const char *address);
-
-/*
  * Create resource server (bootstrap use)
  *
  * Creates resource_server record within an organization.
