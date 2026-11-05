@@ -15,9 +15,17 @@
  * Load all template files from directory into memory.
  * Called once at startup before forking workers.
  *
- * Returns: 0 on success, -1 on error
+ * Returns: 0 on success, -1 if the directory can't be read
  */
 int template_init(const char *templates_dir);
+
+/*
+ * Whether a template was loaded, by its name under the directory
+ * (e.g. "pages/verify-email.html"). For use after template_init.
+ *
+ * Returns: 1 if it was, 0 if not
+ */
+int template_exists(const char *name);
 
 /*
  * Render a template with placeholder substitutions.

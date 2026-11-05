@@ -414,6 +414,56 @@ static void setup_signal_handlers(void) {
 }
 
 /*
+ * The templates this build renders. A missing one would answer 500 at the
+ * first request that needs it, so the start is refused instead. A template the
+ * code comes to render belongs here too; one left off is simply not checked.
+ */
+static const char *const rendered_templates[] = {
+    "pages/accept-invitation.html",
+    "pages/accept-invitation-error.html",
+    "pages/accept-invitation-invalid.html",
+    "pages/accept-invitation-success.html",
+#ifdef EMAIL_SUPPORT
+    "pages/passwordless-login.html",
+    "pages/passwordless-login-invalid.html",
+    "pages/request-password-reset.html",
+    "pages/request-passwordless-login.html",
+    "pages/reset-password.html",
+    "pages/reset-password-error.html",
+    "pages/reset-password-invalid.html",
+    "pages/reset-password-success.html",
+    "pages/verify-email.html",
+    "pages/verify-email-error.html",
+    "pages/verify-email-invalid.html",
+    "pages/verify-email-success.html",
+    "emails/invitation.html",
+    "emails/invitation.txt",
+    "emails/passwordless.html",
+    "emails/passwordless.txt",
+    "emails/reset.html",
+    "emails/reset.txt",
+    "emails/verify.html",
+    "emails/verify.txt",
+#endif
+};
+
+/* How many of rendered_templates weren't loaded from templates_dir, each named */
+static int missing_templates(const char *templates_dir) {
+    int missing = 0;
+    for (size_t i = 0; i < sizeof(rendered_templates) / sizeof(rendered_templates[0]); i++) {
+        if (!template_exists(rendered_templates[i])) {
+            log_error("Template missing: %s/%s", templates_dir, rendered_templates[i]);
+            missing++;
+        }
+    }
+    if (missing > 0) {
+        log_error("%d template%s this build renders %s missing, so the server won't start",
+                  missing, missing == 1 ? "" : "s", missing == 1 ? "is" : "are");
+    }
+    return missing;
+}
+
+/*
  * Router-based HTTP request handler
  */
 static int router_request_handler(Connection *conn,
@@ -1107,8 +1157,14 @@ int main(int argc, char **argv) {
     /* Register static files from ./static/ directory */
     register_static_files(router, config);
 
-    /* Load templates from ./templates/ directory */
-    template_init("./templates");
+    /* Load templates from ./templates/ directory: every one this build renders */
+    if (template_init("./templates") != 0 || missing_templates("./templates") != 0) {
+        router_destroy(router);
+        db_pool_shutdown();
+        encrypt_cleanup();
+        config_free(config);
+        return 1;
+    }
 
     /* Configure event loop (use resolved num_workers) */
     EventLoopConfig event_config = {
