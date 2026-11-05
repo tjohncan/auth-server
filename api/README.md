@@ -2839,7 +2839,7 @@ recovery codes are generated and returned (shown once — user must save them).
 
 **Notes**:
 - Recovery codes (10 × 20-char hex) are only returned on first confirmed method. Subsequent enrollments reuse the existing set.
-- Caller must free/discard recovery codes after displaying — they cannot be retrieved again (only masked versions available).
+- Caller must free/discard recovery codes after displaying — they cannot be retrieved again (`GET /api/user/mfa/recovery-codes` lists their last four characters).
 
 ---
 
@@ -2954,6 +2954,34 @@ Delete an MFA method. The `id` query parameter is the 32-char hex method UUID.
 **Example**:
 ```bash
 curl -X DELETE "http://localhost:8080/api/user/mfa/methods?id=a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4" \
+  -H "Cookie: __Host-session=<token>"
+```
+
+---
+
+### GET /api/user/mfa/recovery-codes
+
+The caller's own recovery codes, masked: the last four characters of each code in the active
+set, and whether it's been used, in the order they were made. The whole codes are shown once,
+when they're made, and only their hashes are kept. The session picks the account and the
+request names none, so no one can list another account's codes. An account with MFA must have
+completed the MFA step in this session, as for the other factor-management endpoints.
+
+**Success Response** (200 OK):
+```json
+{
+  "recovery_codes": [
+    {"last4": "c9d0", "used": false},
+    {"last4": "7e1f", "used": true}
+  ]
+}
+```
+
+An account without recovery codes gets an empty list.
+
+**Example**:
+```bash
+curl http://localhost:8080/api/user/mfa/recovery-codes \
   -H "Cookie: __Host-session=<token>"
 ```
 

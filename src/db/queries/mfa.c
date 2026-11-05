@@ -876,92 +876,55 @@ int recovery_code_set_revoke(db_handle_t *db, const unsigned char *set_id) {
 
 int recovery_code_get_masked_list(db_handle_t *db,
                                    long long user_account_pin,
-                                   char ***out_masked_codes,
+                                   recovery_code_masked_t **out_codes,
                                    int *out_count) {
-    if (!db || !out_masked_codes || !out_count) {
+    if (!db || !out_codes || !out_count) {
         log_error("Invalid arguments to recovery_code_get_masked_list");
         return -1;
     }
 
-    /* Get active recovery code set */
-    recovery_code_set_t set;
-    int result = recovery_code_set_get_active(db, user_account_pin, &set);
+    *out_codes = NULL;
+    *out_count = 0;
 
-    if (result != 0) {
-        log_debug("No active recovery code set found");
-        *out_masked_codes = NULL;
-        *out_count = 0;
-        return 0;  /* No active set - not an error */
-    }
-
-    /* Get masked codes (plaintext_last4 column) */
+    /* The account's active set: user_account_pin picks it, and an account has
+       one active set at most (uix_recovery_code_set_user_active) */
     const char *sql =
         "SELECT rc.plaintext_last4, rc.is_used "
         "FROM " TBL_RECOVERY_CODE " rc "
-        "INNER JOIN " TBL_RECOVERY_CODE_SET " rcs ON rc.recovery_code_set_pin = rcs.pin "
-        "WHERE rcs.id = " P"1 "
-        "ORDER BY rc.pin ASC";
+        "JOIN " TBL_RECOVERY_CODE_SET " rcs ON rcs.pin = rc.recovery_code_set_pin "
+        "WHERE rcs.user_account_pin = " P"1 "
+        "AND rcs.is_active = " BOOL_TRUE " "
+        "ORDER BY rc.pin";
 
     db_stmt_t *stmt = NULL;
     if (db_prepare(db, &stmt, sql) != 0) {
         log_error("Failed to prepare recovery_code_get_masked_list statement");
-        OPENSSL_cleanse(&set, sizeof(set));
         return -1;
     }
 
-    db_bind_blob(stmt, 1, set.id, 16);
-    OPENSSL_cleanse(&set, sizeof(set));
+    db_bind_int64(stmt, 1, user_account_pin);
 
-    /* Collect masked codes */
+    recovery_code_masked_t *codes = NULL;
     int count = 0;
-    int capacity = 10;
-    char **masked_codes = malloc(capacity * sizeof(char *));
-    if (!masked_codes) {
-        log_error("Failed to allocate memory for masked codes list");
-        db_finalize(stmt);
-        return -1;
-    }
-
+    int capacity = 0;
     int rc;
     while ((rc = db_step(stmt)) == DB_ROW) {
-        /* Resize array if needed */
-        if (count >= capacity) {
-            capacity *= 2;
-            char **new_codes = realloc(masked_codes, capacity * sizeof(char *));
-            if (!new_codes) {
-                log_error("Failed to reallocate memory for masked codes list");
-                for (int i = 0; i < count; i++) {
-                    free(masked_codes[i]);
-                }
-                free(masked_codes);
+        if (count == capacity) {
+            int grown = capacity ? capacity * 2 : 16;
+            recovery_code_masked_t *bigger = realloc(codes, (size_t)grown * sizeof(*codes));
+            if (!bigger) {
+                log_error("Failed to allocate memory for masked codes list");
+                free(codes);
                 db_finalize(stmt);
                 return -1;
             }
-            masked_codes = new_codes;
+            codes = bigger;
+            capacity = grown;
         }
 
         const char *last4 = db_column_text(stmt, 0);
-        int is_used = db_column_int(stmt, 1);
-
-        /* Format: "********-last4 (used)" or "********-last4" */
-        char masked[32];
-        if (is_used) {
-            snprintf(masked, sizeof(masked), "********-%s (used)", last4);
-        } else {
-            snprintf(masked, sizeof(masked), "********-%s", last4);
-        }
-
-        masked_codes[count] = str_dup(masked);
-        if (!masked_codes[count]) {
-            log_error("Failed to allocate memory for masked code string");
-            for (int i = 0; i < count; i++) {
-                free(masked_codes[i]);
-            }
-            free(masked_codes);
-            db_finalize(stmt);
-            return -1;
-        }
-
+        str_copy(codes[count].last4, sizeof(codes[count].last4), last4 ? last4 : "");
+        codes[count].is_used = db_column_int(stmt, 1);
         count++;
     }
 
@@ -969,14 +932,11 @@ int recovery_code_get_masked_list(db_handle_t *db,
 
     if (rc != DB_DONE) {
         log_error("Error listing recovery codes");
-        for (int i = 0; i < count; i++) {
-            free(masked_codes[i]);
-        }
-        free(masked_codes);
+        free(codes);
         return -1;
     }
 
-    *out_masked_codes = masked_codes;
+    *out_codes = codes;
     *out_count = count;
     return 0;
 }

@@ -84,6 +84,7 @@ void register_routes(Router *router) {
     router_add(router, HTTP_POST, "/api/user/mfa/recover", mfa_recover_handler);
     router_add(router, HTTP_GET, "/api/user/mfa/methods", mfa_list_methods_handler);
     router_add(router, HTTP_DELETE, "/api/user/mfa/methods", mfa_delete_method_handler);
+    router_add(router, HTTP_GET, "/api/user/mfa/recovery-codes", mfa_list_recovery_codes_handler);
     router_add(router, HTTP_POST, "/api/user/mfa/recovery-codes/regenerate", mfa_regenerate_recovery_codes_handler);
     router_add(router, HTTP_POST, "/api/user/mfa/require", mfa_set_require_handler);
     router_add(router, HTTP_GET, "/authorize", authorize_handler);

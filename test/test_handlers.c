@@ -153,6 +153,25 @@ static int field(const Reply *r, const char *key, char *out, size_t out_size) {
     return 0;
 }
 
+/* The strings of a JSON array of plain strings, as the server writes one (no spaces,
+   no escapes), at most max of them: the count, or -1 if there's no such array */
+static int string_array(const char *body, const char *key, char out[][32], int max) {
+    char start[64];
+    snprintf(start, sizeof(start), "\"%s\":[", key);
+    const char *p = strstr(body, start);
+    if (!p) return -1;
+    p += strlen(start);
+    int n = 0;
+    while (*p == '"') {
+        const char *end = strchr(p + 1, '"');
+        if (!end || n == max || end - p - 1 >= 32) return -1;
+        snprintf(out[n++], 32, "%.*s", (int)(end - p - 1), p + 1);
+        p = end + 1;
+        if (*p == ',') p++;
+    }
+    return *p == ']' ? n : -1;
+}
+
 /* First column of a one-row query, as text */
 static int query_text(const char *sql, char *out, size_t out_size) {
     db_stmt_t *stmt = NULL;
@@ -1012,8 +1031,8 @@ static int totp_now(const char *secret, char *code, size_t size) {
 /*
  * Once a user has a factor, managing factors takes that factor, whatever the
  * require preference says, so a password alone can't add, remove or replace
- * one. With require on, the user's own endpoints and the admin API refuse a
- * session that hasn't completed MFA.
+ * one, or list its recovery codes. With require on, the user's own endpoints
+ * and the admin API refuse a session that hasn't completed MFA.
  */
 static int test_mfa_gates(void) {
     printf("\n=== MFA gates ===\n");
@@ -1045,28 +1064,34 @@ static int test_mfa_gates(void) {
     snprintf(json, sizeof(json), "{\"method_id\":\"%s\",\"code\":\"%s\"}", method, code);
     r = post_json("/api/user/mfa/totp/confirm", first, json);
     if (r.status != 200) FAIL("TOTP confirm answered %d", r.status);
+    /* The recovery codes a first method gives, for step 6 */
+    char codes[16][32];
+    int code_count = string_array(r.body, "recovery_codes", codes, 16);
     reply_free(&r);
+    if (code_count <= 0) FAIL("the first method's confirm gave no recovery codes");
 
     /* 1. Enrolled, require off, a password-only session: every factor-management
           endpoint wants the factor first */
     if (login("mfa-user", "mfa user password", second, sizeof(second)) != 0) FAIL("second sign-in");
     char target[128];
     snprintf(target, sizeof(target), "/api/user/mfa/methods?id=%s", method);
-    Reply gated[5] = {
+    Reply gated[6] = {
         post_json("/api/user/mfa/totp/setup", second, "{\"display_name\":\"other\"}"),
         post_json("/api/user/mfa/totp/confirm", second, json),
         request("DELETE", target, second, NULL, NULL, NULL),
         post_json("/api/user/mfa/recovery-codes/regenerate", second, "{}"),
+        request("GET", "/api/user/mfa/recovery-codes", second, NULL, NULL, NULL),
         post_json("/api/user/mfa/require", second, "{\"enabled\":true}"),
     };
-    const char *names[5] = { "setup", "confirm", "delete", "regenerate", "require" };
-    for (int i = 0; i < 5; i++) {
+    const char *names[6] = { "setup", "confirm", "delete", "regenerate", "recovery codes",
+                             "require" };
+    for (int i = 0; i < 6; i++) {
         int bad = gated[i].status != 403;
         if (bad) printf("✗ %s answered %d to a password-only session\n", names[i], gated[i].status);
         reply_free(&gated[i]);
         if (bad) return 1;
     }
-    printf("✓ the five factor-management endpoints refuse a password-only session\n");
+    printf("✓ the six factor-management endpoints refuse a password-only session\n");
 
     /* Their own profile and the admin API are another rule: those ask for the
        factor only once the user requires it */
@@ -1194,6 +1219,28 @@ static int test_mfa_gates(void) {
         if (got[i] != want[i]) FAIL("%s answered %d, not %d", refusals[i], got[i], want[i]);
     }
     printf("✓ a refused MFA request answers 404 or 409, and another user's method is unknown\n");
+
+    /* 6. The caller's own recovery codes, masked: the last four characters of
+          each code the first method gave, in order, none used, and nothing more.
+          The request names no account, so the admin, who has no codes, gets an
+          empty list rather than anyone else's. */
+    char expected[1024];
+    int at = snprintf(expected, sizeof(expected), "{\"recovery_codes\":[");
+    for (int i = 0; i < code_count; i++) {
+        at += snprintf(expected + at, sizeof(expected) - (size_t)at,
+                       "%s{\"last4\":\"%s\",\"used\":false}", i > 0 ? "," : "",
+                       codes[i] + strlen(codes[i]) - 4);
+    }
+    snprintf(expected + at, sizeof(expected) - (size_t)at, "]}");
+    r = request("GET", "/api/user/mfa/recovery-codes", second, NULL, NULL, NULL);
+    int own = r.status == 200 && strcmp(r.body, expected) == 0;
+    if (!own) printf("  listed %d: %s\n  wanted: %s\n", r.status, r.body, expected);
+    reply_free(&r);
+    r = request("GET", "/api/user/mfa/recovery-codes", g_admin_cookie, NULL, NULL, NULL);
+    int none = r.status == 200 && strcmp(r.body, "{\"recovery_codes\":[]}") == 0;
+    reply_free(&r);
+    if (!own || !none) FAIL("the masked recovery codes weren't the caller's own, or only theirs");
+    printf("✓ a user lists their own recovery codes, masked, and no one else's\n");
 
     return 0;
 }

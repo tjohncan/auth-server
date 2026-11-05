@@ -382,6 +382,9 @@ HttpResponse *mfa_list_methods_handler(const HttpRequest *req);
 /* DELETE /api/user/mfa/methods - Delete MFA method (method specified via query/body) */
 HttpResponse *mfa_delete_method_handler(const HttpRequest *req);
 
+/* GET /api/user/mfa/recovery-codes - The caller's recovery codes, masked */
+HttpResponse *mfa_list_recovery_codes_handler(const HttpRequest *req);
+
 /* POST /api/user/mfa/recovery-codes/regenerate - Regenerate recovery codes */
 HttpResponse *mfa_regenerate_recovery_codes_handler(const HttpRequest *req);
 

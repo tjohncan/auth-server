@@ -488,6 +488,55 @@ HttpResponse *mfa_delete_method_handler(const HttpRequest *req) {
 }
 
 /* ============================================================================
+ * GET /api/user/mfa/recovery-codes
+ * ========================================================================== */
+
+/*
+ * GET /api/user/mfa/recovery-codes
+ *
+ * The caller's own recovery codes, masked: each code's last four characters,
+ * and whether it's been used. The session picks the account; nothing in the
+ * request names one. Like the other factor-management endpoints, it wants the
+ * factor first from an account that has one.
+ *
+ * Response:
+ *   200 OK
+ *   {"recovery_codes":[{"last4":"a1b2","used":false},...]}
+ */
+HttpResponse *mfa_list_recovery_codes_handler(const HttpRequest *req) {
+
+    db_handle_t *db = db_pool_get_connection();
+    if (!db) {
+        log_error("Failed to get database connection");
+        return response_json_error(500, "Internal server error");
+    }
+
+    oauth_session_info_t session;
+    HttpResponse *auth_err = session_require(req, db, SESSION_MFA_IF_ENROLLED, &session);
+    if (auth_err) return auth_err;
+
+    recovery_code_masked_t *codes = NULL;
+    int count = 0;
+    if (recovery_code_get_masked_list(db, session.user_account_pin, &codes, &count) != 0) {
+        return response_json_error(500, "Failed to list recovery codes");
+    }
+
+    JsonBuf *jb = jsonbuf_new(2048 + count * 64);
+    jsonbuf_appendf(jb, "{\"recovery_codes\":[");
+    for (int i = 0; i < count; i++) {
+        jsonbuf_appendf(jb, "%s{\"last4\":\"", i > 0 ? "," : "");
+        jsonbuf_append_escaped(jb, codes[i].last4);
+        jsonbuf_appendf(jb, "\",\"used\":%s}", codes[i].is_used ? "true" : "false");
+    }
+    jsonbuf_appendf(jb, "]}");
+
+    OPENSSL_cleanse(codes, (size_t)count * sizeof(*codes));
+    free(codes);
+
+    return jsonbuf_to_response(jb, 200);
+}
+
+/* ============================================================================
  * POST /api/user/mfa/recovery-codes/regenerate
  * ========================================================================== */
 

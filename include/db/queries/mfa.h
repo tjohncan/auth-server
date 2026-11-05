@@ -110,12 +110,20 @@ int recovery_code_verify(db_handle_t *db,
 int recovery_code_set_revoke(db_handle_t *db,
                               const unsigned char *set_id);
 
-/* Get masked recovery codes (last 4 chars visible)
- * Returns: 0 on success, -1 on error
- * Caller must free *out_masked_codes and each string with free() */
+/* A recovery code as it can be shown again: its last four characters, and
+ * whether it's been used. The whole code is shown once, when it's made; only
+ * its hash is kept. */
+typedef struct {
+    char last4[5];
+    int is_used;
+} recovery_code_masked_t;
+
+/* The account's active recovery codes, masked, in the order they were made.
+ * An account with no active set has none.
+ * Returns: 0 on success, -1 on error. The caller frees *out_codes. */
 int recovery_code_get_masked_list(db_handle_t *db,
                                    long long user_account_pin,
-                                   char ***out_masked_codes,
+                                   recovery_code_masked_t **out_codes,
                                    int *out_count);
 
 /* ============================================================================
