@@ -459,6 +459,9 @@ int client_get_by_id(db_handle_t *db, const unsigned char *client_id,
  * - Session auth: Verifies user is org admin
  * - Org key auth: Verifies specific key is active
  *
+ * Uniqueness among active clients is the caller's to check first, with
+ * client_active_code_name_taken.
+ *
  * Returns: 0 on success, -1 on error or not found
  */
 int client_update(db_handle_t *db, const unsigned char *client_id,
@@ -472,6 +475,17 @@ int client_update(db_handle_t *db, const unsigned char *client_id,
                   const int *maximum_session_seconds,
                   const int *secret_rotation_seconds,
                   const int *is_active);
+
+/*
+ * Whether another active client in the organization has this code name: what
+ * the partial unique index uix_client_org_code holds. The client itself
+ * (client_pin) doesn't count. No authorization: the caller has read the client
+ * already.
+ *
+ * Returns: 1 if it's held, 0 if not, -1 on error
+ */
+int client_active_code_name_taken(db_handle_t *db, long long organization_pin,
+                                  long long client_pin, const char *code_name);
 
 /*
  * Client Key data structure

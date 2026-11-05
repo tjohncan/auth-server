@@ -201,6 +201,14 @@ int admin_get_resource_server(db_handle_t *db, long long user_account_pin,
                                const unsigned char *server_id,
                                admin_resource_server_t *out_server);
 
+/*
+ * Update a resource server. Refused, with nothing changed, when the result would
+ * be active with an address or code name another active server in the
+ * organization has.
+ *
+ * Returns: 0 on success (an update that changes nothing included), 1 if the
+ * address is held, 2 if the code name is, -1 on error or not found
+ */
 int admin_update_resource_server(db_handle_t *db, long long user_account_pin,
                                   long long organization_key_pin,
                                   const unsigned char *server_id,
@@ -324,6 +332,13 @@ int admin_get_client(db_handle_t *db, long long user_account_pin,
                      const unsigned char *client_id,
                      admin_client_t *out_client);
 
+/*
+ * Update a client. Refused, with nothing changed, when it would reactivate the
+ * client while another active client in the organization has its code name.
+ *
+ * Returns: 0 on success (an update that changes nothing included), 1 if the
+ * code name is held, -1 on error or not found
+ */
 int admin_update_client(db_handle_t *db, long long user_account_pin,
                         long long organization_key_pin,
                         const unsigned char *client_id,

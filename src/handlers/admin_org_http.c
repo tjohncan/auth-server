@@ -716,7 +716,11 @@ HttpResponse *admin_update_resource_server_handler(const HttpRequest *req) {
 
     int result = admin_update_resource_server(db, ctx.user_account_pin, ctx.organization_key_pin, server_id, display_name, address, note, is_active, allow_user_provisioning);
 
-    if (result != 0) {
+    if (result == 1) {
+        resp = response_json_error(409, "Another active resource server in this organization has this address");
+    } else if (result == 2) {
+        resp = response_json_error(409, "Another active resource server in this organization has this code name");
+    } else if (result != 0) {
         resp = response_json_error(404, "Resource server not found or update failed");
     } else {
         resp = response_json_ok("{\"message\":\"Resource server updated successfully\"}");
@@ -1131,7 +1135,9 @@ HttpResponse *admin_update_client_handler(const HttpRequest *req) {
                                      access_ttl, issue_refresh, refresh_ttl, max_session,
                                      secret_rotation, is_active);
 
-    if (result != 0) {
+    if (result == 1) {
+        resp = response_json_error(409, "Another active client in this organization has this code name");
+    } else if (result != 0) {
         resp = response_json_error(404, "Client not found or update failed");
     } else {
         resp = response_json_ok("{\"message\":\"Client updated successfully\"}");

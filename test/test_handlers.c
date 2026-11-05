@@ -887,6 +887,121 @@ static int test_field_kinds(void) {
 }
 
 /* ============================================================================
+ * One active holder per address and code name
+ * ============================================================================ */
+
+/* PUT a JSON body as the admin: whether it answered want, naming what's given */
+static int put_answers(const char *target, const char *json, int want, const char *naming) {
+    Reply r = request("PUT", target, g_admin_cookie, NULL, "application/json", json);
+    int ok = r.status == want && (!naming || strstr(r.body, naming));
+    if (!ok) printf("  PUT %s %s answered %d: %s\n", target, json, r.status, r.body);
+    reply_free(&r);
+    return ok;
+}
+
+/* A server's or client's is_active as GET answers it, with a text field of it
+   when key is given; -1 if either can't be read */
+static int active_with(const char *target, const char *key, char *out, size_t size) {
+    Reply r = request("GET", target, g_admin_cookie, NULL, NULL, NULL);
+    int active = -1;
+    if (r.status != 200 || json_get_bool(r.body, "is_active", &active) != 0 ||
+        (key && field(&r, key, out, size) != 0)) {
+        active = -1;
+    }
+    reply_free(&r);
+    return active;
+}
+
+/*
+ * In an organization, one active resource server has a given address and a given
+ * code name, and one active client a given code name. An update that would break
+ * that answers 409 naming which, and changes nothing. A deactivated server keeps
+ * an address an active one has taken, and its edits still save, though the
+ * console sends the address with every edit.
+ */
+static int test_active_clashes(void) {
+    printf("\n=== One active holder per address and code name ===\n");
+
+    char json[512], a[33], b[33], c[33], cl[33], twin[33], text[64];
+    char ta[128], tb[128], tc[128], tcl[128];
+
+    /* A server, deactivated, and another made at its address */
+    snprintf(json, sizeof(json), "{\"organization_id\":\"%s\",\"code_name\":\"clash_a\","
+             "\"display_name\":\"A\",\"address\":\"https://clash.example\"}", g_org_id);
+    if (admin_create("/api/admin/resource-servers", json, "id", a, sizeof(a)) != 0) return 1;
+    snprintf(ta, sizeof(ta), "/api/admin/resource-servers?id=%s", a);
+    if (!put_answers(ta, "{\"is_active\":false}", 200, NULL)) return 1;
+    snprintf(json, sizeof(json), "{\"organization_id\":\"%s\",\"code_name\":\"clash_b\","
+             "\"display_name\":\"B\",\"address\":\"https://clash.example\"}", g_org_id);
+    if (admin_create("/api/admin/resource-servers", json, "id", b, sizeof(b)) != 0) return 1;
+    snprintf(tb, sizeof(tb), "/api/admin/resource-servers?id=%s", b);
+
+    /* 1. The deactivated one's edit, sent as the console sends it: saved */
+    if (!put_answers(ta, "{\"display_name\":\"A\",\"address\":\"https://clash.example\","
+                     "\"note\":\"kept\",\"is_active\":false,\"allow_user_provisioning\":false}",
+                     200, NULL) ||
+        active_with(ta, "note", text, sizeof(text)) != 0 || strcmp(text, "kept") != 0) {
+        FAIL("an edit to a deactivated server whose address an active one has wasn't saved");
+    }
+
+    /* 2. Reactivating it at that address: refused, and it stays deactivated */
+    if (!put_answers(ta, "{\"is_active\":true}", 409, "address") ||
+        active_with(ta, NULL, NULL, 0) != 0) {
+        FAIL("reactivating a server at a taken address wasn't refused, or changed it");
+    }
+
+    /* 3. Reactivating it at a free address: done */
+    if (!put_answers(ta, "{\"is_active\":true,\"address\":\"https://clash-a.example\"}",
+                     200, NULL) ||
+        active_with(ta, "address", text, sizeof(text)) != 1 ||
+        strcmp(text, "https://clash-a.example") != 0) {
+        FAIL("reactivating a server at a free address didn't take");
+    }
+
+    /* 4. An active server moving to a taken address: refused, and its address
+          kept. An update that changes nothing is a success. */
+    if (!put_answers(tb, "{\"address\":\"https://clash-a.example\"}", 409, "address") ||
+        active_with(tb, "address", text, sizeof(text)) != 1 ||
+        strcmp(text, "https://clash.example") != 0) {
+        FAIL("moving an active server to a taken address wasn't refused, or changed it");
+    }
+    if (!put_answers(tb, "{\"display_name\":\"B\"}", 200, NULL)) {
+        FAIL("an update that changes nothing wasn't a success");
+    }
+
+    /* 5. A server reactivated while another active one has its code name */
+    snprintf(json, sizeof(json), "{\"organization_id\":\"%s\",\"code_name\":\"clash_c\","
+             "\"display_name\":\"C\",\"address\":\"https://c1.example\"}", g_org_id);
+    if (admin_create("/api/admin/resource-servers", json, "id", c, sizeof(c)) != 0) return 1;
+    snprintf(tc, sizeof(tc), "/api/admin/resource-servers?id=%s", c);
+    if (!put_answers(tc, "{\"is_active\":false}", 200, NULL)) return 1;
+    snprintf(json, sizeof(json), "{\"organization_id\":\"%s\",\"code_name\":\"clash_c\","
+             "\"display_name\":\"C\",\"address\":\"https://c2.example\"}", g_org_id);
+    if (admin_create("/api/admin/resource-servers", json, "id", twin, sizeof(twin)) != 0) return 1;
+    if (!put_answers(tc, "{\"is_active\":true}", 409, "code name") ||
+        active_with(tc, NULL, NULL, 0) != 0) {
+        FAIL("reactivating a server whose code name is taken wasn't refused, or changed it");
+    }
+
+    /* 6. The same for a client */
+    snprintf(json, sizeof(json), "{\"organization_id\":\"%s\",\"code_name\":\"clash_d\","
+             "\"display_name\":\"D\",\"client_type\":\"public\","
+             "\"grant_type\":\"authorization_code\",\"access_token_ttl_seconds\":600}", g_org_id);
+    if (admin_create("/api/admin/clients", json, "id", cl, sizeof(cl)) != 0) return 1;
+    snprintf(tcl, sizeof(tcl), "/api/admin/clients?id=%s", cl);
+    if (!put_answers(tcl, "{\"is_active\":false}", 200, NULL)) return 1;
+    if (admin_create("/api/admin/clients", json, "id", twin, sizeof(twin)) != 0) return 1;
+    if (!put_answers(tcl, "{\"is_active\":true}", 409, "code name") ||
+        active_with(tcl, NULL, NULL, 0) != 0) {
+        FAIL("reactivating a client whose code name is taken wasn't refused, or changed it");
+    }
+
+    printf("✓ one active holder per address and code name, and a deactivated server's "
+           "edits save\n");
+    return 0;
+}
+
+/* ============================================================================
  * MFA gates
  * ============================================================================ */
 
@@ -2093,6 +2208,7 @@ int main(void) {
     int failed = setup() || test_logout() || test_authorization_code_flow() ||
                  test_redirect_uris() || test_issuer() ||
                  test_client_credentials() || test_field_kinds() ||
+                 test_active_clashes() ||
                  test_mfa_gates() || test_mfa_daily_cap() ||
                  test_localhost_only() || test_admin_socket_caller() ||
                  test_account_recovery() || test_usernames() || test_failed_bootstrap() ||

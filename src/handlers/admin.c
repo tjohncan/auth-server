@@ -310,6 +310,26 @@ int admin_update_resource_server(db_handle_t *db, long long user_account_pin,
         return -1;
     }
 
+    /* One active server per address and per code name in an organization.
+       Checked here, against the row as it stands, so a clash is answered and
+       the update isn't sent. Only a server becoming active, or an active one
+       moving to another address, can clash: a deactivated server keeps an
+       address an active one has taken, and its other edits still save. */
+    int will_be_active = is_active ? (*is_active != 0) : existing.is_active;
+    const char *will_have_address = address ? address : existing.address;
+    if (will_be_active &&
+        (!existing.is_active || strcmp(will_have_address, existing.address) != 0)) {
+        int clash = resource_server_active_clash(db, existing.organization_pin, existing.pin,
+                                                 will_have_address, existing.code_name);
+        if (clash != 0) {
+            if (clash > 0) {
+                log_info("Resource server update refused: another active server has its %s",
+                         clash == 1 ? "address" : "code name");
+            }
+            return clash;
+        }
+    }
+
     if (resource_server_update(db, server_id, user_account_pin, organization_key_pin, display_name, address, note, is_active, allow_user_provisioning) != 0) {
         return -1;
     }
@@ -437,6 +457,20 @@ int admin_update_client(db_handle_t *db, long long user_account_pin,
     admin_client_t existing;
     if (admin_get_client(db, user_account_pin, organization_key_pin, client_id, &existing) != 0) {
         return -1;
+    }
+
+    /* One active client per code name in an organization. A client's code name
+       doesn't change, so only reactivating one can clash; checked here, so the
+       clash is answered and the update isn't sent. */
+    if (is_active && *is_active && !existing.is_active) {
+        int taken = client_active_code_name_taken(db, existing.organization_pin, existing.pin,
+                                                  existing.code_name);
+        if (taken != 0) {
+            if (taken > 0) {
+                log_info("Client update refused: another active client has its code name");
+            }
+            return taken;
+        }
     }
 
     if (client_update(db, client_id, user_account_pin, organization_key_pin, display_name, note,

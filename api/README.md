@@ -750,6 +750,12 @@ Update resource server.
 Query: `id` (required)
 Body: `display_name`, `address`, `note`, `is_active`, `allow_user_provisioning` (all optional)
 
+In an organization, only one active resource server may have a given address, and only one a
+given code name. An update that would leave this server active with an address or code name
+another active server has answers `409`, naming which, and changes nothing. Only reactivating a
+server, or giving an active one another address, can do that: a deactivated server can keep an
+address an active one has taken, and its other changes still save.
+
 Deactivating a resource server stops tokens being issued for it, and from then on its
 outstanding access tokens fail introspection and `/userinfo`. If the server itself only
 checks tokens against JWKS, it keeps accepting them until `exp`.
@@ -796,6 +802,9 @@ Body: `display_name`, `note`, TTL/MFA settings, `is_active` (all optional)
 The durations follow the same rules as on create. The console's edit form sends the stored
 TTL back with every change, so a client stored over the access-token limit can't be edited
 there until its TTL is lowered.
+
+In an organization, only one active client may have a given code name. Reactivating a client
+while another active client has its code name answers `409`, and changes nothing.
 
 ### Client Redirect URIs
 

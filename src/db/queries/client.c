@@ -807,18 +807,9 @@ int client_update(db_handle_t *db, const unsigned char *client_id,
 
     build_rc |= str_appendf(sql, sizeof(sql), &pos, ") ");
 
-    /* Add uniqueness check when reactivating (is_active -> TRUE) */
-    /* Check existing code_name doesn't collide with active records */
-    if (is_active && *is_active == 1) {
-        build_rc |= str_appendf(sql, sizeof(sql), &pos,
-            "AND NOT EXISTS ("
-                "SELECT 1 FROM " TBL_CLIENT " other "
-                "WHERE other.organization_pin = " TBL_CLIENT ".organization_pin "
-                "AND other.code_name = " TBL_CLIENT ".code_name "
-                "AND other.is_active = " BOOL_TRUE " "
-                "AND other.id != " TBL_CLIENT ".id"
-            ") ");
-    }
+    /* Uniqueness among active clients isn't decided here: the caller checks it
+       first (client_active_code_name_taken), and the partial unique index is the
+       database's backstop. */
 
     build_rc |= str_appendf(sql, sizeof(sql), &pos, "AND (");
 
@@ -969,6 +960,42 @@ int client_update(db_handle_t *db, const unsigned char *client_id,
 
     log_info("Updated client");
     return 0;
+}
+
+int client_active_code_name_taken(db_handle_t *db, long long organization_pin,
+                                  long long client_pin, const char *code_name) {
+    if (!db || !code_name) {
+        log_error("Invalid arguments to client_active_code_name_taken");
+        return -1;
+    }
+
+    const char *sql =
+        "SELECT 1 FROM " TBL_CLIENT " "
+        "WHERE organization_pin = " P"1 "
+        "AND pin <> " P"2 "
+        "AND code_name = " P"3 "
+        "AND is_active = " BOOL_TRUE " "
+        "LIMIT 1";
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        log_error("Failed to prepare client_active_code_name_taken statement");
+        return -1;
+    }
+
+    db_bind_int64(stmt, 1, organization_pin);
+    db_bind_int64(stmt, 2, client_pin);
+    db_bind_text(stmt, 3, code_name, -1);
+
+    int rc = db_step(stmt);
+    db_finalize(stmt);
+
+    if (rc != DB_ROW && rc != DB_DONE) {
+        log_error("Failed to check client code name uniqueness");
+        return -1;
+    }
+
+    return rc == DB_ROW ? 1 : 0;
 }
 
 int client_redirect_uri_list(db_handle_t *db, long long user_account_pin,
