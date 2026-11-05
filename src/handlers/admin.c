@@ -38,7 +38,7 @@ int admin_bootstrap(db_handle_t *db,
     if (user_ex < 0) {
         return -1;
     } else if (user_ex == 1) {
-        log_error("Bootstrap failed: username '%s' already exists", username);
+        log_error("Bootstrap failed: the username already exists");
         return -1;
     }
 
@@ -150,7 +150,7 @@ int admin_create_organization(db_handle_t *db,
     if (exists < 0) {
         return -1;
     } else if (exists == 1) {
-        log_error("Organization already exists: code_name='%s'", code_name);
+        log_info("Organization already exists: code_name='%s'", code_name);
         return -1;
     }
 
@@ -905,7 +905,7 @@ int admin_create_user(db_handle_t *db,
     if (username_taken < 0) {
         return -1;
     } else if (username_taken == 1) {
-        log_error("Username already exists");
+        log_info("Username already exists");
         return -1;
     }
 
@@ -915,7 +915,7 @@ int admin_create_user(db_handle_t *db,
         if (exists < 0) {
             return -1;
         } else if (exists == 1) {
-            log_error("Email already exists");
+            log_info("Email already exists");
             return -1;
         }
     }
@@ -942,7 +942,7 @@ int admin_make_org_admin(db_handle_t *db,
     if (user_ex < 0) {
         return -1;
     } else if (user_ex == 0) {
-        log_error("User does not exist");
+        log_info("User does not exist");
         return -1;
     }
 
@@ -951,7 +951,7 @@ int admin_make_org_admin(db_handle_t *db,
     if (org_ex < 0) {
         return -1;
     } else if (org_ex == 0) {
-        log_error("Organization does not exist: code_name='%s'", org_code_name);
+        log_info("Organization does not exist: code_name='%s'", org_code_name);
         return -1;
     }
 

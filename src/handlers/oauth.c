@@ -179,14 +179,14 @@ int oauth_authorize(db_handle_t *db,
     /* Step 1: Look up client */
     oauth_client_info_t client;
     if (oauth_client_lookup(db, client_id, &client) != 0) {
-        log_error("Client not found or inactive");
+        log_info("Client not found or inactive");
         return -4;  /* Pre-trust: do NOT redirect to unverified URI */
     }
 
     /* Step 2: Validate redirect_uri is registered for client */
     int uri_valid = oauth_redirect_uri_validate(db, client.pin, redirect_uri);
     if (uri_valid != 1) {
-        log_error("Redirect URI not registered for client");
+        log_info("Redirect URI not registered for client");
         return -4;  /* Pre-trust: do NOT redirect to unverified URI */
     }
 
@@ -247,15 +247,15 @@ int oauth_authorize(db_handle_t *db,
 
     /* Step 8: Validate PKCE (OAuth 2.1 — required for all authorization_code clients) */
     if (!code_challenge || code_challenge[0] == '\0') {
-        log_error("PKCE code_challenge required");
+        log_info("PKCE code_challenge required");
         return -1;
     }
     if (!code_challenge_method || code_challenge_method[0] == '\0') {
-        log_error("PKCE code_challenge_method required");
+        log_info("PKCE code_challenge_method required");
         return -1;
     }
     if (strcmp(code_challenge_method, "S256") != 0) {
-        log_error("Only S256 PKCE method is supported, got: %s", code_challenge_method);
+        log_info("Only S256 PKCE method is supported, got: %s", code_challenge_method);
         return -1;
     }
     /* An S256 challenge is a SHA-256 in base64url: 43 of A-Z a-z 0-9 - _ (RFC 7636
@@ -264,7 +264,7 @@ int oauth_authorize(db_handle_t *db,
     if (strlen(code_challenge) != 43 ||
         strspn(code_challenge, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
                                "0123456789-_") != 43) {
-        log_error("PKCE code_challenge isn't an S256 challenge (43 base64url characters)");
+        log_info("PKCE code_challenge isn't an S256 challenge (43 base64url characters)");
         return -1;
     }
 
@@ -476,13 +476,13 @@ int oauth_exchange_authorization_code(db_handle_t *db,
     /* Step 1: Look up client */
     oauth_client_info_t client;
     if (oauth_client_lookup(db, client_id, &client) != 0) {
-        log_error("Client not found");
+        log_info("Client not found");
         return -1;
     }
 
     /* Step 1b: Validate grant type */
     if (strcmp(client.grant_type, "authorization_code") != 0) {
-        log_error("Client not configured for authorization_code grant");
+        log_info("Client not configured for authorization_code grant");
         return -1;
     }
 
@@ -499,7 +499,7 @@ int oauth_exchange_authorization_code(db_handle_t *db,
                                  auth_signing_key->prior_secret,
                                  &auth_claims) != 0) {
         signing_key_free(auth_signing_key);
-        log_error("Failed to decode or verify authorization code JWT");
+        log_info("Failed to decode or verify authorization code JWT");
         return -1;
     }
 
@@ -507,13 +507,13 @@ int oauth_exchange_authorization_code(db_handle_t *db,
 
     /* Step 3: Validate client_id matches */
     if (memcmp(auth_claims.client_id, client.id, 16) != 0) {
-        log_error("Client ID mismatch in authorization code");
+        log_warn("Client ID mismatch in authorization code");
         return -1;
     }
 
     /* Step 4: Validate redirect_uri matches */
     if (strcmp(redirect_uri, auth_claims.redirect_uri) != 0) {
-        log_error("Redirect URI mismatch");
+        log_info("Redirect URI mismatch");
         return -1;
     }
 
@@ -523,12 +523,12 @@ int oauth_exchange_authorization_code(db_handle_t *db,
         return -1;
     }
     if (!code_verifier) {
-        log_error("PKCE code_verifier required but not provided");
+        log_info("PKCE code_verifier required but not provided");
         return -1;
     }
     if (!validate_pkce(code_verifier, auth_claims.code_challenge,
                        auth_claims.code_challenge_method)) {
-        log_error("PKCE validation failed");
+        log_warn("PKCE validation failed");
         return -1;
     }
 
@@ -553,7 +553,7 @@ int oauth_exchange_authorization_code(db_handle_t *db,
         db_finalize(user_stmt);
     } else {
         db_finalize(user_stmt);
-        log_error("User account not found or inactive");
+        log_info("User account not found or inactive");
         return -1;
     }
 
@@ -648,7 +648,7 @@ int oauth_exchange_authorization_code(db_handle_t *db,
                                        &resource_server_pin, resource_server_id) != 0) {
         signing_key_free(signing_key);
         db_execute_trusted(db, "ROLLBACK");
-        log_error("Failed to resolve resource server");
+        log_info("Failed to resolve resource server");
         return -1;
     }
 
@@ -738,13 +738,13 @@ int oauth_refresh_access_token(db_handle_t *db,
     /* Step 1: Look up client */
     oauth_client_info_t client;
     if (oauth_client_lookup(db, client_id, &client) != 0) {
-        log_error("Client not found");
+        log_info("Client not found");
         return -1;
     }
 
     /* Check client issues refresh tokens */
     if (!client.issue_refresh_tokens) {
-        log_error("Client not configured to issue refresh tokens");
+        log_info("Client not configured to issue refresh tokens");
         return -1;
     }
 
@@ -811,7 +811,7 @@ int oauth_refresh_access_token(db_handle_t *db,
         cleanse_free(new_refresh_token);
         signing_key_free(signing_key);
         db_execute_trusted(db, "ROLLBACK");
-        log_error("Failed to rotate refresh token");
+        log_info("Failed to rotate refresh token");
         return -1;
     }
 
@@ -820,7 +820,7 @@ int oauth_refresh_access_token(db_handle_t *db,
         cleanse_free(new_refresh_token);
         signing_key_free(signing_key);
         db_execute_trusted(db, "ROLLBACK");
-        log_error("Client PIN mismatch in refresh token");
+        log_warn("Client PIN mismatch in refresh token");
         return -1;
     }
 
@@ -851,7 +851,7 @@ int oauth_refresh_access_token(db_handle_t *db,
             cleanse_free(new_refresh_token);
             signing_key_free(signing_key);
             db_execute_trusted(db, "ROLLBACK");
-            log_error("Requested scope exceeds original grant");
+            log_info("Requested scope exceeds original grant");
             return -1;
         }
         final_scope = scope;  /* Use downscoped request */
@@ -866,7 +866,7 @@ int oauth_refresh_access_token(db_handle_t *db,
         cleanse_free(new_refresh_token);
         signing_key_free(signing_key);
         db_execute_trusted(db, "ROLLBACK");
-        log_error("Failed to resolve resource server");
+        log_info("Failed to resolve resource server");
         return -1;
     }
 
@@ -906,7 +906,7 @@ int oauth_refresh_access_token(db_handle_t *db,
         cleanse_free(new_refresh_token);
         signing_key_free(signing_key);
         db_execute_trusted(db, "ROLLBACK");
-        log_error("User account not found or inactive");
+        log_info("User account not found or inactive");
         return -1;
     }
 
@@ -970,7 +970,7 @@ int oauth_client_credentials(db_handle_t *db,
                                                  client_secret, &client_pin, &key_pin);
 
     if (auth_result != 1) {
-        log_error("Client authentication failed");
+        log_warn("Client authentication failed");
         return -1;
     }
 
@@ -986,13 +986,13 @@ int oauth_client_credentials(db_handle_t *db,
 
     /* Validate grant type is client_credentials */
     if (strcmp(client.grant_type, "client_credentials") != 0) {
-        log_error("Client not configured for client_credentials grant");
+        log_info("Client not configured for client_credentials grant");
         return -1;
     }
 
     /* Validate client type is confidential */
     if (strcmp(client.client_type, "confidential") != 0) {
-        log_error("Client credentials grant requires confidential client");
+        log_info("Client credentials grant requires confidential client");
         return -1;
     }
 
@@ -1001,7 +1001,7 @@ int oauth_client_credentials(db_handle_t *db,
     unsigned char resource_server_id[16];
     if (oauth_resolve_resource_server(db, client.pin, resource,
                                        &resource_server_pin, resource_server_id) != 0) {
-        log_error("Failed to resolve resource server");
+        log_info("Failed to resolve resource server");
         return -1;
     }
 

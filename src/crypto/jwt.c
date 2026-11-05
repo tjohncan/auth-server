@@ -313,13 +313,13 @@ int jwt_decode(const char *token,
     /* Find separators (header.payload.signature) */
     const char *dot1 = strchr(token, '.');
     if (!dot1) {
-        log_error("Invalid JWT format: missing first dot");
+        log_debug("Invalid JWT format: missing first dot");
         return -1;
     }
 
     const char *dot2 = strchr(dot1 + 1, '.');
     if (!dot2) {
-        log_error("Invalid JWT format: missing second dot");
+        log_debug("Invalid JWT format: missing second dot");
         return -1;
     }
 
@@ -335,7 +335,7 @@ int jwt_decode(const char *token,
                               (int)header_len, token,
                               (int)payload_len, dot1 + 1);
     if (signing_len < 0 || (size_t)signing_len >= sizeof(signing_input)) {
-        log_error("JWT signing input too large");
+        log_debug("JWT signing input too large");
         return -1;
     }
 
@@ -353,13 +353,13 @@ int jwt_decode(const char *token,
         dot2 + 1, signature_len,
         received_signature, sizeof(received_signature));
     if (decoded_sig_len != HMAC_SHA256_LENGTH) {
-        log_error("Invalid JWT signature length");
+        log_debug("Invalid JWT signature length");
         return -1;
     }
 
     /* Timing-safe signature comparison */
     if (!crypto_hmac_compare(computed_signature, received_signature, HMAC_SHA256_LENGTH)) {
-        log_error("JWT signature verification failed");
+        log_info("JWT signature verification failed");
         return -1;
     }
 
@@ -398,7 +398,7 @@ int jwt_decode(const char *token,
     /* Check expiration */
     time_t now = time(NULL);
     if (now >= out_claims->exp + jwt_clock_skew_seconds) {
-        log_error("JWT token expired (exp=%ld, now=%ld)", (long)out_claims->exp, (long)now);
+        log_debug("JWT token expired (exp=%ld, now=%ld)", (long)out_claims->exp, (long)now);
         return -1;
     }
 
@@ -780,13 +780,13 @@ int jwt_decode_es256(const char *token,
     /* Find separators (header.payload.signature) */
     const char *dot1 = strchr(token, '.');
     if (!dot1) {
-        log_error("Invalid JWT format: missing first dot");
+        log_debug("Invalid JWT format: missing first dot");
         return -1;
     }
 
     const char *dot2 = strchr(dot1 + 1, '.');
     if (!dot2) {
-        log_error("Invalid JWT format: missing second dot");
+        log_debug("Invalid JWT format: missing second dot");
         return -1;
     }
 
@@ -802,7 +802,7 @@ int jwt_decode_es256(const char *token,
                               (int)header_len, token,
                               (int)payload_len, dot1 + 1);
     if (signing_len < 0 || (size_t)signing_len >= sizeof(signing_input)) {
-        log_error("JWT signing input too large");
+        log_debug("JWT signing input too large");
         return -1;
     }
 
@@ -812,7 +812,7 @@ int jwt_decode_es256(const char *token,
         dot2 + 1, signature_len,
         raw_signature, sizeof(raw_signature));
     if (decoded_sig_len != 64) {
-        log_error("Invalid ES256 signature length: expected 64, got %d", decoded_sig_len);
+        log_debug("Invalid ES256 signature length: expected 64, got %d", decoded_sig_len);
         return -1;
     }
 
@@ -846,7 +846,7 @@ int jwt_decode_es256(const char *token,
     }
 
     if (valid != 1) {
-        log_error("JWT ES256 signature verification failed");
+        log_info("JWT ES256 signature verification failed");
         return -1;
     }
 
@@ -885,7 +885,7 @@ int jwt_decode_es256(const char *token,
     /* Check expiration */
     time_t now = time(NULL);
     if (now >= out_claims->exp + jwt_clock_skew_seconds) {
-        log_error("JWT token expired (exp=%ld, now=%ld)", (long)out_claims->exp, (long)now);
+        log_debug("JWT token expired (exp=%ld, now=%ld)", (long)out_claims->exp, (long)now);
         return -1;
     }
 
@@ -1046,7 +1046,7 @@ int jwt_decode_auth_request(const char *token,
         return 0;
     }
 
-    log_error("Auth request JWT validation failed with both current and prior secrets");
+    log_info("Auth request JWT validation failed with both current and prior secrets");
     return -1;
 }
 
@@ -1072,7 +1072,7 @@ static int jwt_decode_auth_request_with_secret(const char *token,
     char *payload_b64 = strchr(header_b64, '.');
     if (!payload_b64) {
         OPENSSL_cleanse(secret, sizeof(secret));
-        log_error("Malformed JWT (missing first dot)");
+        log_debug("Malformed JWT (missing first dot)");
         return -1;
     }
     *payload_b64 = '\0';
@@ -1081,7 +1081,7 @@ static int jwt_decode_auth_request_with_secret(const char *token,
     char *signature_b64 = strchr(payload_b64, '.');
     if (!signature_b64) {
         OPENSSL_cleanse(secret, sizeof(secret));
-        log_error("Malformed JWT (missing second dot)");
+        log_debug("Malformed JWT (missing second dot)");
         return -1;
     }
     *signature_b64 = '\0';
@@ -1117,7 +1117,7 @@ static int jwt_decode_auth_request_with_secret(const char *token,
                                                     provided_signature, sizeof(provided_signature));
 
     if (provided_sig_len != HMAC_SHA256_LENGTH) {
-        log_error("Invalid JWT signature length: %d", provided_sig_len);
+        log_debug("Invalid JWT signature length: %d", provided_sig_len);
         return -1;
     }
 
@@ -1183,7 +1183,7 @@ static int jwt_decode_auth_request_with_secret(const char *token,
     /* Check expiration */
     time_t now = time(NULL);
     if (now >= out_claims->exp + jwt_clock_skew_seconds) {
-        log_error("Auth request JWT expired (exp=%ld, now=%ld)",
+        log_info("Auth request JWT expired (exp=%ld, now=%ld)",
                  (long)out_claims->exp, (long)now);
         return -1;
     }

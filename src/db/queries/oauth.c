@@ -1143,7 +1143,7 @@ int oauth_resolve_resource_server(db_handle_t *db, long long client_pin,
             return 0;
         } else if (rc == DB_DONE) {
             db_finalize(stmt);
-            log_error("Resource server not found, inactive, or client not linked: address='%s'",
+            log_info("Resource server not found, inactive, or client not linked: address='%s'",
                      resource_address);
             return -1;
         } else {
@@ -1196,7 +1196,7 @@ int oauth_resolve_resource_server(db_handle_t *db, long long client_pin,
         } else if (rc == DB_DONE) {
             /* No result at all */
             db_finalize(stmt);
-            log_error("Client has no linked active resource servers");
+            log_info("Client has no linked active resource servers");
             return -1;
         } else {
             log_error("Error querying linked resource servers");

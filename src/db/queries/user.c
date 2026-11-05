@@ -1565,7 +1565,7 @@ int user_get_userinfo_by_id(db_handle_t *db, const unsigned char *user_id,
     int rc = db_step(stmt);
     if (rc != DB_ROW) {
         db_finalize(stmt);
-        log_error("User not found or inactive for userinfo");
+        log_info("User not found or inactive for userinfo");
         return -1;
     }
 

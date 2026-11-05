@@ -221,13 +221,13 @@ int mfa_verify(db_handle_t *db,
     }
 
     if (method.user_account_pin != user_account_pin) {
-        log_error("MFA method does not belong to this user");
+        log_warn("MFA method does not belong to this user");
         OPENSSL_cleanse(&method, sizeof(method));
         return 0;  /* Treat as invalid */
     }
 
     if (!method.is_confirmed) {
-        log_error("MFA method is not confirmed");
+        log_info("MFA method is not confirmed");
         OPENSSL_cleanse(&method, sizeof(method));
         return 0;  /* Treat as invalid */
     }

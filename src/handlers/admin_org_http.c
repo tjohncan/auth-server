@@ -45,13 +45,13 @@ int try_org_key_auth(const HttpRequest *req, const char *operation,
 
     unsigned char key_id[16];
     if (hex_to_bytes(key_id_hex, key_id, 16) != 0) {
-        log_error("Invalid X-Org-Key-Id format");
+        log_info("Invalid X-Org-Key-Id format");
         return -1;
     }
 
     long long org_pin, key_pin;
     if (organization_key_verify(db, key_id, key_secret, &org_pin, &key_pin) != 0) {
-        log_error("Organization key verification failed");
+        log_warn("Organization key verification failed");
         return -1;
     }
 

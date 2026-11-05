@@ -759,6 +759,16 @@ static void handle_accept(EventLoop *loop, Listener *listener) {
     }  /* End of while(1) loop */
 }
 
+/* A failed recv() or send(): INFO when the client reset or abandoned the
+   connection, which is the client's doing; ERROR otherwise */
+static void log_socket_error(const char *call, const Connection *conn, int err) {
+    if (err == ECONNRESET || err == EPIPE || err == ETIMEDOUT) {
+        log_info("%s() failed on connection %lu: %s", call, conn->connection_id, strerror(err));
+    } else {
+        log_error("%s() failed on connection %lu: %s", call, conn->connection_id, strerror(err));
+    }
+}
+
 /*
  * handle_read - Read data from connection
  *
@@ -797,7 +807,7 @@ static int handle_read(Connection *conn, size_t max_request_size) {
                 /* No more data available right now (edge-triggered) */
                 return 0;
             }
-            log_error("recv() failed on connection %lu: %s", conn->connection_id, strerror(errno));
+            log_socket_error("recv", conn, errno);
             return -1;
         }
 
@@ -918,7 +928,7 @@ static int handle_write(Connection *conn) {
                 /* Socket buffer full, try again later */
                 return 0;
             }
-            log_error("send() failed on connection %lu: %s", conn->connection_id, strerror(errno));
+            log_socket_error("send", conn, errno);
             return -1;
         }
 
