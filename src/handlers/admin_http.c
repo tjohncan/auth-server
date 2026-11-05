@@ -610,7 +610,9 @@ HttpResponse *admin_create_organization_key_handler(const HttpRequest *req) {
     unsigned char key_id[16];
     int result = organization_key_create(db, org_code_name, secret_to_use, note, key_id);
     if (result != 0) {
-        if (result == -2) {
+        if (result == 1) {
+            resp = response_json_error(404, "Organization not found or deactivated");
+        } else if (result == -2) {
             char msg[128];
             snprintf(msg, sizeof(msg),
                      "Secret must be at least %d characters", crypto_password_min_length());

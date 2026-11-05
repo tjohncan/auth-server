@@ -41,7 +41,7 @@ int mfa_method_create(db_handle_t *db,
 int mfa_method_confirm(db_handle_t *db, const unsigned char *method_id);
 
 /* Get single method by ID
- * Returns: 0 on success, -1 on error */
+ * Returns: 0 on success, 1 if there's no such method, -1 on error */
 int mfa_method_get_by_id(db_handle_t *db,
                          const unsigned char *method_id,
                          mfa_method_t *out_method);

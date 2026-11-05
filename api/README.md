@@ -988,6 +988,9 @@ Response (user-provided secret):
 }
 ```
 
+Returns `404` if the organization doesn't exist or is deactivated, and `400` if a secret given
+doesn't meet the secret rules (`machine_secret_pattern` and the length limits).
+
 **GET /api/admin/organization-keys** (Dual-auth: the admin listener, or an org key)
 List organization API keys.
 
@@ -2829,6 +2832,11 @@ recovery codes are generated and returned (shown once — user must save them).
 }
 ```
 
+**Other errors**:
+- **404** "MFA method not found": no such method, or another user's. Both answer alike, so
+  method ids can't be told apart.
+- **409** "MFA method is already confirmed".
+
 **Notes**:
 - Recovery codes (10 × 20-char hex) are only returned on first confirmed method. Subsequent enrollments reuse the existing set.
 - Caller must free/discard recovery codes after displaying — they cannot be retrieved again (only masked versions available).
@@ -2941,6 +2949,8 @@ Delete an MFA method. The `id` query parameter is the 32-char hex method UUID.
 }
 ```
 
+**Error**: **404** "MFA method not found": no such method, or another user's.
+
 **Example**:
 ```bash
 curl -X DELETE "http://localhost:8080/api/user/mfa/methods?id=a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4" \
@@ -2966,6 +2976,8 @@ gets `415`, which keeps a plain HTML form from triggering this.
   ]
 }
 ```
+
+**Error**: **409** "Recovery codes need a confirmed MFA method", for an account without one.
 
 **Notes**:
 - Returns all 10 plaintext codes. Save them immediately — they cannot be retrieved again.

@@ -1157,6 +1157,44 @@ static int test_mfa_gates(void) {
     printf("✓ a new password, however set, closes the session waiting on MFA; the signed-in "
            "one stays\n");
 
+    /* 5. A refused MFA request answers 404 or 409, not 500. Another user's method
+          answers as an unknown one does, so method ids can't be told apart. The
+          bootstrap admin, who has no MFA method, is the other user. */
+    static const char unknown_id[] = "0123456789abcdef0123456789abcdef";
+    char mine[96], unknown[96], unknown_target[96];
+    snprintf(mine, sizeof(mine), "{\"method_id\":\"%s\",\"code\":\"000000\"}", method);
+    snprintf(unknown, sizeof(unknown), "{\"method_id\":\"%s\",\"code\":\"000000\"}", unknown_id);
+    snprintf(unknown_target, sizeof(unknown_target), "/api/user/mfa/methods?id=%s", unknown_id);
+    static const char *const refusals[6] = {
+        "confirming another user's method", "confirming an unknown method",
+        "deleting another user's method", "deleting an unknown method",
+        "confirming a confirmed method, still there", "recovery codes without a confirmed method",
+    };
+    static const int want[6] = { 404, 404, 404, 404, 409, 409 };
+    int got[6];
+    r = post_json("/api/user/mfa/totp/confirm", g_admin_cookie, mine);
+    got[0] = r.status;
+    reply_free(&r);
+    r = post_json("/api/user/mfa/totp/confirm", second, unknown);
+    got[1] = r.status;
+    reply_free(&r);
+    r = request("DELETE", target, g_admin_cookie, NULL, NULL, NULL);
+    got[2] = r.status;
+    reply_free(&r);
+    r = request("DELETE", unknown_target, second, NULL, NULL, NULL);
+    got[3] = r.status;
+    reply_free(&r);
+    r = post_json("/api/user/mfa/totp/confirm", second, mine);
+    got[4] = r.status;
+    reply_free(&r);
+    r = post_json("/api/user/mfa/recovery-codes/regenerate", g_admin_cookie, "{}");
+    got[5] = r.status;
+    reply_free(&r);
+    for (int i = 0; i < 6; i++) {
+        if (got[i] != want[i]) FAIL("%s answered %d, not %d", refusals[i], got[i], want[i]);
+    }
+    printf("✓ a refused MFA request answers 404 or 409, and another user's method is unknown\n");
+
     return 0;
 }
 
@@ -1364,7 +1402,7 @@ static int test_localhost_only(void) {
         Reply pub = request(method, target, NULL, NULL, "application/json", "{}");
         Reply adm = admin_port(method, target, NULL, "{}");
         int refused = pub.status == 403 || pub.status == 401;
-        int served = adm.status != 401 && adm.status != 403;
+        int served = adm.status != 401 && adm.status != 403 && adm.status < 500;
         int pub_status = pub.status, adm_status = adm.status;
         reply_free(&pub);
         reply_free(&adm);
@@ -1374,6 +1412,14 @@ static int test_localhost_only(void) {
         }
     }
     printf("✓ every operator endpoint is refused on the public listener, served on the admin one\n");
+
+    /* A key for an organization that isn't there is refused, not failed */
+    Reply nokey = admin_port("POST", "/api/admin/organization-keys", NULL,
+                             "{\"organization_code_name\":\"nosuchorg\"}");
+    int nokey_status = nokey.status;
+    reply_free(&nokey);
+    if (nokey_status != 404) FAIL("a key for an unknown organization answered %d", nokey_status);
+    printf("✓ a key for an unknown organization answers 404\n");
 
     static const char *const browser[] = {
         "Host: rebind.attacker.example:8080\r\n"

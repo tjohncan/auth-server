@@ -717,7 +717,11 @@ int organization_key_create(db_handle_t *db,
         db_finalize(lookup_stmt);
     } else {
         db_finalize(lookup_stmt);
-        log_error("Organization not found or inactive: %s", organization_code_name);
+        if (lookup_rc == DB_DONE) {
+            log_info("Organization not found or inactive: %s", organization_code_name);
+            return 1;
+        }
+        log_error("Error looking up the organization for a new key");
         return -1;
     }
 
@@ -733,8 +737,12 @@ int organization_key_create(db_handle_t *db,
     if (hash_rc != 0) {
         OPENSSL_cleanse(salt_hex, sizeof(salt_hex));
         OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
+        if (hash_rc == -2) {
+            log_info("Secret refused: its length is out of range");
+            return -2;
+        }
         log_error("Failed to hash secret");
-        return (hash_rc == -2) ? -2 : -1;
+        return -1;
     }
 
     /* Generate UUID for key */

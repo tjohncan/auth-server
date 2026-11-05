@@ -227,9 +227,13 @@ int user_create(db_handle_t *db, const char *username,
                             &iterations,
                             hash, sizeof(hash));
     if (hash_rc != 0) {
-        log_error("Failed to hash password");
         OPENSSL_cleanse(salt, sizeof(salt));
-        return (hash_rc == -2) ? -2 : -1;
+        if (hash_rc == -2) {
+            log_info("Password refused: its length is out of range");
+            return -2;
+        }
+        log_error("Failed to hash password");
+        return -1;
     }
 
     /* Encrypt username and compute hash */
@@ -1280,9 +1284,13 @@ int user_change_password(db_handle_t *db, long long user_account_pin,
                             &new_iterations,
                             new_hash, sizeof(new_hash));
     if (hash_rc != 0) {
-        log_error("Failed to hash new password");
         OPENSSL_cleanse(new_salt, sizeof(new_salt));
-        return (hash_rc == -2) ? -2 : -1;
+        if (hash_rc == -2) {
+            log_info("Password refused: its length is out of range");
+            return -2;
+        }
+        log_error("Failed to hash new password");
+        return -1;
     }
 
     /* Step 4: Update password in database, and close the sessions the old one
@@ -1362,9 +1370,13 @@ int user_set_password(db_handle_t *db, const unsigned char *user_id,
                             &iterations,
                             hash, sizeof(hash));
     if (hash_rc != 0) {
-        log_error("Failed to hash the password to set");
         OPENSSL_cleanse(salt, sizeof(salt));
-        return (hash_rc == -2) ? -2 : -1;
+        if (hash_rc == -2) {
+            log_info("Password refused: its length is out of range");
+            return -2;
+        }
+        log_error("Failed to hash the password to set");
+        return -1;
     }
 
     if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
@@ -2199,9 +2211,13 @@ int user_consume_password_reset_token(db_handle_t *db, const char *token,
                             &iterations,
                             hash, sizeof(hash));
     if (hash_rc != 0) {
-        log_error("Failed to hash new password for reset");
         OPENSSL_cleanse(salt, sizeof(salt));
-        return (hash_rc == -2) ? -2 : -1;
+        if (hash_rc == -2) {
+            log_info("Password refused: its length is out of range");
+            return -2;
+        }
+        log_error("Failed to hash new password for reset");
+        return -1;
     }
 
     /* Step 3: Transaction — mark token used + update password (and close the
@@ -2948,9 +2964,13 @@ int user_consume_invitation_token(db_handle_t *db, const char *token,
                             &iterations,
                             hash, sizeof(hash));
     if (hash_rc != 0) {
-        log_error("Failed to hash password for invitation accept");
         OPENSSL_cleanse(salt, sizeof(salt));
-        return (hash_rc == -2) ? -2 : -1;
+        if (hash_rc == -2) {
+            log_info("Password refused: its length is out of range");
+            return -2;
+        }
+        log_error("Failed to hash password for invitation accept");
+        return -1;
     }
 
     /* Step 3: Transaction.

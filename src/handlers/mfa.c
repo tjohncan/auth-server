@@ -119,23 +119,28 @@ int mfa_totp_confirm(db_handle_t *db,
     *out_recovery_codes = NULL;
     *out_recovery_count = 0;
 
-    /* Get method and verify ownership */
+    /* Get method and verify ownership. Another user's method answers as an
+       unknown one does, so method ids can't be told apart. */
     mfa_method_t method;
-    if (mfa_method_get_by_id(db, method_id, &method) != 0) {
-        log_error("MFA method not found");
+    int lookup = mfa_method_get_by_id(db, method_id, &method);
+    if (lookup < 0) {
         return -1;
+    }
+    if (lookup > 0) {
+        log_info("MFA method not found");
+        return 2;
     }
 
     if (method.user_account_pin != user_account_pin) {
-        log_error("MFA method does not belong to this user");
+        log_warn("MFA method does not belong to this user");
         OPENSSL_cleanse(&method, sizeof(method));
-        return -1;
+        return 2;
     }
 
     if (method.is_confirmed) {
-        log_error("MFA method is already confirmed");
+        log_info("MFA method is already confirmed");
         OPENSSL_cleanse(&method, sizeof(method));
-        return -1;
+        return 3;
     }
 
     /* Decrypt secret from database */
@@ -215,7 +220,11 @@ int mfa_verify(db_handle_t *db,
 
     /* Get method, verify ownership and confirmed status */
     mfa_method_t method;
-    if (mfa_method_get_by_id(db, method_id, &method) != 0) {
+    int lookup = mfa_method_get_by_id(db, method_id, &method);
+    if (lookup < 0) {
+        return -1;
+    }
+    if (lookup > 0) {
         log_debug("MFA method not found");
         return 0;  /* Treat as invalid */
     }
@@ -298,17 +307,22 @@ int mfa_delete_method(db_handle_t *db,
         return -1;
     }
 
-    /* Verify ownership before deleting */
+    /* Verify ownership before deleting. Another user's method answers as an
+       unknown one does. */
     mfa_method_t method;
-    if (mfa_method_get_by_id(db, method_id, &method) != 0) {
-        log_error("MFA method not found");
+    int lookup = mfa_method_get_by_id(db, method_id, &method);
+    if (lookup < 0) {
         return -1;
+    }
+    if (lookup > 0) {
+        log_info("MFA method not found");
+        return 1;
     }
 
     if (method.user_account_pin != user_account_pin) {
-        log_error("MFA method does not belong to this user");
+        log_warn("MFA method does not belong to this user");
         OPENSSL_cleanse(&method, sizeof(method));
-        return -1;
+        return 1;
     }
 
     OPENSSL_cleanse(&method, sizeof(method));
@@ -332,8 +346,8 @@ int mfa_regenerate_recovery_codes(db_handle_t *db,
     }
 
     if (confirmed_count == 0) {
-        log_error("Cannot generate recovery codes without a confirmed MFA method");
-        return -1;
+        log_info("Cannot generate recovery codes without a confirmed MFA method");
+        return 1;
     }
 
     /* Generate plaintext codes */

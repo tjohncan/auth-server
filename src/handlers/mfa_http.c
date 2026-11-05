@@ -191,6 +191,12 @@ HttpResponse *mfa_totp_confirm_handler(const HttpRequest *req) {
     if (rc == 1) {
         return response_json_error(400, "Invalid TOTP code");
     }
+    if (rc == 2) {
+        return response_json_error(404, "MFA method not found");
+    }
+    if (rc == 3) {
+        return response_json_error(409, "MFA method is already confirmed");
+    }
     if (rc != 0) {
         return response_json_error(500, "Failed to confirm MFA method");
     }
@@ -470,7 +476,11 @@ HttpResponse *mfa_delete_method_handler(const HttpRequest *req) {
     free(id_hex);
 
     /* Delete method */
-    if (mfa_delete_method(db, session.user_account_pin, method_id) != 0) {
+    int rc = mfa_delete_method(db, session.user_account_pin, method_id);
+    if (rc == 1) {
+        return response_json_error(404, "MFA method not found");
+    }
+    if (rc != 0) {
         return response_json_error(500, "Failed to delete MFA method");
     }
 
@@ -514,7 +524,11 @@ HttpResponse *mfa_regenerate_recovery_codes_handler(const HttpRequest *req) {
     char **codes = NULL;
     int count = 0;
 
-    if (mfa_regenerate_recovery_codes(db, session.user_account_pin, &codes, &count) != 0) {
+    int rc = mfa_regenerate_recovery_codes(db, session.user_account_pin, &codes, &count);
+    if (rc == 1) {
+        return response_json_error(409, "Recovery codes need a confirmed MFA method");
+    }
+    if (rc != 0) {
         return response_json_error(500, "Failed to regenerate recovery codes");
     }
 

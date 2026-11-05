@@ -230,7 +230,7 @@ int mfa_method_get_by_id(db_handle_t *db,
     } else if (rc == DB_DONE) {
         db_finalize(stmt);
         log_debug("MFA method not found");
-        return -1;
+        return 1;
     } else {
         log_error("Error retrieving MFA method");
         db_finalize(stmt);

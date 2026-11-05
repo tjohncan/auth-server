@@ -1830,8 +1830,12 @@ int client_key_create(db_handle_t *db,
     if (hash_rc != 0) {
         OPENSSL_cleanse(salt_hex, sizeof(salt_hex));
         OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
+        if (hash_rc == -2) {
+            log_info("Secret refused: its length is out of range");
+            return -2;
+        }
         log_error("Failed to hash secret");
-        return (hash_rc == -2) ? -2 : -1;
+        return -1;
     }
 
     const char *sql;
