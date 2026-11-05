@@ -120,6 +120,7 @@ typedef struct {
 
     /* Environment variable names (optional overrides) */
     char *log_level_env;   /* ENV var name for log_level */
+    char *strict_env;      /* ENV var name for strict */
     char *db_type_env;     /* ENV var name for db_type */
     char *db_host_env;     /* ENV var name for db_host */
     char *db_port_env;     /* ENV var name for db_port */

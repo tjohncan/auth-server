@@ -1272,19 +1272,29 @@ static int test_config(void) {
              "refuses the start (OK)");
 
     /* A strict value it can't read refuses the start, in the file or in
-       AUTH_STRICT, which wins over the file */
+       AUTH_STRICT, which wins over the file; strict_env renames the variable, and
+       the renamed one is read the same way */
     config_t *typo = config_from("strict = yes\n");
     setenv("AUTH_STRICT", "on", 1);
     config_t *env_typo = config_from("strict = true\n");
     unsetenv("AUTH_STRICT");
-    int refused = !typo && !env_typo;
+    setenv("TEST_STRICT", "on", 1);
+    config_t *renamed_typo = config_from("strict_env = TEST_STRICT\nstrict = true\n");
+    setenv("TEST_STRICT", "true", 1);
+    config_t *renamed = config_from("strict_env = TEST_STRICT\nstrict = false\n");
+    unsetenv("TEST_STRICT");
+    int refused = !typo && !env_typo && !renamed_typo && renamed && renamed->strict == 1;
     config_free(typo);
     config_free(env_typo);
+    config_free(renamed_typo);
+    config_free(renamed);
     if (!refused) {
-        log_error("Config: a strict value it can't read didn't refuse the start");
+        log_error("Config: a strict value it can't read didn't refuse the start, or strict_env "
+                  "didn't rename the variable");
         return 1;
     }
-    log_info("  strict: a value it can't read refuses the start, in the file or AUTH_STRICT (OK)");
+    log_info("  strict: a value it can't read refuses the start, in the file or AUTH_STRICT, "
+             "which strict_env renames (OK)");
 
     /* An empty server_host refuses the start, from the file or from AUTH_SERVER_HOST,
        which is trimmed as the file's value is: the server's public address is built

@@ -117,6 +117,8 @@ machine_secret_hash_max_iterations = 777
 # minimum). Set it in production. Off, the server starts on them, warning about the key.
 # A value other than true/false or 1/0, here or in AUTH_STRICT, refuses the start too.
 # strict = true
+# Optional: Specify custom environment variable name for strict
+# strict_env = MY_STRICT
 
 # Patterns a value must match when it's created or set (POSIX extended, matched
 # against the whole value). They never apply to what's already stored, so an

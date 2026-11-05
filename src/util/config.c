@@ -502,7 +502,8 @@ static void set_config_value(config_t *config, const char *key, const char *valu
         /* A value it can't read isn't kept at the current one, as other settings'
          * are: strict is there to stop a start on unsafe defaults, so a typo mustn't
          * leave it quietly off. -1 marks it, and config_load refuses the start
-         * unless AUTH_STRICT, which wins over the file, can be read. */
+         * unless AUTH_STRICT (or the variable strict_env names), which wins over the
+         * file, can be read. */
         if (strcmp(value, "true") == 0 || strcmp(value, "1") == 0) {
             config->strict = 1;
         } else if (strcmp(value, "false") == 0 || strcmp(value, "0") == 0) {
@@ -686,6 +687,14 @@ static void set_config_value(config_t *config, const char *key, const char *valu
             config->log_level_env = new_value;
         } else {
             log_error("Failed to allocate memory for log_level_env");
+        }
+    } else if (strcmp(key, "strict_env") == 0) {
+        new_value = str_dup(value);
+        if (new_value) {
+            free(config->strict_env);
+            config->strict_env = new_value;
+        } else {
+            log_error("Failed to allocate memory for strict_env");
         }
     }
 #ifdef EMAIL_SUPPORT
@@ -1011,16 +1020,17 @@ static void apply_env_overrides(config_t *config) {
 
     /* STRICT: a value it can't read marks strict -1, as the file's does (see
        set_config_value) */
-    env_value = getenv("AUTH_STRICT");
+    env_var_name = config->strict_env ? config->strict_env : "AUTH_STRICT";
+    env_value = getenv(env_var_name);
     if (env_value && *env_value) {
         if (strcmp(env_value, "true") == 0 || strcmp(env_value, "1") == 0) {
             config->strict = 1;
-            log_info("Config override from AUTH_STRICT: on");
+            log_info("Config override from %s: on", env_var_name);
         } else if (strcmp(env_value, "false") == 0 || strcmp(env_value, "0") == 0) {
             config->strict = 0;
-            log_info("Config override from AUTH_STRICT: off");
+            log_info("Config override from %s: off", env_var_name);
         } else {
-            log_warn("Invalid AUTH_STRICT value '%s', must be true/false or 1/0", env_value);
+            log_warn("Invalid %s value '%s', must be true/false or 1/0", env_var_name, env_value);
             config->strict = -1;
         }
     }
@@ -1337,6 +1347,7 @@ config_t *config_load(const char *config_file) {
     /* Logging defaults */
     parse_log_level(DEFAULT_LOG_LEVEL, &config->log_level);
     config->log_level_env = NULL;
+    config->strict_env = NULL;
 
     config->schema_dir = str_dup(DEFAULT_SCHEMA_DIR);
     if (!config->schema_dir) {
@@ -1636,6 +1647,7 @@ void config_free(config_t *config) {
     free(config->encryption_key_env);
     free(config->encryption_key_previous_env);
     free(config->log_level_env);
+    free(config->strict_env);
     free(config->server_host_env);
     free(config->server_port_env);
     free(config->admin_port_env);
