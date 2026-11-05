@@ -59,9 +59,14 @@ RUN apk add --no-cache \
     && addgroup -g 1000 authserver \
     && adduser -u 1000 -G authserver -s /bin/sh -D authserver \
     && mkdir -p /app/data \
-    && chown -R authserver:authserver /app
+    && chown authserver:authserver /app/data
 
 WORKDIR /app
+
+# The server owns /app/data alone: the database, its lock file and the admin
+# socket. The binary and the files it serves or reads stay root's, readable and
+# not writable by the server, so a server that's been taken over can't rewrite
+# them.
 
 # Binary from build stage
 COPY --from=builder /build/auth-server /app/auth-server
@@ -70,8 +75,6 @@ COPY --from=builder /build/auth-server /app/auth-server
 COPY static/ /app/static/
 COPY sql/ /app/sql/
 COPY templates/ /app/templates/
-
-RUN chown -R authserver:authserver /app
 
 USER authserver
 
