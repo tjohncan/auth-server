@@ -119,7 +119,7 @@ int crypto_base64url_decode(const char *input, size_t input_len,
      * input_len % 4 == 1: INVALID (cannot represent complete data)
      */
     if (input_len % 4 == 1) {
-        log_error("Invalid base64url length: %zu (cannot be 4n+1)", input_len);
+        log_debug("Invalid base64url length: %zu (cannot be 4n+1)", input_len);
         return -1;
     }
 
@@ -130,7 +130,7 @@ int crypto_base64url_decode(const char *input, size_t input_len,
     if (remainder == 3) expected_output_len += 2;
 
     if (output_len < expected_output_len) {
-        log_error("Output buffer too small for base64url decode");
+        log_debug("Output buffer too small for base64url decode");
         return -1;
     }
 
@@ -145,12 +145,12 @@ int crypto_base64url_decode(const char *input, size_t input_len,
         int v3 = (i + 3 < input_len) ? base64url_decode_char(input[i + 3]) : 0;
 
         if (v0 < 0 || v1 < 0) {
-            log_error("Invalid base64url character in input");
+            log_debug("Invalid base64url character in input");
             return -1;
         }
 
         if ((i + 2 < input_len && v2 < 0) || (i + 3 < input_len && v3 < 0)) {
-            log_error("Invalid base64url character in input");
+            log_debug("Invalid base64url character in input");
             return -1;
         }
 

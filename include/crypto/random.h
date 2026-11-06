@@ -84,6 +84,9 @@ size_t crypto_base64url_encode(const unsigned char *input, size_t input_len,
  *   output_len - Size of output buffer
  *
  * Returns: Number of bytes written, or negative on error
+ *
+ * Input it can't decode logs at DEBUG, since it can be anyone's: a token's signature,
+ * for one. A caller decoding the server's own data logs its own ERROR on failure.
  */
 int crypto_base64url_decode(const char *input, size_t input_len,
                            unsigned char *output, size_t output_len);
