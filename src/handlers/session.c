@@ -41,7 +41,7 @@ int session_authenticate_and_create(db_handle_t *db,
 
     if (valid != 1) {
         if (valid == 0) {
-            log_info("Authentication failed (invalid credentials)");
+            log_warn("Authentication failed (invalid credentials)");
         } else {
             log_error("Error verifying password");
         }

@@ -1270,7 +1270,7 @@ int user_change_password(db_handle_t *db, long long user_account_pin,
     OPENSSL_cleanse(hash, sizeof(hash));
 
     if (valid != 1) {
-        log_info("Current password verification failed for password change");
+        log_warn("Current password verification failed for password change");
         return 0;  /* Invalid current password */
     }
 

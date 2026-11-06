@@ -272,7 +272,7 @@ int mfa_verify(db_handle_t *db,
         log_info("MFA verified");
         return 1;
     } else if (valid == 0) {
-        log_info("MFA verification failed");
+        log_warn("MFA verification failed");
         return 0;
     } else {
         log_error("Error during MFA verification");
@@ -293,7 +293,7 @@ int mfa_recover(db_handle_t *db,
     if (result == 1) {
         log_info("Recovery code used");
     } else if (result == 0) {
-        log_info("Invalid recovery code");
+        log_warn("Invalid recovery code");
     }
 
     return result;
