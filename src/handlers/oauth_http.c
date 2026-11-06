@@ -204,6 +204,28 @@ static HttpResponse *authenticate_token_client(db_handle_t *db,
  * ========================================================================== */
 
 /*
+ * A grant's answer when the code, token or secret isn't what's wrong: the server
+ * failed, or the request asks for something the credential doesn't cover. invalid_grant
+ * or invalid_client would have the client discard a credential that still holds, as RFC
+ * 6749 clients do. Each comes after the credential checked out (PKCE passed, the rotation
+ * done and rolled back, the key verified), so it tells nothing to one who doesn't hold it.
+ *
+ * Returns: the response, or NULL if the credential is what was refused
+ */
+static HttpResponse *grant_not_credential(int rc) {
+    switch (rc) {
+        case -2: return response_json_error(500, "Internal server error");
+        /* RFC 8707 Section 2 */
+        case -3: return response_oauth_error(400, "invalid_target",
+                     "Name a resource server this client is linked to");
+        case -4: return response_oauth_error(400, "invalid_scope", "Scope beyond the grant");
+        case -5: return response_oauth_error(400, "unauthorized_client",
+                     "This client can't use this grant type");
+        default: return NULL;
+    }
+}
+
+/*
  * POST /token
  *
  * OAuth2 token endpoint (RFC 6749 Section 3.2)
@@ -312,18 +334,13 @@ HttpResponse *token_handler(const HttpRequest *req) {
         cleanse_free(code_verifier);
         free(resource);
 
-        if (rc == -2) {
-            /* The server failed: invalid_grant would tell the client to give up
-               on a code that may be good */
-            free(grant_type);
-            return response_json_error(500, "Internal server error");
-        }
         if (rc != 0) {
             /* rc == 1: replay attack detected (token chain revoked automatically)
              * rc == -1: invalid, expired, or malformed authorization code
              * Same response for both — prevents distinguishing replay from invalid */
             free(grant_type);
-            return response_oauth_error(400, "invalid_grant", "Invalid authorization code");
+            HttpResponse *other = grant_not_credential(rc);
+            return other ? other : response_oauth_error(400, "invalid_grant", "Invalid authorization code");
         }
 
         /* Build JSON response */
@@ -399,18 +416,13 @@ HttpResponse *token_handler(const HttpRequest *req) {
         free(scope);
         free(resource);
 
-        if (rc == -2) {
-            /* The server failed: a client takes invalid_grant as final, and would
-               discard a refresh token that's still good */
-            free(grant_type);
-            return response_json_error(500, "Internal server error");
-        }
         if (rc != 0) {
             /* rc == 1: replay attack detected (token chain revoked automatically)
              * rc == -1: invalid, expired, or malformed refresh token
              * Same response for both — prevents distinguishing replay from invalid */
             free(grant_type);
-            return response_oauth_error(400, "invalid_grant", "Invalid refresh token");
+            HttpResponse *other = grant_not_credential(rc);
+            return other ? other : response_oauth_error(400, "invalid_grant", "Invalid refresh token");
         }
 
         /* Build JSON response */
@@ -492,14 +504,10 @@ HttpResponse *token_handler(const HttpRequest *req) {
         free(scope);
         free(resource);
 
-        if (rc == -2) {
-            /* The server failed: invalid_client would report a good secret as wrong */
-            free(grant_type);
-            return response_json_error(500, "Internal server error");
-        }
         if (rc != 0) {
             free(grant_type);
-            return response_oauth_error(401, "invalid_client", "Client authentication failed");
+            HttpResponse *other = grant_not_credential(rc);
+            return other ? other : response_oauth_error(401, "invalid_client", "Client authentication failed");
         }
 
         /* Build JSON response */

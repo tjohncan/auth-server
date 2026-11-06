@@ -262,7 +262,7 @@ Business logic for OAuth2 token operations.
 - **Responsibility**: PKCE validation, token generation, transaction-wrapped token exchanges
 - **Used by**: Token endpoint, introspection/revocation endpoints
 - **Design**: All token operations wrapped in transactions for atomicity
-- **Security**: Replay attack detection via return codes (0=success, 1=replay, -1=error)
+- **Security**: Replay attack detection via return codes (0=success, 1=replay, -1=refused, -2=server failure, and for a resource, scope or grant type the credential doesn't cover -3, -4 and -5)
 
 Examples:
 - `oauth_exchange_authorization_code(db, client_id, code, redirect_uri, verifier, resource, out_response)` - Exchange auth code for tokens

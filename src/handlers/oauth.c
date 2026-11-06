@@ -492,7 +492,7 @@ int oauth_exchange_authorization_code(db_handle_t *db,
     /* Step 1b: Validate grant type */
     if (strcmp(client.grant_type, "authorization_code") != 0) {
         log_info("Client not configured for authorization_code grant");
-        return -1;
+        return -5;
     }
 
     /* Step 2: Decode and verify authorization code JWT (stateless) */
@@ -668,7 +668,7 @@ int oauth_exchange_authorization_code(db_handle_t *db,
         db_execute_trusted(db, "ROLLBACK");
         if (resolved < 0) return -2;  /* logged */
         log_info("Failed to resolve resource server");
-        return -1;
+        return -3;
     }
 
     /* Step 11: Issue the access token, descended from the code */
@@ -877,7 +877,7 @@ int oauth_refresh_access_token(db_handle_t *db,
             signing_key_free(signing_key);
             db_execute_trusted(db, "ROLLBACK");
             log_info("Requested scope exceeds original grant");
-            return -1;
+            return -4;
         }
         final_scope = scope;  /* Use downscoped request */
         log_debug("Downscoped from '%s' to '%s'", token_data.scopes, scope);
@@ -894,7 +894,7 @@ int oauth_refresh_access_token(db_handle_t *db,
         db_execute_trusted(db, "ROLLBACK");
         if (resolved < 0) return -2;  /* logged */
         log_info("Failed to resolve resource server");
-        return -1;
+        return -3;
     }
 
     /* Step 8b: Look up user UUID and verify still active */
@@ -1021,13 +1021,13 @@ int oauth_client_credentials(db_handle_t *db,
     /* Validate grant type is client_credentials */
     if (strcmp(client.grant_type, "client_credentials") != 0) {
         log_info("Client not configured for client_credentials grant");
-        return -1;
+        return -5;
     }
 
     /* Validate client type is confidential */
     if (strcmp(client.client_type, "confidential") != 0) {
         log_info("Client credentials grant requires confidential client");
-        return -1;
+        return -5;
     }
 
     /* Step 3: Resolve resource server */
@@ -1038,7 +1038,7 @@ int oauth_client_credentials(db_handle_t *db,
     if (resolved != 0) {
         if (resolved < 0) return -2;  /* logged */
         log_info("Failed to resolve resource server");
-        return -1;
+        return -3;
     }
 
     /* Step 4: Get signing key for access token JWT */

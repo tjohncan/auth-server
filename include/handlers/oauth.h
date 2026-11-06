@@ -103,7 +103,9 @@ int oauth_authorize(db_handle_t *db,
  * Returns: 0 on success,
  *          1 if code already exchanged (replay attack - should revoke tokens),
  *          -1 if the grant is refused (the code, client, verifier or user won't do),
- *          -2 if the server failed, so nothing is known to be wrong with the code
+ *          -2 if the server failed, so nothing is known to be wrong with the code,
+ *          -3 if the resource won't do, -5 if the client may not use this grant type:
+ *          the code still holds
  */
 int oauth_exchange_authorization_code(db_handle_t *db,
                                        const unsigned char *client_id,
@@ -130,8 +132,10 @@ int oauth_exchange_authorization_code(db_handle_t *db,
  *
  * Returns: 0 on success,
  *          1 if refresh token already exchanged (replay attack - should revoke chain),
- *          -1 if the grant is refused (the token, client, scope or user won't do),
- *          -2 if the server failed, so nothing is known to be wrong with the token
+ *          -1 if the grant is refused (the token, client or user won't do),
+ *          -2 if the server failed, so nothing is known to be wrong with the token,
+ *          -3 if the resource won't do, -4 if the scope is beyond the grant: the token
+ *          still holds
  */
 int oauth_refresh_access_token(db_handle_t *db,
                                 const unsigned char *client_id,
@@ -157,9 +161,10 @@ int oauth_refresh_access_token(db_handle_t *db,
  *   user_agent      - Client user agent (optional, for audit logging)
  *   out_response    - Output: Token response (caller must free)
  *
- * Returns: 0 on success, -1 if the client's authentication or grant is
- *          refused, -2 if the server failed, so nothing is known to be wrong
- *          with the credentials
+ * Returns: 0 on success, -1 if the client's authentication is refused,
+ *          -2 if the server failed, so nothing is known to be wrong with the
+ *          credentials, -3 if the resource won't do, -5 if the client may not
+ *          use this grant type
  */
 int oauth_client_credentials(db_handle_t *db,
                               const unsigned char *client_id,

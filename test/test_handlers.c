@@ -1875,6 +1875,55 @@ static int test_database_failures(void) {
     }
     printf("✓ a refresh the database fails answers 500, and the token still works\n");
 
+    /* A scope beyond the grant is no verdict on the token: invalid_scope, and the same
+       token goes on working. A client that takes invalid_grant as final would have
+       discarded it. */
+    char form[1024];
+    snprintf(form, sizeof(form), "grant_type=refresh_token&refresh_token=%s&client_id=%s&scope=beyond",
+             rt, g_ui_client);
+    r = post_form("/token", form);
+    status = r.status;
+    got = strstr(r.body, "invalid_scope") != NULL;
+    reply_free(&r);
+    if (status != 400 || !got) FAIL("a scope beyond the grant answered %d, not invalid_scope", status);
+    r = refresh(rt);
+    status = r.status;
+    got = field(&r, "refresh_token", rt, sizeof(rt)) == 0;
+    reply_free(&r);
+    if (status != 200 || !got) FAIL("the same token, without the scope, answered %d", status);
+
+    /* A second resource server linked, so a refresh that names none has no one to fall
+       back on: invalid_target, and the same token works when it names one */
+    char json[512], second[33], link[256];
+    snprintf(json, sizeof(json), "{\"organization_id\":\"%s\",\"code_name\":\"second_rs\","
+             "\"display_name\":\"Second\",\"address\":\"https://second.example\"}", g_org_id);
+    if (admin_create("/api/admin/resource-servers", json, "id", second, sizeof(second)) != 0) return 1;
+    snprintf(json, sizeof(json), "{\"client_id\":\"%s\",\"resource_server_id\":\"%s\"}",
+             g_ui_client, second);
+    r = post_json("/api/admin/client-resource-servers", g_admin_cookie, json);
+    status = r.status;
+    reply_free(&r);
+    if (status != 200) FAIL("linking a second resource server answered %d", status);
+    r = refresh(rt);
+    status = r.status;
+    got = strstr(r.body, "invalid_target") != NULL;
+    reply_free(&r);
+    if (status != 400 || !got) FAIL("a refresh with no resource to fall back on answered %d", status);
+    snprintf(form, sizeof(form), "grant_type=refresh_token&refresh_token=%s&client_id=%s"
+             "&resource=https%%3A%%2F%%2Fsecond.example", rt, g_ui_client);
+    r = post_form("/token", form);
+    status = r.status;
+    got = field(&r, "refresh_token", rt, sizeof(rt)) == 0;
+    reply_free(&r);
+    if (status != 200 || !got) FAIL("the same token, naming the resource, answered %d", status);
+    snprintf(link, sizeof(link), "/api/admin/client-resource-servers?client_id=%s&resource_server_id=%s",
+             g_ui_client, second);
+    r = request("DELETE", link, g_admin_cookie, NULL, NULL, NULL);
+    status = r.status;
+    reply_free(&r);
+    if (status != 200) FAIL("unlinking the second resource server answered %d", status);
+    printf("✓ a refused resource or scope leaves the refresh token working\n");
+
     /* A client lookup that fails, not a client that isn't there */
     if (db_execute_direct(conn, HIDE_TABLE(SECURITY_, "client")) != 0) {
         FAIL("could not hide the clients");

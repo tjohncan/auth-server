@@ -1197,6 +1197,11 @@ OAuth2 token endpoint (RFC 6749 Section 3.2). Exchanges authorization codes or r
 
 **A `500`** (`{"error": "Internal server error"}`, on any grant) means the server failed. The code, refresh token or secret still holds: keep it and retry.
 
+**Refusals that leave the credential holding**, each with `400` on any grant that can reach it. Only `invalid_grant` and `invalid_client` are about the code, refresh token or secret, and only those should make a client discard it.
+- `invalid_target` (RFC 8707): the `resource` names no resource server linked to this client, or it's left out and the client hasn't exactly one to fall back on. Name one and retry.
+- `invalid_scope`: on a refresh, the `scope` goes beyond the grant. Ask for the grant's scope, or leave it out.
+- `unauthorized_client`: this client's type doesn't use this grant.
+
 #### Authorization Code Grant
 
 **Request**:
