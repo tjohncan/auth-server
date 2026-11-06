@@ -271,7 +271,8 @@ int organization_key_revoke(db_handle_t *db,
  *   out_organization_pin - Output: Organization PIN if valid
  *   out_key_pin          - Output: Organization key PIN (for re-verification)
  *
- * Returns: 0 if valid, -1 if invalid or error
+ * Returns: 0 if valid, 1 if not (no such active key, or the wrong secret), -1 on
+ *          error
  */
 int organization_key_verify(db_handle_t *db,
                             const unsigned char *key_id,

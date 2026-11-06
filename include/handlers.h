@@ -69,15 +69,16 @@ typedef enum {
  *
  * Returns: 0 with *out_session filled, 1 if there is no session cookie, 2 if it
  *          names no live session, 3 if the session owes the factor the policy
- *          asks for
+ *          asks for, 4 if the check itself failed, which says nothing about the
+ *          cookie
  */
 int session_authenticate(const HttpRequest *req, db_handle_t *db,
                          session_mfa_policy_t policy, oauth_session_info_t *out_session);
 
 /*
  * session_authenticate, answered: NULL with *out_session filled, or the error
- * response, 401 without a live session and 403 "MFA verification required"
- * when it owes a factor
+ * response, 401 without a live session, 403 "MFA verification required" when it
+ * owes a factor, and 500 when the check itself failed
  */
 HttpResponse *session_require(const HttpRequest *req, db_handle_t *db,
                               session_mfa_policy_t policy, oauth_session_info_t *out_session);
@@ -220,7 +221,8 @@ char *http_cookie_get_value(const char *cookie_header, const char *name);
  *   out_org_pin - Output: organization pin on success
  *   out_key_pin - Output: key pin on success
  *
- * Returns: 0 on success, -1 on failure
+ * Returns: 0 on success, -1 if refused (no key headers, or not a good key), -2 if
+ *          the check itself failed, which says nothing about the key
  */
 int try_org_key_auth(const HttpRequest *req, const char *operation,
                      long long *out_org_pin, long long *out_key_pin);

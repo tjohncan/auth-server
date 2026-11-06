@@ -130,7 +130,7 @@ typedef struct {
  *   session_token - Session token from cookie
  *   out_session   - Output: Session information
  *
- * Returns: 0 on success (found active session), -1 on error or not found
+ * Returns: 0 on success (found active session), 1 if there's none, -1 on error
  */
 int oauth_session_get_by_token(db_handle_t *db, const char *session_token,
                                 oauth_session_info_t *out_session);

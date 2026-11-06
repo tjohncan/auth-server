@@ -1841,10 +1841,10 @@ static int test_failed_bootstrap(void) {
 
 /*
  * A database failure isn't answered as a bad credential: a client takes
- * invalid_grant as final and discards its refresh token, and a user told
- * "Invalid credentials" doubts a right password. With the write each needs
- * refused, a refresh and a sign-in answer 500, and the same refresh token and
- * password work once the cause is gone.
+ * invalid_grant as final and discards its refresh token, a user told "Invalid
+ * credentials" doubts a right password, and a console told 401 asks to sign in
+ * again. Nor is it an empty list or an invalid link. With the query each needs
+ * failing, the answer is 500, and what was sent works once the cause is gone.
  */
 static int test_database_failures(void) {
     printf("\n=== A database failure isn't a bad credential ===\n");
@@ -1944,6 +1944,87 @@ static int test_database_failures(void) {
     reply_free(&r);
     if (status != 400) FAIL("an unknown link, once the database worked, answered %d", status);
     printf("✓ a link page the database fails answers 500, not \"invalid\"\n");
+
+    /* 5. A session the server can't check isn't a bad one: 500, not 401, so the console
+          doesn't ask to sign in again. An org key too, and a good key still answers
+          when it's the session lookup that can't run. */
+    r = admin_port("POST", "/api/admin/organization-keys", NULL,
+                   "{\"organization_code_name\":\"system\"}");
+    char key_id[33], secret[128], headers[256], bad_headers[256];
+    got = r.status == 200 && field(&r, "key_id", key_id, sizeof(key_id)) == 0 &&
+          field(&r, "secret", secret, sizeof(secret)) == 0;
+    reply_free(&r);
+    if (!got) FAIL("could not make an organization key");
+    snprintf(headers, sizeof(headers), "X-Org-Key-Id: %s\r\nX-Org-Key-Secret: %s\r\n", key_id, secret);
+    snprintf(bad_headers, sizeof(bad_headers), "X-Org-Key-Id: %s\r\nX-Org-Key-Secret: wrong\r\n", key_id);
+    const char *orgs = "/api/admin/organizations";
+
+    if (db_execute_direct(conn, HIDE_TABLE(SESSION_, "browser")) != 0) FAIL("could not hide the sessions");
+    r = request("GET", "/api/user/profile", g_admin_cookie, NULL, NULL, NULL);
+    int profile = r.status;
+    reply_free(&r);
+    r = request("GET", orgs, g_admin_cookie, NULL, NULL, NULL);
+    int by_cookie = r.status;
+    reply_free(&r);
+    r = request("GET", orgs, g_admin_cookie, headers, NULL, NULL);
+    int with_good_key = r.status;
+    reply_free(&r);
+    if (db_execute_direct(conn, SHOW_TABLE(SESSION_, "browser")) != 0) FAIL("could not show the sessions");
+    if (profile != 500 || by_cookie != 500 || with_good_key != 200) {
+        FAIL("with sessions failing, the profile answered %d, the organizations %d, and with a "
+             "good org key too %d", profile, by_cookie, with_good_key);
+    }
+
+    if (db_execute_direct(conn, HIDE_TABLE(SECURITY_, "organization_key")) != 0) FAIL("could not hide the keys");
+    r = request("GET", orgs, NULL, headers, NULL, NULL);
+    status = r.status;
+    reply_free(&r);
+    if (db_execute_direct(conn, SHOW_TABLE(SECURITY_, "organization_key")) != 0) FAIL("could not show the keys");
+    if (status != 500) FAIL("an org key the database failed answered %d, not 500", status);
+    r = request("GET", orgs, NULL, headers, NULL, NULL);
+    int good = r.status;
+    reply_free(&r);
+    r = request("GET", orgs, NULL, bad_headers, NULL, NULL);
+    int wrong = r.status;
+    reply_free(&r);
+    r = request("GET", "/api/user/profile", g_admin_cookie, NULL, NULL, NULL);
+    profile = r.status;
+    reply_free(&r);
+    if (good != 200 || wrong != 401 || profile != 200) {
+        FAIL("once the database worked, a good org key answered %d, a wrong one %d, the cookie %d",
+             good, wrong, profile);
+    }
+    printf("✓ a session or org key the database can't check answers 500, not 401\n");
+
+    /* 6. /authorize: before the redirect URI is trusted a failure can't be sent to it;
+          after, it goes there as server_error, not invalid_request or the sign-in page */
+    if (db_execute_direct(conn, HIDE_TABLE(SECURITY_, "client")) != 0) FAIL("could not hide the clients");
+    r = authorize_with(PKCE_CHALLENGE);
+    status = r.status;
+    got = r.location == NULL;
+    reply_free(&r);
+    if (db_execute_direct(conn, SHOW_TABLE(SECURITY_, "client")) != 0) FAIL("could not show the clients");
+    if (status != 500 || !got) FAIL("/authorize with its client lookup failing answered %d", status);
+
+    if (db_execute_direct(conn, HIDE_TABLE(SESSION_, "browser")) != 0) FAIL("could not hide the sessions");
+    r = authorize_with(PKCE_CHALLENGE);
+    status = r.status;
+    got = r.location && strstr(r.location, "error=server_error") && strstr(r.location, "state=st8");
+    reply_free(&r);
+    if (db_execute_direct(conn, SHOW_TABLE(SESSION_, "browser")) != 0) FAIL("could not show the sessions");
+    if (status != 302 || !got) FAIL("/authorize with its session lookup failing answered %d", status);
+
+    if (db_execute_direct(conn, REFUSE_INSERTS(TBL_AUTHORIZATION_CODE)) != 0) {
+        FAIL("could not make codes refuse");
+    }
+    r = authorize_with(PKCE_CHALLENGE);
+    status = r.status;
+    got = r.location && strstr(r.location, "error=server_error") && !strstr(r.location, "code=");
+    reply_free(&r);
+    if (db_execute_direct(conn, ALLOW_INSERTS) != 0) FAIL("could not drop the trigger");
+    if (status != 302 || !got) FAIL("/authorize with its code refused answered %d", status);
+    if (authorize(code, sizeof(code)) != 0) FAIL("/authorize, once the database worked, made no code");
+    printf("✓ /authorize answers a failed server with 500 or server_error, by whether it can redirect\n");
 
     return 0;
 }

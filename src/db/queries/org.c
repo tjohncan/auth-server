@@ -1006,11 +1006,16 @@ int organization_key_verify(db_handle_t *db,
     db_bind_blob(stmt, 1, key_id, 16);
 
     int rc = db_step(stmt);
-    if (rc != DB_ROW) {
+    if (rc == DB_DONE) {
         db_finalize(stmt);
         log_debug("Organization key not found or inactive");
         /* As long as a wrong secret takes, so key ids aren't told apart by time */
         crypto_password_verify_dummy(SECRET_MACHINE, secret, strlen(secret));
+        return 1;
+    }
+    if (rc != DB_ROW) {
+        log_error("Error looking up organization key");
+        db_finalize(stmt);
         return -1;
     }
 
@@ -1044,9 +1049,12 @@ int organization_key_verify(db_handle_t *db,
     OPENSSL_cleanse(salt, sizeof(salt));
     OPENSSL_cleanse(hash, sizeof(hash));
 
+    if (valid < 0) {
+        return -1;  /* A stored hash that can't be checked (logged) */
+    }
     if (valid != 1) {
         log_warn("Organization key secret verification failed");
-        return -1;
+        return 1;
     }
 
     *out_organization_pin = org_pin;

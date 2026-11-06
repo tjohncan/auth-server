@@ -169,22 +169,25 @@ int oauth_authorize(db_handle_t *db,
                     const char *state,
                     const char *session_token,
                     oauth_authorize_response_t *out_response) {
-    if (!db || !client_id || !redirect_uri || !out_response) {
+    if (!db || !client_id || !out_response) {
         log_error("Invalid arguments to oauth_authorize");
-        return -1;
+        return -6;
     }
 
     memset(out_response, 0, sizeof(*out_response));
 
     /* Step 1: Look up client */
     oauth_client_info_t client;
-    if (oauth_client_lookup(db, client_id, &client) != 0) {
+    int lookup = oauth_client_lookup(db, client_id, &client);
+    if (lookup == -2) return -6;  /* logged */
+    if (lookup != 0) {
         log_info("Client not found or inactive");
         return -4;  /* Pre-trust: do NOT redirect to unverified URI */
     }
 
-    /* Step 2: Validate redirect_uri is registered for client */
-    int uri_valid = oauth_redirect_uri_validate(db, client.pin, redirect_uri);
+    /* Step 2: Validate redirect_uri is registered for client (an empty one never is) */
+    int uri_valid = redirect_uri ? oauth_redirect_uri_validate(db, client.pin, redirect_uri) : 0;
+    if (uri_valid < 0) return -6;  /* logged */
     if (uri_valid != 1) {
         log_info("Redirect URI not registered for client");
         return -4;  /* Pre-trust: do NOT redirect to unverified URI */
@@ -197,7 +200,9 @@ int oauth_authorize(db_handle_t *db,
     }
 
     oauth_session_info_t session;
-    if (oauth_session_get_by_token(db, session_token, &session) != 0) {
+    int session_rc = oauth_session_get_by_token(db, session_token, &session);
+    if (session_rc < 0) return -7;  /* logged */
+    if (session_rc != 0) {
         log_info("Session not found or expired");
         return -2;  /* Not authenticated */
     }
@@ -231,7 +236,7 @@ int oauth_authorize(db_handle_t *db,
         int link_rc = oauth_client_user_check(db, client.pin, session.user_account_pin);
         if (link_rc < 0) {
             log_error("Failed to check client_user link");
-            return -1;
+            return -7;
         }
         if (link_rc == 0) {
             char denied_client_id_hex[33], denied_user_id_hex[33];
@@ -272,7 +277,7 @@ int oauth_authorize(db_handle_t *db,
     signing_key_t *auth_signing_key = NULL;
     if (signing_key_get_or_rotate(db, SIGNING_KEY_AUTH_REQUEST, &auth_signing_key) != 0) {
         log_error("Failed to get auth request signing key");
-        return -1;
+        return -7;
     }
 
     /* Step 10: Build JWT claims */
@@ -300,7 +305,7 @@ int oauth_authorize(db_handle_t *db,
     if (crypto_random_bytes(nonce_bytes, sizeof(nonce_bytes)) != 0) {
         signing_key_free(auth_signing_key);
         log_error("Failed to generate nonce");
-        return -1;
+        return -7;
     }
 
     /* Convert nonce to hex string */
@@ -321,7 +326,7 @@ int oauth_authorize(db_handle_t *db,
         OPENSSL_cleanse(secret_bytes, sizeof(secret_bytes));
         signing_key_free(auth_signing_key);
         log_error("Failed to decode signing secret");
-        return -1;
+        return -7;
     }
 
     signing_key_free(auth_signing_key);
@@ -331,7 +336,7 @@ int oauth_authorize(db_handle_t *db,
     if (!code_jwt) {
         OPENSSL_cleanse(secret_bytes, sizeof(secret_bytes));
         log_error("Failed to allocate memory for JWT");
-        return -1;
+        return -7;
     }
 
     if (jwt_encode_auth_request(&claims,
@@ -341,7 +346,7 @@ int oauth_authorize(db_handle_t *db,
         OPENSSL_cleanse(secret_bytes, sizeof(secret_bytes));
         OPENSSL_cleanse(code_jwt, JWT_MAX_TOKEN_LENGTH); free(code_jwt);
         log_error("Failed to encode authorization code JWT");
-        return -1;
+        return -7;
     }
 
     /* Secret no longer needed */
@@ -358,7 +363,7 @@ int oauth_authorize(db_handle_t *db,
                                 auth_code_id) != 0) {
         OPENSSL_cleanse(code_jwt, JWT_MAX_TOKEN_LENGTH); free(code_jwt);
         log_error("Failed to create authorization code record");
-        return -1;
+        return -7;
     }
 
     /* Step 14: Prepare response */
@@ -370,7 +375,7 @@ int oauth_authorize(db_handle_t *db,
             OPENSSL_cleanse(code_jwt, JWT_MAX_TOKEN_LENGTH); free(code_jwt);
             out_response->code = NULL;
             log_error("Failed to duplicate state");
-            return -1;
+            return -7;
         }
     }
 

@@ -347,7 +347,7 @@ int oauth_session_get_by_token(db_handle_t *db, const char *session_token,
     } else if (rc == DB_DONE) {
         db_finalize(stmt);
         log_debug("Session not found or expired for token");
-        return -1;
+        return 1;
     } else {
         log_error("Error looking up session by token");
         db_finalize(stmt);

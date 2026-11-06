@@ -66,11 +66,13 @@ void oauth_authorize_response_free(oauth_authorize_response_t *resp);
  *   out_response    - Output: Authorization response (caller must free)
  *
  * Returns: 0 on success,
- *          -1 on error or validation failure,
+ *          -1 if the request is invalid (its PKCE parameters),
  *          -2 if session not authenticated (need login),
  *          -3 if MFA required but not completed,
  *          -4 if client not found or redirect_uri not registered (do NOT redirect),
- *          -5 if user is not linked to this client (access denied)
+ *          -5 if user is not linked to this client (access denied),
+ *          -6 if the server failed before redirect_uri was trusted (do NOT redirect),
+ *          -7 if the server failed after it was
  */
 int oauth_authorize(db_handle_t *db,
                     const unsigned char *client_id,

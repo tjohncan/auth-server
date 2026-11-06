@@ -101,9 +101,12 @@ int session_authenticate(const HttpRequest *req, db_handle_t *db,
         return 1;
     }
 
-    int found = oauth_session_get_by_token(db, session_token, out_session) == 0;
+    int found = oauth_session_get_by_token(db, session_token, out_session);
     cleanse_free(session_token);
-    if (!found) {
+    if (found < 0) {
+        return 4;
+    }
+    if (found != 0) {
         return 2;
     }
 
@@ -122,6 +125,7 @@ HttpResponse *session_require(const HttpRequest *req, db_handle_t *db,
         case 0:  return NULL;
         case 1:  return response_json_error(401, "Authentication required");
         case 2:  return response_json_error(401, "Invalid or expired session");
+        case 4:  return response_json_error(500, "Internal server error");
         default: return response_json_error(403, "MFA verification required");
     }
 }

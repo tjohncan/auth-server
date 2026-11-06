@@ -609,6 +609,30 @@ static int build_error_redirect(const char *redirect_uri,
     return 0;
 }
 
+/* What RFC 6749 Section 4.1.2.1's server_error says, where a 500 couldn't reach the
+ * client through the browser */
+#define SERVER_ERROR_DESCRIPTION "The server failed; try again"
+
+/* An error redirect to a redirect_uri already trusted (RFC 6749 Section 4.1.2.1) */
+static HttpResponse *authorize_error_redirect(const char *redirect_uri, const char *error,
+                                              const char *description, const char *state) {
+    char location[4096];  /* matches the success path in authorize_handler; a maximal state
+                           * encodes to 1533 bytes and would not fit 2048 */
+    if (build_error_redirect(redirect_uri, error, description, state,
+                             location, sizeof(location)) != 0) {
+        return response_json_error(500, "Internal server error");
+    }
+
+    HttpResponse *resp = http_response_new(302);
+    if (!resp) {
+        return response_json_error(500, "Internal server error");
+    }
+
+    http_response_set_header(resp, "Location", location);
+    http_response_set_body_str(resp, "");
+    return resp;
+}
+
 /* ============================================================================
  * Authorization Endpoint
  * ========================================================================== */
@@ -815,7 +839,10 @@ HttpResponse *authorize_handler(const HttpRequest *req) {
     if (rc == -3) {
         /* MFA required - check if user has enrolled MFA methods */
         int mfa_count = 0;
-        mfa_method_count_confirmed(db, auth_response.user_account_pin, &mfa_count);
+        if (mfa_method_count_confirmed(db, auth_response.user_account_pin, &mfa_count) != 0) {
+            return authorize_error_redirect(redirect_uri, "server_error", SERVER_ERROR_DESCRIPTION,
+                                            state[0] ? state : NULL);
+        }
 
         if (mfa_count > 0) {
             /* User has MFA methods - redirect to login page MFA challenge */
@@ -848,23 +875,9 @@ HttpResponse *authorize_handler(const HttpRequest *req) {
         }
 
         /* No MFA methods enrolled - redirect with access_denied */
-        char location[4096];  /* matches the success path below; a maximal state
-                               * encodes to 1533 bytes and would not fit 2048 */
-        if (build_error_redirect(redirect_uri, "access_denied",
-                                  "MFA required but no methods enrolled",
-                                  state[0] ? state : NULL,
-                                  location, sizeof(location)) != 0) {
-            return response_json_error(500, "Internal server error");
-        }
-
-        HttpResponse *resp = http_response_new(302);
-        if (!resp) {
-            return response_json_error(500, "Internal server error");
-        }
-
-        http_response_set_header(resp, "Location", location);
-        http_response_set_body_str(resp, "");
-        return resp;
+        return authorize_error_redirect(redirect_uri, "access_denied",
+                                        "MFA required but no methods enrolled",
+                                        state[0] ? state : NULL);
     }
 
     if (rc == -4) {
@@ -873,46 +886,29 @@ HttpResponse *authorize_handler(const HttpRequest *req) {
         return response_json_error(400, "Invalid client_id or redirect_uri");
     }
 
+    if (rc == -6) {
+        /* The server failed, and redirect_uri isn't trusted yet: as above, no redirect */
+        return response_json_error(500, "Internal server error");
+    }
+
+    if (rc == -7) {
+        return authorize_error_redirect(redirect_uri, "server_error", SERVER_ERROR_DESCRIPTION,
+                                        state[0] ? state : NULL);
+    }
+
     if (rc == -5) {
         /* User not linked to this client — redirect with access_denied
          * (redirect_uri is already validated, post-trust error per RFC 6749 §4.1.2.1) */
-        char location[4096];  /* matches the success path below; a maximal state
-                               * encodes to 1533 bytes and would not fit 2048 */
-        if (build_error_redirect(redirect_uri, "access_denied",
-                                  "User is not authorized for this client",
-                                  state[0] ? state : NULL,
-                                  location, sizeof(location)) != 0) {
-            return response_json_error(500, "Internal server error");
-        }
-
-        HttpResponse *resp = http_response_new(302);
-        if (!resp) {
-            return response_json_error(500, "Internal server error");
-        }
-
-        http_response_set_header(resp, "Location", location);
-        http_response_set_body_str(resp, "");
-        return resp;
+        return authorize_error_redirect(redirect_uri, "access_denied",
+                                        "User is not authorized for this client",
+                                        state[0] ? state : NULL);
     }
 
     if (rc != 0) {
         /* Validation error - redirect with invalid_request */
-        char location[4096];  /* matches the success path below; a maximal state
-                               * encodes to 1533 bytes and would not fit 2048 */
-        if (build_error_redirect(redirect_uri, "invalid_request",
-                                  "Invalid authorization request", state[0] ? state : NULL,
-                                  location, sizeof(location)) != 0) {
-            return response_json_error(500, "Internal server error");
-        }
-
-        HttpResponse *resp = http_response_new(302);
-        if (!resp) {
-            return response_json_error(500, "Internal server error");
-        }
-
-        http_response_set_header(resp, "Location", location);
-        http_response_set_body_str(resp, "");
-        return resp;
+        return authorize_error_redirect(redirect_uri, "invalid_request",
+                                        "Invalid authorization request",
+                                        state[0] ? state : NULL);
     }
 
     /* Build redirect URI with code and state (URL-encoded).

@@ -715,7 +715,8 @@ Authenticated endpoints for organization administrators
 
 A session that still owes MFA gets `403 {"error": "MFA verification required"}`, as on
 `/api/user`, even when the request also carries org-key headers; any other authentication
-failure gets `401`.
+failure gets `401`. A session or org key the server couldn't check gets `500`, unless the
+other one authenticates the request.
 
 In this section's request bodies, a text field takes a string, a number field a whole number,
 and a true/false field `true` or `false`. A value of another kind, such as `12345` for a name,
@@ -1421,6 +1422,16 @@ Location: https://app.example.com/callback?error=access_denied&error_description
 - **302 Found** (post-trust validation error — redirects with OAuth2 error):
 ```http
 Location: https://app.example.com/callback?error=invalid_request&error_description=Invalid%20authorization%20request&state=abc123
+```
+
+- **302 Found** (the server failed, after the redirect_uri was trusted — redirects with OAuth2 error, and a retry may work):
+```http
+Location: https://app.example.com/callback?error=server_error&error_description=The%20server%20failed%3B%20try%20again&state=abc123
+```
+
+- **500 Internal Server Error** (the server failed before the redirect_uri could be trusted — no redirect):
+```json
+{"error": "Internal server error"}
 ```
 
 **Authorization Code**:

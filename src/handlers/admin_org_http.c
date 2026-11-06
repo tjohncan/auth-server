@@ -33,7 +33,7 @@ int try_org_key_auth(const HttpRequest *req, const char *operation,
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
         log_error("Failed to get database connection for org key auth");
-        return -1;
+        return -2;
     }
 
     const char *key_id_hex = http_request_get_header(req, "X-Org-Key-Id");
@@ -50,7 +50,11 @@ int try_org_key_auth(const HttpRequest *req, const char *operation,
     }
 
     long long org_pin, key_pin;
-    if (organization_key_verify(db, key_id, key_secret, &org_pin, &key_pin) != 0) {
+    int verified = organization_key_verify(db, key_id, key_secret, &org_pin, &key_pin);
+    if (verified < 0) {
+        return -2;  /* logged */
+    }
+    if (verified != 0) {
         log_warn("Organization key verification failed");
         return -1;
     }
@@ -95,18 +99,20 @@ typedef struct {
  * leg of dual authentication (session OR org key).
  *
  * Returns: 0 on success with user_pin populated, -2 if the session is valid
- *          but still owes MFA, -1 on any other failure
+ *          but still owes MFA, -3 if the check itself failed, -1 on any other
+ *          failure
  */
 static int get_authenticated_user_pin(const HttpRequest *req, long long *out_user_pin) {
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
         log_error("Failed to get database connection");
-        return -1;
+        return -3;
     }
 
     oauth_session_info_t session;
     int rc = session_authenticate(req, db, SESSION_MFA_IF_REQUIRED, &session);
     if (rc == 3) return -2;
+    if (rc == 4) return -3;
     if (rc != 0) return -1;
 
     *out_user_pin = session.user_account_pin;
@@ -127,8 +133,13 @@ static int get_authenticated_user_pin(const HttpRequest *req, long long *out_use
  * A valid session that still owes MFA ends the attempt there: it is not retried
  * as org-key auth, so the caller can say what is missing.
  *
+ * A check that failed doesn't end it: a good org key is still a real credential
+ * when the session lookup couldn't run. Only when nothing authenticated does the
+ * failed check decide the answer, since then nobody can say the request was wrong.
+ *
  * Returns: 0 on success with ctx populated, -2 if the session owes MFA,
- *          -1 if both methods fail
+ *          -3 if nothing authenticated and either check failed, -1 if both
+ *          methods refuse
  */
 static int get_auth_context(const HttpRequest *req, const char *operation,
                             auth_context_t *ctx) {
@@ -150,7 +161,8 @@ static int get_auth_context(const HttpRequest *req, const char *operation,
 
     /* Try org key authentication */
     long long org_pin, key_pin;
-    if (try_org_key_auth(req, operation, &org_pin, &key_pin) == 0) {
+    int key_rc = try_org_key_auth(req, operation, &org_pin, &key_pin);
+    if (key_rc == 0) {
         /* Org key auth succeeded */
         ctx->user_account_pin = -1;  /* Sentinel: not session auth */
         ctx->organization_pin = org_pin;
@@ -159,16 +171,15 @@ static int get_auth_context(const HttpRequest *req, const char *operation,
         return 0;
     }
 
-    /* Both methods failed */
-    return -1;
+    return session_rc == -3 || key_rc == -2 ? -3 : -1;
 }
 
 /*
  * require_auth_context - get_auth_context, answered as a response on failure
  *
  * A session that owes MFA gets 403 "MFA verification required", the answer the
- * /api/user endpoints give, which the console turns into the MFA step. Anything
- * else gets 401.
+ * /api/user endpoints give, which the console turns into the MFA step. A check
+ * that failed gets 500. Anything else gets 401.
  *
  * Returns: NULL on success with ctx populated, or the error response
  */
@@ -180,6 +191,9 @@ static HttpResponse *require_auth_context(const HttpRequest *req, const char *op
     }
     if (rc == -2) {
         return response_json_error(403, "MFA verification required");
+    }
+    if (rc == -3) {
+        return response_json_error(500, "Internal server error");
     }
     return response_json_error(401, "Authentication required");
 }
