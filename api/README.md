@@ -748,6 +748,10 @@ Create new resource server.
 
 Body: `organization_id`, `code_name`, `display_name`, `address`, `note` (required except note)
 
+Returns `404` if the organization doesn't exist or the caller doesn't administer it, and `409`,
+naming which, if another active resource server in it has the address or the code name (the
+rule below). Neither makes anything.
+
 **PUT /api/admin/resource-servers**
 Update resource server.
 
@@ -796,6 +800,9 @@ Left out on create, the last three are no limit. A value outside these, or one t
 whole number, is refused with `400`, naming the field. The access-token limit is a server
 setting, so a client can hold a larger value from before it was lowered: its tokens are issued
 at the limit, and `expires_in` reports it.
+
+Returns `404` if the organization doesn't exist or the caller doesn't administer it, and `409`
+if another active client in it has the code name (the rule below). Neither makes anything.
 
 **PUT /api/admin/clients**
 Update client configuration.

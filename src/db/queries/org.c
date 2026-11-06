@@ -441,7 +441,11 @@ int org_get_by_id(db_handle_t *db, const unsigned char *org_id,
 
     if (rc != DB_ROW) {
         db_finalize(stmt);
-        log_debug("Organization not found or user not authorized");
+        if (rc == DB_DONE) {
+            log_debug("Organization not found or user not authorized");
+            return 1;
+        }
+        log_error("Failed to look up organization");
         return -1;
     }
 

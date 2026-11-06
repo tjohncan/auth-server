@@ -116,7 +116,8 @@ int org_list_all_unscoped(db_handle_t *db,
  * - Session auth (user_account_pin != -1): Verifies user is org admin
  * - Org key auth (user_account_pin == -1): Verifies specific key is active
  *
- * Returns: 0 on success, -1 on error or not found
+ * Returns: 0 on success, 1 if there's no such organization or the caller
+ * can't administer it (the two look alike), -1 on error
  */
 int org_get_by_id(db_handle_t *db, const unsigned char *org_id,
                   long long user_account_pin, long long organization_key_pin,

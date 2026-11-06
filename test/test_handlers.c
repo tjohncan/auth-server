@@ -918,6 +918,16 @@ static int put_answers(const char *target, const char *json, int want, const cha
     return ok;
 }
 
+/* A POST with the given session answers want, naming the text if given */
+static int post_answers(const char *path, const char *cookie, const char *json, int want,
+                        const char *naming) {
+    Reply r = post_json(path, cookie, json);
+    int ok = r.status == want && (!naming || strstr(r.body, naming));
+    if (!ok) printf("  POST %s %s answered %d: %s\n", path, json, r.status, r.body);
+    reply_free(&r);
+    return ok;
+}
+
 /* A server's or client's is_active as GET answers it, with a text field of it
    when key is given; -1 if either can't be read */
 static int active_with(const char *target, const char *key, char *out, size_t size) {
@@ -936,7 +946,9 @@ static int active_with(const char *target, const char *key, char *out, size_t si
  * code name, and one active client a given code name. An update that would break
  * that answers 409 naming which, and changes nothing. A deactivated server keeps
  * an address an active one has taken, and its edits still save, though the
- * console sends the address with every edit.
+ * console sends the address with every edit. Creating one that would break it
+ * answers 409 naming which too, and creating one in an organization that isn't
+ * there, or isn't the caller's, answers 404.
  */
 static int test_active_clashes(void) {
     printf("\n=== One active holder per address and code name ===\n");
@@ -1015,8 +1027,59 @@ static int test_active_clashes(void) {
         FAIL("reactivating a client whose code name is taken wasn't refused, or changed it");
     }
 
+    /* 7. Creating one that would break the rule, or in an organization that isn't
+          there or isn't the caller's: refused, naming why */
+    const char *nowhere = "0123456789abcdef0123456789abcdef";
+    char outsider[256];
+    Reply u = admin_port("POST", "/api/admin/users", NULL,
+                         "{\"username\":\"outsider\",\"password\":\"outsider password\"}");
+    int made_user = u.status == 200;
+    reply_free(&u);
+    if (!made_user || login("outsider", "outsider password", outsider, sizeof(outsider)) != 0) {
+        FAIL("could not create and sign in a user who administers nothing");
+    }
+    const struct { const char *org, *code_name, *address; int as_outsider, want;
+                   const char *naming; } servers[] = {
+        { g_org_id, "clash_b", "https://free.example", 0, 409, "code name" },
+        { g_org_id, "clash_free", "https://clash.example", 0, 409, "address" },
+        { nowhere, "clash_free", "https://free.example", 0, 404, NULL },
+        { g_org_id, "clash_free", "https://free.example", 1, 404, NULL },
+    };
+    for (size_t i = 0; i < sizeof(servers) / sizeof(servers[0]); i++) {
+        snprintf(json, sizeof(json), "{\"organization_id\":\"%s\",\"code_name\":\"%s\","
+                 "\"display_name\":\"X\",\"address\":\"%s\"}", servers[i].org,
+                 servers[i].code_name, servers[i].address);
+        if (!post_answers("/api/admin/resource-servers",
+                          servers[i].as_outsider ? outsider : g_admin_cookie, json,
+                          servers[i].want, servers[i].naming)) {
+            FAIL("creating a resource server wasn't refused with %d%s%s", servers[i].want,
+                 servers[i].naming ? " naming its " : "",
+                 servers[i].naming ? servers[i].naming : "");
+        }
+    }
+    const struct { const char *org, *code_name; int as_outsider, want;
+                   const char *naming; } clients[] = {
+        { g_org_id, "clash_d", 0, 409, "code name" },
+        { nowhere, "clash_free", 0, 404, NULL },
+        { g_org_id, "clash_free", 1, 404, NULL },
+    };
+    for (size_t i = 0; i < sizeof(clients) / sizeof(clients[0]); i++) {
+        snprintf(json, sizeof(json), "{\"organization_id\":\"%s\",\"code_name\":\"%s\","
+                 "\"display_name\":\"X\",\"client_type\":\"public\","
+                 "\"grant_type\":\"authorization_code\",\"access_token_ttl_seconds\":600}",
+                 clients[i].org, clients[i].code_name);
+        if (!post_answers("/api/admin/clients",
+                          clients[i].as_outsider ? outsider : g_admin_cookie, json,
+                          clients[i].want, clients[i].naming)) {
+            FAIL("creating a client wasn't refused with %d%s%s", clients[i].want,
+                 clients[i].naming ? " naming its " : "",
+                 clients[i].naming ? clients[i].naming : "");
+        }
+    }
+
     printf("✓ one active holder per address and code name, and a deactivated server's "
-           "edits save\n");
+           "edits save; a create that would clash answers 409 naming which, and one in an "
+           "organization not the caller's 404\n");
     return 0;
 }
 

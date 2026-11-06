@@ -165,6 +165,15 @@ int admin_list_resource_servers(db_handle_t *db, long long user_account_pin,
                                  int *out_count,
                                  int *out_total);
 
+/*
+ * Create a resource server in an organization the caller administers. Refused,
+ * with nothing made, when the organization isn't there or isn't the caller's
+ * (the two look alike), or another active server in it has the address or the
+ * code name.
+ *
+ * Returns: 0 on success, 1 if the address is held, 2 if the code name is,
+ * 3 if the organization isn't found, -1 on error
+ */
 int admin_create_resource_server(db_handle_t *db, long long user_account_pin,
                                    long long organization_key_pin,
                                    const unsigned char *organization_id,
@@ -248,6 +257,14 @@ int admin_list_clients(db_handle_t *db, long long user_account_pin,
                        int *out_count,
                        int *out_total);
 
+/*
+ * Create a client in an organization the caller administers. Refused, with
+ * nothing made, when the organization isn't there or isn't the caller's (the
+ * two look alike), or another active client in it has the code name.
+ *
+ * Returns: 0 on success, 1 if the code name is held, 2 if the organization
+ * isn't found, -1 on error
+ */
 int admin_create_client(db_handle_t *db, long long user_account_pin,
                          long long organization_key_pin,
                          const unsigned char *organization_id,

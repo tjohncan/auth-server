@@ -265,11 +265,14 @@ int client_create(db_handle_t *db,
     /* Execute and verify a row was actually inserted */
     int rc = db_step(stmt);
 
-    if (rc == DB_ROW) {
-        db_finalize(stmt);
-    } else {
-        db_finalize(stmt);
-        log_error("Failed to insert client (unauthorized or constraint violation)");
+    db_finalize(stmt);
+    if (rc != DB_ROW) {
+        /* The caller checked the organization and the code name first, so nothing
+           matching means one of them changed since */
+        log_error(rc == DB_DONE
+                  ? "Client not inserted: its organization or an active client changed "
+                    "since the check"
+                  : "Failed to insert client");
         return -1;
     }
 

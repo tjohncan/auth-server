@@ -168,7 +168,12 @@ int resource_server_create(db_handle_t *db,
     db_finalize(stmt);
 
     if (rc != DB_ROW) {
-        log_error("Failed to insert resource server (unauthorized or constraint violation)");
+        /* The caller checked the organization and the clashes first, so nothing
+           matching means one of them changed since */
+        log_error(rc == DB_DONE
+                  ? "Resource server not inserted: its organization or an active server "
+                    "changed since the check"
+                  : "Failed to insert resource server");
         return -1;
     }
 

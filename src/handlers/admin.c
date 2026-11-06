@@ -376,6 +376,27 @@ int admin_create_resource_server(db_handle_t *db, long long user_account_pin,
         return -1;
     }
 
+    /* Checked here, so a refusal is answered and the INSERT isn't sent: the
+       organization, which the caller must administer, and one active server per
+       address and per code name in it */
+    org_data_t org;
+    int found = org_get_by_id(db, organization_id, user_account_pin, organization_key_pin, &org);
+    if (found != 0) {
+        if (found > 0) {
+            log_info("Resource server creation refused: organization not found, or not the caller's");
+            return 3;
+        }
+        return -1;
+    }
+    int clash = resource_server_active_clash(db, org.pin, -1, address, code_name);
+    if (clash != 0) {
+        if (clash > 0) {
+            log_info("Resource server creation refused: an active server has its %s",
+                     clash == 1 ? "address" : "code name");
+        }
+        return clash;
+    }
+
     return resource_server_create(db, user_account_pin, organization_key_pin,
                                    organization_id, code_name, display_name, address, note,
                                    out_id);
@@ -400,6 +421,26 @@ int admin_create_client(db_handle_t *db, long long user_account_pin,
         !client_type || !grant_type || !out_id) {
         log_error("Invalid arguments to admin_create_client");
         return -1;
+    }
+
+    /* Checked here, so a refusal is answered and the INSERT isn't sent: the
+       organization, which the caller must administer, and one active client per
+       code name in it */
+    org_data_t org;
+    int found = org_get_by_id(db, organization_id, user_account_pin, organization_key_pin, &org);
+    if (found != 0) {
+        if (found > 0) {
+            log_info("Client creation refused: organization not found, or not the caller's");
+            return 2;
+        }
+        return -1;
+    }
+    int taken = client_active_code_name_taken(db, org.pin, -1, code_name);
+    if (taken != 0) {
+        if (taken > 0) {
+            log_info("Client creation refused: an active client has its code name");
+        }
+        return taken;
     }
 
     return client_create(db, user_account_pin, organization_key_pin,

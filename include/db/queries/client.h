@@ -94,6 +94,10 @@ int client_add_redirect_uri_bootstrap(db_handle_t *db, const unsigned char *clie
  * - Session auth: Verifies user is org admin
  * - Org key auth: Verifies specific key is active
  *
+ * The organization and uniqueness among active clients are the caller's to
+ * check first (org_get_by_id, client_active_code_name_taken), as
+ * admin_create_client does. The INSERT's own guards refuse what changed since.
+ *
  * Returns: 0 on success, -1 on error
  */
 int client_create(db_handle_t *db,
@@ -471,8 +475,8 @@ int client_update(db_handle_t *db, const unsigned char *client_id,
 /*
  * Whether another active client in the organization has this code name: what
  * the partial unique index uix_client_org_code holds. The client itself
- * (client_pin) doesn't count. No authorization: the caller has read the client
- * already.
+ * (client_pin) doesn't count; -1 for one being created. No authorization: the
+ * caller has read the client, or the organization it's created in, already.
  *
  * Returns: 1 if it's held, 0 if not, -1 on error
  */

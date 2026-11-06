@@ -54,6 +54,11 @@ int resource_server_create_bootstrap(db_handle_t *db, const char *org_code_name,
  * - Session auth: Verifies user is org admin
  * - Org key auth: Verifies specific key is active
  *
+ * The organization and uniqueness among active servers are the caller's to
+ * check first (org_get_by_id, resource_server_active_clash), as
+ * admin_create_resource_server does. The INSERT's own guards refuse what
+ * changed since.
+ *
  * Returns: 0 on success, -1 on error
  */
 int resource_server_create(db_handle_t *db,
@@ -170,7 +175,8 @@ int resource_server_update(db_handle_t *db, const unsigned char *server_id,
  * Whether another active resource server in the organization has this address
  * or this code name: what the partial unique indexes uix_resource_server_org_address
  * and uix_resource_server_org_code hold. The server itself (server_pin) doesn't
- * count. No authorization: the caller has read the server already.
+ * count; -1 for one being created. No authorization: the caller has read the
+ * server, or the organization it's created in, already.
  *
  * Returns: 0 if neither is held, 1 if the address is (named first when both
  * are), 2 if the code name is, -1 on error

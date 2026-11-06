@@ -603,8 +603,14 @@ HttpResponse *admin_create_resource_server_handler(const HttpRequest *req) {
     int result = admin_create_resource_server(db, ctx.user_account_pin, ctx.organization_key_pin,
                                                org_id, code_name, display_name, address, note, server_id);
 
-    if (result != 0) {
-        resp = response_json_error(409, "Resource server creation failed (possibly duplicate code_name or address)");
+    if (result == 1) {
+        resp = response_json_error(409, "Another active resource server in this organization has this address");
+    } else if (result == 2) {
+        resp = response_json_error(409, "Another active resource server in this organization has this code name");
+    } else if (result == 3) {
+        resp = response_json_error(404, "Organization not found or access denied");
+    } else if (result != 0) {
+        resp = response_json_error(500, "Resource server creation failed");
     } else {
         char server_id_hex[33];
         bytes_to_hex(server_id, 16, server_id_hex, sizeof(server_id_hex));
@@ -1017,8 +1023,12 @@ HttpResponse *admin_create_client_handler(const HttpRequest *req) {
                                      client_type, grant_type, note, require_mfa, access_ttl,
                                      issue_refresh, refresh_ttl, max_session, secret_rotation, client_id);
 
-    if (result != 0) {
-        resp = response_json_error(409, "Client creation failed");
+    if (result == 1) {
+        resp = response_json_error(409, "Another active client in this organization has this code name");
+    } else if (result == 2) {
+        resp = response_json_error(404, "Organization not found or access denied");
+    } else if (result != 0) {
+        resp = response_json_error(500, "Client creation failed");
     } else {
         char client_id_hex[33];
         bytes_to_hex(client_id, 16, client_id_hex, sizeof(client_id_hex));
