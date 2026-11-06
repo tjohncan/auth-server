@@ -615,7 +615,8 @@ HttpResponse *admin_create_organization_key_handler(const HttpRequest *req) {
         } else if (result == -2) {
             char msg[128];
             snprintf(msg, sizeof(msg),
-                     "Secret must be at least %d characters", crypto_password_min_length());
+                     "Secret must be between %d and %d characters",
+                     crypto_password_min_length(), PASSWORD_MAX_LENGTH);
             resp = response_json_error(400, msg);
         } else {
             resp = response_json_error(500, "Failed to create organization key");
@@ -947,7 +948,8 @@ HttpResponse *server_set_user_password_handler(const HttpRequest *req) {
     if (rc == -2) {
         char msg[128];
         snprintf(msg, sizeof(msg),
-                 "Password must be at least %d characters", crypto_password_min_length());
+                 "Password must be between %d and %d characters",
+                 crypto_password_min_length(), PASSWORD_MAX_LENGTH);
         return response_json_error(400, msg);
     }
     if (rc != 0) return response_json_error(500, "Internal error");

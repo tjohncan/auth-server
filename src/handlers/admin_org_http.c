@@ -1686,7 +1686,8 @@ HttpResponse *admin_create_resource_server_key_handler(const HttpRequest *req) {
         OPENSSL_cleanse(generated_secret, sizeof(generated_secret));
         char msg[128];
         snprintf(msg, sizeof(msg),
-                 "Secret must be at least %d characters", crypto_password_min_length());
+                 "Secret must be between %d and %d characters",
+                 crypto_password_min_length(), PASSWORD_MAX_LENGTH);
         return response_json_error(400, msg);
     }
     if (result == 1) {
@@ -1938,7 +1939,8 @@ HttpResponse *admin_create_client_key_handler(const HttpRequest *req) {
     if (result == -2) {
         char msg[128];
         snprintf(msg, sizeof(msg),
-                 "Secret must be at least %d characters", crypto_password_min_length());
+                 "Secret must be between %d and %d characters",
+                 crypto_password_min_length(), PASSWORD_MAX_LENGTH);
         resp = response_json_error(400, msg);
     } else if (result == 1) {
         resp = response_json_error(409, "Key creation failed: client not found, or not a confidential client");

@@ -955,7 +955,7 @@ int main(int argc, char **argv) {
         .password = config->password_pattern,
         .machine_secret = config->machine_secret_pattern,
     };
-    if (validation_init(&patterns) != 0) {
+    if (validation_init(&patterns, config->password_min_length) != 0) {
         config_free(config);
         return 1;
     }

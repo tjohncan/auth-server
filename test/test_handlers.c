@@ -1815,14 +1815,56 @@ static int test_operator_addresses(void) {
  * ============================================================================ */
 
 /*
- * The invitation form takes a password as long as the JSON endpoints do, 1024
- * bytes, and past that says so instead of answering "Invalid request". (The
- * reset form, with email support, shares the decoding.)
+ * A password's length is checked where it arrives, before anything is made,
+ * and a refused one answers 400 with the reason. Bootstrap and create-user
+ * refuse one too long or too short, and make nothing. The invitation form
+ * takes one as long as the JSON endpoints do, 1024 bytes, and past that says
+ * so instead of answering "Invalid request". (The reset form, with email
+ * support, shares the decoding.)
  */
-static int test_form_password_length(void) {
-    printf("\n=== Form password length ===\n");
+static int test_password_length(void) {
+    printf("\n=== Password length ===\n");
 
     char user_id[33], sql[128], pin[24], invite[64], password[1026], form[1200];
+    char json[1200], found[8];
+    memset(password, 'p', 1025);
+    password[1025] = '\0';
+
+    /* 1. Bootstrap and create-user, with 1025 bytes and with none */
+    const struct { const char *password, *reason; } refused[] = {
+        { password, "at most 1024" }, { "", "at least" },
+    };
+    for (size_t i = 0; i < sizeof(refused) / sizeof(refused[0]); i++) {
+        snprintf(json, sizeof(json), "{\"org_code_name\":\"lengthy\","
+                 "\"username\":\"lengthy_admin\",\"password\":\"%s\"}", refused[i].password);
+        Reply r = admin_port("POST", "/api/admin/bootstrap", NULL, json);
+        int said = r.status == 400 && strstr(r.body, refused[i].reason) != NULL;
+        int status = r.status;
+        reply_free(&r);
+        int made = query_text("SELECT 1 FROM " TBL_ORGANIZATION " WHERE code_name = 'lengthy'",
+                              found, sizeof(found)) == 0;
+        if (!said || made) {
+            FAIL("a bootstrap with a %zu-byte password answered %d%s%s",
+                 strlen(refused[i].password), status, said ? "" : ", not 400 with the reason",
+                 made ? ", and made the organization" : "");
+        }
+        snprintf(json, sizeof(json), "{\"username\":\"lengthy_user\",\"password\":\"%s\"}",
+                 refused[i].password);
+        r = admin_port("POST", "/api/admin/users", NULL, json);
+        said = r.status == 400 && strstr(r.body, refused[i].reason) != NULL;
+        status = r.status;
+        reply_free(&r);
+        made = user_username_exists(db_pool_get_connection(), "lengthy_user") != 0;
+        if (!said || made) {
+            FAIL("creating a user with a %zu-byte password answered %d%s%s",
+                 strlen(refused[i].password), status, said ? "" : ", not 400 with the reason",
+                 made ? ", and made the user" : "");
+        }
+    }
+    printf("✓ bootstrap and create-user refuse a password too long or too short with 400, "
+           "and make nothing\n");
+
+    /* 2. The invitation form */
     Reply r = admin_port("POST", "/api/admin/users", NULL,
                         "{\"username\":\"longpass\",\"password\":\"a short password\"}");
     int created = r.status == 200 && field(&r, "user_id", user_id, sizeof(user_id)) == 0;
@@ -1835,8 +1877,6 @@ static int test_form_password_length(void) {
         FAIL("could not create the user and an invitation");
     }
 
-    memset(password, 'p', 1025);
-    password[1025] = '\0';
     snprintf(form, sizeof(form), "token=%s&password=%s", invite, password);
     r = post_form("/accept-invitation", form);
     if (r.status != 400 || !strstr(r.body, "at most 1024")) {
@@ -2174,13 +2214,17 @@ static int test_provisioning(void) {
         .code_name = g_config->code_name_pattern, .password = g_config->password_pattern,
         .machine_secret = g_config->machine_secret_pattern,
     };
-    if (validation_init(&before) != 0) FAIL("could not set the patterns aside");
+    if (validation_init(&before, g_config->password_min_length) != 0) {
+        FAIL("could not set the patterns aside");
+    }
     r = admin_port("POST", "/api/admin/users", NULL,
                    "{\"username\":\"obrien\",\"email\":\"o'brien@example.com\","
                    "\"password\":\"obrien password\"}");
     int made = r.status == 200 && field(&r, "user_id", obrien, sizeof(obrien)) == 0;
     reply_free(&r);
-    if (validation_init(&configured) != 0) FAIL("could not restore the patterns");
+    if (validation_init(&configured, g_config->password_min_length) != 0) {
+        FAIL("could not restore the patterns");
+    }
     if (!made) FAIL("could not store an address the default refuses");
     snprintf(obrien_sql, sizeof(obrien_sql),
              "UPDATE " TBL_USER_EMAIL " SET is_verified = " BOOL_TRUE ", verified_at = " NOW " "
@@ -2277,7 +2321,7 @@ int main(void) {
         .machine_secret = config->machine_secret_pattern,
     };
     char conninfo[1024];
-    if (validation_init(&patterns) != 0 ||
+    if (validation_init(&patterns, config->password_min_length) != 0 ||
         encrypt_init(config->encryption_key) != 0 || crypto_password_init(config) != 0 ||
         scratch_db_new(conninfo, sizeof(conninfo)) != 0 ||
         db_pool_init(1, SCRATCH_DB_TYPE, conninfo) != 0) {
@@ -2306,7 +2350,7 @@ int main(void) {
                  test_localhost_only() || test_admin_socket_caller() ||
                  test_account_recovery() || test_usernames() || test_failed_bootstrap() ||
                  test_operator_addresses() ||
-                 test_form_password_length() ||
+                 test_password_length() ||
 #ifdef EMAIL_SUPPORT
                  test_email_links() ||
 #endif

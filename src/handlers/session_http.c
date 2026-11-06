@@ -504,7 +504,8 @@ HttpResponse *change_password_handler(const HttpRequest *req) {
     } else if (result == -2) {
         char msg[128];
         snprintf(msg, sizeof(msg),
-                 "Password must be at least %d characters", crypto_password_min_length());
+                 "Password must be between %d and %d characters",
+                 crypto_password_min_length(), PASSWORD_MAX_LENGTH);
         return response_json_error(400, msg);
     } else {
         /* Error */

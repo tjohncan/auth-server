@@ -40,12 +40,15 @@ typedef struct {
 /*
  * validation_init - Compile the patterns, once, at startup
  *
+ * password_min_length is auth.conf's: the shortest password or machine secret
+ * crypto_password_hash takes.
+ *
  * Every validate_new_* refuses until this has succeeded, so a server that
  * forgot to call it fails loudly instead of skipping the patterns.
  *
  * Returns: 0, or -1 if a pattern won't compile (logged, naming the setting)
  */
-int validation_init(const validation_patterns_t *patterns);
+int validation_init(const validation_patterns_t *patterns, int password_min_length);
 
 /* validation_cleanup - Free the compiled patterns */
 void validation_cleanup(void);
@@ -107,12 +110,14 @@ int validate_new_email(const char *email, char *error_msg, size_t error_len);
 int validate_new_code_name(const char *code_name, char *error_msg, size_t error_len);
 
 /*
- * validate_new_password, validate_new_machine_secret - The configured pattern
- * for a password, or for a secret a caller supplies for a client, resource
- * server or organization key. Nothing else: their lengths are checked where
- * they're hashed, and a secret's characters are its owner's business.
+ * validate_new_password, validate_new_machine_secret - A password, or a secret
+ * a caller supplies for a client, resource server or organization key: the
+ * length crypto_password_hash takes (password_min_length to
+ * PASSWORD_MAX_LENGTH bytes), then the configured pattern. Nothing else: a
+ * secret's characters are its owner's business. Each route calls these before
+ * it writes anything, so a refused secret is a 400 that leaves nothing made.
  *
- * Returns: 0 if valid (or no pattern is set), -1 with error_msg populated
+ * Returns: 0 if valid, -1 with error_msg populated
  */
 int validate_new_password(const char *password, char *error_msg, size_t error_len);
 int validate_new_machine_secret(const char *secret, char *error_msg, size_t error_len);

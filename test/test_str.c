@@ -520,7 +520,7 @@ void test_validation_patterns(void) {
     assert(validate_new_username("alice", err, sizeof(err)) == -1);
 
     validation_patterns_t defaults = {0};
-    assert(validation_init(&defaults) == 0);
+    assert(validation_init(&defaults, 1) == 0);
 
     static const char *const good_names[] = { "alice", "Alice.Smith", "a_b+c-d", "x1" };
     static const char *const bad_names[] = {
@@ -585,7 +585,7 @@ void test_validation_patterns(void) {
         .username = "[a-z]+", .email = "", .code_name = "[A-Z]{3}",
         .password = "^.{12,}$", .machine_secret = ".{32,}",
     };
-    assert(validation_init(&custom) == 0);
+    assert(validation_init(&custom, 1) == 0);
     assert(validate_new_username("alice", err, sizeof(err)) == 0);
     assert(validate_new_username("alice9", err, sizeof(err)) == -1);   /* whole value */
     assert(strstr(err, "username_pattern") != NULL);
@@ -601,9 +601,9 @@ void test_validation_patterns(void) {
 
     /* A pattern that won't compile is refused, naming the setting */
     validation_patterns_t broken = { .email = "[a-" };
-    assert(validation_init(&broken) == -1);
+    assert(validation_init(&broken, 1) == -1);
     assert(validate_new_email("alice@example.com", err, sizeof(err)) == -1);   /* not ready */
-    assert(validation_init(&defaults) == 0);
+    assert(validation_init(&defaults, 1) == 0);
     assert(validate_new_password("x", err, sizeof(err)) == 0);
     assert(validate_new_machine_secret("x", err, sizeof(err)) == 0);
     validation_cleanup();
