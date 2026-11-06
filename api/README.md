@@ -4,7 +4,10 @@ HTTP endpoints for the OAuth2 authentication server.
 
 A path the server serves, asked with a method it doesn't take, answers
 `405 {"error": "Method not allowed"}` with an `Allow` header naming the methods it does
-(`HEAD` comes with `GET`). A path it doesn't serve answers `404`.
+(`HEAD` comes with `GET`). A path it doesn't serve answers `404`. `OPTIONS` is the
+exception: it's answered only on the paths a browser may call from another origin
+(`/token`, `/revoke`, `/userinfo` and `/.well-known/jwks.json`), as a CORS preflight, and is
+`404` on any other.
 
 Any request body that is not form-encoded is checked for JSON string escapes before the
 endpoint runs. A body containing an escape that cannot be decoded (an escaped NUL, a lone

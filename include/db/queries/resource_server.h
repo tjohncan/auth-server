@@ -162,7 +162,8 @@ int resource_server_get_by_id(db_handle_t *db, const unsigned char *server_id,
  * Uniqueness among active servers is the caller's to check first, with
  * resource_server_active_clash.
  *
- * Returns: 0 on success, -1 on error or not found
+ * Returns: 0 once the statement runs, whether or not a row matched (the
+ * caller's read of the server is what finds "not found"), -1 on error
  */
 int resource_server_update(db_handle_t *db, const unsigned char *server_id,
                            long long user_account_pin,

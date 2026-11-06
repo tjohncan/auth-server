@@ -462,7 +462,8 @@ int client_get_by_id(db_handle_t *db, const unsigned char *client_id,
  * Uniqueness among active clients is the caller's to check first, with
  * client_active_code_name_taken.
  *
- * Returns: 0 on success, -1 on error or not found
+ * Returns: 0 once the statement runs, whether or not a row matched (the
+ * caller's read of the client is what finds "not found"), -1 on error
  */
 int client_update(db_handle_t *db, const unsigned char *client_id,
                   long long user_account_pin,

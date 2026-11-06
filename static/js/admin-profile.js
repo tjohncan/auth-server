@@ -499,7 +499,7 @@ async function showMFAAddDevice() {
 
 function showMFAConfirm(methodId, secret, qrUrl) {
     const { modal, close } = showModal('Scan QR Code', `
-        <p class="text-md mb-md">Open your authenticator app and scan the QR code below.</p>
+        <p id="mfaSetupLead" class="text-md mb-md">Open your authenticator app and scan the QR code below.</p>
         <div class="text-center mb-md">
             <div id="qrCodeContainer" class="qr-container"></div>
             <div class="mt-md">
@@ -555,9 +555,12 @@ function showMFAConfirm(methodId, secret, qrUrl) {
             path.setAttribute('fill', tmp);
         });
     } else {
-        qrContainer.textContent = 'This code is too long to draw. Enter the secret below ' +
-            'in your authenticator app instead.';
-        invertButton.parentElement.remove();
+        /* Nothing to scan: the title and lead line say what to do instead, and the
+           code's place, with its invert button, goes */
+        modal.querySelector('h3').textContent = 'Set Up Authenticator';
+        document.getElementById('mfaSetupLead').textContent = 'This code is too long to ' +
+            'draw. Enter the secret below in your authenticator app instead.';
+        qrContainer.parentElement.remove();
         modal.querySelector('details').open = true;
     }
 
