@@ -153,6 +153,20 @@ int str_url_encode(char *dst, size_t dst_size, const char *src);
 int str_url_decode(char *dst, size_t dst_size, const char *src);
 
 /*
+ * str_url_text_valid - Does URL-encoded text decode to text?
+ *
+ * Decodes as str_url_decode does, without storing anything, over a whole query string
+ * or form body: its '&' and '=' are ASCII, so a character can't span two parameters.
+ *
+ * Parameters:
+ *   s   - The encoded text, NUL-terminated at s[len]
+ *   len - Its length (a raw NUL before it makes the text invalid)
+ *
+ * Returns: 1 if it decodes to well-formed UTF-8 with no NUL, else 0
+ */
+int str_url_text_valid(const char *s, size_t len);
+
+/*
  * str_to_lower - Convert string to lowercase
  *
  * Copies src to dest, converting each character to lowercase.

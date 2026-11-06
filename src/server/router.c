@@ -365,6 +365,10 @@ HttpResponse *router_dispatch(Router *router, const HttpRequest *req) {
      * ways: SQLite stores an invalid sequence and echoes it into later JSON
      * responses, while PostgreSQL refuses it at INSERT and the handler answers
      * 500. Refused here, both answer 400.
+     *
+     * The same goes for what a query string or a form body decodes to, whichever
+     * parameter carries it. An encoded NUL is refused with it: a handler's decode
+     * would read that parameter as left out.
      */
     HttpResponse *resp;
     const char *content_type = http_request_get_header(req, "Content-Type");
@@ -374,6 +378,10 @@ HttpResponse *router_dispatch(Router *router, const HttpRequest *req) {
         resp = response_json_error(400, "Request body is not valid UTF-8");
     } else if (req->body && !is_form && !json_escapes_valid(req->body)) {
         resp = response_json_error(400, "Invalid JSON string escape");
+    } else if ((req->query_string &&
+                !str_url_text_valid(req->query_string, strlen(req->query_string))) ||
+               (req->body && is_form && !str_url_text_valid(req->body, req->body_length))) {
+        resp = response_json_error(400, "Request parameters are not valid UTF-8 text");
     } else if (req->method == HTTP_HEAD) {
         /*
          * HEAD: nothing registers it, so the GET route for the same path answers

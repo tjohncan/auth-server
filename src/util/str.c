@@ -189,6 +189,19 @@ int str_url_encode(char *dst, size_t dst_size, const char *src) {
 
 /*******/
 
+/* What a '%' and two hex digits at p stand for, or -1 if p doesn't start with them
+   (RFC 3986 pct-encoded). Checked digit by digit rather than with strtol, which also
+   takes a sign or leading whitespace, so "%-1" would decode to 0xFF and "% 9" to a
+   tab. p is NUL-terminated, which ends the checks at the end of the text. */
+static int url_escape_value(const char *p) {
+    if (*p != '%' || !isxdigit((unsigned char)p[1]) || !isxdigit((unsigned char)p[2])) {
+        return -1;
+    }
+    int hi = isdigit((unsigned char)p[1]) ? p[1] - '0' : tolower((unsigned char)p[1]) - 'a' + 10;
+    int lo = isdigit((unsigned char)p[2]) ? p[2] - '0' : tolower((unsigned char)p[2]) - 'a' + 10;
+    return hi * 16 + lo;
+}
+
 int str_url_decode(char *dst, size_t dst_size, const char *src) {
     if (!dst || dst_size == 0 || !src) {
         return -1;
@@ -198,15 +211,9 @@ int str_url_decode(char *dst, size_t dst_size, const char *src) {
     const char *p = src;
 
     while (*p && written < dst_size - 1) {
-        /* Exactly two hex digits after the '%' (RFC 3986 pct-encoded). Checked digit
-           by digit rather than with strtol, which also takes a sign or leading
-           whitespace, so "%-1" would decode to 0xFF and "% 9" to a tab. Anything
-           else falls through and is copied literally. */
-        if (*p == '%' && isxdigit((unsigned char)p[1]) && isxdigit((unsigned char)p[2])) {
-            int hi = isdigit((unsigned char)p[1]) ? p[1] - '0' : tolower((unsigned char)p[1]) - 'a' + 10;
-            int lo = isdigit((unsigned char)p[2]) ? p[2] - '0' : tolower((unsigned char)p[2]) - 'a' + 10;
-            int val = hi * 16 + lo;
-
+        /* Anything but an escape falls through and is copied literally */
+        int val = url_escape_value(p);
+        if (val >= 0) {
             /* Reject NULL byte injection (%00) */
             if (val == 0) return -1;
             dst[written++] = (char)val;
@@ -229,6 +236,36 @@ int str_url_decode(char *dst, size_t dst_size, const char *src) {
 
     dst[written] = '\0';
     return (int)written;
+}
+
+/* The next byte of URL-encoded text, decoded as str_url_decode decodes it */
+static unsigned char url_next_byte(const char *s, size_t *i) {
+    int val = url_escape_value(s + *i);
+    if (val >= 0) {
+        *i += 3;
+        return (unsigned char)val;
+    }
+    return (unsigned char)s[(*i)++];
+}
+
+int str_url_text_valid(const char *s, size_t len) {
+    size_t i = 0;
+    while (i < len) {
+        unsigned char ch[4];
+        ch[0] = url_next_byte(s, &i);
+        if (ch[0] == 0) return 0;
+        if (ch[0] < 0x80) continue;
+
+        /* One character at a time: its lead byte says how long it is, and
+           json_utf8_valid judges it, refusing a lead byte no character has */
+        size_t n = ch[0] < 0xE0 ? 2 : ch[0] < 0xF0 ? 3 : 4;
+        for (size_t k = 1; k < n; k++) {
+            if (i >= len) return 0;
+            ch[k] = url_next_byte(s, &i);
+        }
+        if (!json_utf8_valid((const char *)ch, n)) return 0;
+    }
+    return 1;
 }
 
 

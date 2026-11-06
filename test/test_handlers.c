@@ -410,9 +410,9 @@ static int test_authorization_code_flow(void) {
     char code[2048], access[2048], rt[256], rt2[256];
 
     /* 0. A challenge that can't be an S256 one is refused, no code made: a byte
-          short, and bytes that aren't UTF-8 (which PostgreSQL won't store) */
+          short, and characters a challenge doesn't have */
     static const char *not_s256[] = {
-        "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-c", "%FF%FE" };
+        "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-c", "%C3%A9" };
     for (size_t i = 0; i < sizeof(not_s256) / sizeof(not_s256[0]); i++) {
         Reply r = authorize_with(not_s256[i]);
         int refused = r.status == 302 && r.location &&
@@ -421,6 +421,19 @@ static int test_authorization_code_flow(void) {
         if (!refused) FAIL("/authorize took the challenge '%s'", not_s256[i]);
     }
     printf("✓ a challenge that can't be S256's is refused before a code is made\n");
+
+    /* Parameters that don't decode to text never reach a handler, which on PostgreSQL
+       would hand them to the database and answer 500 */
+    Reply bad = authorize_with("%FF%FE");
+    int status = bad.status;
+    reply_free(&bad);
+    if (status != 400) FAIL("/authorize with %%FF%%FE in a parameter answered %d, not 400", status);
+    bad = post_form("/token", "grant_type=refresh_token&refresh_token=x&client_id=x&resource=%FF");
+    status = bad.status;
+    int said = strstr(bad.body, "not valid UTF-8 text") != NULL;
+    reply_free(&bad);
+    if (status != 400 || !said) FAIL("/token with resource=%%FF answered %d", status);
+    printf("✓ a parameter that doesn't decode to text is refused, on a query or a form\n");
 
     /* 1. The wrong verifier is refused and the right one exchanges, so the
           refusal was PKCE's (it's checked before the code is spent) */

@@ -19,6 +19,10 @@ UTF-16 surrogate, a malformed or unknown escape) is refused with
 well-formed UTF-8, as JSON has to be, is refused the same way, with
 `400 {"error": "Request body is not valid UTF-8"}`.
 
+A query string or form-encoded body is checked the same way, as it decodes. One holding anything
+but well-formed UTF-8, or an encoded NUL (`%00`), is refused with
+`400 {"error": "Request parameters are not valid UTF-8 text"}`, whichever parameter carries it.
+
 A new username, email address or code name must match the server's pattern for it, set in
 auth.conf (`username_pattern`, `email_pattern`, `code_name_pattern`). By default:
 - Usernames and code names are letters, digits and `. _ + -`, with no dot first, last or doubled.

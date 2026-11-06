@@ -211,6 +211,26 @@ void test_str_url_encode_decode(void) {
     }
     assert(str_url_decode(decoded, sizeof(decoded), "a%00b") == -1);
     printf("Only %%XX with two hex digits decodes; malformed escapes copy literally; %%00 refused\n");
+
+    /* What the router asks of a query string or form body. A character may arrive
+       encoded, raw or a mix, and can't span two parameters. Only what really decodes
+       counts: "%zz" and "%F" are literal, "%25FF" is the text "%FF". */
+    static const char *text[] = {
+        "", "a=1&b=two+words", "x=%C3%A9", "x=\xc3\xa9", "x=%C3\xa9", "x=%F0%9F%98%80",
+        "x=%zz", "x=100%", "x=%F", "x=%25FF", "x=%2500",
+    };
+    for (size_t i = 0; i < sizeof(text) / sizeof(text[0]); i++) {
+        assert(str_url_text_valid(text[i], strlen(text[i])) == 1);
+    }
+    static const char *not_text[] = {
+        "x=%FF", "x=\xff", "x=%00", "x=%C3", "x=%C3&y=%A9", "x=%C0%80", "x=%ED%A0%80",
+        "x=%F4%90%80%80", "x=%E2%82", "x=%80",
+    };
+    for (size_t i = 0; i < sizeof(not_text) / sizeof(not_text[0]); i++) {
+        assert(str_url_text_valid(not_text[i], strlen(not_text[i])) == 0);
+    }
+    assert(str_url_text_valid("a=1\0b=2", 7) == 0);
+    printf("Text that decodes to UTF-8 passes; ill-formed bytes and NUL don't\n");
 }
 
 void test_str_html_escape(void) {

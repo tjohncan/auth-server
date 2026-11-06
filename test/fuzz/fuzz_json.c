@@ -13,10 +13,13 @@
  *   - once a body has passed both whole-body checks, every string a handler can
  *     read from it is well-formed UTF-8: escapes decode to UTF-8, and the raw
  *     bytes were checked before any field was read;
- *   - json_get_text hands back text exactly when it returns 0.
+ *   - json_get_text hands back text exactly when it returns 0;
+ *   - what str_url_text_valid passes, as the router checks form bodies and query
+ *     strings, decodes to well-formed UTF-8.
  */
 #include "util/json.h"
 #include "util/log.h"
+#include "util/str.h"
 #include <stdint.h>
 #include <stddef.h>
 #include <stdlib.h>
@@ -42,6 +45,15 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     body[size] = '\0';
 
     int checked = json_utf8_valid(body, size) && json_escapes_valid(body);
+
+    if (str_url_text_valid(body, size)) {
+        char *decoded = malloc(size + 1);
+        if (decoded) {
+            int n = str_url_decode(decoded, size + 1, body);
+            if (n < 0 || !json_utf8_valid(decoded, (size_t)n)) abort();
+            free(decoded);
+        }
+    }
 
     for (size_t k = 0; k < sizeof(KEYS) / sizeof(KEYS[0]); k++) {
         char *value = json_get_string(body, KEYS[k]);

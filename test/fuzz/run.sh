@@ -13,7 +13,8 @@
 # Targets:
 #   http  - http_request_parse + accessors (the socket-facing request parser)
 #   jwt   - jwt_decode_auth_request (the authorization-code JWT decoder)
-#   json  - the request-body checks and field readers in util/json.c
+#   json  - the request-body checks and field readers in util/json.c, and the
+#           router's check of form bodies and query strings in util/str.c
 #
 # Single process on purpose. These targets saturate their reachable edges within
 # seconds, so extra cores buy no coverage — they only scatter per-worker logs and
@@ -52,9 +53,9 @@ case "${TARGET}" in
         MAXLEN=1200
         ;;
     json)
-        SRCS="test/fuzz/fuzz_json.c src/util/json.c src/util/log.c"
+        SRCS="test/fuzz/fuzz_json.c src/util/json.c src/util/str.c src/util/log.c"
         DICT="test/fuzz/json.dict"
-        DESC="json_utf8_valid, json_escapes_valid, json_get_* and json_unescape"
+        DESC="json_utf8_valid, json_escapes_valid, json_get_*, json_unescape and str_url_text_valid"
         MAXLEN=4096
         ;;
     *)

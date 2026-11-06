@@ -276,7 +276,7 @@ FUZZ_SAN         = -fsanitize=address,undefined -fno-sanitize-recover=undefined 
 FUZZ_HTTP_SRCS   = test/fuzz/fuzz_http.c src/server/http.c src/util/str.c src/util/json.c src/util/log.c
 FUZZ_JWT_SRCS    = test/fuzz/fuzz_jwt.c src/crypto/jwt.c src/crypto/hmac.c src/crypto/random.c \
                    src/crypto/sha256.c src/util/data.c src/util/str.c src/util/json.c src/util/log.c
-FUZZ_JSON_SRCS   = test/fuzz/fuzz_json.c src/util/json.c src/util/log.c
+FUZZ_JSON_SRCS   = test/fuzz/fuzz_json.c src/util/json.c src/util/str.c src/util/log.c
 FUZZ_TIME       ?= 60
 FUZZ_TARGET     ?= http
 
