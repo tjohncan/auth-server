@@ -409,7 +409,8 @@ int json_get_text(const char *json, const char *key, char **out_value) {
     if (strncmp(value_start, "null", 4) == 0 && IS_JSON_DELIM(value_start[4])) return 1;
     if (*value_start != '"') return -1;
 
-    /* NULL now means a string it can't read: unterminated, or a refused escape */
+    /* It starts as a string, so NULL means one it can't read: unterminated, or a refused
+       escape */
     *out_value = json_get_string(json, key);
     return *out_value ? 0 : -1;
 }

@@ -200,7 +200,6 @@ int mfa_totp_confirm(db_handle_t *db,
         *out_recovery_count = MFA_RECOVERY_CODE_COUNT;
     }
 
-    log_info("Confirmed MFA method");
     return 0;
 }
 
