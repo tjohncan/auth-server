@@ -137,7 +137,7 @@ static int validate_scope_subset(const char *requested, const char *allowed) {
             }
         }
         if (!found) {
-            log_warn("Requested scope '%s' not in allowed scopes '%s'",
+            log_info("Requested scope '%s' not in allowed scopes '%s'",
                      requested_scopes[i], allowed);
             result = -1;
             break;
