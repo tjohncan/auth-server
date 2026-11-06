@@ -72,15 +72,170 @@ int mfa_method_create(db_handle_t *db,
     return 0;
 }
 
-int mfa_method_confirm(db_handle_t *db, const unsigned char *method_id) {
-    if (!db || !method_id) {
+/* ============================================================================
+ * A recovery code set, hashed and then stored
+ * ========================================================================== */
+
+/*
+ * A set's codes, hashed before any write transaction opens. On SQLite, BEGIN
+ * IMMEDIATE holds the database's one write lock until COMMIT, and a machine
+ * secret hashed with Argon2id at the password defaults takes about a fifth of a
+ * second: ten inside the transaction would keep every other write, a sign-in's
+ * included, waiting for the set. One method, salt and iteration count for the
+ * whole set: a code is found by hashing what's submitted as the set's codes were.
+ */
+typedef struct {
+    unsigned char id[16];
+    char salt_hex[33];
+    int iterations;
+    int count;
+    const char **codes;                       /* the plaintext, for each one's last four */
+    char (*hashes)[PASSWORD_HASH_MAX_LENGTH];
+} hashed_code_set_t;
+
+static void code_set_free(hashed_code_set_t *set) {
+    if (set->hashes) {
+        OPENSSL_cleanse(set->hashes, (size_t)set->count * sizeof(*set->hashes));
+        free(set->hashes);
+        set->hashes = NULL;
+    }
+    OPENSSL_cleanse(set->salt_hex, sizeof(set->salt_hex));
+}
+
+/* Returns: 0, or -1 (logged) with nothing left to free */
+static int code_set_hash(const char **codes, int count, hashed_code_set_t *out) {
+    memset(out, 0, sizeof(*out));
+    for (int i = 0; i < count; i++) {
+        if (!codes[i] || strlen(codes[i]) < 4) {
+            log_error("Recovery code too short (must be at least 4 characters)");
+            return -1;
+        }
+    }
+
+    unsigned char salt_bytes[16];
+    if (crypto_random_bytes(out->id, sizeof(out->id)) != 0 ||
+        crypto_random_bytes(salt_bytes, sizeof(salt_bytes)) != 0) {
+        log_error("Failed to generate the id and salt for a recovery code set");
+        return -1;
+    }
+    bytes_to_hex(salt_bytes, sizeof(salt_bytes), out->salt_hex, sizeof(out->salt_hex));
+    OPENSSL_cleanse(salt_bytes, sizeof(salt_bytes));
+
+    const char *method = crypto_password_method(SECRET_MACHINE);
+    out->iterations = crypto_password_min_iterations(SECRET_MACHINE);
+    out->count = count;
+    out->codes = codes;
+    out->hashes = calloc((size_t)count, sizeof(*out->hashes));
+    if (!out->hashes) {
+        log_error("Failed to allocate recovery code hashes");
+        code_set_free(out);
+        return -1;
+    }
+    for (int i = 0; i < count; i++) {
+        if (crypto_password_hash_with_salt(method, codes[i], strlen(codes[i]), out->salt_hex,
+                                           out->iterations, out->hashes[i],
+                                           sizeof(out->hashes[i])) != 0) {
+            log_error("Failed to hash recovery code");
+            code_set_free(out);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/*
+ * The set's rows, in the caller's write transaction: the user's active set, if
+ * any, revoked, and this one stored as the active set.
+ *
+ * Returns: 0, or -1 (logged), for the caller to roll back
+ */
+static int code_set_store(db_handle_t *db, long long user_account_pin,
+                          const hashed_code_set_t *set) {
+    const char *revoke_sql =
+        "UPDATE " TBL_RECOVERY_CODE_SET " "
+        "SET is_active = " BOOL_FALSE ", "
+        "    revoked_at = " NOW ", "
+        "    updated_at = " NOW " "
+        "WHERE user_account_pin = " P"1 AND is_active = " BOOL_TRUE;
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, revoke_sql) != 0) {
+        log_error("Failed to prepare recovery code set revoke statement");
+        return -1;
+    }
+    db_bind_int64(stmt, 1, user_account_pin);
+    int rc = db_step(stmt);
+    db_finalize(stmt);
+    if (rc != DB_DONE) {
+        log_error("Failed to revoke existing recovery code set");
+        return -1;
+    }
+
+    const char *set_sql =
+        "INSERT INTO " TBL_RECOVERY_CODE_SET " "
+        "(id, user_account_pin, generated_at, salt, hash_iterations) "
+        "VALUES (" P"1, " P"2, " NOW ", " P"3, " P"4) "
+        "RETURNING pin";
+
+    if (db_prepare(db, &stmt, set_sql) != 0) {
+        log_error("Failed to prepare recovery_code_set insert");
+        return -1;
+    }
+    db_bind_blob(stmt, 1, set->id, sizeof(set->id));
+    db_bind_int64(stmt, 2, user_account_pin);
+    db_bind_text(stmt, 3, set->salt_hex, -1);
+    db_bind_int(stmt, 4, set->iterations);
+    rc = db_step(stmt);
+    long long set_pin = rc == DB_ROW ? db_column_int64(stmt, 0) : 0;
+    db_finalize(stmt);
+    if (rc != DB_ROW) {
+        log_error("Failed to insert recovery code set");
+        return -1;
+    }
+
+    /* Each code, hashed */
+    const char *code_sql =
+        "INSERT INTO " TBL_RECOVERY_CODE " "
+        "(recovery_code_set_pin, secret_hash, plaintext_last4) "
+        "VALUES (" P"1, " P"2, " P"3)";
+
+    if (db_prepare(db, &stmt, code_sql) != 0) {
+        log_error("Failed to prepare recovery_code insert");
+        return -1;
+    }
+    for (int i = 0; i < set->count; i++) {
+        const char *last4 = set->codes[i] + (strlen(set->codes[i]) - 4);
+
+        db_bind_int64(stmt, 1, set_pin);
+        db_bind_text(stmt, 2, set->hashes[i], -1);
+        db_bind_text(stmt, 3, last4, -1);
+        if (db_step(stmt) != DB_DONE) {
+            log_error("Failed to insert recovery code");
+            db_finalize(stmt);
+            return -1;
+        }
+        db_reset(stmt);
+    }
+    db_finalize(stmt);
+    return 0;
+}
+
+int mfa_method_confirm(db_handle_t *db, const unsigned char *method_id,
+                       const char **recovery_codes, int code_count) {
+    if (!db || !method_id || (recovery_codes && code_count <= 0)) {
         log_error("Invalid arguments to mfa_method_confirm");
         return -1;
     }
 
+    hashed_code_set_t set = {0};
+    if (recovery_codes && code_set_hash(recovery_codes, code_count, &set) != 0) {
+        return -1;
+    }
+
+    int result = -1;
     if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
         log_error("Failed to begin transaction");
-        return -1;
+        goto done;
     }
 
     const char *update_sql =
@@ -94,23 +249,19 @@ int mfa_method_confirm(db_handle_t *db, const unsigned char *method_id) {
     db_stmt_t *stmt = NULL;
     if (db_prepare(db, &stmt, update_sql) != 0) {
         log_error("Failed to prepare mfa_method_confirm statement");
-        db_execute_trusted(db, "ROLLBACK");
-        return -1;
+        goto rollback;
     }
 
     db_bind_blob(stmt, 1, method_id, 16);
 
     int rc = db_step(stmt);
+    long long user_account_pin = rc == DB_ROW ? db_column_int64(stmt, 0) : 0;
+    db_finalize(stmt);
 
     if (rc != DB_ROW) {
         log_error("Failed to confirm MFA method (not found or already confirmed)");
-        db_finalize(stmt);
-        db_execute_trusted(db, "ROLLBACK");
-        return -1;
+        goto rollback;
     }
-
-    long long user_account_pin = db_column_int64(stmt, 0);
-    db_finalize(stmt);
 
     const char *update_user_sql =
         "UPDATE " TBL_USER_ACCOUNT " "
@@ -120,8 +271,7 @@ int mfa_method_confirm(db_handle_t *db, const unsigned char *method_id) {
     db_stmt_t *user_stmt = NULL;
     if (db_prepare(db, &user_stmt, update_user_sql) != 0) {
         log_error("Failed to prepare has_mfa update statement");
-        db_execute_trusted(db, "ROLLBACK");
-        return -1;
+        goto rollback;
     }
 
     db_bind_int64(user_stmt, 1, user_account_pin);
@@ -131,18 +281,28 @@ int mfa_method_confirm(db_handle_t *db, const unsigned char *method_id) {
 
     if (rc != DB_DONE) {
         log_error("Failed to update user has_mfa flag");
-        db_execute_trusted(db, "ROLLBACK");
-        return -1;
+        goto rollback;
+    }
+
+    if (recovery_codes && code_set_store(db, user_account_pin, &set) != 0) {
+        goto rollback;
     }
 
     if (db_execute_trusted(db, "COMMIT") != 0) {
         log_error("Failed to commit transaction");
-        db_execute_trusted(db, "ROLLBACK");
-        return -1;
+        goto rollback;
     }
 
-    log_info("Confirmed MFA method");
-    return 0;
+    log_info(recovery_codes ? "Confirmed MFA method, with recovery codes"
+                            : "Confirmed MFA method");
+    result = 0;
+    goto done;
+
+rollback:
+    db_execute_trusted(db, "ROLLBACK");
+done:
+    code_set_free(&set);
+    return result;
 }
 
 int mfa_method_get_by_id(db_handle_t *db,
@@ -522,164 +682,26 @@ int recovery_code_set_create(db_handle_t *db,
         return -1;
     }
 
-    for (int i = 0; i < code_count; i++) {
-        if (!plaintext_codes[i] || strlen(plaintext_codes[i]) < 4) {
-            log_error("Recovery code too short (must be at least 4 characters)");
-            return -1;
-        }
-    }
-
-    unsigned char set_id[16];
-    if (crypto_random_bytes(set_id, sizeof(set_id)) != 0) {
-        log_error("Failed to generate UUID for recovery code set");
+    hashed_code_set_t set;
+    if (code_set_hash(plaintext_codes, code_count, &set) != 0) {
         return -1;
     }
-
-    unsigned char salt_bytes[16];
-    if (crypto_random_bytes(salt_bytes, sizeof(salt_bytes)) != 0) {
-        log_error("Failed to generate salt for recovery codes");
-        return -1;
-    }
-
-    char salt_hex[33];
-    bytes_to_hex(salt_bytes, sizeof(salt_bytes), salt_hex, sizeof(salt_hex));
-    OPENSSL_cleanse(salt_bytes, sizeof(salt_bytes));
-
-    /* Machine secrets, one method, salt and iteration count for the whole set:
-       a code is found by hashing what's submitted as the set's codes were */
-    const char *method = crypto_password_method(SECRET_MACHINE);
-    int hash_iterations = crypto_password_min_iterations(SECRET_MACHINE);
 
     int result = -1;
-    int in_transaction = 0;
-    db_stmt_t *code_stmt = NULL;
-
-    /* Every code is hashed before the write transaction opens. On SQLite,
-       BEGIN IMMEDIATE holds the database's one write lock until COMMIT, and a
-       machine secret hashed with Argon2id at the password defaults takes about a
-       fifth of a second: ten inside the transaction would keep every other
-       write, a sign-in's included, waiting for the set. */
-    char (*hashes)[PASSWORD_HASH_MAX_LENGTH] = calloc((size_t)code_count, sizeof(*hashes));
-    if (!hashes) {
-        log_error("Failed to allocate recovery code hashes");
-        goto done;
-    }
-
-    for (int i = 0; i < code_count; i++) {
-        if (crypto_password_hash_with_salt(method, plaintext_codes[i], strlen(plaintext_codes[i]),
-                                           salt_hex, hash_iterations,
-                                           hashes[i], sizeof(hashes[i])) != 0) {
-            log_error("Failed to hash recovery code");
-            goto done;
-        }
-    }
-
     if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
         log_error("Failed to begin transaction");
-        goto done;
-    }
-    in_transaction = 1;
-
-    /* Revoke existing active set for this user, if any */
-    const char *revoke_sql =
-        "UPDATE " TBL_RECOVERY_CODE_SET " "
-        "SET is_active = " BOOL_FALSE ", "
-        "    revoked_at = " NOW ", "
-        "    updated_at = " NOW " "
-        "WHERE user_account_pin = " P"1 AND is_active = " BOOL_TRUE;
-
-    db_stmt_t *revoke_stmt = NULL;
-    if (db_prepare(db, &revoke_stmt, revoke_sql) != 0) {
-        log_error("Failed to prepare recovery code set revoke statement");
-        goto done;
-    }
-
-    db_bind_int64(revoke_stmt, 1, user_account_pin);
-
-    int rc = db_step(revoke_stmt);
-    db_finalize(revoke_stmt);
-
-    if (rc != DB_DONE) {
-        log_error("Failed to revoke existing recovery code set");
-        goto done;
-    }
-
-    const char *set_sql =
-        "INSERT INTO " TBL_RECOVERY_CODE_SET " "
-        "(id, user_account_pin, generated_at, salt, hash_iterations) "
-        "VALUES (" P"1, " P"2, " NOW ", " P"3, " P"4) "
-        "RETURNING pin";
-
-    db_stmt_t *set_stmt = NULL;
-    if (db_prepare(db, &set_stmt, set_sql) != 0) {
-        log_error("Failed to prepare recovery_code_set insert");
-        goto done;
-    }
-
-    db_bind_blob(set_stmt, 1, set_id, sizeof(set_id));
-    db_bind_int64(set_stmt, 2, user_account_pin);
-    db_bind_text(set_stmt, 3, salt_hex, -1);
-    db_bind_int(set_stmt, 4, hash_iterations);
-
-    rc = db_step(set_stmt);
-
-    if (rc != DB_ROW) {
-        log_error("Failed to insert recovery code set");
-        db_finalize(set_stmt);
-        goto done;
-    }
-
-    long long set_pin = db_column_int64(set_stmt, 0);
-    db_finalize(set_stmt);
-
-    /* Insert each recovery code (hashed) */
-    const char *code_sql =
-        "INSERT INTO " TBL_RECOVERY_CODE " "
-        "(recovery_code_set_pin, secret_hash, plaintext_last4) "
-        "VALUES (" P"1, " P"2, " P"3)";
-
-    if (db_prepare(db, &code_stmt, code_sql) != 0) {
-        log_error("Failed to prepare recovery_code insert");
-        goto done;
-    }
-
-    for (int i = 0; i < code_count; i++) {
-        const char *last4 = plaintext_codes[i] + (strlen(plaintext_codes[i]) - 4);
-
-        db_bind_int64(code_stmt, 1, set_pin);
-        db_bind_text(code_stmt, 2, hashes[i], -1);
-        db_bind_text(code_stmt, 3, last4, -1);
-
-        rc = db_step(code_stmt);
-        if (rc != DB_DONE) {
-            log_error("Failed to insert recovery code");
-            goto done;
-        }
-
-        db_reset(code_stmt);
-    }
-
-    db_finalize(code_stmt);
-    code_stmt = NULL;
-
-    if (db_execute_trusted(db, "COMMIT") != 0) {
+    } else if (code_set_store(db, user_account_pin, &set) != 0) {
+        db_execute_trusted(db, "ROLLBACK");
+    } else if (db_execute_trusted(db, "COMMIT") != 0) {
         log_error("Failed to commit transaction");
-        goto done;
+        db_execute_trusted(db, "ROLLBACK");
+    } else {
+        memcpy(out_set_id, set.id, 16);
+        log_info("Created recovery code set with %d codes", code_count);
+        result = 0;
     }
-    in_transaction = 0;
 
-    memcpy(out_set_id, set_id, 16);
-    log_info("Created recovery code set with %d codes", code_count);
-    result = 0;
-
-done:
-    if (code_stmt) db_finalize(code_stmt);
-    if (in_transaction) db_execute_trusted(db, "ROLLBACK");
-    if (hashes) {
-        OPENSSL_cleanse(hashes, (size_t)code_count * sizeof(*hashes));
-        free(hashes);
-    }
-    OPENSSL_cleanse(salt_hex, sizeof(salt_hex));
+    code_set_free(&set);
     return result;
 }
 

@@ -1849,6 +1849,60 @@ static int test_database_failures(void) {
 }
 
 /*
+ * A first TOTP confirm stores the method's confirmation and its recovery codes
+ * together. With the codes refused, it answers 500 and leaves the method
+ * unconfirmed, so the same method confirms, with its codes, once the cause is
+ * gone, rather than staying confirmed with no codes and the retry refused.
+ */
+static int test_failed_first_confirm(void) {
+    printf("\n=== A first TOTP confirm that fails ===\n");
+
+    char cookie[256], method[33], secret[64], code[16], json[256];
+    Reply r = admin_port("POST", "/api/admin/users", NULL,
+                         "{\"username\":\"halfway\",\"password\":\"halfway password\"}");
+    int status = r.status;
+    reply_free(&r);
+    if (status != 200 || login("halfway", "halfway password", cookie, sizeof(cookie)) != 0) {
+        FAIL("could not create and sign in the user");
+    }
+    r = post_json("/api/user/mfa/totp/setup", cookie, "{\"display_name\":\"phone\"}");
+    if (r.status != 200 || field(&r, "method_id", method, sizeof(method)) != 0 ||
+        field(&r, "secret", secret, sizeof(secret)) != 0) {
+        FAIL("TOTP setup answered %d", r.status);
+    }
+    reply_free(&r);
+
+    /* 1. The codes can't be stored: 500 */
+    db_handle_t *conn = db_pool_get_connection();
+    if (totp_now(secret, code, sizeof(code)) != 0) FAIL("could not make a TOTP code");
+    snprintf(json, sizeof(json), "{\"method_id\":\"%s\",\"code\":\"%s\"}", method, code);
+    if (db_execute_direct(conn, REFUSE_INSERTS(TBL_RECOVERY_CODE_SET)) != 0) {
+        FAIL("could not make recovery codes refuse");
+    }
+    r = post_json("/api/user/mfa/totp/confirm", cookie, json);
+    status = r.status;
+    reply_free(&r);
+    if (db_execute_direct(conn, ALLOW_INSERTS) != 0) FAIL("could not drop the trigger");
+    if (status != 500) FAIL("a confirm whose codes couldn't be stored answered %d, not 500", status);
+
+    /* 2. Once they can: the same method confirms, with its codes */
+    if (totp_now(secret, code, sizeof(code)) != 0) FAIL("could not make a TOTP code");
+    snprintf(json, sizeof(json), "{\"method_id\":\"%s\",\"code\":\"%s\"}", method, code);
+    r = post_json("/api/user/mfa/totp/confirm", cookie, json);
+    char codes[16][32];
+    int count = r.status == 200 ? string_array(r.body, "recovery_codes", codes, 16) : 0;
+    status = r.status;
+    reply_free(&r);
+    if (count <= 0) {
+        FAIL("confirming the same method again answered %d, with %d recovery codes", status, count);
+    }
+    printf("✓ a first confirm whose codes can't be stored changes nothing, and confirms "
+           "with codes after\n");
+
+    return 0;
+}
+
+/*
  * The operator lists a user's addresses, with when each was added and
  * verified, and removes one the user doesn't recognize; one not on the account
  * is a 404, not a silent success. With email support, the removed address no
@@ -2489,7 +2543,7 @@ int main(void) {
                  test_mfa_gates() || test_mfa_daily_cap() ||
                  test_localhost_only() || test_admin_socket_caller() ||
                  test_account_recovery() || test_usernames() || test_failed_bootstrap() ||
-                 test_database_failures() ||
+                 test_database_failures() || test_failed_first_confirm() ||
                  test_operator_addresses() ||
                  test_password_length() ||
 #ifdef EMAIL_SUPPORT

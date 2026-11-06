@@ -35,10 +35,17 @@ int mfa_method_create(db_handle_t *db,
                       const char *secret,
                       unsigned char *out_method_id);
 
-/* Confirm MFA method (mark is_confirmed = 1, set confirmed_at)
- * Used by both TOTP and SMS flows
+/* Confirm MFA method (mark is_confirmed = 1, set confirmed_at), and mark the
+ * user as having MFA. Used by both TOTP and SMS flows.
+ *
+ * recovery_codes (NULL for none, else code_count of them): the codes a first
+ * confirmed method comes with, stored as the user's active set in the same
+ * transaction, so a failure leaves neither the method confirmed nor the codes.
+ * They're hashed before the transaction opens, as recovery_code_set_create's are.
+ *
  * Returns: 0 on success, -1 on error */
-int mfa_method_confirm(db_handle_t *db, const unsigned char *method_id);
+int mfa_method_confirm(db_handle_t *db, const unsigned char *method_id,
+                       const char **recovery_codes, int code_count);
 
 /* Get single method by ID
  * Returns: 0 on success, 1 if there's no such method, -1 on error */

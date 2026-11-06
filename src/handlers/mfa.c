@@ -164,41 +164,38 @@ int mfa_totp_confirm(db_handle_t *db,
         return -1;
     }
 
-    /* Confirm the method */
-    if (mfa_method_confirm(db, method_id) != 0) {
-        log_error("Failed to confirm MFA method");
-        return -1;
-    }
-
-    /* Generate recovery codes if this is the first confirmed method */
+    /* The first confirmed method comes with recovery codes, stored with the
+       confirm in one transaction: a failure leaves the method unconfirmed and
+       the account without MFA, so the user can enter a fresh code and try again */
     int confirmed_count = 0;
     if (mfa_method_count_confirmed(db, user_account_pin, &confirmed_count) != 0) {
         log_error("Failed to count confirmed MFA methods");
         return -1;
     }
 
-    if (confirmed_count == 1) {
-        char **codes = NULL;
+    char **codes = NULL;
+    const char *code_ptrs[MFA_RECOVERY_CODE_COUNT];
+    if (confirmed_count == 0) {
         if (generate_recovery_codes(&codes) != 0) {
             log_error("Failed to generate recovery codes");
             return -1;
         }
-
-        unsigned char set_id[16];
-        const char *code_ptrs[MFA_RECOVERY_CODE_COUNT];
         for (int i = 0; i < MFA_RECOVERY_CODE_COUNT; i++) {
             code_ptrs[i] = codes[i];
         }
+    }
 
-        if (recovery_code_set_create(db, user_account_pin,
-                                     code_ptrs, MFA_RECOVERY_CODE_COUNT,
-                                     set_id) != 0) {
-            log_error("Failed to store recovery codes");
+    if (mfa_method_confirm(db, method_id, codes ? code_ptrs : NULL,
+                           codes ? MFA_RECOVERY_CODE_COUNT : 0) != 0) {
+        log_error("Failed to confirm MFA method");
+        if (codes) {
             for (int i = 0; i < MFA_RECOVERY_CODE_COUNT; i++) { OPENSSL_cleanse(codes[i], MFA_RECOVERY_CODE_LENGTH); free(codes[i]); }
             free(codes);
-            return -1;
         }
+        return -1;
+    }
 
+    if (codes) {
         *out_recovery_codes = codes;
         *out_recovery_count = MFA_RECOVERY_CODE_COUNT;
     }

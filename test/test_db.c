@@ -2645,12 +2645,12 @@ static int test_mfa_reset(const config_t *config) {
     unsigned char method_id[16], set_id[16];
     const char *codes[] = { "reset-code-one", "reset-code-two" };
     if (mfa_method_create(sdb, 1, "TOTP", "phone", "secret-1", method_id) != 0 ||
-        mfa_method_confirm(sdb, method_id) != 0 ||
+        mfa_method_confirm(sdb, method_id, NULL, 0) != 0 ||
         mfa_method_create(sdb, 1, "TOTP", "spare", "secret-2", method_id) != 0 ||
         recovery_code_set_create(sdb, 1, codes, 2, set_id) != 0 ||
         mfa_update_require_mfa_flag(sdb, 1, 1) != 0 ||
         mfa_method_create(sdb, 2, "TOTP", "theirs", "secret-3", method_id) != 0 ||
-        mfa_method_confirm(sdb, method_id) != 0) {
+        mfa_method_confirm(sdb, method_id, NULL, 0) != 0) {
         log_error("MFA reset: could not set up MFA");
         goto done;
     }
