@@ -428,7 +428,8 @@ int client_list_all(db_handle_t *db, long long user_account_pin,
     int total_count = 0;
     int first_row = 1;
 
-    while (db_step(stmt) == DB_ROW) {
+    int rc;
+    while ((rc = db_step(stmt)) == DB_ROW) {
         client_data_t client;
         memset(&client, 0, sizeof(client));
 
@@ -509,6 +510,12 @@ int client_list_all(db_handle_t *db, long long user_account_pin,
     }
 
     db_finalize(stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Error listing clients");
+        db_results_free(list);
+        return -1;
+    }
 
     /* Convert list to array */
     int count;
@@ -1039,7 +1046,8 @@ int client_redirect_uri_list(db_handle_t *db, long long user_account_pin,
     int total_count = 0;
     int first_row = 1;
 
-    while (db_step(stmt) == DB_ROW) {
+    int rc;
+    while ((rc = db_step(stmt)) == DB_ROW) {
         client_redirect_uri_data_t uri;
         memset(&uri, 0, sizeof(uri));
 
@@ -1068,6 +1076,12 @@ int client_redirect_uri_list(db_handle_t *db, long long user_account_pin,
     }
 
     db_finalize(stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Error listing redirect URIs");
+        db_results_free(list);
+        return -1;
+    }
 
     /* Convert list to array */
     int count;
@@ -1318,7 +1332,8 @@ int client_resource_server_list(db_handle_t *db, long long user_account_pin,
     int total_count = 0;
     int first_row = 1;
 
-    while (db_step(stmt) == DB_ROW) {
+    int rc;
+    while ((rc = db_step(stmt)) == DB_ROW) {
         client_resource_server_data_t link;
         memset(&link, 0, sizeof(link));
 
@@ -1359,6 +1374,12 @@ int client_resource_server_list(db_handle_t *db, long long user_account_pin,
     }
 
     db_finalize(stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Error listing a client's resource servers");
+        db_results_free(list);
+        return -1;
+    }
 
     /* Convert list to array */
     int count;
@@ -1460,7 +1481,8 @@ int resource_server_client_list(db_handle_t *db, long long user_account_pin,
     int total_count = 0;
     int first_row = 1;
 
-    while (db_step(stmt) == DB_ROW) {
+    int rc;
+    while ((rc = db_step(stmt)) == DB_ROW) {
         resource_server_client_data_t link;
         memset(&link, 0, sizeof(link));
 
@@ -1496,6 +1518,12 @@ int resource_server_client_list(db_handle_t *db, long long user_account_pin,
     }
 
     db_finalize(stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Error listing a resource server's clients");
+        db_results_free(list);
+        return -1;
+    }
 
     /* Convert list to array */
     int count;
@@ -1981,7 +2009,8 @@ int client_key_list(db_handle_t *db,
     int total_count = 0;
     int first_row = 1;
 
-    while (db_step(stmt) == DB_ROW) {
+    int rc;
+    while ((rc = db_step(stmt)) == DB_ROW) {
         client_key_data_t key;
         memset(&key, 0, sizeof(key));
 
@@ -2020,6 +2049,12 @@ int client_key_list(db_handle_t *db,
     }
 
     db_finalize(stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Error listing client keys");
+        db_results_free(list);
+        return -1;
+    }
 
     /* Convert list to array */
     int count;

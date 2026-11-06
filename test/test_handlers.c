@@ -1908,6 +1908,25 @@ static int test_database_failures(void) {
     }
     printf("✓ a sign-in the database fails answers 500, not \"Invalid credentials\"\n");
 
+    /* 3. A list whose query fails, not an empty list */
+    char target[128];
+    snprintf(target, sizeof(target), "/api/admin/clients?organization_id=%s", g_org_id);
+    if (db_execute_direct(conn, HIDE_TABLE(SECURITY_, "client")) != 0) {
+        FAIL("could not hide the clients");
+    }
+    r = request("GET", target, g_admin_cookie, NULL, NULL, NULL);
+    status = r.status;
+    reply_free(&r);
+    if (db_execute_direct(conn, SHOW_TABLE(SECURITY_, "client")) != 0) {
+        FAIL("could not show the clients");
+    }
+    if (status != 500) FAIL("a list of clients the database failed answered %d, not 500", status);
+    r = request("GET", target, g_admin_cookie, NULL, NULL, NULL);
+    got = r.status == 200 && strstr(r.body, "management_ui") != NULL;
+    reply_free(&r);
+    if (!got) FAIL("the same list, once the database worked, isn't the clients");
+    printf("✓ a list the database fails answers 500, not an empty list\n");
+
     return 0;
 }
 

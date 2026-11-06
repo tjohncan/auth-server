@@ -649,7 +649,8 @@ int user_get_management_ui_setups(db_handle_t *db, long long user_account_pin,
     /* Build linked list */
     db_result_node_t *list = NULL, *list_tail = NULL;
 
-    while (db_step(stmt) == DB_ROW) {
+    int rc;
+    while ((rc = db_step(stmt)) == DB_ROW) {
         management_ui_setup_t setup;
 
         /* Extract row data */
@@ -681,6 +682,12 @@ int user_get_management_ui_setups(db_handle_t *db, long long user_account_pin,
     }
 
     db_finalize(stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Error listing management UI setups");
+        db_results_free(list);
+        return -1;
+    }
 
     /* Convert linked list to array */
     int count;
@@ -805,7 +812,8 @@ int user_get_emails(db_handle_t *db, long long user_account_pin,
     int total_count = 0;
     int first_row = 1;
 
-    while (db_step(stmt) == DB_ROW) {
+    int rc;
+    while ((rc = db_step(stmt)) == DB_ROW) {
         user_email_t email;
         memset(&email, 0, sizeof(email));
 
@@ -845,6 +853,12 @@ int user_get_emails(db_handle_t *db, long long user_account_pin,
     }
 
     db_finalize(stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Error listing user emails");
+        db_results_free(list);
+        return -1;
+    }
 
     /* Convert linked list to array */
     int count;

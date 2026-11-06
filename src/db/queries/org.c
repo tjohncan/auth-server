@@ -158,7 +158,8 @@ int org_list_all_unscoped(db_handle_t *db,
     int total_count = 0;
     int first_row = 1;
 
-    while (db_step(stmt) == DB_ROW) {
+    int rc;
+    while ((rc = db_step(stmt)) == DB_ROW) {
         org_data_t org;
         memset(&org, 0, sizeof(org));
 
@@ -204,6 +205,12 @@ int org_list_all_unscoped(db_handle_t *db,
     }
 
     db_finalize(stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Error listing organizations");
+        db_results_free(list);
+        return -1;
+    }
 
     /* Convert list to array */
     int count;
@@ -314,7 +321,8 @@ int org_list_all(db_handle_t *db, long long user_account_pin,
     int total_count = 0;
     int first_row = 1;
 
-    while (db_step(stmt) == DB_ROW) {
+    int rc;
+    while ((rc = db_step(stmt)) == DB_ROW) {
         org_data_t org;
         memset(&org, 0, sizeof(org));
 
@@ -360,6 +368,12 @@ int org_list_all(db_handle_t *db, long long user_account_pin,
     }
 
     db_finalize(stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Error listing a user's organizations");
+        db_results_free(list);
+        return -1;
+    }
 
     /* Convert list to array */
     int count;
@@ -863,7 +877,8 @@ int organization_key_list(db_handle_t *db,
     int total_count = 0;
     int first_row = 1;
 
-    while (db_step(stmt) == DB_ROW) {
+    int rc;
+    while ((rc = db_step(stmt)) == DB_ROW) {
         organization_key_data_t key;
         memset(&key, 0, sizeof(key));
 
@@ -896,6 +911,12 @@ int organization_key_list(db_handle_t *db,
     }
 
     db_finalize(stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Error listing organization keys");
+        db_results_free(list);
+        return -1;
+    }
 
     /* Convert list to array */
     int count;
