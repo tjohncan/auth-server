@@ -413,6 +413,10 @@ int user_verify_password(db_handle_t *db, const char *username,
 
     if (rc != DB_ROW) {
         db_finalize(stmt);
+        if (rc != DB_DONE) {
+            log_error("Failed to look up user for password verification");
+            return -1;
+        }
         /* Perform dummy verification to equalize timing (prevents user enumeration) */
         crypto_password_verify_dummy(SECRET_USER, password, strlen(password));
         return 0;  /* User not found = invalid password */
@@ -502,6 +506,10 @@ int user_verify_password_by_email(db_handle_t *db, const char *email,
 
     if (rc != DB_ROW) {
         db_finalize(stmt);
+        if (rc != DB_DONE) {
+            log_error("Failed to look up user by email for password verification");
+            return -1;
+        }
         /* Dummy verification to equalize timing */
         crypto_password_verify_dummy(SECRET_USER, password, strlen(password));
         return 0;
@@ -1269,6 +1277,9 @@ int user_change_password(db_handle_t *db, long long user_account_pin,
     OPENSSL_cleanse(salt, sizeof(salt));
     OPENSSL_cleanse(hash, sizeof(hash));
 
+    if (valid < 0) {
+        return -1;  /* A stored hash that can't be checked (logged) */
+    }
     if (valid != 1) {
         log_warn("Current password verification failed for password change");
         return 0;  /* Invalid current password */
@@ -1577,8 +1588,12 @@ int user_get_userinfo_by_id(db_handle_t *db, const unsigned char *user_id,
     int rc = db_step(stmt);
     if (rc != DB_ROW) {
         db_finalize(stmt);
+        if (rc != DB_DONE) {
+            log_error("Failed to look up user for userinfo");
+            return -1;
+        }
         log_info("User not found or inactive for userinfo");
-        return -1;
+        return 1;
     }
 
     /* Decrypt username */

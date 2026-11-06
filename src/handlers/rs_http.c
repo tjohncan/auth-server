@@ -84,6 +84,10 @@ static HttpResponse *rs_authenticate(const HttpRequest *req,
     OPENSSL_cleanse(rs_secret, strlen(rs_secret));
     free(rs_secret);
 
+    if (auth_result < 0) {
+        /* The server failed: 401 would report a good secret as wrong */
+        return response_json_error(500, "Internal server error");  /* logged */
+    }
     if (auth_result != 1) {
         log_warn("RS authentication failed for %s", operation);
         return response_json_error(401, "Authentication failed");

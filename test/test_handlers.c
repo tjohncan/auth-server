@@ -1748,19 +1748,20 @@ static int test_usernames(void) {
     return 0;
 }
 
-/* A trigger that makes every org-admin grant fail, and its removal */
+/* A trigger that makes every insert into a table fail, and its removal: a
+   database failure, where a test needs one. One at a time. */
 #ifdef DB_BACKEND_POSTGRESQL
-#define REFUSE_ORG_ADMIN \
-    "CREATE FUNCTION refuse_org_admin() RETURNS trigger LANGUAGE plpgsql " \
+#define REFUSE_INSERTS(table) \
+    "CREATE FUNCTION refuse_insert() RETURNS trigger LANGUAGE plpgsql " \
     "AS $$ BEGIN RAISE EXCEPTION 'refused'; END $$; " \
-    "CREATE TRIGGER refuse_org_admin BEFORE INSERT ON " TBL_ORGANIZATION_ADMIN " " \
-    "FOR EACH ROW EXECUTE FUNCTION refuse_org_admin()"
-#define ALLOW_ORG_ADMIN "DROP FUNCTION refuse_org_admin() CASCADE"
+    "CREATE TRIGGER refuse_insert BEFORE INSERT ON " table " " \
+    "FOR EACH ROW EXECUTE FUNCTION refuse_insert()"
+#define ALLOW_INSERTS "DROP FUNCTION refuse_insert() CASCADE"
 #else
-#define REFUSE_ORG_ADMIN \
-    "CREATE TRIGGER refuse_org_admin BEFORE INSERT ON " TBL_ORGANIZATION_ADMIN " " \
+#define REFUSE_INSERTS(table) \
+    "CREATE TRIGGER refuse_insert BEFORE INSERT ON " table " " \
     "BEGIN SELECT RAISE(FAIL, 'refused'); END"
-#define ALLOW_ORG_ADMIN "DROP TRIGGER refuse_org_admin"
+#define ALLOW_INSERTS "DROP TRIGGER refuse_insert"
 #endif
 
 /*
@@ -1774,9 +1775,11 @@ static int test_failed_bootstrap(void) {
     const char *body = "{\"org_code_name\":\"third\",\"username\":\"third_admin\","
                        "\"password\":\"correct horse battery\"}";
     db_handle_t *conn = db_pool_get_connection();
-    if (db_execute_direct(conn, REFUSE_ORG_ADMIN) != 0) FAIL("could not make the grant refuse");
+    if (db_execute_direct(conn, REFUSE_INSERTS(TBL_ORGANIZATION_ADMIN)) != 0) {
+        FAIL("could not make the grant refuse");
+    }
     int status = post_status("/api/admin/bootstrap", body);
-    if (db_execute_direct(conn, ALLOW_ORG_ADMIN) != 0) FAIL("could not drop the trigger");
+    if (db_execute_direct(conn, ALLOW_INSERTS) != 0) FAIL("could not drop the trigger");
 
     char found[8];
     int org = query_text("SELECT 1 FROM " TBL_ORGANIZATION " WHERE code_name = 'third'",
@@ -1790,6 +1793,58 @@ static int test_failed_bootstrap(void) {
     if (status != 200) FAIL("the same bootstrap, once the grant was allowed, answered %d", status);
 
     printf("✓ a bootstrap refused at its last step makes nothing, and runs again\n");
+    return 0;
+}
+
+/*
+ * A database failure isn't answered as a bad credential: a client takes
+ * invalid_grant as final and discards its refresh token, and a user told
+ * "Invalid credentials" doubts a right password. With the write each needs
+ * refused, a refresh and a sign-in answer 500, and the same refresh token and
+ * password work once the cause is gone.
+ */
+static int test_database_failures(void) {
+    printf("\n=== A database failure isn't a bad credential ===\n");
+
+    db_handle_t *conn = db_pool_get_connection();
+    char code[2048], rt[256];
+    if (authorize(code, sizeof(code)) != 0) FAIL("/authorize did not redirect with a code");
+    Reply r = exchange(code, PKCE_VERIFIER);
+    int got = r.status == 200 && field(&r, "refresh_token", rt, sizeof(rt)) == 0;
+    reply_free(&r);
+    if (!got) FAIL("the code exchange failed");
+
+    /* 1. A refresh whose new token can't be stored */
+    if (db_execute_direct(conn, REFUSE_INSERTS(TBL_REFRESH_TOKEN)) != 0) {
+        FAIL("could not make refresh tokens refuse");
+    }
+    r = refresh(rt);
+    int status = r.status;
+    reply_free(&r);
+    if (db_execute_direct(conn, ALLOW_INSERTS) != 0) FAIL("could not drop the trigger");
+    if (status != 500) FAIL("a refresh the database failed answered %d, not 500", status);
+    r = refresh(rt);
+    status = r.status;
+    reply_free(&r);
+    if (status != 200) FAIL("the same refresh token, once the database worked, answered %d", status);
+    printf("✓ a refresh the database fails answers 500, and the token still works\n");
+
+    /* 2. A sign-in whose session can't be stored */
+    char cookie[256];
+    if (db_execute_direct(conn, REFUSE_INSERTS(TBL_BROWSER)) != 0) {
+        FAIL("could not make sessions refuse");
+    }
+    r = post_json("/login", NULL,
+                  "{\"username\":\"admin\",\"password\":\"correct horse battery\"}");
+    status = r.status;
+    reply_free(&r);
+    if (db_execute_direct(conn, ALLOW_INSERTS) != 0) FAIL("could not drop the trigger");
+    if (status != 500) FAIL("a sign-in the database failed answered %d, not 500", status);
+    if (login("admin", "correct horse battery", cookie, sizeof(cookie)) != 0) {
+        FAIL("the same password, once the database worked, didn't sign in");
+    }
+    printf("✓ a sign-in the database fails answers 500, not \"Invalid credentials\"\n");
+
     return 0;
 }
 
@@ -2434,6 +2489,7 @@ int main(void) {
                  test_mfa_gates() || test_mfa_daily_cap() ||
                  test_localhost_only() || test_admin_socket_caller() ||
                  test_account_recovery() || test_usernames() || test_failed_bootstrap() ||
+                 test_database_failures() ||
                  test_operator_addresses() ||
                  test_password_length() ||
 #ifdef EMAIL_SUPPORT

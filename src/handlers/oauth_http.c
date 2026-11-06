@@ -180,8 +180,12 @@ static HttpResponse *authenticate_token_client(db_handle_t *db,
     }
 
     long long client_pin, key_pin;
-    if (oauth_client_authenticate(db, client_id, client_key_id, client_secret,
-                                   &client_pin, &key_pin) != 1) {
+    int authenticated = oauth_client_authenticate(db, client_id, client_key_id, client_secret,
+                                                  &client_pin, &key_pin);
+    if (authenticated < 0) {
+        return response_json_error(500, "Internal server error");  /* logged */
+    }
+    if (authenticated != 1) {
         return response_oauth_error(401, "invalid_client", "Client authentication failed");
     }
 
@@ -304,9 +308,15 @@ HttpResponse *token_handler(const HttpRequest *req) {
         cleanse_free(code_verifier);
         free(resource);
 
+        if (rc == -2) {
+            /* The server failed: invalid_grant would tell the client to give up
+               on a code that may be good */
+            free(grant_type);
+            return response_json_error(500, "Internal server error");
+        }
         if (rc != 0) {
             /* rc == 1: replay attack detected (token chain revoked automatically)
-             * rc <  0: invalid, expired, or malformed authorization code
+             * rc == -1: invalid, expired, or malformed authorization code
              * Same response for both — prevents distinguishing replay from invalid */
             free(grant_type);
             return response_oauth_error(400, "invalid_grant", "Invalid authorization code");
@@ -385,9 +395,15 @@ HttpResponse *token_handler(const HttpRequest *req) {
         free(scope);
         free(resource);
 
+        if (rc == -2) {
+            /* The server failed: a client takes invalid_grant as final, and would
+               discard a refresh token that's still good */
+            free(grant_type);
+            return response_json_error(500, "Internal server error");
+        }
         if (rc != 0) {
             /* rc == 1: replay attack detected (token chain revoked automatically)
-             * rc <  0: invalid, expired, or malformed refresh token
+             * rc == -1: invalid, expired, or malformed refresh token
              * Same response for both — prevents distinguishing replay from invalid */
             free(grant_type);
             return response_oauth_error(400, "invalid_grant", "Invalid refresh token");
@@ -472,6 +488,11 @@ HttpResponse *token_handler(const HttpRequest *req) {
         free(scope);
         free(resource);
 
+        if (rc == -2) {
+            /* The server failed: invalid_client would report a good secret as wrong */
+            free(grant_type);
+            return response_json_error(500, "Internal server error");
+        }
         if (rc != 0) {
             free(grant_type);
             return response_oauth_error(401, "invalid_client", "Client authentication failed");
@@ -1395,6 +1416,13 @@ HttpResponse *introspect_handler(const HttpRequest *req) {
     OPENSSL_cleanse(resource_server_secret, strlen(resource_server_secret));
     free(resource_server_secret);
 
+    if (auth_result < 0) {
+        /* The server failed: {"active": false} would have the resource server
+           turn away a token that may be live */
+        cleanse_free(token);
+        free(token_type_hint);
+        return response_json_error(500, "Internal server error");  /* logged */
+    }
     if (auth_result != 1) {
         cleanse_free(token);
         free(token_type_hint);
@@ -1565,7 +1593,11 @@ HttpResponse *userinfo_handler(const HttpRequest *req) {
 
     /* Look up user profile */
     user_userinfo_t info;
-    if (user_get_userinfo_by_id(db, user_id, &info) != 0) {
+    int found = user_get_userinfo_by_id(db, user_id, &info);
+    if (found < 0) {
+        return response_json_error(500, "Internal server error");  /* logged */
+    }
+    if (found != 0) {
         return response_bearer_error("invalid_token", "User not found");
     }
 

@@ -272,7 +272,7 @@ static int test_credential_lifetimes(const config_t *config) {
         log_error("Lifetimes: a used authorization code was not reported as a replay");
         goto done;
     }
-    if (oauth_auth_code_consume(sdb, "life-code-expired", &code) != -1) {
+    if (oauth_auth_code_consume(sdb, "life-code-expired", &code) != 2) {
         log_error("Lifetimes: an expired authorization code exchanged");
         goto done;
     }

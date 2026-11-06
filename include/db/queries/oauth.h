@@ -38,7 +38,8 @@ typedef struct {
  *   client_id   - Client UUID (16 bytes)
  *   out_client  - Output: Client configuration
  *
- * Returns: 0 on success (client found and active), -1 on error or not found
+ * Returns: 0 on success (client found and active), -1 if it isn't found or
+ *          isn't active, -2 on error (nothing is wrong with the caller's request)
  */
 int oauth_client_lookup(db_handle_t *db, const unsigned char *client_id,
                         oauth_client_info_t *out_client);
@@ -216,7 +217,8 @@ typedef struct {
  *
  * Returns: 0 on success (code valid and consumed),
  *          1 if already exchanged (replay attack detected),
- *          -1 on error or not found/expired
+ *          2 if not found or expired,
+ *          -1 on error
  */
 int oauth_auth_code_consume(db_handle_t *db, const char *code,
                              oauth_auth_code_data_t *out_data);
@@ -303,7 +305,8 @@ typedef struct {
  *
  * Returns: 0 on success (rotated),
  *          1 if already exchanged (replay attack detected),
- *          -1 on error or not found/expired/revoked
+ *          2 if not found, expired or revoked,
+ *          -1 on error
  */
 int oauth_token_rotate_refresh(db_handle_t *db, const char *old_token,
                                 const char *new_token, int ttl_seconds,
@@ -355,7 +358,8 @@ int oauth_client_authenticate(db_handle_t *db,
  *   out_resource_server_id  - Output: Resource server UUID (16 bytes)
  *
  * Returns: 0 on success (resource resolved),
- *          -1 on error (not found, not linked, inactive, or ambiguous)
+ *          1 if none fits (not found, not linked, inactive, or ambiguous),
+ *          -1 on error
  */
 int oauth_resolve_resource_server(db_handle_t *db, long long client_pin,
                                     const char *resource_address,

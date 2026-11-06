@@ -178,6 +178,11 @@ HttpResponse *login_handler(const HttpRequest *req) {
     free(username);
     cleanse_free(password);
 
+    if (rc == -2) {
+        /* The server failed: "Invalid credentials" would tell the user a right
+           password is wrong */
+        return response_json_error(500, "Internal server error");
+    }
     if (rc != 0) {
         return response_json_error(401, "Invalid credentials");
     }

@@ -212,7 +212,7 @@ typedef struct {
  *   user_id  - User UUID (16 bytes)
  *   out      - Output: UserInfo data
  *
- * Returns: 0 on success, -1 on error or user not found
+ * Returns: 0 on success, 1 if the user isn't found or isn't active, -1 on error
  */
 int user_get_userinfo_by_id(db_handle_t *db, const unsigned char *user_id,
                             user_userinfo_t *out);

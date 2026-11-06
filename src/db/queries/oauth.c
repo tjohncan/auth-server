@@ -63,7 +63,7 @@ int oauth_client_lookup(db_handle_t *db, const unsigned char *client_id,
         if (!code_name || !client_type || !grant_type) {
             log_error("NULL fields in client record");
             db_finalize(stmt);
-            return -1;
+            return -2;
         }
 
         str_copy(out_client->code_name, sizeof(out_client->code_name), code_name);
@@ -601,10 +601,14 @@ int oauth_auth_code_consume(db_handle_t *db, const char *code,
             db_finalize(check_stmt);
             log_warn("Authorization code replay attack detected");
             return 1;  /* Already exchanged - replay attack */
-        } else {
+        } else if (check_rc == DB_DONE) {
             db_finalize(check_stmt);
             log_debug("Authorization code not found or expired");
-            return -1;  /* Not found or expired */
+            return 2;  /* Not found or expired */
+        } else {
+            db_finalize(check_stmt);
+            log_error("Error checking authorization code for replay");
+            return -1;
         }
     } else {
         log_error("Error consuming authorization code");
@@ -974,10 +978,14 @@ int oauth_token_rotate_refresh(db_handle_t *db, const char *old_token,
             db_finalize(check_stmt);
             log_warn("Refresh token replay attack detected");
             return 1;  /* Already exchanged - replay attack */
-        } else {
+        } else if (check_rc == DB_DONE) {
             db_finalize(check_stmt);
             log_debug("Refresh token not found, expired, or revoked");
-            return -1;  /* Not found, expired, or revoked */
+            return 2;  /* Not found, expired, or revoked */
+        } else {
+            db_finalize(check_stmt);
+            log_error("Error checking refresh token for replay");
+            return -1;
         }
     } else {
         log_error("Error rotating refresh token");
@@ -1023,6 +1031,10 @@ int oauth_client_authenticate(db_handle_t *db,
 
     if (rc != DB_ROW) {
         db_finalize(stmt);
+        if (rc != DB_DONE) {
+            log_error("Error looking up client key");
+            return -1;
+        }
         log_debug("Client key not found or inactive");
         /* As long as a wrong secret takes, so key ids aren't told apart by time */
         crypto_password_verify_dummy(SECRET_MACHINE, secret, strlen(secret));
@@ -1063,6 +1075,9 @@ int oauth_client_authenticate(db_handle_t *db,
     OPENSSL_cleanse(salt, sizeof(salt));
     OPENSSL_cleanse(hash, sizeof(hash));
 
+    if (valid < 0) {
+        return -1;  /* A stored hash that can't be checked (logged) */
+    }
     if (valid != 1) {
         char client_id_hex[33];
         bytes_to_hex(client_id, 16, client_id_hex, sizeof(client_id_hex));
@@ -1145,7 +1160,7 @@ int oauth_resolve_resource_server(db_handle_t *db, long long client_pin,
             db_finalize(stmt);
             log_info("Resource server not found, inactive, or client not linked: address='%s'",
                      resource_address);
-            return -1;
+            return 1;
         } else {
             log_error("Error looking up resource server by address");
             db_finalize(stmt);
@@ -1194,10 +1209,10 @@ int oauth_resolve_resource_server(db_handle_t *db, long long client_pin,
                      *out_resource_server_pin);
             return 0;
         } else if (rc == DB_DONE) {
-            /* No result at all */
+            /* No single linked active resource server: none, or more than one */
             db_finalize(stmt);
-            log_info("Client has no linked active resource servers");
-            return -1;
+            log_info("Client has no single linked active resource server");
+            return 1;
         } else {
             log_error("Error querying linked resource servers");
             db_finalize(stmt);
@@ -1242,6 +1257,10 @@ int oauth_resource_server_authenticate(db_handle_t *db,
 
     if (rc != DB_ROW) {
         db_finalize(stmt);
+        if (rc != DB_DONE) {
+            log_error("Error looking up resource server key");
+            return -1;
+        }
         log_debug("Resource server key not found or inactive");
         /* As long as a wrong secret takes, so key ids aren't told apart by time */
         crypto_password_verify_dummy(SECRET_MACHINE, secret, strlen(secret));
@@ -1279,6 +1298,9 @@ int oauth_resource_server_authenticate(db_handle_t *db,
     OPENSSL_cleanse(salt, sizeof(salt));
     OPENSSL_cleanse(hash, sizeof(hash));
 
+    if (valid < 0) {
+        return -1;  /* A stored hash that can't be checked (logged) */
+    }
     if (valid != 1) {
         char resource_server_id_hex[33];
         bytes_to_hex(resource_server_id, 16, resource_server_id_hex, sizeof(resource_server_id_hex));
