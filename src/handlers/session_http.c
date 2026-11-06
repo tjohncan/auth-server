@@ -52,6 +52,15 @@ static HttpResponse *response_html_error(int status_code, const char *message) {
 }
 
 /*
+ * A one-time link's page when the query behind it failed: that says nothing about
+ * the link, so the page doesn't call it invalid, and a retry can still use it.
+ */
+static HttpResponse *link_check_failed(void) {
+    return response_html_error(500, "Something went wrong on our side, so this link "
+                                    "wasn't used. Try it again in a moment.");
+}
+
+/*
  * A form's password, URL-decoded into a new buffer (cleanse_free it). The
  * buffer is as long as the encoded value, so decoding never truncates, and the
  * limit is PASSWORD_MAX_LENGTH, as for every JSON endpoint that takes one.
@@ -848,6 +857,7 @@ HttpResponse *verify_email_page_handler(const HttpRequest *req) {
 
     if (rc != 0) {
         cleanse_free(token);
+        if (rc < 0) return link_check_failed();
         HttpResponse *resp = response_template(400, "pages/verify-email-invalid.html", NULL);
         return resp ? resp : response_json_error(400, "Invalid token");
     }
@@ -923,6 +933,7 @@ HttpResponse *verify_email_handler(const HttpRequest *req) {
     cleanse_free(token);
 
     if (rc != 0) {
+        if (rc < 0) return link_check_failed();
         HttpResponse *resp = response_template(400, "pages/verify-email-error.html", NULL);
         return resp ? resp : response_json_error(400, "Verification failed");
     }
@@ -1038,6 +1049,7 @@ HttpResponse *reset_password_page_handler(const HttpRequest *req) {
 
     if (rc != 0) {
         cleanse_free(token);
+        if (rc < 0) return link_check_failed();
         HttpResponse *resp = response_template(400, "pages/reset-password-invalid.html", NULL);
         return resp ? resp : response_json_error(400, "Invalid token");
     }
@@ -1124,6 +1136,7 @@ HttpResponse *reset_password_handler(const HttpRequest *req) {
         return resp ? resp : response_json_error(400, msg);
     }
     if (rc != 0) {
+        if (rc < 0) return link_check_failed();
         HttpResponse *resp = response_template(400, "pages/reset-password-error.html",
             "MESSAGE", "This password reset link is invalid, expired, or has already been used.",
             NULL);
@@ -1165,6 +1178,7 @@ HttpResponse *accept_invitation_page_handler(const HttpRequest *req) {
 
     if (rc != 0) {
         cleanse_free(token);
+        if (rc < 0) return link_check_failed();
         HttpResponse *resp = response_template(400, "pages/accept-invitation-invalid.html", NULL);
         return resp ? resp : response_json_error(400, "Invalid token");
     }
@@ -1293,6 +1307,7 @@ HttpResponse *accept_invitation_handler(const HttpRequest *req) {
     }
 
     if (rc != 0) {
+        if (rc < 0) return link_check_failed();
         HttpResponse *resp = response_template(400, "pages/accept-invitation-invalid.html", NULL);
         return resp ? resp : response_json_error(400, "Invalid invitation");
     }
@@ -1434,6 +1449,7 @@ HttpResponse *passwordless_login_page_handler(const HttpRequest *req) {
 
     if (rc != 0) {
         cleanse_free(token);
+        if (rc < 0) return link_check_failed();
         HttpResponse *resp = response_template(400, "pages/passwordless-login-invalid.html", NULL);
         return resp ? resp : response_json_error(400, "Invalid token");
     }
@@ -1504,6 +1520,7 @@ HttpResponse *passwordless_login_handler(const HttpRequest *req) {
     cleanse_free(token);
 
     if (rc != 0) {
+        if (rc < 0) return link_check_failed();
         HttpResponse *resp = response_template(400, "pages/passwordless-login-invalid.html", NULL);
         return resp ? resp : response_html_error(400, "Invalid login link");
     }

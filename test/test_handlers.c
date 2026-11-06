@@ -1927,6 +1927,24 @@ static int test_database_failures(void) {
     if (!got) FAIL("the same list, once the database worked, isn't the clients");
     printf("✓ a list the database fails answers 500, not an empty list\n");
 
+    /* 4. A link page whose query fails doesn't call the link invalid */
+    if (db_execute_direct(conn, HIDE_TABLE(SESSION_, "invitation_token")) != 0) {
+        FAIL("could not hide the invitations");
+    }
+    r = request("GET", "/accept-invitation?token=nosuchtoken", NULL, NULL, NULL, NULL);
+    status = r.status;
+    got = strstr(r.body, "wasn't used") != NULL;
+    reply_free(&r);
+    if (db_execute_direct(conn, SHOW_TABLE(SESSION_, "invitation_token")) != 0) {
+        FAIL("could not show the invitations");
+    }
+    if (status != 500 || !got) FAIL("a link page the database failed answered %d", status);
+    r = request("GET", "/accept-invitation?token=nosuchtoken", NULL, NULL, NULL, NULL);
+    status = r.status;
+    reply_free(&r);
+    if (status != 400) FAIL("an unknown link, once the database worked, answered %d", status);
+    printf("✓ a link page the database fails answers 500, not \"invalid\"\n");
+
     return 0;
 }
 
