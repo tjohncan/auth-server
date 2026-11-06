@@ -2494,6 +2494,15 @@ static int test_provisioning(void) {
              "\"resource_server_key_id\":\"%s\",\"resource_server_secret\":\"%s\"",
              rs, key, secret);
 
+    /* 0. A field of another kind names itself. Read as left out, a numeric username
+          would make an address-only account, and a numeric user_id find by username */
+    char kinds[640];
+    snprintf(kinds, sizeof(kinds), "{%s,\"username\":123,\"email\":\"kinds@example.com\"}", g_rs_auth);
+    r = post_json("/api/rs/users", NULL, kinds);
+    int refused = r.status == 400 && strstr(r.body, "username must be text");
+    reply_free(&r);
+    if (!refused) FAIL("provisioning with a numeric username wasn't refused naming it");
+
     /* 1. A new address gets an account and an invitation. The same address
           again finds that account rather than making another. With email
           support it's invited again, to the mailbox, four more times, and only

@@ -3120,6 +3120,9 @@ All endpoints require RS key authentication and `allow_user_provisioning = true`
 
 - **Authentication**: RS key credentials in JSON body (same key pair used for `/introspect`)
 - **Authorization**: `allow_user_provisioning` must be enabled on the resource server
+- **Fields**: a text field takes a string and a number field a whole number. A value of another
+  kind, such as `123` for a username, is refused with `400`, naming the field, rather than taken
+  as left out. A field sent as `null` counts as left out.
 - **What it opens**: lookups and provisioning reach every user on the server, not only those
   linked to this resource server's clients. That's what lets a resource server tell whether
   someone already has an account before it invites them. It can find anyone by `user_id`,

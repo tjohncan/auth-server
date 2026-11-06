@@ -123,7 +123,7 @@ HttpResponse *response_json_ok(const char *json);
 HttpResponse *response_json_error(int status_code, const char *message);
 
 /*
- * The fields of an admin request body, on either listener. read_int_field and
+ * The fields of an admin or /api/rs request body. read_int_field and
  * read_bool_field return 1 if the field is read into *out, and 0 if it's left
  * out, as json_get_int and json_get_bool count that; read_text_field returns the
  * text (the caller frees it), or NULL if it's left out. A value of another kind
