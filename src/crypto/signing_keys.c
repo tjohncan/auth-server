@@ -910,6 +910,7 @@ int signing_key_get_or_rotate(db_handle_t *db, signing_key_type_t type,
 
         /* Commit and reload */
         if (db_execute_trusted(db, "COMMIT") != 0) {
+            db_execute_trusted(db, "ROLLBACK");
             log_error("Failed to commit new key transaction");
             OPENSSL_cleanse(secret_or_priv, strlen(secret_or_priv));
             free(secret_or_priv);
@@ -973,6 +974,7 @@ int signing_key_get_or_rotate(db_handle_t *db, signing_key_type_t type,
 
         /* Commit and reload */
         if (db_execute_trusted(db, "COMMIT") != 0) {
+            db_execute_trusted(db, "ROLLBACK");
             log_error("Failed to commit key rotation");
             OPENSSL_cleanse(new_secret_or_priv, strlen(new_secret_or_priv));
             free(new_secret_or_priv);
@@ -998,6 +1000,7 @@ int signing_key_get_or_rotate(db_handle_t *db, signing_key_type_t type,
 
     /* Key is fresh, just commit and return */
     if (db_execute_trusted(db, "COMMIT") != 0) {
+        db_execute_trusted(db, "ROLLBACK");
         log_error("Failed to commit key load transaction");
         signing_key_free(key);
         free(current_ts);

@@ -715,6 +715,7 @@ int oauth_exchange_authorization_code(db_handle_t *db,
     if (db_execute_trusted(db, "COMMIT") != 0) {
         oauth_token_response_free(out_response);
         cleanse_free(refresh_token);
+        db_execute_trusted(db, "ROLLBACK");
         log_error("Failed to commit transaction");
         return -2;
     }
@@ -953,6 +954,7 @@ int oauth_refresh_access_token(db_handle_t *db,
     if (db_execute_trusted(db, "COMMIT") != 0) {
         oauth_token_response_free(out_response);
         cleanse_free(new_refresh_token);
+        db_execute_trusted(db, "ROLLBACK");
         log_error("Failed to commit transaction");
         return -2;
     }
