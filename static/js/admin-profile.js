@@ -398,11 +398,33 @@ async function changePassword(currentPassword, newPassword) {
 
 // ===== MFA Management =====
 
+/* What the open MFA dialog shows */
+let shownMFAMethods = [];
+let noUsableRecoveryCodes = false;
+
+/* Whether this account has a confirmed method and no recovery code left to use. Asked with
+   plain fetch: apiGet sends a 403 to the MFA step and never settles, and a password-only
+   session may open this dialog. Any failure means not known, since the glow it decides is
+   a hint, never an obstacle. */
+async function checkRecoveryCodes(methods) {
+    noUsableRecoveryCodes = false;
+    if (!methods.some(m => m.is_confirmed)) return;
+    try {
+        const response = await fetch(`${API_URL}/user/mfa/recovery-codes`, { credentials: 'include' });
+        if (!response.ok) return;
+        const data = await response.json();
+        noUsableRecoveryCodes = !data.recovery_codes.some(c => !c.used);
+    } catch (error) {
+        console.error('Failed to check recovery codes:', error);
+    }
+}
+
 async function showMFASetup() {
     const { modal, close } = showModal('Multi-Factor Authentication', '<div id="mfaContent"><p class="text-muted">Loading...</p></div>');
     currentMFASetupClose = () => { close(); currentMFASetupClose = null; };
     try {
         const data = await apiGet('/user/mfa/methods');
+        await checkRecoveryCodes(data.methods);
         renderMFAContent(data.methods);
     } catch (error) {
         document.getElementById('mfaContent').innerHTML =
@@ -414,6 +436,7 @@ function renderMFAContent(methods) {
     const content = document.getElementById('mfaContent');
     if (!content) return;
 
+    shownMFAMethods = methods;
     let html = '';
 
     if (methods.length === 0) {
@@ -445,8 +468,11 @@ function renderMFAContent(methods) {
             html += `
                 <div class="section-divider">
                     <strong>Recovery Codes</strong>
-                    <p class="text-muted text-sm">Single-use backup codes for when you lose access to your authenticator.</p>
-                    <button data-action="mfa-regenerate-codes" class="btn-gray btn-sm">Regenerate Recovery Codes</button>
+                    ${noUsableRecoveryCodes
+                        ? `<p class="text-warning text-sm">Your account has no usable recovery codes. Generate a new set.</p>
+                           <button data-action="mfa-regenerate-codes" class="btn-gray btn-sm btn-glow">Generate Recovery Codes</button>`
+                        : `<p class="text-muted text-sm">Single-use backup codes for when you lose access to your authenticator.</p>
+                           <button data-action="mfa-regenerate-codes" class="btn-gray btn-sm">Regenerate Recovery Codes</button>`}
                 </div>
             `;
         }
@@ -648,10 +674,14 @@ async function mfaDeleteMethod(methodId) {
 }
 
 async function mfaRegenerateCodes() {
-    if (!(await showConfirm('Regenerate recovery codes? Your existing codes will be invalidated immediately.'))) return;
+    /* With none usable, there's nothing to warn about losing */
+    if (!noUsableRecoveryCodes &&
+        !(await showConfirm('Regenerate recovery codes? Your existing codes will be invalidated immediately.'))) return;
     try {
         const data = await apiPost('/user/mfa/recovery-codes/regenerate', {});
         showMFARecoveryCodes(data.recovery_codes, 'New Recovery Codes');
+        noUsableRecoveryCodes = false;
+        renderMFAContent(shownMFAMethods);
     } catch (error) {
         showAlert('Failed to regenerate recovery codes: ' + error.message);
     }

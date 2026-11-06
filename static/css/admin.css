@@ -89,6 +89,12 @@ h4 {
 
 .section-heading { margin-top: 30px; }
 
+/* Draws the eye to a button that needs attention. A shadow takes no space, so nothing
+   around the button moves or wraps. The gold is .text-warning's. */
+.btn-glow {
+    box-shadow: 0 0 0 1px #daa520, 0 0 8px 1px rgba(218, 165, 32, .6);
+}
+
 .section-divider {
     border-top: 1px solid #444;
     padding-top: 15px;
