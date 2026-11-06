@@ -115,7 +115,8 @@ machine_secret_hash_min_iterations = 777
 machine_secret_hash_max_iterations = 777
 
 # Password policy
-# Minimum password length (default 1, minimum 1)
+# Minimum password length (default 1, minimum 1). Over 43 refuses to start: a generated
+# key secret is 43 characters, and the same minimum applies to it.
 # password_min_length = 8
 
 # Refuse to start on the defaults fit only for trying the server out: encryption_key

@@ -1268,6 +1268,18 @@ static int test_config(void) {
                   "minimum, or refused what it shouldn't");
         return 1;
     }
+
+    /* A password minimum a generated key secret can meet, and no higher */
+    config_t *at_cap = config_from("password_min_length = 43\n");
+    config_t *over_cap = config_from("password_min_length = 44\n");
+    int cap_holds = at_cap && at_cap->password_min_length == 43 && !over_cap;
+    config_free(at_cap);
+    config_free(over_cap);
+    if (!cap_holds) {
+        log_error("Config: password_min_length of 43 should load and 44 refuse the start");
+        return 1;
+    }
+    log_info("  password_min_length: 43 loads, 44 refuses the start (OK)");
     log_info("  strict: off by default; on, the shipped key or a password minimum under 8 "
              "refuses the start (OK)");
 

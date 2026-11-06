@@ -83,7 +83,7 @@ cp .env.example .env
 #                                        carry it as their issuer, and emailed links use it;
 #                                        bootstrap can't be re-run to change them)
 #   encryption_key = <a long random secret>
-#   password_min_length = 8             (or more)
+#   password_min_length = 8             (or more, up to 43)
 #   strict = true                       (then the server refuses to start on the placeholder
 #                                        key or a password minimum under 8)
 # auth.conf must be readable by uid 1000 (the container's user): the server refuses one it
@@ -191,9 +191,9 @@ last entry. (Putting nginx between the ALB and the server, with `real_ip` config
 2. Create a service user: `useradd -r -s /bin/false authserver`
 3. Place the project in `/opt/auth-server` and configure `auth.conf`. Set `server_host` to the
    public hostname and `encryption_key` before the first start: bootstrap stores the console's
-   URLs from `server_host`, and can't be re-run to change them. Set `password_min_length` (8 or
-   more) and `strict = true`, so the server refuses to start on the placeholder key or a
-   shorter password minimum
+   URLs from `server_host`, and can't be re-run to change them. Set `password_min_length` (8 to
+   43) and `strict = true`, so the server refuses to start on the placeholder key or a shorter
+   password minimum
 4. Set ownership: `chown -R authserver:authserver /opt/auth-server/data`
 5. Create the systemd unit file at `/etc/systemd/system/auth-server.service`:
 

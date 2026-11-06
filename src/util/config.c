@@ -1476,6 +1476,16 @@ config_t *config_load(const char *config_file) {
         return NULL;
     }
 
+    /* Refused rather than kept at the current value, as other numbers are: that would
+       leave the default of 1 in place for someone asking for more */
+    if (config->password_min_length > PASSWORD_MIN_LENGTH_CAP) {
+        log_error("password_min_length is %d, over its limit of %d: a generated key secret "
+                  "is %d characters, and the same minimum applies to it",
+                  config->password_min_length, PASSWORD_MIN_LENGTH_CAP, PASSWORD_MIN_LENGTH_CAP);
+        config_free(config);
+        return NULL;
+    }
+
     /* SQLite takes an empty file name for a temporary database, which keeps nothing */
     if (config->db_type == DB_TYPE_SQLITE && config->db_path[0] == '\0') {
         log_error("db_path is empty (in auth.conf): SQLite would open a temporary database, "
