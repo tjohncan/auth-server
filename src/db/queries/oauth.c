@@ -15,7 +15,7 @@ int oauth_client_lookup(db_handle_t *db, const unsigned char *client_id,
                         oauth_client_info_t *out_client) {
     if (!db || !client_id || !out_client) {
         log_error("Invalid arguments to oauth_client_lookup");
-        return -1;
+        return -2;
     }
 
     const char *sql =
@@ -33,7 +33,7 @@ int oauth_client_lookup(db_handle_t *db, const unsigned char *client_id,
     db_stmt_t *stmt = NULL;
     if (db_prepare(db, &stmt, sql) != 0) {
         log_error("Failed to prepare oauth_client_lookup statement");
-        return -1;
+        return -2;
     }
 
     db_bind_blob(stmt, 1, client_id, 16);
@@ -47,7 +47,7 @@ int oauth_client_lookup(db_handle_t *db, const unsigned char *client_id,
         if (blob_len != 16) {
             log_error("Invalid client ID length: %d", blob_len);
             db_finalize(stmt);
-            return -1;
+            return -2;
         }
         memcpy(out_client->id, id_blob, 16);
 
@@ -1428,11 +1428,16 @@ int oauth_introspect_token(db_handle_t *db,
 
     int rc = db_step(stmt);
 
-    if (rc != DB_ROW) {
+    if (rc == DB_DONE) {
         db_finalize(stmt);
         /* Token not found, expired, revoked, or wrong resource server */
         log_debug("Token introspection: token not active");
         return 0;  /* Not an error, just inactive token */
+    }
+    if (rc != DB_ROW) {
+        log_error("Token introspection: the token query failed");
+        db_finalize(stmt);
+        return -1;
     }
 
     /* Every id that is present must be exactly 16 bytes before the token is
@@ -1446,9 +1451,9 @@ int oauth_introspect_token(db_handle_t *db,
         }
         const void *blob = db_column_blob(stmt, col);
         if (!blob || db_column_bytes(stmt, col) != 16) {
-            log_error("Token introspection: malformed id in column %d; reporting inactive", col);
+            log_error("Token introspection: malformed id in column %d", col);
             db_finalize(stmt);
-            return 0;
+            return -1;
         }
     }
 

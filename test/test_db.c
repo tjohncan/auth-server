@@ -2845,7 +2845,7 @@ static int test_deactivated_user_tokens(const config_t *config) {
 
     /* 5. A malformed user id must not degrade into "no user". A zero user id is
        how a client_credentials token looks, so a user token would introspect
-       as active with no sub. It must read as inactive instead. */
+       as active with no sub. It must be an error instead. */
     if (db_execute_direct(sdb,
             "UPDATE user_account SET is_active = 1, id = x'DEADBEEF'") != 0) {
         log_error("Deactivation: could not corrupt the user id");
@@ -2853,11 +2853,11 @@ static int test_deactivated_user_tokens(const config_t *config) {
     }
     active = -1;
     if (oauth_introspect_token(sdb, "deact-user-token", NULL, 1, &active,
-                               NULL, NULL, NULL, NULL, NULL, NULL) != 0 || active != 0) {
-        log_error("Deactivation: token with a malformed user id introspected as active");
+                               NULL, NULL, NULL, NULL, NULL, NULL) != -1 || active != 0) {
+        log_error("Deactivation: a token with a malformed user id wasn't an error");
         goto done;
     }
-    log_info("  malformed user id: inactive, not a machine token (OK)");
+    log_info("  malformed user id: an error, not a machine token (OK)");
 
     failed = 0;
 

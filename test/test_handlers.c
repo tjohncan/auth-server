@@ -703,6 +703,20 @@ static int admin_create(const char *path, const char *json, const char *key,
     return ok ? 0 : -1;
 }
 
+/* A table the server can't find, and its return: a failed read, where a test
+   needs one. One at a time. On one connection, SQLite fails at the query's prepare
+   and PostgreSQL at its step. legacy_alter_table: SQLite otherwise checks the rename
+   against every view and trigger, and renaming a table some of them name fails. */
+#ifdef DB_BACKEND_POSTGRESQL
+#define HIDE_TABLE(schema, table) "ALTER TABLE " schema table " RENAME TO zz_hidden"
+#define SHOW_TABLE(schema, table) "ALTER TABLE " schema "zz_hidden RENAME TO " table
+#else
+#define HIDE_TABLE(schema, table) \
+    "PRAGMA legacy_alter_table = ON; ALTER TABLE " schema table " RENAME TO zz_hidden"
+#define SHOW_TABLE(schema, table) "ALTER TABLE " schema "zz_hidden RENAME TO " table
+#endif
+
+/* 1 active, 0 inactive, -1 no answer about the token */
 static int introspect_active(const char *token, const char *rs, const char *key,
                              const char *secret) {
     char form[4096];
@@ -774,6 +788,21 @@ static int test_client_credentials(void) {
     if (introspect_active(token, rs_a, ka, sa) != 1) FAIL("RS A sees its own token inactive");
     if (introspect_active(token, rs_b, kb, sb) != 0) FAIL("RS B can see RS A's token");
     printf("✓ a client_credentials token introspects active for its server only\n");
+
+    /* A check that fails says nothing about the token: no answer, not "inactive" */
+    db_handle_t *conn = db_pool_get_connection();
+    if (db_execute_direct(conn, HIDE_TABLE(SESSION_, "access_token")) != 0) {
+        FAIL("could not hide the access tokens");
+    }
+    int seen = introspect_active(token, rs_a, ka, sa);
+    if (db_execute_direct(conn, SHOW_TABLE(SESSION_, "access_token")) != 0) {
+        FAIL("could not show the access tokens");
+    }
+    if (seen != -1) FAIL("a live token, the check failing, introspected as %d", seen);
+    if (introspect_active(token, rs_a, ka, sa) != 1) {
+        FAIL("the same token, once the database worked, isn't active");
+    }
+    printf("✓ an introspection the database fails gives no answer about the token\n");
 
     /* 2. Revoked by its client: inactive */
     snprintf(form, sizeof(form), "token=%s&client_id=%s&client_key_id=%s&client_secret=%s",
@@ -1825,9 +1854,29 @@ static int test_database_failures(void) {
     if (status != 500) FAIL("a refresh the database failed answered %d, not 500", status);
     r = refresh(rt);
     status = r.status;
+    got = field(&r, "refresh_token", rt, sizeof(rt)) == 0;
     reply_free(&r);
-    if (status != 200) FAIL("the same refresh token, once the database worked, answered %d", status);
+    if (status != 200 || !got) {
+        FAIL("the same refresh token, once the database worked, answered %d", status);
+    }
     printf("✓ a refresh the database fails answers 500, and the token still works\n");
+
+    /* A client lookup that fails, not a client that isn't there */
+    if (db_execute_direct(conn, HIDE_TABLE(SECURITY_, "client")) != 0) {
+        FAIL("could not hide the clients");
+    }
+    r = refresh(rt);
+    status = r.status;
+    reply_free(&r);
+    if (db_execute_direct(conn, SHOW_TABLE(SECURITY_, "client")) != 0) {
+        FAIL("could not show the clients");
+    }
+    if (status != 500) FAIL("a refresh whose client lookup failed answered %d, not 500", status);
+    r = refresh(rt);
+    status = r.status;
+    reply_free(&r);
+    if (status != 200) FAIL("the same token, once the lookup worked, answered %d", status);
+    printf("✓ a failed client lookup answers 500, not an unknown client\n");
 
     /* 2. A sign-in whose session can't be stored */
     char cookie[256];

@@ -9,6 +9,9 @@ exception: it's answered only on the paths a browser may call from another origi
 (`/token`, `/revoke`, `/userinfo` and `/.well-known/jwks.json`), as a CORS preflight, and is
 `404` on any other.
 
+A `5xx` means the server failed, as during a database fault, and says nothing about what was
+sent: keep any tokens and credentials, and try again. A refused credential is never a `5xx`.
+
 Any request body that is not form-encoded is checked for JSON string escapes before the
 endpoint runs. A body containing an escape that cannot be decoded (an escaped NUL, a lone
 UTF-16 surrogate, a malformed or unknown escape) is refused with
@@ -1186,6 +1189,8 @@ OAuth2 token endpoint (RFC 6749 Section 3.2). Exchanges authorization codes or r
 - **Refresh tokens**: Opaque random strings (32-byte base64url-encoded)
 - Clients should treat both token types as opaque strings
 
+**A `500`** (`{"error": "Internal server error"}`, on any grant) means the server failed. The code, refresh token or secret still holds: keep it and retry.
+
 #### Authorization Code Grant
 
 **Request**:
@@ -1624,6 +1629,7 @@ resource_server_secret=<resource_server_secret>
   - Tokens not belonging to the authenticated resource server
   - Authentication failures
 - This prevents information disclosure per RFC 7662
+- A `500` (`{"error": "Internal server error"}`) means the check itself failed, and says nothing about the token: don't take it as inactive, or as active
 - Primarily used by resource servers to validate access tokens before granting access to protected resources
 - The `sub` field is omitted for machine-to-machine (client_credentials) tokens
 

@@ -1454,10 +1454,11 @@ HttpResponse *introspect_handler(const HttpRequest *req) {
     cleanse_free(token);
     free(token_type_hint);
 
+    /* A check that failed says nothing about the token, so it isn't "inactive" */
     if (introspect_result != 0) {
         free(scope);
         log_error("Error during token introspection");
-        return response_json_ok("{\"active\":false}");
+        return response_json_error(500, "Internal server error");
     }
 
     /* Build JSON response */

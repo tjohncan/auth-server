@@ -429,7 +429,9 @@ int oauth_resource_server_authenticate(db_handle_t *db,
  *   out_expires_at         - Output: expiration timestamp (0 if not active)
  *   out_issued_at          - Output: issued timestamp (0 if not active)
  *
- * Returns: 0 on success, -1 on error
+ * Returns: 0 when the token's state is known (out_active says which), -1 on
+ *          error (a failed query, or a malformed id in the token's row), which
+ *          says nothing about the token
  */
 int oauth_introspect_token(db_handle_t *db,
                            const char *token,
