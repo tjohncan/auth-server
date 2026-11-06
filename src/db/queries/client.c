@@ -1108,13 +1108,6 @@ int client_redirect_uri_create(db_handle_t *db, long long user_account_pin,
         return -1;
     }
 
-    /* Validate redirect URI has proper scheme (OAuth2 spec requires absolute URI) */
-    if (strncmp(redirect_uri, "http://", 7) != 0 &&
-        strncmp(redirect_uri, "https://", 8) != 0) {
-        log_error("Invalid redirect URI: must start with http:// or https://");
-        return -1;
-    }
-
     const char *sql;
     int is_org_key_auth = (user_account_pin == -1);
 

@@ -835,8 +835,9 @@ Add redirect URI to client.
 
 Body: `client_id`, `redirect_uri`, `note` (required except note)
 
-The URI must use http or https, and must not contain a fragment (`#`), where the code would
-land and never reach the client's server (RFC 6749 §3.1.2); either answers `400`. URIs
+The URI must use http or https, in either case (RFC 3986 §3.1), and must not contain a fragment
+(`#`), where the code would land and never reach the client's server (RFC 6749 §3.1.2); either
+answers `400`. `/authorize` compares a URI exactly, so a client sends it as registered. URIs
 registered before the fragment rule aren't rechecked. Plain http is allowed to any host: it
 exposes the code and state on the wire to that client's own users only, PKCE keeps a code seen
 there from being redeemed, and it's the client deployer's call. (OAuth 2.1 and RFC 9700 §2.6

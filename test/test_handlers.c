@@ -606,6 +606,7 @@ static int test_redirect_uris(void) {
         { "https://app.example.com/callback", 200 },
         { "http://localhost:3000/callback", 200 },
         { "http://app.example.com/callback", 200 },
+        { "HTTPS://app.example.com/upper", 200 },
         { "https://app.example.com/cb#x", 400 },
         { "http://localhost/cb#x", 400 },
     };
