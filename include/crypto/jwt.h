@@ -11,7 +11,7 @@
  * jwt_decode_es256, which resource servers can check against the server's JWKS.
  * Authorization codes are HS256 (HMAC-SHA256) JWTs, jwt_encode_auth_request and
  * jwt_decode_auth_request: the server's own, which only it checks, under a secret
- * it keeps. jwt_encode and jwt_decode are a plain HS256 pair.
+ * it keeps.
  * Format: base64url(header).base64url(payload).base64url(signature)
  */
 
@@ -39,79 +39,6 @@ typedef struct {
     char scope[JWT_MAX_CLAIM_VALUE_LENGTH];    /* OAuth2 scopes (space-separated) */
     char client_id[JWT_MAX_CLAIM_VALUE_LENGTH]; /* OAuth2 client ID */
 } jwt_claims_t;
-
-/*
- * Create and sign an HS256 JWT
- *
- * Generates a JWT with HS256 signature using provided claims and secret.
- * Sets iat (issued at) to current time if not already set.
- *
- * Parameters:
- *   claims      - JWT claims (sub, aud, exp, scope, client_id, etc.)
- *   secret      - Secret key for HMAC signature
- *   secret_len  - Length of secret key
- *   out_token   - Output buffer for JWT string
- *   token_len   - Size of output buffer (must be >= JWT_MAX_TOKEN_LENGTH)
- *
- * Returns: 0 on success, negative on error
- *
- * Example:
- *   jwt_claims_t claims = {0};
- *   snprintf(claims.iss, sizeof(claims.iss), "https://auth.example.com");
- *   snprintf(claims.sub, sizeof(claims.sub), "user123");
- *   snprintf(claims.aud, sizeof(claims.aud), "https://api.example.com");
- *   claims.exp = time(NULL) + 3600;  // 1 hour from now
- *   snprintf(claims.scope, sizeof(claims.scope), "read write");
- *   snprintf(claims.client_id, sizeof(claims.client_id), "webapp");
- *
- *   char token[JWT_MAX_TOKEN_LENGTH];
- *   jwt_encode(&claims, secret, secret_len, token, sizeof(token));
- */
-int jwt_encode(const jwt_claims_t *claims,
-              const unsigned char *secret, size_t secret_len,
-              char *out_token, size_t token_len);
-
-/*
- * Decode and verify an HS256 JWT
- *
- * Parses JWT, validates signature, checks expiration, and extracts claims.
- * Returns error if signature invalid or token expired.
- *
- * Parameters:
- *   token       - JWT string to decode
- *   secret      - Secret key for signature verification
- *   secret_len  - Length of secret key
- *   out_claims  - Output buffer for decoded claims
- *
- * Returns: 0 on success (token valid), negative on error/invalid/expired
- *
- * Example:
- *   jwt_claims_t claims;
- *   if (jwt_decode(token, secret, secret_len, &claims) == 0) {
- *       // Token valid, use claims.sub, claims.scope, etc.
- *   } else {
- *       // Token invalid or expired
- *   }
- */
-int jwt_decode(const char *token,
-              const unsigned char *secret, size_t secret_len,
-              jwt_claims_t *out_claims);
-
-/*
- * Validate JWT (convenience wrapper)
- *
- * Returns 1 (valid) or 0 (invalid/expired/error) without exposing
- * parsed claims to the caller. Performs a full decode internally.
- *
- * Parameters:
- *   token       - JWT string to validate
- *   secret      - Secret key for signature verification
- *   secret_len  - Length of secret key
- *
- * Returns: 1 if valid, 0 if invalid/expired/error
- */
-int jwt_validate(const char *token,
-                const unsigned char *secret, size_t secret_len);
 
 /*
  * Create and sign a JWT access token with ES256 (ECDSA P-256)
