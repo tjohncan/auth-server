@@ -596,7 +596,8 @@ static int test_authorization_code_flow(void) {
 
 /*
  * A redirect URI never has a fragment, which the code would land inside. Plain
- * http is the client deployer's call, to any host.
+ * http is the client deployer's call, to any host. Adding one the client has
+ * already is a success that changes nothing.
  */
 static int test_redirect_uris(void) {
     printf("\n=== Redirect URIs ===\n");
@@ -620,6 +621,27 @@ static int test_redirect_uris(void) {
         }
     }
     printf("✓ a redirect URI with a fragment is refused\n");
+
+    /* The first one again, with a note: 200 saying nothing changed, and still one
+       of it, its note as it was */
+    char json[256], target[128];
+    snprintf(json, sizeof(json), "{\"client_id\":\"%s\",\"redirect_uri\":\"%s\","
+             "\"note\":\"a second note\"}", g_ui_client, cases[0].uri);
+    Reply r = post_json("/api/admin/client-redirect-uris", g_admin_cookie, json);
+    int status = r.status;
+    int said = status == 200 && strstr(r.body, "already registered") != NULL;
+    reply_free(&r);
+    snprintf(target, sizeof(target), "/api/admin/client-redirect-uris?client_id=%s&limit=100",
+             g_ui_client);
+    r = request("GET", target, g_admin_cookie, NULL, NULL, NULL);
+    const char *first = r.status == 200 ? strstr(r.body, cases[0].uri) : NULL;
+    int kept = first && !strstr(first + 1, cases[0].uri) && !strstr(r.body, "a second note");
+    reply_free(&r);
+    if (!said || !kept) {
+        FAIL("adding a redirect URI the client has answered %d%s", status,
+             said ? ", and changed what's stored" : ", not 200 saying nothing changed");
+    }
+    printf("✓ adding a redirect URI the client has answers 200, and changes nothing\n");
 
     return 0;
 }

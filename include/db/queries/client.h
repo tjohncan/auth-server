@@ -171,6 +171,9 @@ int client_redirect_uri_list(db_handle_t *db, long long user_account_pin,
  * - Session auth: Verifies user is org admin
  * - Org key auth: Verifies specific key is active
  *
+ * Whether the client has the URI already is the caller's to check first, as
+ * admin_create_client_redirect_uri does: the unique index refuses a repeat.
+ *
  * Returns: 0 on success, 1 if nothing was inserted (client not found or caller
  *          not authorized), -1 on error
  */
@@ -423,7 +426,8 @@ int client_list_all(db_handle_t *db, long long user_account_pin,
  * - Session auth: Verifies user is org admin
  * - Org key auth: Verifies specific key is active
  *
- * Returns: 0 on success, -1 on error or not found
+ * Returns: 0 on success, 1 if there's no such client or the caller can't
+ * administer it (the two look alike), -1 on error
  */
 int client_get_by_id(db_handle_t *db, const unsigned char *client_id,
                      long long user_account_pin,

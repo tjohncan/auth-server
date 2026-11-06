@@ -322,6 +322,9 @@ int admin_list_client_redirect_uris(db_handle_t *db, long long user_account_pin,
  * unchanged, including 1 for "matched nothing" -- not found, not the caller's,
  * or (keys) not confidential / already revoked. Handlers answer 1 with 404 or 409,
  * never with success. See the query headers for each function's exact meaning.
+ *
+ * admin_create_client_redirect_uri checks the client and its URIs first, and
+ * returns 2, inserting nothing, when the client has the URI already.
  */
 int admin_create_client_redirect_uri(db_handle_t *db, long long user_account_pin,
                                       long long organization_key_pin,

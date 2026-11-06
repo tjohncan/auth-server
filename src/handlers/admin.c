@@ -2,6 +2,7 @@
 #include "db/db_sql.h"
 #include "db/queries/org.h"
 #include "db/queries/client.h"
+#include "db/queries/oauth.h"
 #include "db/queries/resource_server.h"
 #include "db/queries/user.h"
 #include "util/log.h"
@@ -556,6 +557,25 @@ int admin_create_client_redirect_uri(db_handle_t *db, long long user_account_pin
                                       const char *note) {
     if (!db || !client_id || !redirect_uri) {
         log_error("Invalid arguments to admin_create_client_redirect_uri");
+        return -1;
+    }
+
+    /* Checked here, so a repeat is answered and the INSERT isn't sent: the
+       client, which the caller must administer, and whether it has the URI */
+    client_data_t client;
+    int found = client_get_by_id(db, client_id, user_account_pin, organization_key_pin, &client);
+    if (found != 0) {
+        if (found > 0) {
+            log_info("Redirect URI not created: client not found or caller not authorized");
+        }
+        return found;
+    }
+    int registered = oauth_redirect_uri_validate(db, client.pin, redirect_uri);
+    if (registered != 0) {
+        if (registered > 0) {
+            log_info("Redirect URI already registered for the client: nothing changed");
+            return 2;
+        }
         return -1;
     }
 

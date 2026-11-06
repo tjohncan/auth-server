@@ -1284,8 +1284,13 @@ HttpResponse *admin_create_client_redirect_uri_handler(const HttpRequest *req) {
     if (result == 1) {
         return response_json_error(404, "Client not found");
     }
+    if (result == 2) {
+        /* A repeat succeeds, as a repeated client-resource-server link does, and
+           says so: the note sent with it isn't saved */
+        return response_json_ok("{\"message\":\"Redirect URI already registered; nothing changed\"}");
+    }
     if (result != 0) {
-        return response_json_error(409, "Failed to create redirect URI");
+        return response_json_error(500, "Failed to create redirect URI");
     }
 
     return response_json_ok("{\"message\":\"Redirect URI created successfully\"}");

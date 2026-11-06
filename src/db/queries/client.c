@@ -599,7 +599,11 @@ int client_get_by_id(db_handle_t *db, const unsigned char *client_id,
 
     if (rc != DB_ROW) {
         db_finalize(stmt);
-        log_debug("Client not found or user not authorized");
+        if (rc == DB_DONE) {
+            log_debug("Client not found or user not authorized");
+            return 1;
+        }
+        log_error("Failed to look up client");
         return -1;
     }
 

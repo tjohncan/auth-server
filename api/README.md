@@ -837,6 +837,9 @@ there from being redeemed, and it's the client deployer's call. (OAuth 2.1 and R
 would allow it only to localhost.)
 
 Returns `404` if the client doesn't exist or isn't in an organization the caller administers.
+A URI the client already has answers `200` `{"message": "Redirect URI already registered;
+nothing changed"}`, so a setup script can run twice; a `note` sent with it isn't saved. To
+change a URI's note, remove the URI and add it again.
 
 **DELETE /api/admin/client-redirect-uris**
 Remove redirect URI from client.
