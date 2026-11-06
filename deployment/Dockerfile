@@ -35,6 +35,15 @@ RUN if [ "$DB_BACKEND" = "sqlite" ]; then sh vendor/verify-sqlite.sh; fi
 
 RUN make clean && make DB_BACKEND=${DB_BACKEND} EMAIL_SUPPORT=${EMAIL_SUPPORT}
 
+# The files the server reads at run time, readable by everyone and writable by
+# root alone, whatever modes the build context gave them: a checkout made under
+# umask 077 leaves them unreadable to the server's user, and one under umask 000
+# writable by it. Set here, so the runtime stage takes them in one layer.
+COPY static/ /stage/static/
+COPY sql/ /stage/sql/
+COPY templates/ /stage/templates/
+RUN chmod -R a+rX,go-w /stage
+
 # -----------------------------------------------------------------------------
 # Stage 2: Runtime
 # -----------------------------------------------------------------------------
@@ -71,10 +80,9 @@ WORKDIR /app
 # Binary from build stage
 COPY --from=builder /build/auth-server /app/auth-server
 
-# Runtime files (static assets, SQL schemas)
-COPY static/ /app/static/
-COPY sql/ /app/sql/
-COPY templates/ /app/templates/
+# Runtime files (static assets, SQL schemas, templates), as the build stage
+# left them
+COPY --from=builder /stage/ /app/
 
 USER authserver
 
