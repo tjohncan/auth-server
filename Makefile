@@ -270,7 +270,7 @@ test-sanitized: test-str test-http test-router
 #
 # Per fuzz target: the harness, and the extra TUs it links (the http parser needs no
 # database or crypto; the jwt decoder needs the hmac/base64/json stack; the json
-# request-body helpers need only json.c). Each target owns its own corpus/ and
+# target needs only json.c and str.c). Each target owns its own corpus/ and
 # crashes/ subdirectory.
 FUZZ_SAN         = -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer
 FUZZ_HTTP_SRCS   = test/fuzz/fuzz_http.c src/server/http.c src/util/str.c src/util/json.c src/util/log.c

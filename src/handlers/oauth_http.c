@@ -206,9 +206,10 @@ static HttpResponse *authenticate_token_client(db_handle_t *db,
 /*
  * A grant's answer when the code, token or secret isn't what's wrong: the server
  * failed, or the request asks for something the credential doesn't cover. invalid_grant
- * or invalid_client would have the client discard a credential that still holds, as RFC
- * 6749 clients do. Each comes after the credential checked out (PKCE passed, the rotation
- * done and rolled back, the key verified), so it tells nothing to one who doesn't hold it.
+ * would have the client discard a code or token that still holds, as RFC 6749 clients do,
+ * and invalid_client report a good secret as wrong. Each comes after the credential checked
+ * out (PKCE passed, the rotation done and rolled back, the key verified), so it tells nothing
+ * to one who doesn't hold it.
  *
  * Returns: the response, or NULL if the credential is what was refused
  */
@@ -661,11 +662,15 @@ static HttpResponse *authorize_error_redirect(const char *redirect_uri, const ch
  *
  * Response (not authenticated):
  *   302 Found
- *   Location: /login?redirect=<current_url>
+ *   Location: /login?return=<current_url>
  *
- * Response (error):
- *   400 Bad Request
- *   {"error":"invalid_request","error_description":"..."}
+ * Response (error, once redirect_uri is trusted):
+ *   302 Found
+ *   Location: <redirect_uri>?error=<code>&error_description=<text>&state=<state>
+ *
+ * Response (error, before that):
+ *   400 Bad Request, or 500 if the server failed
+ *   {"error":"..."}
  */
 HttpResponse *authorize_handler(const HttpRequest *req) {
 
