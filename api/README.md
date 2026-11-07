@@ -22,6 +22,7 @@ well-formed UTF-8, as JSON has to be, is refused the same way, with
 A query string or form-encoded body is checked the same way, as it decodes. One holding anything
 but well-formed UTF-8, or an encoded NUL (`%00`), is refused with
 `400 {"error": "Request parameters are not valid UTF-8 text"}`, whichever parameter carries it.
+An endpoint given a `Content-Type` it doesn't take answers `415`.
 
 A new username, email address or code name must match the server's pattern for it, set in
 auth.conf (`username_pattern`, `email_pattern`, `code_name_pattern`). By default:

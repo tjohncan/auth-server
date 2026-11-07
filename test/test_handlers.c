@@ -435,6 +435,29 @@ static int test_authorization_code_flow(void) {
     if (status != 400 || !said) FAIL("/token with resource=%%FF answered %d", status);
     printf("✓ a parameter that doesn't decode to text is refused, on a query or a form\n");
 
+    /* The one-time link forms read a body as a form, so another type would pass it by that
+       check, and an invitation would take a password no sign-in can send */
+    static const char *const link_forms[] = {
+        "/accept-invitation",
+#ifdef EMAIL_SUPPORT
+        "/verify-email", "/reset-password", "/passwordless-login",
+#endif
+    };
+    for (size_t i = 0; i < sizeof(link_forms) / sizeof(link_forms[0]); i++) {
+        static const char *const types[] = { "text/plain", NULL };
+        for (size_t t = 0; t < 2; t++) {
+            bad = request("POST", link_forms[i], NULL, NULL, types[t],
+                          "token=nosuch&password=%FF%FE%FDlongenoughpassword");
+            status = bad.status;
+            reply_free(&bad);
+            if (status != 415) {
+                FAIL("%s sent as %s answered %d, not 415", link_forms[i],
+                     types[t] ? types[t] : "no type", status);
+            }
+        }
+    }
+    printf("✓ the one-time link forms take form-encoded bodies alone\n");
+
     /* 1. The wrong verifier is refused and the right one exchanges, so the
           refusal was PKCE's (it's checked before the code is spent) */
     if (authorize(code, sizeof(code)) != 0) FAIL("/authorize did not redirect with a code");

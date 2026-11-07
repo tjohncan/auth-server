@@ -84,6 +84,11 @@ static int form_password(const char *encoded, char **out_password) {
     return 0;
 }
 
+/* The one type the one-time link forms take. The router checks a form body's text by this
+ * type, and these handlers read a body as a form whatever its type, so one sent as another
+ * type would reach them unchecked: a password no sign-in can send, for one. */
+#define FORM_CONTENT_TYPE "application/x-www-form-urlencoded"
+
 /* Session token size: 32 bytes (256 bits) — matches session.c */
 #define SESSION_TOKEN_BYTES 32
 
@@ -915,6 +920,8 @@ HttpResponse *verify_email_page_handler(const HttpRequest *req) {
  * Expects form-encoded body: token=...
  */
 HttpResponse *verify_email_handler(const HttpRequest *req) {
+    HttpResponse *ct_err = require_content_type(req, FORM_CONTENT_TYPE);
+    if (ct_err) return ct_err;
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -1080,6 +1087,8 @@ HttpResponse *reset_password_page_handler(const HttpRequest *req) {
  * Expects form-encoded body: token=...&password=...
  */
 HttpResponse *reset_password_handler(const HttpRequest *req) {
+    HttpResponse *ct_err = require_content_type(req, FORM_CONTENT_TYPE);
+    if (ct_err) return ct_err;
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -1242,6 +1251,8 @@ HttpResponse *accept_invitation_page_handler(const HttpRequest *req) {
  * Expects form-encoded body: token=...&password=...
  */
 HttpResponse *accept_invitation_handler(const HttpRequest *req) {
+    HttpResponse *ct_err = require_content_type(req, FORM_CONTENT_TYPE);
+    if (ct_err) return ct_err;
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -1501,6 +1512,9 @@ HttpResponse *passwordless_login_handler(const HttpRequest *req) {
     if (http_request_is_cross_origin(req)) {
         return response_html_error(403, "Cross-site request refused");
     }
+
+    HttpResponse *ct_err = require_content_type(req, FORM_CONTENT_TYPE);
+    if (ct_err) return ct_err;
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
