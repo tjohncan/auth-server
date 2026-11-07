@@ -495,7 +495,8 @@ class OAuthClient {
      *
      * Polls storage every 200ms for as long as a lock can be held (LOCK_TTL_MS,
      * 10 seconds). Resolves as soon as the stored tokens change (the
-     * other tab finished refreshing).
+     * other tab finished refreshing). Stops as soon as the lock is gone with the
+     * tokens unchanged: that refresh failed and kept them, so nothing more is coming.
      *
      * @private
      * @param {number} originalExpiresAt - expires_at before refresh, used to detect change
@@ -518,18 +519,20 @@ class OAuthClient {
                 this._scheduleRefresh(tokens);
                 return tokens;
             }
+            if (!this._tokenStorage.getItem(this._lockKey)) break;
         }
 
-        /* The other tab never landed new tokens (it stalled, or its request failed).
-         * That is not the same as the session being over: do not evict a user whose
-         * current access token is still valid. Only a genuinely expired token is dead. */
+        /* The other refresh never landed new tokens (it stalled, or its request failed).
+         * That is not the same as the session being over, whatever the access token's
+         * age: the refresh token is kept, and only invalid_grant says it's dead. So use
+         * the access token if it's still valid, and otherwise fail this call alone. The
+         * caller's next one sends the refresh itself, and hears the real answer. */
         const tokens = this.getTokens();
         if (tokens && tokens.expires_at > Date.now()) {
             return tokens;
         }
 
-        this._handleSessionExpired();
-        throw new Error('Token refresh timed out waiting for another tab');
+        throw new Error('Token refresh did not complete — not clearing session');
     }
 
     /* ======================================================================
@@ -619,7 +622,8 @@ class OAuthClient {
              * resource server linked to the client, and they would all have to
              * re-authenticate for no reason. Surface the error and let the caller retry
              * instead. */
-            const error = await response.json().then(body => body.error, () => null);
+            const body = await this._safeJson(response);
+            const error = body && body.error;
             this._assertStillHeld(refreshToken);
             if (error === 'invalid_grant') {
                 this.clearTokens();

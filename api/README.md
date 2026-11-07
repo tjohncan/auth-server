@@ -886,6 +886,10 @@ Body: `client_id`, `resource_server_id` (both required)
 Linking a pair that is already linked succeeds. Returns `404` if either side doesn't exist,
 they are in different organizations, or the caller doesn't administer them.
 
+A client that sends no `resource` falls back on its one link, so a second link makes its code
+exchanges and refreshes answer `invalid_target`. The bundled library and the console's own client
+send none: for them, signing in stops working until the second link is removed.
+
 **DELETE /api/admin/client-resource-servers**
 Unlink client from resource server.
 

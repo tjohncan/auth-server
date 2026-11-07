@@ -104,6 +104,8 @@ new OAuthClient(config)
 - `config.onTokenRefresh` (function, optional) - Called after successful token refresh with new token data
 - `config.tokenStorage` (string, optional) - Token storage: `'local'` (default, cross-tab) or `'session'` (per-tab, disables cross-tab coordination)
 
+The library sends no `resource`, so the client needs exactly one linked resource server. With more, the code exchange and every refresh answer `invalid_target`.
+
 ### Methods
 
 #### `authorize()`
@@ -163,7 +165,7 @@ const tokens = await client.refreshAccessToken();
 
 **Returns:** Promise resolving to new token data
 
-**Throws:** Error if refresh fails. A dead refresh token (`invalid_grant`) clears the tokens and triggers `onSessionExpired`; any other failure, such as a `5xx` or `invalid_target`, keeps them, and the call can be retried.
+**Throws:** Error if refresh fails. A dead refresh token (`invalid_grant`) clears the tokens and triggers `onSessionExpired`. Any other failure keeps them. A `5xx` can be retried. `invalid_target` can't: it lasts until the client has exactly one resource server, and `logout()` gets out of it.
 
 ---
 
@@ -184,7 +186,7 @@ const response = await client.fetchWithToken('/api/resource', {
 
 **Returns:** Promise resolving to Response object
 
-**Throws:** Error if not authenticated and cannot refresh (also triggers `onSessionExpired`)
+**Throws:** Error if not authenticated and cannot refresh (a dead refresh token also triggers `onSessionExpired`)
 
 ---
 
