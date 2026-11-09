@@ -2083,6 +2083,41 @@ static int test_database_failures(void) {
     }
     printf("✓ a session or org key the database can't check answers 500, not 401\n");
 
+    /* A good key whose organization can't be looked up is no more forbidden than one
+       that can't be checked, and on the admin listener the organization isn't missing */
+    const char *keys = "/api/admin/organization-keys?organization_code_name=system";
+    if (db_execute_direct(conn, HIDE_TABLE(SECURITY_, "organization")) != 0) {
+        FAIL("could not hide the organizations");
+    }
+    r = request("GET", keys, NULL, headers, NULL, NULL);
+    int by_key = r.status;
+    reply_free(&r);
+    r = admin_port("GET", keys, NULL, NULL);
+    int by_socket = r.status;
+    reply_free(&r);
+    if (db_execute_direct(conn, SHOW_TABLE(SECURITY_, "organization")) != 0) {
+        FAIL("could not show the organizations");
+    }
+    if (by_key != 500 || by_socket != 500) {
+        FAIL("with the organization lookup failing, a good key answered %d, the admin listener %d",
+             by_key, by_socket);
+    }
+    r = request("GET", keys, NULL, headers, NULL, NULL);
+    by_key = r.status;
+    reply_free(&r);
+    r = request("GET", "/api/admin/organization-keys?organization_code_name=nosuch", NULL, headers,
+                NULL, NULL);
+    int unknown = r.status;
+    reply_free(&r);
+    r = admin_port("GET", "/api/admin/organization-keys?organization_code_name=nosuch", NULL, NULL);
+    by_socket = r.status;
+    reply_free(&r);
+    if (by_key != 200 || unknown != 403 || by_socket != 404) {
+        FAIL("once the database worked, a good key answered %d, for an unknown organization %d, "
+             "and the admin listener %d", by_key, unknown, by_socket);
+    }
+    printf("✓ a good org key whose organization can't be looked up answers 500, not 403\n");
+
     /* 6. /authorize: before the redirect URI is trusted a failure can't be sent to it;
           after, it goes there as server_error, not invalid_request or the sign-in page */
     if (db_execute_direct(conn, HIDE_TABLE(SECURITY_, "client")) != 0) FAIL("could not hide the clients");

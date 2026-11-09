@@ -699,10 +699,12 @@ HttpResponse *admin_list_organization_keys_handler(const HttpRequest *req) {
             if (org_code_name_param) {
                 /* Org code_name provided - verify it matches the key's org */
                 long long requested_org_pin;
-                if (organization_get_pin_by_code_name(db, org_code_name_param, &requested_org_pin) == 0) {
-                    if (org_pin == requested_org_pin) {
-                        is_org_key_access = 1;
-                    }
+                int lookup = organization_get_pin_by_code_name(db, org_code_name_param, &requested_org_pin);
+                if (lookup < 0) {
+                    return response_json_error(500, "Internal server error");
+                }
+                if (lookup == 0 && org_pin == requested_org_pin) {
+                    is_org_key_access = 1;
                 }
             } else {
                 /* No org code_name provided - key's org is implicit */
@@ -720,7 +722,11 @@ HttpResponse *admin_list_organization_keys_handler(const HttpRequest *req) {
         if (!org_code_name_param) {
             return response_json_error(400, "organization_code_name query parameter required for localhost access");
         }
-        if (organization_get_pin_by_code_name(db, org_code_name_param, &org_pin) != 0) {
+        int lookup = organization_get_pin_by_code_name(db, org_code_name_param, &org_pin);
+        if (lookup < 0) {
+            return response_json_error(500, "Internal server error");
+        }
+        if (lookup > 0) {
             return response_json_error(404, "Organization not found");
         }
     }
@@ -814,11 +820,13 @@ HttpResponse *admin_revoke_organization_key_handler(const HttpRequest *req) {
         if (key_rc == 0) {
             /* Org key auth succeeded - verify it matches the key being revoked */
             long long key_org_pin;
-            if (organization_key_get_organization_pin(db, key_id, &key_org_pin) == 0) {
-                if (auth_org_pin == key_org_pin) {
-                    is_org_key_access = 1;
-                    /* Note: Self-revocation is allowed (revoking the key you're using) */
-                }
+            int lookup = organization_key_get_organization_pin(db, key_id, &key_org_pin);
+            if (lookup < 0) {
+                return response_json_error(500, "Internal server error");
+            }
+            if (lookup == 0 && auth_org_pin == key_org_pin) {
+                is_org_key_access = 1;
+                /* Note: Self-revocation is allowed (revoking the key you're using) */
             }
         }
     }

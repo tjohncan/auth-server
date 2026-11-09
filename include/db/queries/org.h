@@ -175,7 +175,7 @@ typedef struct {
  *   organization_code_name - Organization code name
  *   out_organization_pin - Output: Organization PIN
  *
- * Returns: 0 on success, -1 if not found or error
+ * Returns: 0 on success, 1 if not found, -1 on error
  */
 int organization_get_pin_by_code_name(db_handle_t *db,
                                        const char *organization_code_name,
@@ -192,7 +192,7 @@ int organization_get_pin_by_code_name(db_handle_t *db,
  *   key_id               - Organization key UUID (16 bytes)
  *   out_organization_pin - Output: Organization PIN
  *
- * Returns: 0 on success, -1 if not found or error
+ * Returns: 0 on success, 1 if not found, -1 on error
  */
 int organization_key_get_organization_pin(db_handle_t *db,
                                            const unsigned char *key_id,

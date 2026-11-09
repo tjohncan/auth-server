@@ -661,9 +661,14 @@ int organization_get_pin_by_code_name(db_handle_t *db,
     db_bind_text(stmt, 1, organization_code_name, -1);
 
     int result = db_step(stmt);
-    if (result != DB_ROW) {
+    if (result == DB_DONE) {
         db_finalize(stmt);
-        return -1;  /* Not found */
+        return 1;  /* Not found */
+    }
+    if (result != DB_ROW) {
+        log_error("Failed to look up an organization's PIN");
+        db_finalize(stmt);
+        return -1;
     }
 
     *out_organization_pin = db_column_int64(stmt, 0);
@@ -693,9 +698,14 @@ int organization_key_get_organization_pin(db_handle_t *db,
     db_bind_blob(stmt, 1, key_id, 16);
 
     int result = db_step(stmt);
-    if (result != DB_ROW) {
+    if (result == DB_DONE) {
         db_finalize(stmt);
-        return -1;  /* Not found */
+        return 1;  /* Not found */
+    }
+    if (result != DB_ROW) {
+        log_error("Failed to look up a key's organization");
+        db_finalize(stmt);
+        return -1;
     }
 
     *out_organization_pin = db_column_int64(stmt, 0);
