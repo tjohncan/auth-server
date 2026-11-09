@@ -1830,6 +1830,21 @@ static int test_usernames(void) {
 #define ALLOW_INSERTS "DROP TRIGGER refuse_insert"
 #endif
 
+/* The same for updates of one column */
+#ifdef DB_BACKEND_POSTGRESQL
+#define REFUSE_UPDATES(table, column) \
+    "CREATE FUNCTION refuse_update() RETURNS trigger LANGUAGE plpgsql " \
+    "AS $$ BEGIN RAISE EXCEPTION 'refused'; END $$; " \
+    "CREATE TRIGGER refuse_update BEFORE UPDATE OF " column " ON " table " " \
+    "FOR EACH ROW EXECUTE FUNCTION refuse_update()"
+#define ALLOW_UPDATES "DROP FUNCTION refuse_update() CASCADE"
+#else
+#define REFUSE_UPDATES(table, column) \
+    "CREATE TRIGGER refuse_update BEFORE UPDATE OF " column " ON " table " " \
+    "BEGIN SELECT RAISE(FAIL, 'refused'); END"
+#define ALLOW_UPDATES "DROP TRIGGER refuse_update"
+#endif
+
 /*
  * A bootstrap that fails part-way makes nothing. With its last step, the
  * org-admin grant, refused, it answers 500 and leaves neither the organization
@@ -2151,6 +2166,81 @@ static int test_failed_first_confirm(void) {
     }
     printf("✓ a first confirm whose codes can't be stored changes nothing, and confirms "
            "with codes after\n");
+
+    return 0;
+}
+
+/*
+ * A right MFA code whose session can't be marked complete answers 500, not
+ * {"valid":true}. A recovery code is marked used in the same transaction, so
+ * the failure leaves it good for the next try.
+ */
+static int test_failed_mfa_completion(void) {
+    printf("\n=== An MFA step the session can't record ===\n");
+
+    char first[256], second[256], method[33], secret[64], code[16], json[256], recover[128];
+    Reply r = admin_port("POST", "/api/admin/users", NULL,
+                         "{\"username\":\"unfinished\",\"password\":\"unfinished password\"}");
+    int status = r.status;
+    reply_free(&r);
+    if (status != 200 || login("unfinished", "unfinished password", first, sizeof(first)) != 0) {
+        FAIL("could not create and sign in the user");
+    }
+    r = post_json("/api/user/mfa/totp/setup", first, "{\"display_name\":\"phone\"}");
+    if (r.status != 200 || field(&r, "method_id", method, sizeof(method)) != 0 ||
+        field(&r, "secret", secret, sizeof(secret)) != 0) {
+        FAIL("TOTP setup answered %d", r.status);
+    }
+    reply_free(&r);
+    if (totp_now(secret, code, sizeof(code)) != 0) FAIL("could not make a TOTP code");
+    snprintf(json, sizeof(json), "{\"method_id\":\"%s\",\"code\":\"%s\"}", method, code);
+    r = post_json("/api/user/mfa/totp/confirm", first, json);
+    char codes[16][32];
+    int count = r.status == 200 ? string_array(r.body, "recovery_codes", codes, 16) : 0;
+    status = r.status;
+    reply_free(&r);
+    if (count <= 0) FAIL("confirming answered %d, with %d recovery codes", status, count);
+    snprintf(recover, sizeof(recover), "{\"recovery_code\":\"%s\"}", codes[0]);
+
+    /* A second sign-in, which owes the factor */
+    if (login("unfinished", "unfinished password", second, sizeof(second)) != 0) FAIL("second sign-in");
+
+    /* 1. The session can't be marked: 500, for a right TOTP code and a right recovery code */
+    db_handle_t *conn = db_pool_get_connection();
+    if (totp_now(secret, code, sizeof(code)) != 0) FAIL("could not make a TOTP code");
+    snprintf(json, sizeof(json), "{\"method_id\":\"%s\",\"code\":\"%s\"}", method, code);
+    if (db_execute_direct(conn, REFUSE_UPDATES(TBL_BROWSER, "mfa_completed")) != 0) {
+        FAIL("could not make the session refuse");
+    }
+    r = post_json("/api/user/mfa/verify", second, json);
+    int verified = r.status;
+    reply_free(&r);
+    r = post_json("/api/user/mfa/recover", second, recover);
+    int recovered = r.status;
+    reply_free(&r);
+    if (db_execute_direct(conn, ALLOW_UPDATES) != 0) FAIL("could not drop the trigger");
+    if (verified != 500 || recovered != 500) {
+        FAIL("with the session refusing, a right code answered %d, a right recovery code %d",
+             verified, recovered);
+    }
+
+    /* 2. Once it can be marked, the session still owes the factor, and the same recovery
+          code works */
+    r = request("GET", "/api/user/mfa/recovery-codes", second, NULL, NULL, NULL);
+    int gated = r.status;
+    reply_free(&r);
+    r = post_json("/api/user/mfa/recover", second, recover);
+    int valid = r.status == 200 && strstr(r.body, "\"valid\":true") != NULL;
+    status = r.status;
+    reply_free(&r);
+    r = request("GET", "/api/user/mfa/recovery-codes", second, NULL, NULL, NULL);
+    int opened = r.status;
+    reply_free(&r);
+    if (gated != 403 || !valid || opened != 200) {
+        FAIL("after the failure the session got %d, the same code answered %d (valid: %d), and "
+             "then the session got %d", gated, status, valid, opened);
+    }
+    printf("✓ a right code the session can't record answers 500, and a recovery code stays good\n");
 
     return 0;
 }
@@ -2806,6 +2896,7 @@ int main(void) {
                  test_localhost_only() || test_admin_socket_caller() ||
                  test_account_recovery() || test_usernames() || test_failed_bootstrap() ||
                  test_database_failures() || test_failed_first_confirm() ||
+                 test_failed_mfa_completion() ||
                  test_operator_addresses() ||
                  test_password_length() ||
 #ifdef EMAIL_SUPPORT

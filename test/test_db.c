@@ -1406,7 +1406,7 @@ static int test_rehash(const config_t *config) {
 
     int failed = 1;
     char seen[64], before[128], after[128], salt[64];
-    unsigned char user_id[16], set_id[16];
+    unsigned char user_id[16], set_id[16], session_id[16];
     long long pin = 0, key_pin = 0;
     const char *hash_sql = "SELECT secret_hash FROM user_account WHERE pin = 1";
     static const unsigned char rs_id[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x02};
@@ -1546,10 +1546,12 @@ static int test_rehash(const config_t *config) {
           unless no code is left unused to match */
     const char *codes[] = { "AAAA-BBBB-CCCC-DDDD", "EEEE-FFFF-GGGG-HHHH", "JJJJ-KKKK-LLLL-MMMM" };
     if (recovery_code_set_create(sdb, 1, codes, 3, set_id) != 0 ||
+        oauth_session_create(sdb, 1, user_id, "rehash-session", "password", NULL, NULL, 3600,
+                             session_id) != 0 ||
         read_stored_value(sdb, "SELECT group_concat(DISTINCT substr(secret_hash, 1, "
                                "instr(secret_hash, '$') - 1)) FROM recovery_code",
                           seen, sizeof(seen)) != 0 || strcmp(seen, "pbkdf2-sha256") != 0 ||
-        recovery_code_verify(sdb, 1, codes[0]) != 1) {
+        recovery_code_verify(sdb, 1, session_id, codes[0]) != 1) {
         log_error("Re-hash: a new recovery code set isn't under the machine method (%s), "
                   "or its code didn't verify", seen);
         goto done;
@@ -1569,20 +1571,20 @@ static int test_rehash(const config_t *config) {
                                    "WHERE plaintext_last4 = '%s'", hash, codes[i] + 15);
         if (db_execute_direct(sdb, sql) != 0) goto done;
     }
-    if (recovery_code_verify(sdb, 1, codes[1]) != 1) {
+    if (recovery_code_verify(sdb, 1, session_id, codes[1]) != 1) {
         log_error("Re-hash: a code of a set made under another method didn't verify");
         goto done;
     }
     if (db_execute_direct(sdb, "UPDATE recovery_code SET secret_hash = "
                                "substr(secret_hash, instr(secret_hash, '$') + 1)") != 0 ||
-        recovery_code_verify(sdb, 1, codes[2]) != -1 ||
+        recovery_code_verify(sdb, 1, session_id, codes[2]) != -1 ||
         read_count(sdb, "SELECT count(*) FROM recovery_code WHERE is_used = 1") != 2) {
         log_error("Re-hash: a code with no label didn't fail, or was used");
         goto done;
     }
     /* Only an unused code can match, so with every code used the labels don't matter */
     if (db_execute_direct(sdb, "UPDATE recovery_code SET is_used = 1") != 0 ||
-        recovery_code_verify(sdb, 1, codes[2]) != 0) {
+        recovery_code_verify(sdb, 1, session_id, codes[2]) != 0) {
         log_error("Re-hash: a set with every code used didn't answer no match");
         goto done;
     }
@@ -3679,27 +3681,30 @@ static int test_single_use(const config_t *config) {
           the set is replaced, its unused codes don't */
     const char *codes[] = { "single-code-1", "single-code-2" };
     const char *new_codes[] = { "single-code-3" };
-    unsigned char set_id[16];
-    if (recovery_code_set_create(sdb, 1, codes, 2, set_id) != 0) {
-        log_error("Single-use: could not create recovery codes");
+    static const unsigned char user_id[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x04};
+    unsigned char set_id[16], session_id[16];
+    if (recovery_code_set_create(sdb, 1, codes, 2, set_id) != 0 ||
+        oauth_session_create(sdb, 1, user_id, "single-session", "password", NULL, NULL, 3600,
+                             session_id) != 0) {
+        log_error("Single-use: could not create recovery codes and a session");
         goto done;
     }
-    if (recovery_code_verify(sdb, 1, codes[0]) != 1 ||
-        recovery_code_verify(sdb, 1, codes[0]) != 0 ||
-        recovery_code_verify(sdb, 1, "not-a-recovery-code") != 0) {
+    if (recovery_code_verify(sdb, 1, session_id, codes[0]) != 1 ||
+        recovery_code_verify(sdb, 1, session_id, codes[0]) != 0 ||
+        recovery_code_verify(sdb, 1, session_id, "not-a-recovery-code") != 0) {
         log_error("Single-use: a recovery code didn't work exactly once");
         goto done;
     }
     if (recovery_code_set_create(sdb, 1, new_codes, 1, set_id) != 0 ||
-        recovery_code_verify(sdb, 1, codes[1]) != 0 ||
-        recovery_code_verify(sdb, 1, new_codes[0]) != 1) {
+        recovery_code_verify(sdb, 1, session_id, codes[1]) != 0 ||
+        recovery_code_verify(sdb, 1, session_id, new_codes[0]) != 1) {
         log_error("Single-use: a replaced set's code was accepted, or the new set's refused");
         goto done;
     }
     /* Every code of the new set used, and the used ones purged as the cleaner
        purges them: the set is still active, with nothing left to match */
     if (db_execute_direct(sdb, "DELETE FROM recovery_code WHERE is_used = 1") != 0 ||
-        recovery_code_verify(sdb, 1, new_codes[0]) != 0) {
+        recovery_code_verify(sdb, 1, session_id, new_codes[0]) != 0) {
         log_error("Single-use: a set with no codes left didn't answer no match");
         goto done;
     }

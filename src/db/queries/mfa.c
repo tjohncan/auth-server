@@ -2,6 +2,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "db/queries/mfa.h"
+#include "db/queries/oauth.h"
 #include "db/db_sql.h"
 #include "crypto/random.h"
 #include "crypto/password.h"
@@ -776,8 +777,9 @@ int recovery_code_set_get_active(db_handle_t *db,
 
 int recovery_code_verify(db_handle_t *db,
                          long long user_account_pin,
+                         const unsigned char *session_id,
                          const char *code) {
-    if (!db || !code) {
+    if (!db || !session_id || !code) {
         log_error("Invalid arguments to recovery_code_verify");
         return -1;
     }
@@ -820,7 +822,11 @@ int recovery_code_verify(db_handle_t *db,
      * the code is still unused and its set still active, and its RETURNING row
      * is the verdict. Of two submissions of one code, the second matches
      * nothing: SQLite runs them one at a time, and on PostgreSQL the second
-     * waits on the first's row lock and then finds the code used. */
+     * waits on the first's row lock and then finds the code used.
+     *
+     * The session is marked in the same transaction, so a code isn't spent on a
+     * sign-in that didn't complete. The hash above is made before it opens: it's
+     * slow, and on SQLite this transaction holds the write lock. */
     const char *use_sql =
         "UPDATE " TBL_RECOVERY_CODE " "
         "SET is_used = " BOOL_TRUE ", "
@@ -834,9 +840,17 @@ int recovery_code_verify(db_handle_t *db,
         "AND is_used = " BOOL_FALSE " "
         "RETURNING pin";
 
+    if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
+        log_error("Failed to begin using a recovery code");
+        OPENSSL_cleanse(&set, sizeof(set));
+        OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
+        return -1;
+    }
+
     db_stmt_t *use_stmt = NULL;
     if (db_prepare(db, &use_stmt, use_sql) != 0) {
         log_error("Failed to prepare recovery code use");
+        db_execute_trusted(db, "ROLLBACK");
         OPENSSL_cleanse(&set, sizeof(set));
         OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
         return -1;
@@ -851,11 +865,23 @@ int recovery_code_verify(db_handle_t *db,
     OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
 
     if (rc == DB_DONE) {
+        db_execute_trusted(db, "ROLLBACK");
         log_debug("Recovery code not found or already used");
         return 0;  /* Invalid */
     }
     if (rc != DB_ROW) {
         log_error("Failed to use recovery code");
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+
+    if (oauth_session_set_mfa_completed(db, session_id) != 0) {
+        db_execute_trusted(db, "ROLLBACK");
+        return -1;
+    }
+    if (db_execute_trusted(db, "COMMIT") != 0) {
+        log_error("Failed to commit a recovery code's use");
+        db_execute_trusted(db, "ROLLBACK");
         return -1;
     }
 

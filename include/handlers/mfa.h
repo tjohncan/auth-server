@@ -102,12 +102,14 @@ int mfa_verify(db_handle_t *db,
  * Parameters:
  *   db               - Database handle
  *   user_account_pin - User attempting recovery
+ *   session_id       - The session a valid code completes MFA on (16 bytes)
  *   recovery_code    - Plaintext recovery code
  *
- * Returns: 1 if valid, 0 if invalid, -1 on error
+ * Returns: 1 if valid, 0 if invalid, -1 on error (the code stays unused)
  */
 int mfa_recover(db_handle_t *db,
                 long long user_account_pin,
+                const unsigned char *session_id,
                 const char *recovery_code);
 
 /*

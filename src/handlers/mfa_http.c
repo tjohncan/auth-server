@@ -204,7 +204,9 @@ HttpResponse *mfa_totp_confirm_handler(const HttpRequest *req) {
     /* A valid code from the authenticator just registered proves possession of
      * it, so this session has completed MFA. Without this, a first enrollment
      * would be followed by a bounce to the MFA step on the very next MFA-management
-     * call. For an additional method the gate above already required completion. */
+     * call. For an additional method the gate above already required completion.
+     * A failure here still answers 200: the method is confirmed, and the recovery
+     * codes below can't be shown again. That bounce is all it costs. */
     oauth_session_set_mfa_completed(db, session.id);
 
     /* Build response */
@@ -291,7 +293,9 @@ HttpResponse *mfa_verify_handler(const HttpRequest *req) {
     free(code);
 
     if (result == 1) {
-        oauth_session_set_mfa_completed(db, session.id);
+        if (oauth_session_set_mfa_completed(db, session.id) != 0) {
+            return response_json_error(500, "MFA verification error");
+        }
         return response_json_ok("{\"valid\":true}");
     } else if (result == -2) {
         return response_json_error(429, "Too many attempts, try again soon!");
@@ -346,13 +350,12 @@ HttpResponse *mfa_recover_handler(const HttpRequest *req) {
         return response_json_error(400, "recovery_code required");
     }
 
-    /* Verify recovery code */
-    int result = mfa_recover(db, session.user_account_pin, recovery_code);
+    /* Verify recovery code: a valid one also completes MFA on this session */
+    int result = mfa_recover(db, session.user_account_pin, session.id, recovery_code);
     OPENSSL_cleanse(recovery_code, strlen(recovery_code));
     free(recovery_code);
 
     if (result == 1) {
-        oauth_session_set_mfa_completed(db, session.id);
         return response_json_ok("{\"valid\":true}");
     } else if (result == 0) {
         return response_json_ok("{\"valid\":false}");

@@ -2931,6 +2931,8 @@ or
 - **503** `{"error": "MFA verification is unavailable, try again soon"}` when the attempt can't
   be recorded. The limits count recorded attempts, so one that can't be recorded gets no
   verdict, right code or wrong. Retry it; don't take it for a wrong code.
+- **500** when the session can't be marked complete: the code was right, and the step isn't
+  done. Retry it.
 
 ---
 
@@ -2958,6 +2960,8 @@ or
 - Each recovery code is single-use. Once used it cannot be reused.
 - 10 codes per set. Regenerate with `POST /api/user/mfa/recovery-codes/regenerate` when running low.
 - On success (`valid: true`), sets `mfa_completed = true` on the session, unblocking `/authorize`.
+- **500** when the code can't be marked used or the session complete. Those are one transaction,
+  so the code stays unused and can be tried again.
 
 ---
 

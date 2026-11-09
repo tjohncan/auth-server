@@ -278,13 +278,14 @@ int mfa_verify(db_handle_t *db,
 
 int mfa_recover(db_handle_t *db,
                 long long user_account_pin,
+                const unsigned char *session_id,
                 const char *recovery_code) {
-    if (!db || !recovery_code) {
+    if (!db || !session_id || !recovery_code) {
         log_error("Invalid arguments to mfa_recover");
         return -1;
     }
 
-    int result = recovery_code_verify(db, user_account_pin, recovery_code);
+    int result = recovery_code_verify(db, user_account_pin, session_id, recovery_code);
 
     if (result == 1) {
         log_info("Recovery code used");
