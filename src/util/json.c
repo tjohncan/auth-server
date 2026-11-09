@@ -321,11 +321,16 @@ int json_utf8_valid(const char *text, size_t len) {
     return 1;
 }
 
+/* A JSON keyword (true, false, null) or number ends at one of these */
+#define IS_JSON_DELIM(c) ((c) == ',' || (c) == '}' || (c) == ']' || \
+                          (c) == ' ' || (c) == '\t' || (c) == '\n' || \
+                          (c) == '\r' || (c) == '\0')
+
 int json_get_int(const char *json, const char *key, int *out_value) {
     if (!json || !key || !out_value) return -1;
 
     const char *key_pos = find_json_key(json, key);
-    if (!key_pos) return -1;
+    if (!key_pos) return 1;  /* left out */
 
     /* Find the colon after the key */
     const char *colon = strchr(key_pos, ':');
@@ -337,15 +342,16 @@ int json_get_int(const char *json, const char *key, int *out_value) {
         value_start++;
     }
 
+    /* null reads as left out */
+    if (strncmp(value_start, "null", 4) == 0 && IS_JSON_DELIM(value_start[4])) return 1;
+
     /* Parse integer */
     char *endptr;
     long val = strtol(value_start, &endptr, 10);
     if (endptr == value_start) return -1;  /* No digits found */
 
-    /* Verify delimiter after number (reject "123abc") */
-    char c = *endptr;
-    if (c != ',' && c != '}' && c != ']' && c != ' ' &&
-        c != '\t' && c != '\n' && c != '\r' && c != '\0') return -1;
+    /* Verify delimiter after number (reject "123abc", 1.5, 1e3) */
+    if (!IS_JSON_DELIM(*endptr)) return -1;
 
     if (val < INT_MIN || val > INT_MAX) return -1;  /* Overflow */
     *out_value = (int)val;
@@ -356,7 +362,7 @@ int json_get_bool(const char *json, const char *key, int *out_value) {
     if (!json || !key || !out_value) return -1;
 
     const char *key_pos = find_json_key(json, key);
-    if (!key_pos) return -1;
+    if (!key_pos) return 1;  /* left out */
 
     /* Find the colon after the key */
     const char *colon = strchr(key_pos, ':');
@@ -368,11 +374,6 @@ int json_get_bool(const char *json, const char *key, int *out_value) {
         value_start++;
     }
 
-    /* Check that character after a JSON keyword is a valid delimiter */
-    #define IS_JSON_DELIM(c) ((c) == ',' || (c) == '}' || (c) == ']' || \
-                              (c) == ' ' || (c) == '\t' || (c) == '\n' || \
-                              (c) == '\r' || (c) == '\0')
-
     /* Parse boolean value */
     if (strncmp(value_start, "true", 4) == 0 && IS_JSON_DELIM(value_start[4])) {
         *out_value = 1;
@@ -381,14 +382,40 @@ int json_get_bool(const char *json, const char *key, int *out_value) {
         *out_value = 0;
         return 0;
     } else if (strncmp(value_start, "null", 4) == 0 && IS_JSON_DELIM(value_start[4])) {
-        *out_value = 0;
-        return 0;
+        return 1;  /* null reads as left out, not false */
     }
-
-    #undef IS_JSON_DELIM
 
     return -1;  /* Not a valid boolean */
 }
+
+int json_get_text(const char *json, const char *key, char **out_value) {
+    if (!json || !key || !out_value) return -1;
+    *out_value = NULL;
+
+    const char *key_pos = find_json_key(json, key);
+    if (!key_pos) return 1;  /* left out */
+
+    /* Find the colon after the key */
+    const char *colon = strchr(key_pos, ':');
+    if (!colon) return -1;
+
+    /* Skip whitespace after colon */
+    const char *value_start = colon + 1;
+    while (*value_start == ' ' || *value_start == '\t' || *value_start == '\n' || *value_start == '\r') {
+        value_start++;
+    }
+
+    /* null reads as left out; anything else but a string is another kind */
+    if (strncmp(value_start, "null", 4) == 0 && IS_JSON_DELIM(value_start[4])) return 1;
+    if (*value_start != '"') return -1;
+
+    /* It starts as a string, so NULL means one it can't read: unterminated, or a refused
+       escape */
+    *out_value = json_get_string(json, key);
+    return *out_value ? 0 : -1;
+}
+
+#undef IS_JSON_DELIM
 
 /* ============================================================================
  * json_escape - Escape string for JSON output

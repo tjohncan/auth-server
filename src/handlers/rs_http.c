@@ -45,16 +45,17 @@ static HttpResponse *rs_authenticate(const HttpRequest *req,
 
     const char *body = req->body ? req->body : "";
 
-    char *rs_id_str = json_get_string(body, "resource_server_id");
-    char *rs_key_id_str = json_get_string(body, "resource_server_key_id");
-    char *rs_secret = json_get_string(body, "resource_server_secret");
+    HttpResponse *bad = NULL;
+    char *rs_id_str = read_text_field(body, "resource_server_id", &bad);
+    char *rs_key_id_str = read_text_field(body, "resource_server_key_id", &bad);
+    char *rs_secret = read_text_field(body, "resource_server_secret", &bad);
 
-    if (!rs_id_str || !rs_key_id_str || !rs_secret) {
+    if (bad || !rs_id_str || !rs_key_id_str || !rs_secret) {
         free(rs_id_str);
         free(rs_key_id_str);
         if (rs_secret) OPENSSL_cleanse(rs_secret, strlen(rs_secret));
         free(rs_secret);
-        return response_json_error(400,
+        return bad ? bad : response_json_error(400,
             "resource_server_id, resource_server_key_id, and resource_server_secret required");
     }
 
@@ -84,6 +85,10 @@ static HttpResponse *rs_authenticate(const HttpRequest *req,
     OPENSSL_cleanse(rs_secret, strlen(rs_secret));
     free(rs_secret);
 
+    if (auth_result < 0) {
+        /* The server failed: 401 would report a good secret as wrong */
+        return response_json_error(500, "Internal server error");  /* logged */
+    }
     if (auth_result != 1) {
         log_warn("RS authentication failed for %s", operation);
         return response_json_error(401, "Authentication failed");
@@ -141,17 +146,19 @@ static HttpResponse *rs_error_response(int rc, const char *context) {
 
 HttpResponse *rs_provision_user_handler(const HttpRequest *req) {
 
-    if (req->method != HTTP_POST)
-        return response_method_not_allowed("POST");
-
     rs_auth_t auth;
     HttpResponse *err = rs_authenticate(req, "rs_provision_user", &auth);
     if (err) return err;
 
     const char *body = req->body;
-    char *username = json_get_string(body, "username");
-    char *email = json_get_string(body, "email");
+    HttpResponse *bad = NULL;
+    char *username = read_text_field(body, "username", &bad);
+    char *email = read_text_field(body, "email", &bad);
 
+    if (bad) {
+        free(username); free(email);
+        return bad;
+    }
     if (!username && !email) {
         return response_json_error(400, "username and/or email required");
     }
@@ -258,9 +265,15 @@ HttpResponse *rs_lookup_user_handler(const HttpRequest *req) {
     if (err) return err;
 
     const char *body = req->body;
-    char *user_id_str = json_get_string(body, "user_id");
-    char *username = json_get_string(body, "username");
-    char *email = json_get_string(body, "email");
+    HttpResponse *bad = NULL;
+    char *user_id_str = read_text_field(body, "user_id", &bad);
+    char *username = read_text_field(body, "username", &bad);
+    char *email = read_text_field(body, "email", &bad);
+
+    if (bad) {
+        free(user_id_str); free(username); free(email);
+        return bad;
+    }
 
     unsigned char user_id[16];
     unsigned char *user_id_ptr = NULL;
@@ -306,21 +319,19 @@ HttpResponse *rs_lookup_user_handler(const HttpRequest *req) {
 
 HttpResponse *rs_link_client_user_handler(const HttpRequest *req) {
 
-    if (req->method != HTTP_POST)
-        return response_method_not_allowed("POST");
-
     rs_auth_t auth;
     HttpResponse *err = rs_authenticate(req, "rs_link_client_user", &auth);
     if (err) return err;
 
     const char *body = req->body;
-    char *client_id_str = json_get_string(body, "client_id");
-    char *user_id_str = json_get_string(body, "user_id");
+    HttpResponse *bad = NULL;
+    char *client_id_str = read_text_field(body, "client_id", &bad);
+    char *user_id_str = read_text_field(body, "user_id", &bad);
 
-    if (!client_id_str || !user_id_str) {
+    if (bad || !client_id_str || !user_id_str) {
         free(client_id_str);
         free(user_id_str);
-        return response_json_error(400, "client_id and user_id required");
+        return bad ? bad : response_json_error(400, "client_id and user_id required");
     }
 
     unsigned char client_id[16], user_id[16];
@@ -348,21 +359,19 @@ HttpResponse *rs_link_client_user_handler(const HttpRequest *req) {
 
 HttpResponse *rs_unlink_client_user_handler(const HttpRequest *req) {
 
-    if (req->method != HTTP_DELETE)
-        return response_method_not_allowed("DELETE");
-
     rs_auth_t auth;
     HttpResponse *err = rs_authenticate(req, "rs_unlink_client_user", &auth);
     if (err) return err;
 
     const char *body = req->body;
-    char *client_id_str = json_get_string(body, "client_id");
-    char *user_id_str = json_get_string(body, "user_id");
+    HttpResponse *bad = NULL;
+    char *client_id_str = read_text_field(body, "client_id", &bad);
+    char *user_id_str = read_text_field(body, "user_id", &bad);
 
-    if (!client_id_str || !user_id_str) {
+    if (bad || !client_id_str || !user_id_str) {
         free(client_id_str);
         free(user_id_str);
-        return response_json_error(400, "client_id and user_id required");
+        return bad ? bad : response_json_error(400, "client_id and user_id required");
     }
 
     unsigned char client_id[16], user_id[16];
@@ -394,10 +403,16 @@ HttpResponse *rs_list_client_users_handler(const HttpRequest *req) {
     if (err) return err;
 
     const char *body = req->body;
-    char *client_id_str = json_get_string(body, "client_id");
+    HttpResponse *bad = NULL;
+    char *client_id_str = read_text_field(body, "client_id", &bad);
+    int limit = 20, offset = 0;
+    read_int_field(body, "limit", &limit, &bad);
+    read_int_field(body, "offset", &offset, &bad);
 
-    if (!client_id_str)
-        return response_json_error(400, "client_id required");
+    if (bad || !client_id_str) {
+        free(client_id_str);
+        return bad ? bad : response_json_error(400, "client_id required");
+    }
 
     unsigned char client_id[16];
     if (hex_to_bytes(client_id_str, client_id, 16) != 0) {
@@ -406,9 +421,6 @@ HttpResponse *rs_list_client_users_handler(const HttpRequest *req) {
     }
     free(client_id_str);
 
-    int limit = 20, offset = 0;
-    json_get_int(body, "limit", &limit);
-    json_get_int(body, "offset", &offset);
     if (limit < 1) limit = 1;
     if (limit > 100) limit = 100;
     if (offset < 0) offset = 0;

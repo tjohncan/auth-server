@@ -223,194 +223,6 @@ static int parse_json_long(const char *json, const char *key, long *out) {
     return 0;
 }
 
-int jwt_encode(const jwt_claims_t *claims,
-              const unsigned char *secret, size_t secret_len,
-              char *out_token, size_t token_len) {
-    if (!claims || !secret || !out_token) {
-        log_error("Invalid arguments to jwt_encode");
-        return -1;
-    }
-
-    if (token_len < JWT_MAX_TOKEN_LENGTH) {
-        log_error("Token buffer too small");
-        return -1;
-    }
-
-    /* Build payload JSON */
-    char payload_json[1024];
-    if (build_payload_json(claims, payload_json, sizeof(payload_json)) != 0) {
-        return -1;
-    }
-
-    /* Base64url encode header */
-    char header_b64[256];
-    size_t header_b64_len = crypto_base64url_encode(
-        (unsigned char *)JWT_HEADER, strlen(JWT_HEADER),
-        header_b64, sizeof(header_b64));
-    if (header_b64_len == 0) {
-        log_error("Failed to encode JWT header");
-        return -1;
-    }
-
-    /* Base64url encode payload */
-    char payload_b64[2048];
-    size_t payload_b64_len = crypto_base64url_encode(
-        (unsigned char *)payload_json, strlen(payload_json),
-        payload_b64, sizeof(payload_b64));
-    if (payload_b64_len == 0) {
-        log_error("Failed to encode JWT payload");
-        return -1;
-    }
-
-    /* Build signing input: header.payload */
-    char signing_input[3072];
-    int signing_len = snprintf(signing_input, sizeof(signing_input),
-                              "%s.%s", header_b64, payload_b64);
-    if (signing_len < 0 || (size_t)signing_len >= sizeof(signing_input)) {
-        log_error("JWT signing input buffer overflow");
-        return -1;
-    }
-
-    /* Compute HMAC-SHA256 signature */
-    unsigned char signature[HMAC_SHA256_LENGTH];
-    if (crypto_hmac_sha256(secret, secret_len,
-                          (unsigned char *)signing_input, signing_len,
-                          signature, sizeof(signature)) != 0) {
-        log_error("Failed to compute JWT signature");
-        return -1;
-    }
-
-    /* Base64url encode signature */
-    char signature_b64[128];
-    size_t signature_b64_len = crypto_base64url_encode(
-        signature, sizeof(signature),
-        signature_b64, sizeof(signature_b64));
-    if (signature_b64_len == 0) {
-        log_error("Failed to encode JWT signature");
-        return -1;
-    }
-
-    /* Build final token: header.payload.signature */
-    int token_written = snprintf(out_token, token_len,
-                                "%s.%s.%s",
-                                header_b64, payload_b64, signature_b64);
-    if (token_written < 0 || (size_t)token_written >= token_len) {
-        log_error("JWT token buffer overflow");
-        return -1;
-    }
-
-    return 0;
-}
-
-int jwt_decode(const char *token,
-              const unsigned char *secret, size_t secret_len,
-              jwt_claims_t *out_claims) {
-    if (!token || !secret || !out_claims) {
-        log_error("Invalid arguments to jwt_decode");
-        return -1;
-    }
-
-    /* Find separators (header.payload.signature) */
-    const char *dot1 = strchr(token, '.');
-    if (!dot1) {
-        log_error("Invalid JWT format: missing first dot");
-        return -1;
-    }
-
-    const char *dot2 = strchr(dot1 + 1, '.');
-    if (!dot2) {
-        log_error("Invalid JWT format: missing second dot");
-        return -1;
-    }
-
-    /* Extract parts */
-    size_t header_len = dot1 - token;
-    size_t payload_len = dot2 - (dot1 + 1);
-    size_t signature_len = strlen(dot2 + 1);
-
-    /* Verify signature */
-    char signing_input[3072];
-    int signing_len = snprintf(signing_input, sizeof(signing_input),
-                              "%.*s.%.*s",
-                              (int)header_len, token,
-                              (int)payload_len, dot1 + 1);
-    if (signing_len < 0 || (size_t)signing_len >= sizeof(signing_input)) {
-        log_error("JWT signing input too large");
-        return -1;
-    }
-
-    unsigned char computed_signature[HMAC_SHA256_LENGTH];
-    if (crypto_hmac_sha256(secret, secret_len,
-                          (unsigned char *)signing_input, signing_len,
-                          computed_signature, sizeof(computed_signature)) != 0) {
-        log_error("Failed to compute JWT signature for verification");
-        return -1;
-    }
-
-    /* Decode received signature */
-    unsigned char received_signature[HMAC_SHA256_LENGTH];
-    int decoded_sig_len = crypto_base64url_decode(
-        dot2 + 1, signature_len,
-        received_signature, sizeof(received_signature));
-    if (decoded_sig_len != HMAC_SHA256_LENGTH) {
-        log_error("Invalid JWT signature length");
-        return -1;
-    }
-
-    /* Timing-safe signature comparison */
-    if (!crypto_hmac_compare(computed_signature, received_signature, HMAC_SHA256_LENGTH)) {
-        log_error("JWT signature verification failed");
-        return -1;
-    }
-
-    /* Decode payload */
-    unsigned char payload_json[2048];
-    int payload_json_len = crypto_base64url_decode(
-        dot1 + 1, payload_len,
-        payload_json, sizeof(payload_json) - 1);
-    if (payload_json_len < 0) {
-        log_error("Failed to decode JWT payload");
-        return -1;
-    }
-    payload_json[payload_json_len] = '\0';
-
-    /* Parse claims from JSON */
-    memset(out_claims, 0, sizeof(jwt_claims_t));
-
-    if (parse_json_string((char *)payload_json, "iss", out_claims->iss, sizeof(out_claims->iss)) != 0 ||
-        parse_json_string((char *)payload_json, "sub", out_claims->sub, sizeof(out_claims->sub)) != 0 ||
-        parse_json_string((char *)payload_json, "aud", out_claims->aud, sizeof(out_claims->aud)) != 0 ||
-        parse_json_string((char *)payload_json, "scope", out_claims->scope, sizeof(out_claims->scope)) != 0 ||
-        parse_json_string((char *)payload_json, "client_id", out_claims->client_id, sizeof(out_claims->client_id)) != 0) {
-        log_error("Failed to parse JWT claims");
-        return -1;
-    }
-
-    long exp, iat;
-    if (parse_json_long((char *)payload_json, "exp", &exp) != 0 ||
-        parse_json_long((char *)payload_json, "iat", &iat) != 0) {
-        log_error("Failed to parse JWT timestamps");
-        return -1;
-    }
-    out_claims->exp = (time_t)exp;
-    out_claims->iat = (time_t)iat;
-
-    /* Check expiration */
-    time_t now = time(NULL);
-    if (now >= out_claims->exp + jwt_clock_skew_seconds) {
-        log_error("JWT token expired (exp=%ld, now=%ld)", (long)out_claims->exp, (long)now);
-        return -1;
-    }
-
-    return 0;
-}
-
-int jwt_validate(const char *token,
-                const unsigned char *secret, size_t secret_len) {
-    jwt_claims_t claims;
-    return (jwt_decode(token, secret, secret_len, &claims) == 0) ? 1 : 0;
-}
-
 /* ============================================================================
  * ES256 (ECDSA P-256) JWT Implementation
  * ============================================================================ */
@@ -780,13 +592,13 @@ int jwt_decode_es256(const char *token,
     /* Find separators (header.payload.signature) */
     const char *dot1 = strchr(token, '.');
     if (!dot1) {
-        log_error("Invalid JWT format: missing first dot");
+        log_debug("Invalid JWT format: missing first dot");
         return -1;
     }
 
     const char *dot2 = strchr(dot1 + 1, '.');
     if (!dot2) {
-        log_error("Invalid JWT format: missing second dot");
+        log_debug("Invalid JWT format: missing second dot");
         return -1;
     }
 
@@ -802,7 +614,7 @@ int jwt_decode_es256(const char *token,
                               (int)header_len, token,
                               (int)payload_len, dot1 + 1);
     if (signing_len < 0 || (size_t)signing_len >= sizeof(signing_input)) {
-        log_error("JWT signing input too large");
+        log_debug("JWT signing input too large");
         return -1;
     }
 
@@ -812,7 +624,7 @@ int jwt_decode_es256(const char *token,
         dot2 + 1, signature_len,
         raw_signature, sizeof(raw_signature));
     if (decoded_sig_len != 64) {
-        log_error("Invalid ES256 signature length: expected 64, got %d", decoded_sig_len);
+        log_debug("Invalid ES256 signature length: expected 64, got %d", decoded_sig_len);
         return -1;
     }
 
@@ -846,7 +658,7 @@ int jwt_decode_es256(const char *token,
     }
 
     if (valid != 1) {
-        log_error("JWT ES256 signature verification failed");
+        log_info("JWT ES256 signature verification failed");
         return -1;
     }
 
@@ -885,7 +697,7 @@ int jwt_decode_es256(const char *token,
     /* Check expiration */
     time_t now = time(NULL);
     if (now >= out_claims->exp + jwt_clock_skew_seconds) {
-        log_error("JWT token expired (exp=%ld, now=%ld)", (long)out_claims->exp, (long)now);
+        log_debug("JWT token expired (exp=%ld, now=%ld)", (long)out_claims->exp, (long)now);
         return -1;
     }
 
@@ -962,7 +774,7 @@ int jwt_encode_auth_request(const auth_request_claims_t *claims,
         return -1;
     }
 
-    /* Encode using HS256 (reuse existing jwt_encode logic) */
+    /* Encode using HS256 */
     /* Base64url encode header */
     char header_b64[256];
     size_t header_b64_len = crypto_base64url_encode(
@@ -1046,7 +858,7 @@ int jwt_decode_auth_request(const char *token,
         return 0;
     }
 
-    log_error("Auth request JWT validation failed with both current and prior secrets");
+    log_info("Auth request JWT validation failed with both current and prior secrets");
     return -1;
 }
 
@@ -1072,7 +884,7 @@ static int jwt_decode_auth_request_with_secret(const char *token,
     char *payload_b64 = strchr(header_b64, '.');
     if (!payload_b64) {
         OPENSSL_cleanse(secret, sizeof(secret));
-        log_error("Malformed JWT (missing first dot)");
+        log_debug("Malformed JWT (missing first dot)");
         return -1;
     }
     *payload_b64 = '\0';
@@ -1081,7 +893,7 @@ static int jwt_decode_auth_request_with_secret(const char *token,
     char *signature_b64 = strchr(payload_b64, '.');
     if (!signature_b64) {
         OPENSSL_cleanse(secret, sizeof(secret));
-        log_error("Malformed JWT (missing second dot)");
+        log_debug("Malformed JWT (missing second dot)");
         return -1;
     }
     *signature_b64 = '\0';
@@ -1117,7 +929,7 @@ static int jwt_decode_auth_request_with_secret(const char *token,
                                                     provided_signature, sizeof(provided_signature));
 
     if (provided_sig_len != HMAC_SHA256_LENGTH) {
-        log_error("Invalid JWT signature length: %d", provided_sig_len);
+        log_debug("Invalid JWT signature length: %d", provided_sig_len);
         return -1;
     }
 
@@ -1183,7 +995,7 @@ static int jwt_decode_auth_request_with_secret(const char *token,
     /* Check expiration */
     time_t now = time(NULL);
     if (now >= out_claims->exp + jwt_clock_skew_seconds) {
-        log_error("Auth request JWT expired (exp=%ld, now=%ld)",
+        log_info("Auth request JWT expired (exp=%ld, now=%ld)",
                  (long)out_claims->exp, (long)now);
         return -1;
     }

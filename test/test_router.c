@@ -150,12 +150,29 @@ void test_json_body_utf8_check(Router *router) {
     printf("✓ raw UTF-8 reaches the handler: %d\n", resp->status_code);
     http_response_free(resp);
 
-    resp = request(router,
-        "POST /revoke HTTP/1.0\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\n"
-        "token=a\xff");
-    assert(resp && resp->status_code == 200);
-    printf("✓ form-encoded body is not UTF-8-checked: %d\n", resp->status_code);
+    /* A form body is checked as it decodes, so JSON's rule goes for it too */
+    static const struct { const char *body; int status; } forms[] = {
+        { "token=a\xff", 400 },
+        { "token=a%FF", 400 },
+        { "token=caf%C3%A9", 200 },
+    };
+    for (size_t i = 0; i < sizeof(forms) / sizeof(forms[0]); i++) {
+        char raw[256];
+        snprintf(raw, sizeof(raw), "POST /revoke HTTP/1.0\r\n"
+                 "Content-Type: application/x-www-form-urlencoded\r\n\r\n%s", forms[i].body);
+        resp = request(router, raw);
+        assert(resp && resp->status_code == forms[i].status);
+        http_response_free(resp);
+    }
+    printf("✓ a form body with ill-formed text is refused, and well-formed text passes\n");
+
+    resp = request(router, "GET /health?x=%FF HTTP/1.0\r\n\r\n");
+    assert(resp && resp->status_code == 400);
     http_response_free(resp);
+    resp = request(router, "GET /health?x=caf%C3%A9 HTTP/1.0\r\n\r\n");
+    assert(resp && resp->status_code == 200);
+    http_response_free(resp);
+    printf("✓ so is a query string\n");
 }
 
 /*
@@ -299,11 +316,40 @@ void test_cors_boot_validation(void) {
 
 
 /* ============================================================================
+ * 405
+ * ============================================================================ */
+
+/*
+ * A routed path asked with a method it isn't routed for answers 405, with
+ * Allow naming the methods it is (RFC 9110 15.5.6), not 404, which says the
+ * path isn't there. GET brings HEAD, which the router serves from the GET
+ * route; a path without GET refuses HEAD too.
+ */
+void test_method_not_allowed(Router *router) {
+    printf("\n=== Test: 405 for a routed path's other methods ===\n");
+
+    static const struct { const char *raw, *allow; } cases[] = {
+        { "POST /health HTTP/1.0\r\n\r\n", "GET, HEAD" },
+        { "DELETE /health HTTP/1.0\r\n\r\n", "GET, HEAD" },
+        { "GET /revoke HTTP/1.0\r\n\r\n", "POST" },
+        { "HEAD /revoke HTTP/1.0\r\n\r\n", "POST" },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        HttpResponse *resp = request(router, cases[i].raw);
+        assert(resp && resp->status_code == 405);
+        const char *allow = header_value(resp, "Allow");
+        assert(allow && strcmp(allow, cases[i].allow) == 0);
+        http_response_free(resp);
+    }
+    printf("✓ a routed path's other methods answer 405 with Allow, and GET brings HEAD\n");
+}
+
+/* ============================================================================
  * HEAD
  * ============================================================================ */
 
 void test_head_requests(Router *router) {
-    printf("\n=== Test: HEAD falls back to the GET route ===\n");
+    printf("\n=== Test: HEAD is served by the GET route ===\n");
 
     HttpResponse *get = request(router, "GET /health HTTP/1.0\r\n\r\n");
     assert(get);
@@ -353,9 +399,9 @@ void test_head_requests(Router *router) {
     printf("✓ HEAD on an unrouted path is 404 with no body\n");
 
     /*
-     * HEAD is handled after dispatch_route and before the CORS attachment,
-     * precisely so that a HEAD on a public endpoint keeps its CORS header.
-     * Handling it as an early return, the way OPTIONS is, would silently drop it.
+     * HEAD goes through dispatch and on to the CORS attachment, precisely so
+     * that a HEAD on a public endpoint keeps its CORS header. Handling it as an
+     * early return, the way OPTIONS is, would silently drop it.
      */
     head = request(router, "HEAD /userinfo HTTP/1.0\r\n\r\n");
     assert(head);
@@ -422,6 +468,7 @@ int main(void) {
     /* Run tests */
     test_exact_match(router);
     test_404(router);
+    test_method_not_allowed(router);
     test_json_body_escape_check(router);
     test_json_body_utf8_check(router);
     test_cors_set_is_pinned();

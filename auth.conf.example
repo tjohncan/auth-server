@@ -9,7 +9,8 @@ log_level = info
 
 # Public identity of this server — used to build URLs (JWT `iss` claim, email links,
 # TOTP issuer). localhost means http://localhost:<server_port>, reached directly; any
-# other name means https://<name>, through a TLS proxy on the default port.
+# other name means https://<name>, through a TLS proxy on the default port. Empty, here
+# or in AUTH_SERVER_HOST, refuses the start.
 # This is NOT a bind address: the server always listens on all interfaces, so that
 # an edge proxy or load balancer on another host can reach it. Firewall the port;
 # do not rely on this setting to restrict access.
@@ -49,7 +50,9 @@ admin_socket_mode = 0600
 # Database — "sqlite" or "postgresql"
 db_type = sqlite
 
-# SQLite
+# SQLite: the database file, relative to the server's working directory or absolute.
+# Empty refuses to start, since SQLite would take it for a temporary database, which
+# keeps nothing.
 db_path = ./data/auth.db
 
 # PostgreSQL (used when db_type = postgresql)
@@ -60,12 +63,20 @@ db_path = ./data/auth.db
 # db_password = CHANGE_ME
 # Schema owner role for SET ROLE during first-run initialization
 # If not set, falls back to db_user (SET ROLE becomes a no-op)
+# Set even while the rest of this block is commented: it's the owner role
+# sql/postgresql/setup_reference.sql makes, so a deployment set up from that file
+# gets its schema owned as intended without touching this line. SQLite ignores it.
 db_owner_role = auth_dbo
 
+# The schema files, relative to the server's working directory: an absolute path, or
+# one with "..", refuses to start.
 schema_dir = ./sql
 
 # Enable history tables for auditing UPDATE/DELETE operations
 # History tables track changes to tables with 'pin' primary keys in lookup/security schemas
+# On here: an audit trail of every change is worth keeping from the first start, and the
+# cleaner keeps it retention_history_days (below). The test suites run with this file's
+# value too, since CI copies it.
 # Turning this off doesn't remove history already made, nor stop its triggers writing: with
 # every instance stopped, run ./auth-server --drophistory (sql/README.md).
 enable_history_tables = true
@@ -104,13 +115,17 @@ machine_secret_hash_min_iterations = 777
 machine_secret_hash_max_iterations = 777
 
 # Password policy
-# Minimum password length (default 1, minimum 1)
+# Minimum password length (default 1, minimum 1). Over 43 refuses to start: a generated
+# key secret is 43 characters, and the same minimum applies to it.
 # password_min_length = 8
 
 # Refuse to start on the defaults fit only for trying the server out: encryption_key
 # left at customize_me, which anyone can read, or password_min_length under 8 (NIST's
 # minimum). Set it in production. Off, the server starts on them, warning about the key.
+# A value other than true/false or 1/0, here or in AUTH_STRICT, refuses the start too.
 # strict = true
+# Optional: Specify custom environment variable name for strict
+# strict_env = MY_STRICT
 
 # Patterns a value must match when it's created or set (POSIX extended, matched
 # against the whole value). They never apply to what's already stored, so an

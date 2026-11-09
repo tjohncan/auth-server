@@ -35,13 +35,20 @@ int mfa_method_create(db_handle_t *db,
                       const char *secret,
                       unsigned char *out_method_id);
 
-/* Confirm MFA method (mark is_confirmed = 1, set confirmed_at)
- * Used by both TOTP and SMS flows
+/* Confirm MFA method (mark is_confirmed = 1, set confirmed_at), and mark the
+ * user as having MFA. Used by both TOTP and SMS flows.
+ *
+ * recovery_codes (NULL for none, else code_count of them): the codes a first
+ * confirmed method comes with, stored as the user's active set in the same
+ * transaction, so a failure leaves neither the method confirmed nor the codes.
+ * They're hashed before the transaction opens, as recovery_code_set_create's are.
+ *
  * Returns: 0 on success, -1 on error */
-int mfa_method_confirm(db_handle_t *db, const unsigned char *method_id);
+int mfa_method_confirm(db_handle_t *db, const unsigned char *method_id,
+                       const char **recovery_codes, int code_count);
 
 /* Get single method by ID
- * Returns: 0 on success, -1 on error */
+ * Returns: 0 on success, 1 if there's no such method, -1 on error */
 int mfa_method_get_by_id(db_handle_t *db,
                          const unsigned char *method_id,
                          mfa_method_t *out_method);
@@ -98,11 +105,14 @@ int recovery_code_set_get_active(db_handle_t *db,
                                   long long user_account_pin,
                                   recovery_code_set_t *out_set);
 
-/* Verify recovery code (marks as used if valid). Checking and marking are one
- * statement, so a code submitted twice at once is accepted once.
+/* Verify recovery code. A valid one is marked used and the session's MFA marked
+ * complete in one transaction, so a failure leaves the code unused. Checking and
+ * marking the code are one statement, so a code submitted twice at once is
+ * accepted once.
  * Returns: 1 if valid, 0 if invalid, -1 on error */
 int recovery_code_verify(db_handle_t *db,
                          long long user_account_pin,
+                         const unsigned char *session_id,
                          const char *code);
 
 /* Revoke recovery code set (set is_active = 0)
@@ -110,12 +120,20 @@ int recovery_code_verify(db_handle_t *db,
 int recovery_code_set_revoke(db_handle_t *db,
                               const unsigned char *set_id);
 
-/* Get masked recovery codes (last 4 chars visible)
- * Returns: 0 on success, -1 on error
- * Caller must free *out_masked_codes and each string with free() */
+/* A recovery code as it can be shown again: its last four characters, and
+ * whether it's been used. The whole code is shown once, when it's made; only
+ * its hash is kept. */
+typedef struct {
+    char last4[5];
+    int is_used;
+} recovery_code_masked_t;
+
+/* The account's active recovery codes, masked, in the order they were made.
+ * An account with no active set has none.
+ * Returns: 0 on success, -1 on error. The caller frees *out_codes. */
 int recovery_code_get_masked_list(db_handle_t *db,
                                    long long user_account_pin,
-                                   char ***out_masked_codes,
+                                   recovery_code_masked_t **out_codes,
                                    int *out_count);
 
 /* ============================================================================

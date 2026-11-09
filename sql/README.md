@@ -3,8 +3,9 @@
 OAuth2 authentication server with enterprise SSO, MFA, and passwordless login support.
 
 **Schema Files:**
-- `sqlite/schema.sql` - SQLite 3.45+ implementation
-- `postgresql/schema.sql` - PostgreSQL 14+ implementation
+- `sqlite/schema.sql` - SQLite implementation, for the releases `vendor/verify-sqlite.sh` approves
+  (SQLite is compiled into the server)
+- `postgresql/schema.sql` - PostgreSQL 15+ implementation
 - `postgresql/setup_reference.sql` - PostgreSQL prerequisite setup and optional hardening
 
 ## Applying Schema Changes to an Existing Database
@@ -91,7 +92,8 @@ Lookup tables for valid values.
 **Tables:**
 - `grant_type` - OAuth2 grant type descriptions
 - `client_type` - Public vs confidential client types
-- `code_challenge_method` - PKCE methods (plain, S256)
+- `code_challenge_method` - PKCE methods: the table lists plain and S256, and the server
+  accepts only S256
 - `mfa_method` - Available MFA types (TOTP; SMS reserved for future use)
 
 ### Keys Domain

@@ -34,7 +34,8 @@
  *   out_user_pin        - Output: User PIN (for response/logging)
  *
  * Returns: 0 on success (credentials valid, session created),
- *          -1 on error or invalid credentials
+ *          -1 if the credentials are invalid,
+ *          -2 if the server failed, so nothing is known to be wrong with them
  */
 int session_authenticate_and_create(db_handle_t *db,
                                      const char *username,

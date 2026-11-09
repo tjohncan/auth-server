@@ -2,7 +2,8 @@
 -- Auth System - Core Schema DDL (SQLite)
 -- ============================================================================
 -- This file contains table definitions for the OAuth2 authentication system.
--- Designed for SQLite 3.45+ (latest amalgamation)
+-- Designed for the SQLite releases vendor/verify-sqlite.sh approves, which the
+-- server compiles in
 --
 -- Companion files:
 --   - ../postgresql/schema.sql (PostgreSQL version of this schema)
@@ -822,5 +823,12 @@ create index idx_access_token_client_resource_server
 
 create index idx_invitation_token_user
   on invitation_token(user_account_pin);
+
+-- A set's codes, found by their set: listing them, counting the unused ones,
+-- spending one, and the cleaner's check that a revoked set is empty. A foreign
+-- key isn't indexed by itself.
+
+create index idx_recovery_code_set
+  on recovery_code(recovery_code_set_pin);
 
 commit;

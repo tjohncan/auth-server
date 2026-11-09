@@ -153,6 +153,25 @@ static int field(const Reply *r, const char *key, char *out, size_t out_size) {
     return 0;
 }
 
+/* The strings of a JSON array of plain strings, as the server writes one (no spaces,
+   no escapes), at most max of them: the count, or -1 if there's no such array */
+static int string_array(const char *body, const char *key, char out[][32], int max) {
+    char start[64];
+    snprintf(start, sizeof(start), "\"%s\":[", key);
+    const char *p = strstr(body, start);
+    if (!p) return -1;
+    p += strlen(start);
+    int n = 0;
+    while (*p == '"') {
+        const char *end = strchr(p + 1, '"');
+        if (!end || n == max || end - p - 1 >= 32) return -1;
+        snprintf(out[n++], 32, "%.*s", (int)(end - p - 1), p + 1);
+        p = end + 1;
+        if (*p == ',') p++;
+    }
+    return *p == ']' ? n : -1;
+}
+
 /* First column of a one-row query, as text */
 static int query_text(const char *sql, char *out, size_t out_size) {
     db_stmt_t *stmt = NULL;
@@ -274,6 +293,46 @@ static int setup(void) {
 }
 
 /* ============================================================================
+ * Logout
+ * ============================================================================ */
+
+/*
+ * Logging out closes the session, so its cookie is refused even if the browser
+ * kept it. Logging out again with that cookie also answers 200, since nothing
+ * is left open, and both answers clear the cookie.
+ */
+static int test_logout(void) {
+    printf("\n=== Logout ===\n");
+
+    char cookie[256];
+    Reply r = admin_port("POST", "/api/admin/users", NULL,
+                        "{\"username\":\"leaving\",\"password\":\"leaving password\"}");
+    int status = r.status;
+    reply_free(&r);
+    if (status != 200 || login("leaving", "leaving password", cookie, sizeof(cookie)) != 0) {
+        FAIL("could not create and sign in the user");
+    }
+
+    for (int i = 1; i <= 2; i++) {
+        r = request("POST", "/logout", cookie, NULL, NULL, "");
+        status = r.status;
+        int cleared = r.cookie && strcmp(r.cookie, SESSION_COOKIE_NAME "=") == 0;
+        reply_free(&r);
+        if (status != 200 || !cleared) {
+            FAIL("logout %d answered %d, %s", i, status,
+                 cleared ? "clearing the cookie" : "leaving the cookie");
+        }
+    }
+    r = request("GET", "/api/user/profile", cookie, NULL, NULL, NULL);
+    status = r.status;
+    reply_free(&r);
+    if (status != 401) FAIL("the closed session's cookie got %d", status);
+    printf("✓ logout clears the cookie, a second time too, and the closed session is refused\n");
+
+    return 0;
+}
+
+/* ============================================================================
  * Authorization code with PKCE, and refresh-token rotation
  * ============================================================================ */
 
@@ -351,9 +410,9 @@ static int test_authorization_code_flow(void) {
     char code[2048], access[2048], rt[256], rt2[256];
 
     /* 0. A challenge that can't be an S256 one is refused, no code made: a byte
-          short, and bytes that aren't UTF-8 (which PostgreSQL won't store) */
+          short, and characters a challenge doesn't have */
     static const char *not_s256[] = {
-        "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-c", "%FF%FE" };
+        "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-c", "%C3%A9" };
     for (size_t i = 0; i < sizeof(not_s256) / sizeof(not_s256[0]); i++) {
         Reply r = authorize_with(not_s256[i]);
         int refused = r.status == 302 && r.location &&
@@ -362,6 +421,42 @@ static int test_authorization_code_flow(void) {
         if (!refused) FAIL("/authorize took the challenge '%s'", not_s256[i]);
     }
     printf("✓ a challenge that can't be S256's is refused before a code is made\n");
+
+    /* Parameters that don't decode to text never reach a handler, which on PostgreSQL
+       would hand them to the database and answer 500 */
+    Reply bad = authorize_with("%FF%FE");
+    int status = bad.status;
+    reply_free(&bad);
+    if (status != 400) FAIL("/authorize with %%FF%%FE in a parameter answered %d, not 400", status);
+    bad = post_form("/token", "grant_type=refresh_token&refresh_token=x&client_id=x&resource=%FF");
+    status = bad.status;
+    int said = strstr(bad.body, "not valid UTF-8 text") != NULL;
+    reply_free(&bad);
+    if (status != 400 || !said) FAIL("/token with resource=%%FF answered %d", status);
+    printf("✓ a parameter that doesn't decode to text is refused, on a query or a form\n");
+
+    /* The one-time link forms read a body as a form, so another type would pass it by that
+       check, and an invitation would take a password no sign-in can send */
+    static const char *const link_forms[] = {
+        "/accept-invitation",
+#ifdef EMAIL_SUPPORT
+        "/verify-email", "/reset-password", "/passwordless-login",
+#endif
+    };
+    for (size_t i = 0; i < sizeof(link_forms) / sizeof(link_forms[0]); i++) {
+        static const char *const types[] = { "text/plain", NULL };
+        for (size_t t = 0; t < 2; t++) {
+            bad = request("POST", link_forms[i], NULL, NULL, types[t],
+                          "token=nosuch&password=%FF%FE%FDlongenoughpassword");
+            status = bad.status;
+            reply_free(&bad);
+            if (status != 415) {
+                FAIL("%s sent as %s answered %d, not 415", link_forms[i],
+                     types[t] ? types[t] : "no type", status);
+            }
+        }
+    }
+    printf("✓ the one-time link forms take form-encoded bodies alone\n");
 
     /* 1. The wrong verifier is refused and the right one exchanges, so the
           refusal was PKCE's (it's checked before the code is spent) */
@@ -537,7 +632,8 @@ static int test_authorization_code_flow(void) {
 
 /*
  * A redirect URI never has a fragment, which the code would land inside. Plain
- * http is the client deployer's call, to any host.
+ * http is the client deployer's call, to any host. Adding one the client has
+ * already is a success that changes nothing.
  */
 static int test_redirect_uris(void) {
     printf("\n=== Redirect URIs ===\n");
@@ -546,6 +642,7 @@ static int test_redirect_uris(void) {
         { "https://app.example.com/callback", 200 },
         { "http://localhost:3000/callback", 200 },
         { "http://app.example.com/callback", 200 },
+        { "HTTPS://app.example.com/upper", 200 },
         { "https://app.example.com/cb#x", 400 },
         { "http://localhost/cb#x", 400 },
     };
@@ -561,6 +658,27 @@ static int test_redirect_uris(void) {
         }
     }
     printf("✓ a redirect URI with a fragment is refused\n");
+
+    /* The first one again, with a note: 200 saying nothing changed, and still one
+       of it, its note as it was */
+    char json[256], target[128];
+    snprintf(json, sizeof(json), "{\"client_id\":\"%s\",\"redirect_uri\":\"%s\","
+             "\"note\":\"a second note\"}", g_ui_client, cases[0].uri);
+    Reply r = post_json("/api/admin/client-redirect-uris", g_admin_cookie, json);
+    int status = r.status;
+    int said = status == 200 && strstr(r.body, "already registered") != NULL;
+    reply_free(&r);
+    snprintf(target, sizeof(target), "/api/admin/client-redirect-uris?client_id=%s&limit=100",
+             g_ui_client);
+    r = request("GET", target, g_admin_cookie, NULL, NULL, NULL);
+    const char *first = r.status == 200 ? strstr(r.body, cases[0].uri) : NULL;
+    int kept = first && !strstr(first + 1, cases[0].uri) && !strstr(r.body, "a second note");
+    reply_free(&r);
+    if (!said || !kept) {
+        FAIL("adding a redirect URI the client has answered %d%s", status,
+             said ? ", and changed what's stored" : ", not 200 saying nothing changed");
+    }
+    printf("✓ adding a redirect URI the client has answers 200, and changes nothing\n");
 
     return 0;
 }
@@ -622,6 +740,20 @@ static int admin_create(const char *path, const char *json, const char *key,
     return ok ? 0 : -1;
 }
 
+/* A table the server can't find, and its return: a failed read, where a test
+   needs one. One at a time. On one connection, SQLite fails at the query's prepare
+   and PostgreSQL at its step. legacy_alter_table: SQLite otherwise checks the rename
+   against every view and trigger, and renaming a table some of them name fails. */
+#ifdef DB_BACKEND_POSTGRESQL
+#define HIDE_TABLE(schema, table) "ALTER TABLE " schema table " RENAME TO zz_hidden"
+#define SHOW_TABLE(schema, table) "ALTER TABLE " schema "zz_hidden RENAME TO " table
+#else
+#define HIDE_TABLE(schema, table) \
+    "PRAGMA legacy_alter_table = ON; ALTER TABLE " schema table " RENAME TO zz_hidden"
+#define SHOW_TABLE(schema, table) "ALTER TABLE " schema "zz_hidden RENAME TO " table
+#endif
+
+/* 1 active, 0 inactive, -1 no answer about the token */
 static int introspect_active(const char *token, const char *rs, const char *key,
                              const char *secret) {
     char form[4096];
@@ -694,6 +826,21 @@ static int test_client_credentials(void) {
     if (introspect_active(token, rs_b, kb, sb) != 0) FAIL("RS B can see RS A's token");
     printf("✓ a client_credentials token introspects active for its server only\n");
 
+    /* A check that fails says nothing about the token: no answer, not "inactive" */
+    db_handle_t *conn = db_pool_get_connection();
+    if (db_execute_direct(conn, HIDE_TABLE(SESSION_, "access_token")) != 0) {
+        FAIL("could not hide the access tokens");
+    }
+    int seen = introspect_active(token, rs_a, ka, sa);
+    if (db_execute_direct(conn, SHOW_TABLE(SESSION_, "access_token")) != 0) {
+        FAIL("could not show the access tokens");
+    }
+    if (seen != -1) FAIL("a live token, the check failing, introspected as %d", seen);
+    if (introspect_active(token, rs_a, ka, sa) != 1) {
+        FAIL("the same token, once the database worked, isn't active");
+    }
+    printf("✓ an introspection the database fails gives no answer about the token\n");
+
     /* 2. Revoked by its client: inactive */
     snprintf(form, sizeof(form), "token=%s&client_id=%s&client_key_id=%s&client_secret=%s",
              token, svc, ck, cs);
@@ -758,6 +905,272 @@ static int test_client_credentials(void) {
     return 0;
 }
 
+/*
+ * A field sent as another kind of value ("3600" in quotes, 12345 for a name) is
+ * refused, naming the field: a client's on create and on update, and the admin
+ * listener's alike. Taken as left out, it would give the client no key-age
+ * limit, or no MFA, or keep its old name, and answer 200 for whatever else the
+ * body changed. A flag sent as null counts as left out: read as false, an update
+ * that doesn't mean to touch MFA would switch it off.
+ */
+static int test_field_kinds(void) {
+    printf("\n=== A field of the wrong kind ===\n");
+
+    /* 1. Create: refused, and nothing made, so the code name is still free */
+    const char *sent[2][2] = {
+        { "secret_rotation_seconds", "\"3600\"" },
+        { "require_mfa", "\"true\"" },
+    };
+    char json[512], id[33];
+    for (size_t i = 0; i < 2; i++) {
+        snprintf(json, sizeof(json), "{\"organization_id\":\"%s\",\"code_name\":\"kinds\","
+                 "\"display_name\":\"Kinds\",\"client_type\":\"confidential\","
+                 "\"grant_type\":\"authorization_code\",\"access_token_ttl_seconds\":600,"
+                 "\"%s\":%s}", g_org_id, sent[i][0], sent[i][1]);
+        Reply r = post_json("/api/admin/clients", g_admin_cookie, json);
+        int refused = r.status == 400 && strstr(r.body, sent[i][0]);
+        if (!refused) FAIL("creating a client with %s %s answered %d: %s",
+                           sent[i][0], sent[i][1], r.status, r.body);
+        reply_free(&r);
+    }
+    snprintf(json, sizeof(json), "{\"organization_id\":\"%s\",\"code_name\":\"kinds\","
+             "\"display_name\":\"Kinds\",\"client_type\":\"confidential\","
+             "\"grant_type\":\"authorization_code\",\"access_token_ttl_seconds\":600,"
+             "\"secret_rotation_seconds\":3600,\"require_mfa\":true}", g_org_id);
+    if (admin_create("/api/admin/clients", json, "id", id, sizeof(id)) != 0) return 1;
+
+    /* 2. Update: refused beside a good field, and nothing changes */
+    char target[128], name[64];
+    snprintf(target, sizeof(target), "/api/admin/clients?id=%s", id);
+    Reply r = request("PUT", target, g_admin_cookie, NULL, "application/json",
+                      "{\"display_name\":\"Renamed\",\"secret_rotation_seconds\":\"60\"}");
+    int refused = r.status == 400 && strstr(r.body, "secret_rotation_seconds");
+    if (!refused) FAIL("an update with a key age in quotes answered %d: %s", r.status, r.body);
+    reply_free(&r);
+    r = request("GET", target, g_admin_cookie, NULL, NULL, NULL);
+    int age = 0;
+    int kept = r.status == 200 && json_get_int(r.body, "secret_rotation_seconds", &age) == 0 &&
+               age == 3600 && field(&r, "display_name", name, sizeof(name)) == 0 &&
+               strcmp(name, "Kinds") == 0;
+    reply_free(&r);
+    if (!kept) FAIL("a refused update changed the client (key age %d)", age);
+
+    /* 3. A flag sent as null beside a good field: the flag is left as it is */
+    r = request("PUT", target, g_admin_cookie, NULL, "application/json",
+                "{\"display_name\":\"Renamed\",\"require_mfa\":null}");
+    int applied = r.status == 200;
+    reply_free(&r);
+    if (!applied) FAIL("an update with require_mfa null beside a display name was refused");
+    r = request("GET", target, g_admin_cookie, NULL, NULL, NULL);
+    int mfa = 0;
+    int left = r.status == 200 && json_get_bool(r.body, "require_mfa", &mfa) == 0 && mfa == 1 &&
+               field(&r, "display_name", name, sizeof(name)) == 0 && strcmp(name, "Renamed") == 0;
+    reply_free(&r);
+    if (!left) FAIL("require_mfa null turned MFA off, or the display name wasn't applied");
+
+    /* 4. Text of another kind beside a good field: refused, and nothing changes */
+    r = request("PUT", target, g_admin_cookie, NULL, "application/json",
+                "{\"display_name\":12345,\"require_mfa\":false}");
+    refused = r.status == 400 && strstr(r.body, "display_name");
+    reply_free(&r);
+    if (!refused) FAIL("an update with display_name 12345 wasn't refused naming it");
+    r = request("GET", target, g_admin_cookie, NULL, NULL, NULL);
+    mfa = 0;
+    kept = r.status == 200 && json_get_bool(r.body, "require_mfa", &mfa) == 0 && mfa == 1 &&
+           field(&r, "display_name", name, sizeof(name)) == 0 && strcmp(name, "Renamed") == 0;
+    reply_free(&r);
+    if (!kept) FAIL("a refused update with display_name 12345 changed the client");
+
+    /* 5. The admin listener's bodies too: an organization key's secret as a number,
+          which a generated secret would otherwise stand in for */
+    r = admin_port("POST", "/api/admin/organization-keys", NULL,
+                   "{\"organization_code_name\":\"system\",\"secret\":12345678}");
+    refused = r.status == 400 && strstr(r.body, "secret must be text");
+    reply_free(&r);
+    if (!refused) FAIL("an organization key with a numeric secret wasn't refused naming it");
+
+    printf("✓ a field of the wrong kind is refused, and null leaves one as it is\n");
+    return 0;
+}
+
+/* ============================================================================
+ * One active holder per address and code name
+ * ============================================================================ */
+
+/* PUT a JSON body as the admin: whether it answered want, naming what's given */
+static int put_answers(const char *target, const char *json, int want, const char *naming) {
+    Reply r = request("PUT", target, g_admin_cookie, NULL, "application/json", json);
+    int ok = r.status == want && (!naming || strstr(r.body, naming));
+    if (!ok) printf("  PUT %s %s answered %d: %s\n", target, json, r.status, r.body);
+    reply_free(&r);
+    return ok;
+}
+
+/* A POST with the given session answers want, naming the text if given */
+static int post_answers(const char *path, const char *cookie, const char *json, int want,
+                        const char *naming) {
+    Reply r = post_json(path, cookie, json);
+    int ok = r.status == want && (!naming || strstr(r.body, naming));
+    if (!ok) printf("  POST %s %s answered %d: %s\n", path, json, r.status, r.body);
+    reply_free(&r);
+    return ok;
+}
+
+/* A server's or client's is_active as GET answers it, with a text field of it
+   when key is given; -1 if either can't be read */
+static int active_with(const char *target, const char *key, char *out, size_t size) {
+    Reply r = request("GET", target, g_admin_cookie, NULL, NULL, NULL);
+    int active = -1;
+    if (r.status != 200 || json_get_bool(r.body, "is_active", &active) != 0 ||
+        (key && field(&r, key, out, size) != 0)) {
+        active = -1;
+    }
+    reply_free(&r);
+    return active;
+}
+
+/*
+ * In an organization, one active resource server has a given address and a given
+ * code name, and one active client a given code name. An update that would break
+ * that answers 409 naming which, and changes nothing. A deactivated server keeps
+ * an address an active one has taken, and its edits still save, though the
+ * console sends the address with every edit. Creating one that would break it
+ * answers 409 naming which too, and creating one in an organization that isn't
+ * there, or isn't the caller's, answers 404.
+ */
+static int test_active_clashes(void) {
+    printf("\n=== One active holder per address and code name ===\n");
+
+    char json[512], a[33], b[33], c[33], cl[33], twin[33], text[64];
+    char ta[128], tb[128], tc[128], tcl[128];
+
+    /* A server, deactivated, and another made at its address */
+    snprintf(json, sizeof(json), "{\"organization_id\":\"%s\",\"code_name\":\"clash_a\","
+             "\"display_name\":\"A\",\"address\":\"https://clash.example\"}", g_org_id);
+    if (admin_create("/api/admin/resource-servers", json, "id", a, sizeof(a)) != 0) return 1;
+    snprintf(ta, sizeof(ta), "/api/admin/resource-servers?id=%s", a);
+    if (!put_answers(ta, "{\"is_active\":false}", 200, NULL)) return 1;
+    snprintf(json, sizeof(json), "{\"organization_id\":\"%s\",\"code_name\":\"clash_b\","
+             "\"display_name\":\"B\",\"address\":\"https://clash.example\"}", g_org_id);
+    if (admin_create("/api/admin/resource-servers", json, "id", b, sizeof(b)) != 0) return 1;
+    snprintf(tb, sizeof(tb), "/api/admin/resource-servers?id=%s", b);
+
+    /* 1. The deactivated one's edit, sent as the console sends it: saved */
+    if (!put_answers(ta, "{\"display_name\":\"A\",\"address\":\"https://clash.example\","
+                     "\"note\":\"kept\",\"is_active\":false,\"allow_user_provisioning\":false}",
+                     200, NULL) ||
+        active_with(ta, "note", text, sizeof(text)) != 0 || strcmp(text, "kept") != 0) {
+        FAIL("an edit to a deactivated server whose address an active one has wasn't saved");
+    }
+
+    /* 2. Reactivating it at that address: refused, and it stays deactivated */
+    if (!put_answers(ta, "{\"is_active\":true}", 409, "address") ||
+        active_with(ta, NULL, NULL, 0) != 0) {
+        FAIL("reactivating a server at a taken address wasn't refused, or changed it");
+    }
+
+    /* 3. Reactivating it at a free address: done */
+    if (!put_answers(ta, "{\"is_active\":true,\"address\":\"https://clash-a.example\"}",
+                     200, NULL) ||
+        active_with(ta, "address", text, sizeof(text)) != 1 ||
+        strcmp(text, "https://clash-a.example") != 0) {
+        FAIL("reactivating a server at a free address didn't take");
+    }
+
+    /* 4. An active server moving to a taken address: refused, and its address
+          kept. An update that changes nothing is a success. */
+    if (!put_answers(tb, "{\"address\":\"https://clash-a.example\"}", 409, "address") ||
+        active_with(tb, "address", text, sizeof(text)) != 1 ||
+        strcmp(text, "https://clash.example") != 0) {
+        FAIL("moving an active server to a taken address wasn't refused, or changed it");
+    }
+    if (!put_answers(tb, "{\"display_name\":\"B\"}", 200, NULL)) {
+        FAIL("an update that changes nothing wasn't a success");
+    }
+
+    /* 5. A server reactivated while another active one has its code name */
+    snprintf(json, sizeof(json), "{\"organization_id\":\"%s\",\"code_name\":\"clash_c\","
+             "\"display_name\":\"C\",\"address\":\"https://c1.example\"}", g_org_id);
+    if (admin_create("/api/admin/resource-servers", json, "id", c, sizeof(c)) != 0) return 1;
+    snprintf(tc, sizeof(tc), "/api/admin/resource-servers?id=%s", c);
+    if (!put_answers(tc, "{\"is_active\":false}", 200, NULL)) return 1;
+    snprintf(json, sizeof(json), "{\"organization_id\":\"%s\",\"code_name\":\"clash_c\","
+             "\"display_name\":\"C\",\"address\":\"https://c2.example\"}", g_org_id);
+    if (admin_create("/api/admin/resource-servers", json, "id", twin, sizeof(twin)) != 0) return 1;
+    if (!put_answers(tc, "{\"is_active\":true}", 409, "code name") ||
+        active_with(tc, NULL, NULL, 0) != 0) {
+        FAIL("reactivating a server whose code name is taken wasn't refused, or changed it");
+    }
+
+    /* 6. The same for a client */
+    snprintf(json, sizeof(json), "{\"organization_id\":\"%s\",\"code_name\":\"clash_d\","
+             "\"display_name\":\"D\",\"client_type\":\"public\","
+             "\"grant_type\":\"authorization_code\",\"access_token_ttl_seconds\":600}", g_org_id);
+    if (admin_create("/api/admin/clients", json, "id", cl, sizeof(cl)) != 0) return 1;
+    snprintf(tcl, sizeof(tcl), "/api/admin/clients?id=%s", cl);
+    if (!put_answers(tcl, "{\"is_active\":false}", 200, NULL)) return 1;
+    if (admin_create("/api/admin/clients", json, "id", twin, sizeof(twin)) != 0) return 1;
+    if (!put_answers(tcl, "{\"is_active\":true}", 409, "code name") ||
+        active_with(tcl, NULL, NULL, 0) != 0) {
+        FAIL("reactivating a client whose code name is taken wasn't refused, or changed it");
+    }
+
+    /* 7. Creating one that would break the rule, or in an organization that isn't
+          there or isn't the caller's: refused, naming why */
+    const char *nowhere = "0123456789abcdef0123456789abcdef";
+    char outsider[256];
+    Reply u = admin_port("POST", "/api/admin/users", NULL,
+                         "{\"username\":\"outsider\",\"password\":\"outsider password\"}");
+    int made_user = u.status == 200;
+    reply_free(&u);
+    if (!made_user || login("outsider", "outsider password", outsider, sizeof(outsider)) != 0) {
+        FAIL("could not create and sign in a user who administers nothing");
+    }
+    const struct { const char *org, *code_name, *address; int as_outsider, want;
+                   const char *naming; } servers[] = {
+        { g_org_id, "clash_b", "https://free.example", 0, 409, "code name" },
+        { g_org_id, "clash_free", "https://clash.example", 0, 409, "address" },
+        { nowhere, "clash_free", "https://free.example", 0, 404, NULL },
+        { g_org_id, "clash_free", "https://free.example", 1, 404, NULL },
+    };
+    for (size_t i = 0; i < sizeof(servers) / sizeof(servers[0]); i++) {
+        snprintf(json, sizeof(json), "{\"organization_id\":\"%s\",\"code_name\":\"%s\","
+                 "\"display_name\":\"X\",\"address\":\"%s\"}", servers[i].org,
+                 servers[i].code_name, servers[i].address);
+        if (!post_answers("/api/admin/resource-servers",
+                          servers[i].as_outsider ? outsider : g_admin_cookie, json,
+                          servers[i].want, servers[i].naming)) {
+            FAIL("creating a resource server wasn't refused with %d%s%s", servers[i].want,
+                 servers[i].naming ? " naming its " : "",
+                 servers[i].naming ? servers[i].naming : "");
+        }
+    }
+    const struct { const char *org, *code_name; int as_outsider, want;
+                   const char *naming; } clients[] = {
+        { g_org_id, "clash_d", 0, 409, "code name" },
+        { nowhere, "clash_free", 0, 404, NULL },
+        { g_org_id, "clash_free", 1, 404, NULL },
+    };
+    for (size_t i = 0; i < sizeof(clients) / sizeof(clients[0]); i++) {
+        snprintf(json, sizeof(json), "{\"organization_id\":\"%s\",\"code_name\":\"%s\","
+                 "\"display_name\":\"X\",\"client_type\":\"public\","
+                 "\"grant_type\":\"authorization_code\",\"access_token_ttl_seconds\":600}",
+                 clients[i].org, clients[i].code_name);
+        if (!post_answers("/api/admin/clients",
+                          clients[i].as_outsider ? outsider : g_admin_cookie, json,
+                          clients[i].want, clients[i].naming)) {
+            FAIL("creating a client wasn't refused with %d%s%s", clients[i].want,
+                 clients[i].naming ? " naming its " : "",
+                 clients[i].naming ? clients[i].naming : "");
+        }
+    }
+
+    printf("✓ one active holder per address and code name, and a deactivated server's "
+           "edits save; a create that would clash answers 409 naming which, and one in an "
+           "organization not the caller's 404\n");
+    return 0;
+}
+
 /* ============================================================================
  * MFA gates
  * ============================================================================ */
@@ -769,8 +1182,8 @@ static int totp_now(const char *secret, char *code, size_t size) {
 /*
  * Once a user has a factor, managing factors takes that factor, whatever the
  * require preference says, so a password alone can't add, remove or replace
- * one. With require on, the user's own endpoints and the admin API refuse a
- * session that hasn't completed MFA.
+ * one, or list its recovery codes. With require on, the user's own endpoints
+ * and the admin API refuse a session that hasn't completed MFA.
  */
 static int test_mfa_gates(void) {
     printf("\n=== MFA gates ===\n");
@@ -802,28 +1215,34 @@ static int test_mfa_gates(void) {
     snprintf(json, sizeof(json), "{\"method_id\":\"%s\",\"code\":\"%s\"}", method, code);
     r = post_json("/api/user/mfa/totp/confirm", first, json);
     if (r.status != 200) FAIL("TOTP confirm answered %d", r.status);
+    /* The recovery codes a first method gives, for step 6 */
+    char codes[16][32];
+    int code_count = string_array(r.body, "recovery_codes", codes, 16);
     reply_free(&r);
+    if (code_count <= 0) FAIL("the first method's confirm gave no recovery codes");
 
     /* 1. Enrolled, require off, a password-only session: every factor-management
           endpoint wants the factor first */
     if (login("mfa-user", "mfa user password", second, sizeof(second)) != 0) FAIL("second sign-in");
     char target[128];
     snprintf(target, sizeof(target), "/api/user/mfa/methods?id=%s", method);
-    Reply gated[5] = {
+    Reply gated[6] = {
         post_json("/api/user/mfa/totp/setup", second, "{\"display_name\":\"other\"}"),
         post_json("/api/user/mfa/totp/confirm", second, json),
         request("DELETE", target, second, NULL, NULL, NULL),
         post_json("/api/user/mfa/recovery-codes/regenerate", second, "{}"),
+        request("GET", "/api/user/mfa/recovery-codes", second, NULL, NULL, NULL),
         post_json("/api/user/mfa/require", second, "{\"enabled\":true}"),
     };
-    const char *names[5] = { "setup", "confirm", "delete", "regenerate", "require" };
-    for (int i = 0; i < 5; i++) {
+    const char *names[6] = { "setup", "confirm", "delete", "regenerate", "recovery codes",
+                             "require" };
+    for (int i = 0; i < 6; i++) {
         int bad = gated[i].status != 403;
         if (bad) printf("✗ %s answered %d to a password-only session\n", names[i], gated[i].status);
         reply_free(&gated[i]);
         if (bad) return 1;
     }
-    printf("✓ the five factor-management endpoints refuse a password-only session\n");
+    printf("✓ the six factor-management endpoints refuse a password-only session\n");
 
     /* Their own profile and the admin API are another rule: those ask for the
        factor only once the user requires it */
@@ -913,6 +1332,66 @@ static int test_mfa_gates(void) {
     }
     printf("✓ a new password, however set, closes the session waiting on MFA; the signed-in "
            "one stays\n");
+
+    /* 5. A refused MFA request answers 404 or 409, not 500. Another user's method
+          answers as an unknown one does, so method ids can't be told apart. The
+          bootstrap admin, who has no MFA method, is the other user. */
+    static const char unknown_id[] = "0123456789abcdef0123456789abcdef";
+    char mine[96], unknown[96], unknown_target[96];
+    snprintf(mine, sizeof(mine), "{\"method_id\":\"%s\",\"code\":\"000000\"}", method);
+    snprintf(unknown, sizeof(unknown), "{\"method_id\":\"%s\",\"code\":\"000000\"}", unknown_id);
+    snprintf(unknown_target, sizeof(unknown_target), "/api/user/mfa/methods?id=%s", unknown_id);
+    static const char *const refusals[6] = {
+        "confirming another user's method", "confirming an unknown method",
+        "deleting another user's method", "deleting an unknown method",
+        "confirming a confirmed method, still there", "recovery codes without a confirmed method",
+    };
+    static const int want[6] = { 404, 404, 404, 404, 409, 409 };
+    int got[6];
+    r = post_json("/api/user/mfa/totp/confirm", g_admin_cookie, mine);
+    got[0] = r.status;
+    reply_free(&r);
+    r = post_json("/api/user/mfa/totp/confirm", second, unknown);
+    got[1] = r.status;
+    reply_free(&r);
+    r = request("DELETE", target, g_admin_cookie, NULL, NULL, NULL);
+    got[2] = r.status;
+    reply_free(&r);
+    r = request("DELETE", unknown_target, second, NULL, NULL, NULL);
+    got[3] = r.status;
+    reply_free(&r);
+    r = post_json("/api/user/mfa/totp/confirm", second, mine);
+    got[4] = r.status;
+    reply_free(&r);
+    r = post_json("/api/user/mfa/recovery-codes/regenerate", g_admin_cookie, "{}");
+    got[5] = r.status;
+    reply_free(&r);
+    for (int i = 0; i < 6; i++) {
+        if (got[i] != want[i]) FAIL("%s answered %d, not %d", refusals[i], got[i], want[i]);
+    }
+    printf("✓ a refused MFA request answers 404 or 409, and another user's method is unknown\n");
+
+    /* 6. The caller's own recovery codes, masked: the last four characters of
+          each code the first method gave, in order, none used, and nothing more.
+          The request names no account, so the admin, who has no codes, gets an
+          empty list rather than anyone else's. */
+    char expected[1024];
+    int at = snprintf(expected, sizeof(expected), "{\"recovery_codes\":[");
+    for (int i = 0; i < code_count; i++) {
+        at += snprintf(expected + at, sizeof(expected) - (size_t)at,
+                       "%s{\"last4\":\"%s\",\"used\":false}", i > 0 ? "," : "",
+                       codes[i] + strlen(codes[i]) - 4);
+    }
+    snprintf(expected + at, sizeof(expected) - (size_t)at, "]}");
+    r = request("GET", "/api/user/mfa/recovery-codes", second, NULL, NULL, NULL);
+    int own = r.status == 200 && strcmp(r.body, expected) == 0;
+    if (!own) printf("  listed %d: %s\n  wanted: %s\n", r.status, r.body, expected);
+    reply_free(&r);
+    r = request("GET", "/api/user/mfa/recovery-codes", g_admin_cookie, NULL, NULL, NULL);
+    int none = r.status == 200 && strcmp(r.body, "{\"recovery_codes\":[]}") == 0;
+    reply_free(&r);
+    if (!own || !none) FAIL("the masked recovery codes weren't the caller's own, or only theirs");
+    printf("✓ a user lists their own recovery codes, masked, and no one else's\n");
 
     return 0;
 }
@@ -1121,7 +1600,7 @@ static int test_localhost_only(void) {
         Reply pub = request(method, target, NULL, NULL, "application/json", "{}");
         Reply adm = admin_port(method, target, NULL, "{}");
         int refused = pub.status == 403 || pub.status == 401;
-        int served = adm.status != 401 && adm.status != 403;
+        int served = adm.status != 401 && adm.status != 403 && adm.status < 500;
         int pub_status = pub.status, adm_status = adm.status;
         reply_free(&pub);
         reply_free(&adm);
@@ -1131,6 +1610,14 @@ static int test_localhost_only(void) {
         }
     }
     printf("✓ every operator endpoint is refused on the public listener, served on the admin one\n");
+
+    /* A key for an organization that isn't there is refused, not failed */
+    Reply nokey = admin_port("POST", "/api/admin/organization-keys", NULL,
+                             "{\"organization_code_name\":\"nosuchorg\"}");
+    int nokey_status = nokey.status;
+    reply_free(&nokey);
+    if (nokey_status != 404) FAIL("a key for an unknown organization answered %d", nokey_status);
+    printf("✓ a key for an unknown organization answers 404\n");
 
     static const char *const browser[] = {
         "Host: rebind.attacker.example:8080\r\n"
@@ -1266,6 +1753,534 @@ static int test_account_recovery(void) {
 }
 
 /*
+ * A deactivated account keeps its username, as the unique index has it: the
+ * account can be reactivated, and apps know it by that name. So the name is
+ * taken for a new user and for a new organization's admin, and that bootstrap
+ * makes nothing. The username change takes a name no other account holds, and
+ * the caller's own in another case.
+ */
+static int test_usernames(void) {
+    printf("\n=== Usernames ===\n");
+
+    char user_id[33], json[256], found[8], cookie[256];
+    Reply r = admin_port("POST", "/api/admin/users", NULL,
+                        "{\"username\":\"dormant\",\"password\":\"dormant password\"}");
+    int created = r.status == 200 && field(&r, "user_id", user_id, sizeof(user_id)) == 0;
+    reply_free(&r);
+    snprintf(json, sizeof(json), "{\"user_id\":\"%s\"}", user_id);
+    if (!created || post_status("/api/admin/users/deactivate", json) != 200) {
+        FAIL("could not create and deactivate the user");
+    }
+
+    /* 1. Its name, in another case, for a new user and a new organization's admin */
+    int status = post_status("/api/admin/users",
+                             "{\"username\":\"Dormant\",\"password\":\"another password\"}");
+    if (status != 409) FAIL("a new user with a deactivated account's name answered %d", status);
+    status = post_status("/api/admin/bootstrap", "{\"org_code_name\":\"second\","
+                         "\"username\":\"Dormant\",\"password\":\"correct horse battery\"}");
+    int made = query_text("SELECT 1 FROM " TBL_ORGANIZATION " WHERE code_name = 'second'",
+                          found, sizeof(found)) == 0;
+    if (status != 409 || made) {
+        FAIL("a bootstrap with a deactivated account's name answered %d%s", status,
+             made ? ", and made the organization" : "");
+    }
+    printf("✓ a deactivated account's name is taken for a new user and a bootstrap\n");
+
+    /* 2. The username change */
+    r = admin_port("POST", "/api/admin/users", NULL,
+                   "{\"username\":\"renamer\",\"password\":\"renamer password\"}");
+    status = r.status;
+    reply_free(&r);
+    if (status != 200 || login("renamer", "renamer password", cookie, sizeof(cookie)) != 0) {
+        FAIL("could not create and sign in the user");
+    }
+    const struct { const char *name; int want; } changes[] = {
+        { "Dormant", 409 },  /* a deactivated account's */
+        { "admin", 409 },    /* an active account's */
+        { "Renamer", 200 },  /* the caller's own, in another case */
+    };
+    for (size_t i = 0; i < sizeof(changes) / sizeof(changes[0]); i++) {
+        snprintf(json, sizeof(json), "{\"new_username\":\"%s\"}", changes[i].name);
+        r = post_json("/api/user/username", cookie, json);
+        status = r.status;
+        reply_free(&r);
+        if (status != changes[i].want) {
+            FAIL("changing the username to %s answered %d, not %d", changes[i].name, status,
+                 changes[i].want);
+        }
+    }
+    printf("✓ the username change refuses another account's name with 409, and takes its own\n");
+
+    return 0;
+}
+
+/* A trigger that makes every insert into a table fail, and its removal: a
+   database failure, where a test needs one. One at a time. */
+#ifdef DB_BACKEND_POSTGRESQL
+#define REFUSE_INSERTS(table) \
+    "CREATE FUNCTION refuse_insert() RETURNS trigger LANGUAGE plpgsql " \
+    "AS $$ BEGIN RAISE EXCEPTION 'refused'; END $$; " \
+    "CREATE TRIGGER refuse_insert BEFORE INSERT ON " table " " \
+    "FOR EACH ROW EXECUTE FUNCTION refuse_insert()"
+#define ALLOW_INSERTS "DROP FUNCTION refuse_insert() CASCADE"
+#else
+#define REFUSE_INSERTS(table) \
+    "CREATE TRIGGER refuse_insert BEFORE INSERT ON " table " " \
+    "BEGIN SELECT RAISE(FAIL, 'refused'); END"
+#define ALLOW_INSERTS "DROP TRIGGER refuse_insert"
+#endif
+
+/* The same for updates of one column */
+#ifdef DB_BACKEND_POSTGRESQL
+#define REFUSE_UPDATES(table, column) \
+    "CREATE FUNCTION refuse_update() RETURNS trigger LANGUAGE plpgsql " \
+    "AS $$ BEGIN RAISE EXCEPTION 'refused'; END $$; " \
+    "CREATE TRIGGER refuse_update BEFORE UPDATE OF " column " ON " table " " \
+    "FOR EACH ROW EXECUTE FUNCTION refuse_update()"
+#define ALLOW_UPDATES "DROP FUNCTION refuse_update() CASCADE"
+#else
+#define REFUSE_UPDATES(table, column) \
+    "CREATE TRIGGER refuse_update BEFORE UPDATE OF " column " ON " table " " \
+    "BEGIN SELECT RAISE(FAIL, 'refused'); END"
+#define ALLOW_UPDATES "DROP TRIGGER refuse_update"
+#endif
+
+/*
+ * A bootstrap that fails part-way makes nothing. With its last step, the
+ * org-admin grant, refused, it answers 500 and leaves neither the organization
+ * nor its admin behind, so the same bootstrap runs once the cause is gone.
+ */
+static int test_failed_bootstrap(void) {
+    printf("\n=== A failed bootstrap ===\n");
+
+    const char *body = "{\"org_code_name\":\"third\",\"username\":\"third_admin\","
+                       "\"password\":\"correct horse battery\"}";
+    db_handle_t *conn = db_pool_get_connection();
+    if (db_execute_direct(conn, REFUSE_INSERTS(TBL_ORGANIZATION_ADMIN)) != 0) {
+        FAIL("could not make the grant refuse");
+    }
+    int status = post_status("/api/admin/bootstrap", body);
+    if (db_execute_direct(conn, ALLOW_INSERTS) != 0) FAIL("could not drop the trigger");
+
+    char found[8];
+    int org = query_text("SELECT 1 FROM " TBL_ORGANIZATION " WHERE code_name = 'third'",
+                         found, sizeof(found)) == 0;
+    int admin = user_username_exists(conn, "third_admin") != 0;
+    if (status != 500 || org || admin) {
+        FAIL("a bootstrap refused at its last step answered %d%s%s", status,
+             org ? ", leaving the organization" : "", admin ? ", leaving its admin" : "");
+    }
+    status = post_status("/api/admin/bootstrap", body);
+    if (status != 200) FAIL("the same bootstrap, once the grant was allowed, answered %d", status);
+
+    printf("✓ a bootstrap refused at its last step makes nothing, and runs again\n");
+    return 0;
+}
+
+/*
+ * A database failure isn't answered as a bad credential: a client takes
+ * invalid_grant as final and discards its refresh token, a user told "Invalid
+ * credentials" doubts a right password, and a console told 401 asks to sign in
+ * again. Nor is it an empty list or an invalid link. With the query each needs
+ * failing, the answer is 500, and what was sent works once the cause is gone.
+ */
+static int test_database_failures(void) {
+    printf("\n=== A database failure isn't a bad credential ===\n");
+
+    db_handle_t *conn = db_pool_get_connection();
+    char code[2048], rt[256];
+    if (authorize(code, sizeof(code)) != 0) FAIL("/authorize did not redirect with a code");
+    Reply r = exchange(code, PKCE_VERIFIER);
+    int got = r.status == 200 && field(&r, "refresh_token", rt, sizeof(rt)) == 0;
+    reply_free(&r);
+    if (!got) FAIL("the code exchange failed");
+
+    /* 1. A refresh whose new token can't be stored */
+    if (db_execute_direct(conn, REFUSE_INSERTS(TBL_REFRESH_TOKEN)) != 0) {
+        FAIL("could not make refresh tokens refuse");
+    }
+    r = refresh(rt);
+    int status = r.status;
+    reply_free(&r);
+    if (db_execute_direct(conn, ALLOW_INSERTS) != 0) FAIL("could not drop the trigger");
+    if (status != 500) FAIL("a refresh the database failed answered %d, not 500", status);
+    r = refresh(rt);
+    status = r.status;
+    got = field(&r, "refresh_token", rt, sizeof(rt)) == 0;
+    reply_free(&r);
+    if (status != 200 || !got) {
+        FAIL("the same refresh token, once the database worked, answered %d", status);
+    }
+    printf("✓ a refresh the database fails answers 500, and the token still works\n");
+
+    /* A scope beyond the grant is no verdict on the token: invalid_scope, and the same
+       token goes on working. A client that takes invalid_grant as final would have
+       discarded it. */
+    char form[1024];
+    snprintf(form, sizeof(form), "grant_type=refresh_token&refresh_token=%s&client_id=%s&scope=beyond",
+             rt, g_ui_client);
+    r = post_form("/token", form);
+    status = r.status;
+    got = strstr(r.body, "invalid_scope") != NULL;
+    reply_free(&r);
+    if (status != 400 || !got) FAIL("a scope beyond the grant answered %d, not invalid_scope", status);
+    r = refresh(rt);
+    status = r.status;
+    got = field(&r, "refresh_token", rt, sizeof(rt)) == 0;
+    reply_free(&r);
+    if (status != 200 || !got) FAIL("the same token, without the scope, answered %d", status);
+
+    /* A second resource server linked, so a refresh that names none has no one to fall
+       back on: invalid_target, and the same token works when it names one */
+    char json[512], second[33], link[256];
+    snprintf(json, sizeof(json), "{\"organization_id\":\"%s\",\"code_name\":\"second_rs\","
+             "\"display_name\":\"Second\",\"address\":\"https://second.example\"}", g_org_id);
+    if (admin_create("/api/admin/resource-servers", json, "id", second, sizeof(second)) != 0) return 1;
+    snprintf(json, sizeof(json), "{\"client_id\":\"%s\",\"resource_server_id\":\"%s\"}",
+             g_ui_client, second);
+    r = post_json("/api/admin/client-resource-servers", g_admin_cookie, json);
+    status = r.status;
+    reply_free(&r);
+    if (status != 200) FAIL("linking a second resource server answered %d", status);
+    r = refresh(rt);
+    status = r.status;
+    got = strstr(r.body, "invalid_target") != NULL;
+    reply_free(&r);
+    if (status != 400 || !got) FAIL("a refresh with no resource to fall back on answered %d", status);
+    snprintf(form, sizeof(form), "grant_type=refresh_token&refresh_token=%s&client_id=%s"
+             "&resource=https%%3A%%2F%%2Fsecond.example", rt, g_ui_client);
+    r = post_form("/token", form);
+    status = r.status;
+    got = field(&r, "refresh_token", rt, sizeof(rt)) == 0;
+    reply_free(&r);
+    if (status != 200 || !got) FAIL("the same token, naming the resource, answered %d", status);
+    snprintf(link, sizeof(link), "/api/admin/client-resource-servers?client_id=%s&resource_server_id=%s",
+             g_ui_client, second);
+    r = request("DELETE", link, g_admin_cookie, NULL, NULL, NULL);
+    status = r.status;
+    reply_free(&r);
+    if (status != 200) FAIL("unlinking the second resource server answered %d", status);
+    printf("✓ a refused resource or scope leaves the refresh token working\n");
+
+    /* A client lookup that fails, not a client that isn't there */
+    if (db_execute_direct(conn, HIDE_TABLE(SECURITY_, "client")) != 0) {
+        FAIL("could not hide the clients");
+    }
+    r = refresh(rt);
+    status = r.status;
+    reply_free(&r);
+    if (db_execute_direct(conn, SHOW_TABLE(SECURITY_, "client")) != 0) {
+        FAIL("could not show the clients");
+    }
+    if (status != 500) FAIL("a refresh whose client lookup failed answered %d, not 500", status);
+    r = refresh(rt);
+    status = r.status;
+    reply_free(&r);
+    if (status != 200) FAIL("the same token, once the lookup worked, answered %d", status);
+    printf("✓ a failed client lookup answers 500, not an unknown client\n");
+
+    /* 2. A sign-in whose session can't be stored */
+    char cookie[256];
+    if (db_execute_direct(conn, REFUSE_INSERTS(TBL_BROWSER)) != 0) {
+        FAIL("could not make sessions refuse");
+    }
+    r = post_json("/login", NULL,
+                  "{\"username\":\"admin\",\"password\":\"correct horse battery\"}");
+    status = r.status;
+    reply_free(&r);
+    if (db_execute_direct(conn, ALLOW_INSERTS) != 0) FAIL("could not drop the trigger");
+    if (status != 500) FAIL("a sign-in the database failed answered %d, not 500", status);
+    if (login("admin", "correct horse battery", cookie, sizeof(cookie)) != 0) {
+        FAIL("the same password, once the database worked, didn't sign in");
+    }
+    printf("✓ a sign-in the database fails answers 500, not \"Invalid credentials\"\n");
+
+    /* 3. A list whose query fails, not an empty list */
+    char target[128];
+    snprintf(target, sizeof(target), "/api/admin/clients?organization_id=%s", g_org_id);
+    if (db_execute_direct(conn, HIDE_TABLE(SECURITY_, "client")) != 0) {
+        FAIL("could not hide the clients");
+    }
+    r = request("GET", target, g_admin_cookie, NULL, NULL, NULL);
+    status = r.status;
+    reply_free(&r);
+    if (db_execute_direct(conn, SHOW_TABLE(SECURITY_, "client")) != 0) {
+        FAIL("could not show the clients");
+    }
+    if (status != 500) FAIL("a list of clients the database failed answered %d, not 500", status);
+    r = request("GET", target, g_admin_cookie, NULL, NULL, NULL);
+    got = r.status == 200 && strstr(r.body, "management_ui") != NULL;
+    reply_free(&r);
+    if (!got) FAIL("the same list, once the database worked, isn't the clients");
+    printf("✓ a list the database fails answers 500, not an empty list\n");
+
+    /* 4. A link page whose query fails doesn't call the link invalid */
+    if (db_execute_direct(conn, HIDE_TABLE(SESSION_, "invitation_token")) != 0) {
+        FAIL("could not hide the invitations");
+    }
+    r = request("GET", "/accept-invitation?token=nosuchtoken", NULL, NULL, NULL, NULL);
+    status = r.status;
+    got = strstr(r.body, "wasn't used") != NULL;
+    reply_free(&r);
+    if (db_execute_direct(conn, SHOW_TABLE(SESSION_, "invitation_token")) != 0) {
+        FAIL("could not show the invitations");
+    }
+    if (status != 500 || !got) FAIL("a link page the database failed answered %d", status);
+    r = request("GET", "/accept-invitation?token=nosuchtoken", NULL, NULL, NULL, NULL);
+    status = r.status;
+    reply_free(&r);
+    if (status != 400) FAIL("an unknown link, once the database worked, answered %d", status);
+    printf("✓ a link page the database fails answers 500, not \"invalid\"\n");
+
+    /* 5. A session the server can't check isn't a bad one: 500, not 401, so the console
+          doesn't ask to sign in again. An org key too, and a good key still answers
+          when it's the session lookup that can't run. */
+    r = admin_port("POST", "/api/admin/organization-keys", NULL,
+                   "{\"organization_code_name\":\"system\"}");
+    char key_id[33], secret[128], headers[256], bad_headers[256];
+    got = r.status == 200 && field(&r, "key_id", key_id, sizeof(key_id)) == 0 &&
+          field(&r, "secret", secret, sizeof(secret)) == 0;
+    reply_free(&r);
+    if (!got) FAIL("could not make an organization key");
+    snprintf(headers, sizeof(headers), "X-Org-Key-Id: %s\r\nX-Org-Key-Secret: %s\r\n", key_id, secret);
+    snprintf(bad_headers, sizeof(bad_headers), "X-Org-Key-Id: %s\r\nX-Org-Key-Secret: wrong\r\n", key_id);
+    const char *orgs = "/api/admin/organizations";
+
+    if (db_execute_direct(conn, HIDE_TABLE(SESSION_, "browser")) != 0) FAIL("could not hide the sessions");
+    r = request("GET", "/api/user/profile", g_admin_cookie, NULL, NULL, NULL);
+    int profile = r.status;
+    reply_free(&r);
+    r = request("GET", orgs, g_admin_cookie, NULL, NULL, NULL);
+    int by_cookie = r.status;
+    reply_free(&r);
+    r = request("GET", orgs, g_admin_cookie, headers, NULL, NULL);
+    int with_good_key = r.status;
+    reply_free(&r);
+    if (db_execute_direct(conn, SHOW_TABLE(SESSION_, "browser")) != 0) FAIL("could not show the sessions");
+    if (profile != 500 || by_cookie != 500 || with_good_key != 200) {
+        FAIL("with sessions failing, the profile answered %d, the organizations %d, and with a "
+             "good org key too %d", profile, by_cookie, with_good_key);
+    }
+
+    if (db_execute_direct(conn, HIDE_TABLE(SECURITY_, "organization_key")) != 0) FAIL("could not hide the keys");
+    r = request("GET", orgs, NULL, headers, NULL, NULL);
+    status = r.status;
+    reply_free(&r);
+    if (db_execute_direct(conn, SHOW_TABLE(SECURITY_, "organization_key")) != 0) FAIL("could not show the keys");
+    if (status != 500) FAIL("an org key the database failed answered %d, not 500", status);
+    r = request("GET", orgs, NULL, headers, NULL, NULL);
+    int good = r.status;
+    reply_free(&r);
+    r = request("GET", orgs, NULL, bad_headers, NULL, NULL);
+    int wrong = r.status;
+    reply_free(&r);
+    r = request("GET", "/api/user/profile", g_admin_cookie, NULL, NULL, NULL);
+    profile = r.status;
+    reply_free(&r);
+    if (good != 200 || wrong != 401 || profile != 200) {
+        FAIL("once the database worked, a good org key answered %d, a wrong one %d, the cookie %d",
+             good, wrong, profile);
+    }
+    printf("✓ a session or org key the database can't check answers 500, not 401\n");
+
+    /* A good key whose organization can't be looked up is no more forbidden than one
+       that can't be checked, and on the admin listener the organization isn't missing */
+    const char *keys = "/api/admin/organization-keys?organization_code_name=system";
+    if (db_execute_direct(conn, HIDE_TABLE(SECURITY_, "organization")) != 0) {
+        FAIL("could not hide the organizations");
+    }
+    r = request("GET", keys, NULL, headers, NULL, NULL);
+    int by_key = r.status;
+    reply_free(&r);
+    r = admin_port("GET", keys, NULL, NULL);
+    int by_socket = r.status;
+    reply_free(&r);
+    if (db_execute_direct(conn, SHOW_TABLE(SECURITY_, "organization")) != 0) {
+        FAIL("could not show the organizations");
+    }
+    if (by_key != 500 || by_socket != 500) {
+        FAIL("with the organization lookup failing, a good key answered %d, the admin listener %d",
+             by_key, by_socket);
+    }
+    r = request("GET", keys, NULL, headers, NULL, NULL);
+    by_key = r.status;
+    reply_free(&r);
+    r = request("GET", "/api/admin/organization-keys?organization_code_name=nosuch", NULL, headers,
+                NULL, NULL);
+    int unknown = r.status;
+    reply_free(&r);
+    r = admin_port("GET", "/api/admin/organization-keys?organization_code_name=nosuch", NULL, NULL);
+    by_socket = r.status;
+    reply_free(&r);
+    if (by_key != 200 || unknown != 403 || by_socket != 404) {
+        FAIL("once the database worked, a good key answered %d, for an unknown organization %d, "
+             "and the admin listener %d", by_key, unknown, by_socket);
+    }
+    printf("✓ a good org key whose organization can't be looked up answers 500, not 403\n");
+
+    /* 6. /authorize: before the redirect URI is trusted a failure can't be sent to it;
+          after, it goes there as server_error, not invalid_request or the sign-in page */
+    if (db_execute_direct(conn, HIDE_TABLE(SECURITY_, "client")) != 0) FAIL("could not hide the clients");
+    r = authorize_with(PKCE_CHALLENGE);
+    status = r.status;
+    got = r.location == NULL;
+    reply_free(&r);
+    if (db_execute_direct(conn, SHOW_TABLE(SECURITY_, "client")) != 0) FAIL("could not show the clients");
+    if (status != 500 || !got) FAIL("/authorize with its client lookup failing answered %d", status);
+
+    if (db_execute_direct(conn, HIDE_TABLE(SESSION_, "browser")) != 0) FAIL("could not hide the sessions");
+    r = authorize_with(PKCE_CHALLENGE);
+    status = r.status;
+    got = r.location && strstr(r.location, "error=server_error") && strstr(r.location, "state=st8");
+    reply_free(&r);
+    if (db_execute_direct(conn, SHOW_TABLE(SESSION_, "browser")) != 0) FAIL("could not show the sessions");
+    if (status != 302 || !got) FAIL("/authorize with its session lookup failing answered %d", status);
+
+    if (db_execute_direct(conn, REFUSE_INSERTS(TBL_AUTHORIZATION_CODE)) != 0) {
+        FAIL("could not make codes refuse");
+    }
+    r = authorize_with(PKCE_CHALLENGE);
+    status = r.status;
+    got = r.location && strstr(r.location, "error=server_error") && !strstr(r.location, "code=");
+    reply_free(&r);
+    if (db_execute_direct(conn, ALLOW_INSERTS) != 0) FAIL("could not drop the trigger");
+    if (status != 302 || !got) FAIL("/authorize with its code refused answered %d", status);
+    if (authorize(code, sizeof(code)) != 0) FAIL("/authorize, once the database worked, made no code");
+    printf("✓ /authorize answers a failed server with 500 or server_error, by whether it can redirect\n");
+
+    return 0;
+}
+
+/*
+ * A first TOTP confirm stores the method's confirmation and its recovery codes
+ * together. With the codes refused, it answers 500 and leaves the method
+ * unconfirmed, so the same method confirms, with its codes, once the cause is
+ * gone, rather than staying confirmed with no codes and the retry refused.
+ */
+static int test_failed_first_confirm(void) {
+    printf("\n=== A first TOTP confirm that fails ===\n");
+
+    char cookie[256], method[33], secret[64], code[16], json[256];
+    Reply r = admin_port("POST", "/api/admin/users", NULL,
+                         "{\"username\":\"halfway\",\"password\":\"halfway password\"}");
+    int status = r.status;
+    reply_free(&r);
+    if (status != 200 || login("halfway", "halfway password", cookie, sizeof(cookie)) != 0) {
+        FAIL("could not create and sign in the user");
+    }
+    r = post_json("/api/user/mfa/totp/setup", cookie, "{\"display_name\":\"phone\"}");
+    if (r.status != 200 || field(&r, "method_id", method, sizeof(method)) != 0 ||
+        field(&r, "secret", secret, sizeof(secret)) != 0) {
+        FAIL("TOTP setup answered %d", r.status);
+    }
+    reply_free(&r);
+
+    /* 1. The codes can't be stored: 500 */
+    db_handle_t *conn = db_pool_get_connection();
+    if (totp_now(secret, code, sizeof(code)) != 0) FAIL("could not make a TOTP code");
+    snprintf(json, sizeof(json), "{\"method_id\":\"%s\",\"code\":\"%s\"}", method, code);
+    if (db_execute_direct(conn, REFUSE_INSERTS(TBL_RECOVERY_CODE_SET)) != 0) {
+        FAIL("could not make recovery codes refuse");
+    }
+    r = post_json("/api/user/mfa/totp/confirm", cookie, json);
+    status = r.status;
+    reply_free(&r);
+    if (db_execute_direct(conn, ALLOW_INSERTS) != 0) FAIL("could not drop the trigger");
+    if (status != 500) FAIL("a confirm whose codes couldn't be stored answered %d, not 500", status);
+
+    /* 2. Once they can: the same method confirms, with its codes */
+    if (totp_now(secret, code, sizeof(code)) != 0) FAIL("could not make a TOTP code");
+    snprintf(json, sizeof(json), "{\"method_id\":\"%s\",\"code\":\"%s\"}", method, code);
+    r = post_json("/api/user/mfa/totp/confirm", cookie, json);
+    char codes[16][32];
+    int count = r.status == 200 ? string_array(r.body, "recovery_codes", codes, 16) : 0;
+    status = r.status;
+    reply_free(&r);
+    if (count <= 0) {
+        FAIL("confirming the same method again answered %d, with %d recovery codes", status, count);
+    }
+    printf("✓ a first confirm whose codes can't be stored changes nothing, and confirms "
+           "with codes after\n");
+
+    return 0;
+}
+
+/*
+ * A right MFA code whose session can't be marked complete answers 500, not
+ * {"valid":true}. A recovery code is marked used in the same transaction, so
+ * the failure leaves it good for the next try.
+ */
+static int test_failed_mfa_completion(void) {
+    printf("\n=== An MFA step the session can't record ===\n");
+
+    char first[256], second[256], method[33], secret[64], code[16], json[256], recover[128];
+    Reply r = admin_port("POST", "/api/admin/users", NULL,
+                         "{\"username\":\"unfinished\",\"password\":\"unfinished password\"}");
+    int status = r.status;
+    reply_free(&r);
+    if (status != 200 || login("unfinished", "unfinished password", first, sizeof(first)) != 0) {
+        FAIL("could not create and sign in the user");
+    }
+    r = post_json("/api/user/mfa/totp/setup", first, "{\"display_name\":\"phone\"}");
+    if (r.status != 200 || field(&r, "method_id", method, sizeof(method)) != 0 ||
+        field(&r, "secret", secret, sizeof(secret)) != 0) {
+        FAIL("TOTP setup answered %d", r.status);
+    }
+    reply_free(&r);
+    if (totp_now(secret, code, sizeof(code)) != 0) FAIL("could not make a TOTP code");
+    snprintf(json, sizeof(json), "{\"method_id\":\"%s\",\"code\":\"%s\"}", method, code);
+    r = post_json("/api/user/mfa/totp/confirm", first, json);
+    char codes[16][32];
+    int count = r.status == 200 ? string_array(r.body, "recovery_codes", codes, 16) : 0;
+    status = r.status;
+    reply_free(&r);
+    if (count <= 0) FAIL("confirming answered %d, with %d recovery codes", status, count);
+    snprintf(recover, sizeof(recover), "{\"recovery_code\":\"%s\"}", codes[0]);
+
+    /* A second sign-in, which owes the factor */
+    if (login("unfinished", "unfinished password", second, sizeof(second)) != 0) FAIL("second sign-in");
+
+    /* 1. The session can't be marked: 500, for a right TOTP code and a right recovery code */
+    db_handle_t *conn = db_pool_get_connection();
+    if (totp_now(secret, code, sizeof(code)) != 0) FAIL("could not make a TOTP code");
+    snprintf(json, sizeof(json), "{\"method_id\":\"%s\",\"code\":\"%s\"}", method, code);
+    if (db_execute_direct(conn, REFUSE_UPDATES(TBL_BROWSER, "mfa_completed")) != 0) {
+        FAIL("could not make the session refuse");
+    }
+    r = post_json("/api/user/mfa/verify", second, json);
+    int verified = r.status;
+    reply_free(&r);
+    r = post_json("/api/user/mfa/recover", second, recover);
+    int recovered = r.status;
+    reply_free(&r);
+    if (db_execute_direct(conn, ALLOW_UPDATES) != 0) FAIL("could not drop the trigger");
+    if (verified != 500 || recovered != 500) {
+        FAIL("with the session refusing, a right code answered %d, a right recovery code %d",
+             verified, recovered);
+    }
+
+    /* 2. Once it can be marked, the session still owes the factor, and the same recovery
+          code works */
+    r = request("GET", "/api/user/mfa/recovery-codes", second, NULL, NULL, NULL);
+    int gated = r.status;
+    reply_free(&r);
+    r = post_json("/api/user/mfa/recover", second, recover);
+    int valid = r.status == 200 && strstr(r.body, "\"valid\":true") != NULL;
+    status = r.status;
+    reply_free(&r);
+    r = request("GET", "/api/user/mfa/recovery-codes", second, NULL, NULL, NULL);
+    int opened = r.status;
+    reply_free(&r);
+    if (gated != 403 || !valid || opened != 200) {
+        FAIL("after the failure the session got %d, the same code answered %d (valid: %d), and "
+             "then the session got %d", gated, status, valid, opened);
+    }
+    printf("✓ a right code the session can't record answers 500, and a recovery code stays good\n");
+
+    return 0;
+}
+
+/*
  * The operator lists a user's addresses, with when each was added and
  * verified, and removes one the user doesn't recognize; one not on the account
  * is a 404, not a silent success. With email support, the removed address no
@@ -1372,14 +2387,56 @@ static int test_operator_addresses(void) {
  * ============================================================================ */
 
 /*
- * The invitation form takes a password as long as the JSON endpoints do, 1024
- * bytes, and past that says so instead of answering "Invalid request". (The
- * reset form, with email support, shares the decoding.)
+ * A password's length is checked where it arrives, before anything is made,
+ * and a refused one answers 400 with the reason. Bootstrap and create-user
+ * refuse one too long or too short, and make nothing. The invitation form
+ * takes one as long as the JSON endpoints do, 1024 bytes, and past that says
+ * so instead of answering "Invalid request". (The reset form, with email
+ * support, shares the decoding.)
  */
-static int test_form_password_length(void) {
-    printf("\n=== Form password length ===\n");
+static int test_password_length(void) {
+    printf("\n=== Password length ===\n");
 
     char user_id[33], sql[128], pin[24], invite[64], password[1026], form[1200];
+    char json[1200], found[8];
+    memset(password, 'p', 1025);
+    password[1025] = '\0';
+
+    /* 1. Bootstrap and create-user, with 1025 bytes and with none */
+    const struct { const char *password, *reason; } refused[] = {
+        { password, "at most 1024" }, { "", "at least" },
+    };
+    for (size_t i = 0; i < sizeof(refused) / sizeof(refused[0]); i++) {
+        snprintf(json, sizeof(json), "{\"org_code_name\":\"lengthy\","
+                 "\"username\":\"lengthy_admin\",\"password\":\"%s\"}", refused[i].password);
+        Reply r = admin_port("POST", "/api/admin/bootstrap", NULL, json);
+        int said = r.status == 400 && strstr(r.body, refused[i].reason) != NULL;
+        int status = r.status;
+        reply_free(&r);
+        int made = query_text("SELECT 1 FROM " TBL_ORGANIZATION " WHERE code_name = 'lengthy'",
+                              found, sizeof(found)) == 0;
+        if (!said || made) {
+            FAIL("a bootstrap with a %zu-byte password answered %d%s%s",
+                 strlen(refused[i].password), status, said ? "" : ", not 400 with the reason",
+                 made ? ", and made the organization" : "");
+        }
+        snprintf(json, sizeof(json), "{\"username\":\"lengthy_user\",\"password\":\"%s\"}",
+                 refused[i].password);
+        r = admin_port("POST", "/api/admin/users", NULL, json);
+        said = r.status == 400 && strstr(r.body, refused[i].reason) != NULL;
+        status = r.status;
+        reply_free(&r);
+        made = user_username_exists(db_pool_get_connection(), "lengthy_user") != 0;
+        if (!said || made) {
+            FAIL("creating a user with a %zu-byte password answered %d%s%s",
+                 strlen(refused[i].password), status, said ? "" : ", not 400 with the reason",
+                 made ? ", and made the user" : "");
+        }
+    }
+    printf("✓ bootstrap and create-user refuse a password too long or too short with 400, "
+           "and make nothing\n");
+
+    /* 2. The invitation form */
     Reply r = admin_port("POST", "/api/admin/users", NULL,
                         "{\"username\":\"longpass\",\"password\":\"a short password\"}");
     int created = r.status == 200 && field(&r, "user_id", user_id, sizeof(user_id)) == 0;
@@ -1392,8 +2449,6 @@ static int test_form_password_length(void) {
         FAIL("could not create the user and an invitation");
     }
 
-    memset(password, 'p', 1025);
-    password[1025] = '\0';
     snprintf(form, sizeof(form), "token=%s&password=%s", invite, password);
     r = post_form("/accept-invitation", form);
     if (r.status != 400 || !strstr(r.body, "at most 1024")) {
@@ -1491,6 +2546,40 @@ static int test_email_links(void) {
     reply_free(&r);
     printf("✓ deactivation voids an outstanding verification link\n");
 
+    /* 3. A request whose query fails isn't "check your inbox", for any address */
+    const char *unknown = "{\"email\":\"nobody@example.com\"}";
+    db_handle_t *conn = db_pool_get_connection();
+    if (db_execute_direct(conn, HIDE_TABLE(SESSION_, "password_reset_token")) != 0) {
+        FAIL("could not hide the reset links");
+    }
+    r = post_json("/request-password-reset", NULL, unknown);
+    int reset = r.status;
+    reply_free(&r);
+    if (db_execute_direct(conn, SHOW_TABLE(SESSION_, "password_reset_token")) != 0 ||
+        db_execute_direct(conn, HIDE_TABLE(SESSION_, "passwordless_login_token")) != 0) {
+        FAIL("could not swap the hidden table");
+    }
+    r = post_json("/request-passwordless-login", NULL, unknown);
+    int passwordless = r.status;
+    reply_free(&r);
+    if (db_execute_direct(conn, SHOW_TABLE(SESSION_, "passwordless_login_token")) != 0) {
+        FAIL("could not show the sign-in links");
+    }
+    if (reset != 500 || passwordless != 500) {
+        FAIL("with the query failing, a reset request answered %d, a sign-in link request %d",
+             reset, passwordless);
+    }
+    r = post_json("/request-password-reset", NULL, unknown);
+    reset = r.status;
+    reply_free(&r);
+    r = post_json("/request-passwordless-login", NULL, unknown);
+    passwordless = r.status;
+    reply_free(&r);
+    if (reset != 200 || passwordless != 200) {
+        FAIL("an unknown address, once the database worked, answered %d and %d", reset, passwordless);
+    }
+    printf("✓ a request for an emailed link answers 500 when its query fails\n");
+
     return 0;
 }
 #endif
@@ -1586,6 +2675,15 @@ static int test_provisioning(void) {
     snprintf(g_rs_auth, sizeof(g_rs_auth), "\"resource_server_id\":\"%s\","
              "\"resource_server_key_id\":\"%s\",\"resource_server_secret\":\"%s\"",
              rs, key, secret);
+
+    /* 0. A field of another kind names itself. Read as left out, a numeric username
+          would make an address-only account, and a numeric user_id find by username */
+    char kinds[640];
+    snprintf(kinds, sizeof(kinds), "{%s,\"username\":123,\"email\":\"kinds@example.com\"}", g_rs_auth);
+    r = post_json("/api/rs/users", NULL, kinds);
+    int refused = r.status == 400 && strstr(r.body, "username must be text");
+    reply_free(&r);
+    if (!refused) FAIL("provisioning with a numeric username wasn't refused naming it");
 
     /* 1. A new address gets an account and an invitation. The same address
           again finds that account rather than making another. With email
@@ -1731,13 +2829,17 @@ static int test_provisioning(void) {
         .code_name = g_config->code_name_pattern, .password = g_config->password_pattern,
         .machine_secret = g_config->machine_secret_pattern,
     };
-    if (validation_init(&before) != 0) FAIL("could not set the patterns aside");
+    if (validation_init(&before, g_config->password_min_length) != 0) {
+        FAIL("could not set the patterns aside");
+    }
     r = admin_port("POST", "/api/admin/users", NULL,
                    "{\"username\":\"obrien\",\"email\":\"o'brien@example.com\","
                    "\"password\":\"obrien password\"}");
     int made = r.status == 200 && field(&r, "user_id", obrien, sizeof(obrien)) == 0;
     reply_free(&r);
-    if (validation_init(&configured) != 0) FAIL("could not restore the patterns");
+    if (validation_init(&configured, g_config->password_min_length) != 0) {
+        FAIL("could not restore the patterns");
+    }
     if (!made) FAIL("could not store an address the default refuses");
     snprintf(obrien_sql, sizeof(obrien_sql),
              "UPDATE " TBL_USER_EMAIL " SET is_verified = " BOOL_TRUE ", verified_at = " NOW " "
@@ -1834,7 +2936,7 @@ int main(void) {
         .machine_secret = config->machine_secret_pattern,
     };
     char conninfo[1024];
-    if (validation_init(&patterns) != 0 ||
+    if (validation_init(&patterns, config->password_min_length) != 0 ||
         encrypt_init(config->encryption_key) != 0 || crypto_password_init(config) != 0 ||
         scratch_db_new(conninfo, sizeof(conninfo)) != 0 ||
         db_pool_init(1, SCRATCH_DB_TYPE, conninfo) != 0) {
@@ -1855,12 +2957,17 @@ int main(void) {
     g_router = router_create();
     register_routes(g_router);
 
-    int failed = setup() || test_authorization_code_flow() || test_redirect_uris() ||
-                 test_issuer() ||
-                 test_client_credentials() || test_mfa_gates() || test_mfa_daily_cap() ||
+    int failed = setup() || test_logout() || test_authorization_code_flow() ||
+                 test_redirect_uris() || test_issuer() ||
+                 test_client_credentials() || test_field_kinds() ||
+                 test_active_clashes() ||
+                 test_mfa_gates() || test_mfa_daily_cap() ||
                  test_localhost_only() || test_admin_socket_caller() ||
-                 test_account_recovery() || test_operator_addresses() ||
-                 test_form_password_length() ||
+                 test_account_recovery() || test_usernames() || test_failed_bootstrap() ||
+                 test_database_failures() || test_failed_first_confirm() ||
+                 test_failed_mfa_completion() ||
+                 test_operator_addresses() ||
+                 test_password_length() ||
 #ifdef EMAIL_SUPPORT
                  test_email_links() ||
 #endif

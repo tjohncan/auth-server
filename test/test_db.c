@@ -272,7 +272,7 @@ static int test_credential_lifetimes(const config_t *config) {
         log_error("Lifetimes: a used authorization code was not reported as a replay");
         goto done;
     }
-    if (oauth_auth_code_consume(sdb, "life-code-expired", &code) != -1) {
+    if (oauth_auth_code_consume(sdb, "life-code-expired", &code) != 2) {
         log_error("Lifetimes: an expired authorization code exchanged");
         goto done;
     }
@@ -337,6 +337,102 @@ done:
     db_disconnect(sdb);
     if (!failed) {
         log_info("Credential lifetime tests passed!");
+    }
+    return failed;
+}
+
+/* A refresh token's expiry less its issue, in seconds, into *out: -1 for a NULL
+   expiry. Returns 0, or -1 if the row couldn't be read. */
+static int refresh_lifetime(db_handle_t *db, const unsigned char *id, int *out) {
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, "SELECT CAST(" UNIX_TS("expected_expiry") " - "
+                              UNIX_TS("issued_at") " AS INTEGER) "
+                              "FROM " TBL_REFRESH_TOKEN " WHERE id = " P"1") != 0) {
+        return -1;
+    }
+    db_bind_blob(stmt, 1, id, 16);
+    int rc = db_step(stmt);
+    if (rc == DB_ROW) *out = db_column_type(stmt, 0) == DB_NULL ? -1 : db_column_int(stmt, 0);
+    db_finalize(stmt);
+    return rc == DB_ROW ? 0 : -1;
+}
+
+/*
+ * A refresh token's lifetime, as made and as rotated: -1 is none (its expiry is
+ * NULL, so it rotates whenever it's used), and any other number of seconds is
+ * that long from issue, 0 included (expired as issued, so it never rotates).
+ * On both backends, which share the SQL (see INTERVAL_SECONDS in db_sql.h).
+ *
+ * Returns 0 on success.
+ */
+static int test_refresh_lifetime(const config_t *config) {
+    log_info("=== Refresh token lifetime tests");
+
+    db_handle_t *sdb = open_test_db(config);
+    if (!sdb) {
+        log_error("Refresh lifetime: could not open a test database");
+        return 1;
+    }
+
+    int failed = 1;
+
+    /* FIXTURE_ORG_RS_CLIENT's organization and client, and a user, as both
+       backends take them */
+    if (db_execute_direct(sdb,
+            "INSERT INTO " TBL_ORGANIZATION " (id, code_name, display_name) "
+            "  VALUES (" ID_FROM_HEX("00000000000000000000000000000001") ", 'org', 'Org');"
+            "INSERT INTO " TBL_CLIENT " (id, organization_pin, code_name, client_type, "
+            "                            grant_type, display_name, access_token_ttl_seconds) "
+            "  VALUES (" ID_FROM_HEX("00000000000000000000000000000003") ", 1, 'cl', "
+            "          'confidential', 'authorization_code', 'Client', 3600);"
+            "INSERT INTO " TBL_USER_ACCOUNT " (id) "
+            "  VALUES (" ID_FROM_HEX("00000000000000000000000000000004") ");") != 0) {
+        log_error("Refresh lifetime: could not insert fixtures");
+        goto done;
+    }
+    const unsigned char user_id[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x04};
+
+    /* Each lifetime: the token made with it, then rotated with it again */
+    const int lifetimes[3] = { -1, 0, 3600 };
+    for (int i = 0; i < 3; i++) {
+        char code[32], made[32], rotated[32];
+        unsigned char code_id[16], made_id[16], rotated_id[16];
+        oauth_refresh_token_data_t data;
+        snprintf(code, sizeof(code), "lifetime-code-%d", i);
+        snprintf(made, sizeof(made), "lifetime-made-%d", i);
+        snprintf(rotated, sizeof(rotated), "lifetime-rotated-%d", i);
+        int made_life = -2, rotated_life = -2;
+        if (oauth_auth_code_create(sdb, 1, FIXTURE_CLIENT_ID, 1, user_id, code,
+                                   NULL, NULL, 600, code_id) != 0 ||
+            oauth_token_create_refresh(sdb, 1, 1, code_id, made, "read", lifetimes[i],
+                                       made_id) != 0 ||
+            refresh_lifetime(sdb, made_id, &made_life) != 0) {
+            log_error("Refresh lifetime: could not make a token with lifetime %d", lifetimes[i]);
+            goto done;
+        }
+        int rotate_rc = oauth_token_rotate_refresh(sdb, made, rotated, lifetimes[i], &data,
+                                                   rotated_id);
+        if (rotate_rc == 0 && refresh_lifetime(sdb, rotated_id, &rotated_life) != 0) {
+            log_error("Refresh lifetime: could not read the rotated token");
+            goto done;
+        }
+        int rotates = lifetimes[i] != 0;
+        if (made_life != lifetimes[i] || (rotate_rc == 0) != rotates ||
+            (rotates && rotated_life != lifetimes[i])) {
+            log_error("Refresh lifetime %d: made with %d, rotation answered %d, rotated with %d",
+                      lifetimes[i], made_life, rotate_rc, rotated_life);
+            goto done;
+        }
+    }
+    log_info("  -1 is no expiry, made and rotated; 3600 an hour from issue; 0 expired as "
+             "issued, never rotating (OK)");
+
+    failed = 0;
+
+done:
+    db_disconnect(sdb);
+    if (!failed) {
+        log_info("Refresh token lifetime tests passed!");
     }
     return failed;
 }
@@ -1015,15 +1111,17 @@ static config_t *config_from(const char *lines) {
 }
 
 /*
- * The machine-secret hashing settings: each one left out takes the password
- * setting's value, so an auth.conf from before they existed hashes every secret
- * as it did. Set, they're the machine secrets' alone, held to the method's
- * iteration limit like the password ones.
+ * Loading the configuration. The machine-secret hashing settings: each one left
+ * out takes the password setting's value, so an auth.conf from before they existed
+ * hashes every secret as it did. Set, they're the machine secrets' alone, held to
+ * the method's iteration limit like the password ones. Then a config file that
+ * can't be read, the admin API's listeners, strict, and the settings that can't be
+ * empty.
  *
  * Returns 0 on success.
  */
-static int test_hashing_config(void) {
-    log_info("=== Hashing config tests");
+static int test_config(void) {
+    log_info("=== Config tests");
 
     const char *user = "secret_hashing_algorithm = pbkdf2-sha256\n"
                        "secret_hash_min_iterations = 1000\n"
@@ -1050,7 +1148,7 @@ static int test_hashing_config(void) {
         none->machine_secret_hash_min_iterations >= 1;
     config_free(none);
     if (!ok_none) {
-        log_error("Hashing config: without a config file, the machine settings weren't filled in");
+        log_error("Config: without a config file, the machine settings weren't filled in");
         return 1;
     }
 
@@ -1058,14 +1156,14 @@ static int test_hashing_config(void) {
        source is missing: refused, not read as nothing */
     char dir[] = "/tmp/test-db-config-dir.XXXXXX";
     if (!mkdtemp(dir)) {
-        log_error("Hashing config: could not make a directory");
+        log_error("Config: could not make a directory");
         return 1;
     }
     config_t *as_dir = config_load(dir);
     rmdir(dir);
     if (as_dir) {
         config_free(as_dir);
-        log_error("Hashing config: a directory was loaded as a config file");
+        log_error("Config: a directory was loaded as a config file");
         return 1;
     }
 
@@ -1073,7 +1171,7 @@ static int test_hashing_config(void) {
        not taken for no file */
     char linked[] = "/tmp/test-db-config-link.XXXXXX";
     if (!mkdtemp(linked)) {
-        log_error("Hashing config: could not make a directory");
+        log_error("Config: could not make a directory");
         return 1;
     }
     char link_path[64], target[64];
@@ -1085,7 +1183,7 @@ static int test_hashing_config(void) {
     rmdir(linked);
     if (!linked_ok || dangling) {
         config_free(dangling);
-        log_error("Hashing config: a link to a missing file was taken for no config file");
+        log_error("Config: a link to a missing file was taken for no config file");
         return 1;
     }
 
@@ -1095,7 +1193,7 @@ static int test_hashing_config(void) {
         char unreadable[] = "/tmp/test-db-config-unreadable.XXXXXX";
         int fd = mkstemp(unreadable);
         if (fd < 0) {
-            log_error("Hashing config: could not make a file");
+            log_error("Config: could not make a file");
             return 1;
         }
         close(fd);
@@ -1104,7 +1202,7 @@ static int test_hashing_config(void) {
         unlink(unreadable);
         if (refused) {
             config_free(refused);
-            log_error("Hashing config: an unreadable config file was taken for a missing one");
+            log_error("Config: an unreadable config file was taken for a missing one");
             return 1;
         }
     }
@@ -1122,7 +1220,7 @@ static int test_hashing_config(void) {
     config_free(b);
     config_free(c);
     if (!ok) {
-        log_error("Hashing config: machine settings weren't filled in from the password ones, "
+        log_error("Config: machine settings weren't filled in from the password ones, "
                   "kept apart, or held to the method's limit");
         return 1;
     }
@@ -1144,7 +1242,7 @@ static int test_hashing_config(void) {
     config_free(bad);
     config_free(off);
     if (!ok_admin) {
-        log_error("Hashing config: the admin listener settings didn't default or parse as documented");
+        log_error("Config: the admin listener settings didn't default or parse as documented");
         return 1;
     }
     log_info("  admin API: the socket by default (0600), no TCP port; modes octal (OK)");
@@ -1166,13 +1264,90 @@ static int test_hashing_config(void) {
     config_free(lax);
     config_free(strict);
     if (!ok_strict) {
-        log_error("Hashing config: strict didn't refuse the shipped key or a short password "
+        log_error("Config: strict didn't refuse the shipped key or a short password "
                   "minimum, or refused what it shouldn't");
         return 1;
     }
+
+    /* A password minimum a generated key secret can meet, and no higher */
+    config_t *at_cap = config_from("password_min_length = 43\n");
+    config_t *over_cap = config_from("password_min_length = 44\n");
+    int cap_holds = at_cap && at_cap->password_min_length == 43 && !over_cap;
+    config_free(at_cap);
+    config_free(over_cap);
+    if (!cap_holds) {
+        log_error("Config: password_min_length of 43 should load and 44 refuse the start");
+        return 1;
+    }
+    log_info("  password_min_length: 43 loads, 44 refuses the start (OK)");
     log_info("  strict: off by default; on, the shipped key or a password minimum under 8 "
              "refuses the start (OK)");
-    log_info("Hashing config tests passed!");
+
+    /* A strict value it can't read refuses the start, in the file or in
+       AUTH_STRICT, which wins over the file; strict_env renames the variable, and
+       the renamed one is read the same way */
+    config_t *typo = config_from("strict = yes\n");
+    setenv("AUTH_STRICT", "on", 1);
+    config_t *env_typo = config_from("strict = true\n");
+    unsetenv("AUTH_STRICT");
+    setenv("TEST_STRICT", "on", 1);
+    config_t *renamed_typo = config_from("strict_env = TEST_STRICT\nstrict = true\n");
+    setenv("TEST_STRICT", "true", 1);
+    config_t *renamed = config_from("strict_env = TEST_STRICT\nstrict = false\n");
+    unsetenv("TEST_STRICT");
+    int refused = !typo && !env_typo && !renamed_typo && renamed && renamed->strict == 1;
+    config_free(typo);
+    config_free(env_typo);
+    config_free(renamed_typo);
+    config_free(renamed);
+    if (!refused) {
+        log_error("Config: a strict value it can't read didn't refuse the start, or strict_env "
+                  "didn't rename the variable");
+        return 1;
+    }
+    log_info("  strict: a value it can't read refuses the start, in the file or AUTH_STRICT, "
+             "which strict_env renames (OK)");
+
+    /* An empty server_host refuses the start, from the file or from AUTH_SERVER_HOST,
+       which is trimmed as the file's value is: the server's public address is built
+       from it, and an empty text variable is a value */
+    config_t *blank = config_from("server_host =\n");
+    setenv("AUTH_SERVER_HOST", "  ", 1);
+    config_t *env_blank = config_from("server_host = auth.example.com\n");
+    setenv("AUTH_SERVER_HOST", "auth.example.com ", 1);
+    config_t *padded = config_from("server_host = localhost\n");
+    unsetenv("AUTH_SERVER_HOST");
+    int ok_host = !blank && !env_blank && padded &&
+                  strcmp(padded->public_base_url, "https://auth.example.com") == 0;
+    config_free(blank);
+    config_free(env_blank);
+    config_free(padded);
+    if (!ok_host) {
+        log_error("Config: an empty server_host didn't refuse the start, or AUTH_SERVER_HOST "
+                  "wasn't trimmed");
+        return 1;
+    }
+    log_info("  server_host: empty refuses the start, in the file or AUTH_SERVER_HOST, which is "
+             "trimmed (OK)");
+
+    /* An empty db_path refuses the start with SQLite, which would open a temporary
+       database; a PostgreSQL configuration doesn't use it. Any other path is taken
+       as written, ".." included: falling back to the default would start the server
+       on another database */
+    config_t *no_path = config_from("db_path =\n");
+    config_t *pg_no_path = config_from("db_type = postgresql\ndb_path =\n");
+    config_t *up = config_from("db_path = ../shared/auth.db\n");
+    int scoped = !no_path && pg_no_path && up && strcmp(up->db_path, "../shared/auth.db") == 0;
+    config_free(no_path);
+    config_free(pg_no_path);
+    config_free(up);
+    if (!scoped) {
+        log_error("Config: an empty db_path didn't refuse the start with SQLite, or refused "
+                  "it with PostgreSQL, or a path with \"..\" wasn't taken as written");
+        return 1;
+    }
+    log_info("  db_path: empty refuses the start with SQLite; \"..\" is taken as written (OK)");
+    log_info("Config tests passed!");
     return 0;
 }
 
@@ -1231,7 +1406,7 @@ static int test_rehash(const config_t *config) {
 
     int failed = 1;
     char seen[64], before[128], after[128], salt[64];
-    unsigned char user_id[16], set_id[16];
+    unsigned char user_id[16], set_id[16], session_id[16];
     long long pin = 0, key_pin = 0;
     const char *hash_sql = "SELECT secret_hash FROM user_account WHERE pin = 1";
     static const unsigned char rs_id[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x02};
@@ -1371,10 +1546,12 @@ static int test_rehash(const config_t *config) {
           unless no code is left unused to match */
     const char *codes[] = { "AAAA-BBBB-CCCC-DDDD", "EEEE-FFFF-GGGG-HHHH", "JJJJ-KKKK-LLLL-MMMM" };
     if (recovery_code_set_create(sdb, 1, codes, 3, set_id) != 0 ||
+        oauth_session_create(sdb, 1, user_id, "rehash-session", "password", NULL, NULL, 3600,
+                             session_id) != 0 ||
         read_stored_value(sdb, "SELECT group_concat(DISTINCT substr(secret_hash, 1, "
                                "instr(secret_hash, '$') - 1)) FROM recovery_code",
                           seen, sizeof(seen)) != 0 || strcmp(seen, "pbkdf2-sha256") != 0 ||
-        recovery_code_verify(sdb, 1, codes[0]) != 1) {
+        recovery_code_verify(sdb, 1, session_id, codes[0]) != 1) {
         log_error("Re-hash: a new recovery code set isn't under the machine method (%s), "
                   "or its code didn't verify", seen);
         goto done;
@@ -1394,20 +1571,20 @@ static int test_rehash(const config_t *config) {
                                    "WHERE plaintext_last4 = '%s'", hash, codes[i] + 15);
         if (db_execute_direct(sdb, sql) != 0) goto done;
     }
-    if (recovery_code_verify(sdb, 1, codes[1]) != 1) {
+    if (recovery_code_verify(sdb, 1, session_id, codes[1]) != 1) {
         log_error("Re-hash: a code of a set made under another method didn't verify");
         goto done;
     }
     if (db_execute_direct(sdb, "UPDATE recovery_code SET secret_hash = "
                                "substr(secret_hash, instr(secret_hash, '$') + 1)") != 0 ||
-        recovery_code_verify(sdb, 1, codes[2]) != -1 ||
+        recovery_code_verify(sdb, 1, session_id, codes[2]) != -1 ||
         read_count(sdb, "SELECT count(*) FROM recovery_code WHERE is_used = 1") != 2) {
         log_error("Re-hash: a code with no label didn't fail, or was used");
         goto done;
     }
     /* Only an unused code can match, so with every code used the labels don't matter */
     if (db_execute_direct(sdb, "UPDATE recovery_code SET is_used = 1") != 0 ||
-        recovery_code_verify(sdb, 1, codes[2]) != 0) {
+        recovery_code_verify(sdb, 1, session_id, codes[2]) != 0) {
         log_error("Re-hash: a set with every code used didn't answer no match");
         goto done;
     }
@@ -2482,12 +2659,12 @@ static int test_mfa_reset(const config_t *config) {
     unsigned char method_id[16], set_id[16];
     const char *codes[] = { "reset-code-one", "reset-code-two" };
     if (mfa_method_create(sdb, 1, "TOTP", "phone", "secret-1", method_id) != 0 ||
-        mfa_method_confirm(sdb, method_id) != 0 ||
+        mfa_method_confirm(sdb, method_id, NULL, 0) != 0 ||
         mfa_method_create(sdb, 1, "TOTP", "spare", "secret-2", method_id) != 0 ||
         recovery_code_set_create(sdb, 1, codes, 2, set_id) != 0 ||
         mfa_update_require_mfa_flag(sdb, 1, 1) != 0 ||
         mfa_method_create(sdb, 2, "TOTP", "theirs", "secret-3", method_id) != 0 ||
-        mfa_method_confirm(sdb, method_id) != 0) {
+        mfa_method_confirm(sdb, method_id, NULL, 0) != 0) {
         log_error("MFA reset: could not set up MFA");
         goto done;
     }
@@ -2682,7 +2859,7 @@ static int test_deactivated_user_tokens(const config_t *config) {
 
     /* 5. A malformed user id must not degrade into "no user". A zero user id is
        how a client_credentials token looks, so a user token would introspect
-       as active with no sub. It must read as inactive instead. */
+       as active with no sub. It must be an error instead. */
     if (db_execute_direct(sdb,
             "UPDATE user_account SET is_active = 1, id = x'DEADBEEF'") != 0) {
         log_error("Deactivation: could not corrupt the user id");
@@ -2690,11 +2867,11 @@ static int test_deactivated_user_tokens(const config_t *config) {
     }
     active = -1;
     if (oauth_introspect_token(sdb, "deact-user-token", NULL, 1, &active,
-                               NULL, NULL, NULL, NULL, NULL, NULL) != 0 || active != 0) {
-        log_error("Deactivation: token with a malformed user id introspected as active");
+                               NULL, NULL, NULL, NULL, NULL, NULL) != -1 || active != 0) {
+        log_error("Deactivation: a token with a malformed user id wasn't an error");
         goto done;
     }
-    log_info("  malformed user id: inactive, not a machine token (OK)");
+    log_info("  malformed user id: an error, not a machine token (OK)");
 
     failed = 0;
 
@@ -3504,27 +3681,30 @@ static int test_single_use(const config_t *config) {
           the set is replaced, its unused codes don't */
     const char *codes[] = { "single-code-1", "single-code-2" };
     const char *new_codes[] = { "single-code-3" };
-    unsigned char set_id[16];
-    if (recovery_code_set_create(sdb, 1, codes, 2, set_id) != 0) {
-        log_error("Single-use: could not create recovery codes");
+    static const unsigned char user_id[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x04};
+    unsigned char set_id[16], session_id[16];
+    if (recovery_code_set_create(sdb, 1, codes, 2, set_id) != 0 ||
+        oauth_session_create(sdb, 1, user_id, "single-session", "password", NULL, NULL, 3600,
+                             session_id) != 0) {
+        log_error("Single-use: could not create recovery codes and a session");
         goto done;
     }
-    if (recovery_code_verify(sdb, 1, codes[0]) != 1 ||
-        recovery_code_verify(sdb, 1, codes[0]) != 0 ||
-        recovery_code_verify(sdb, 1, "not-a-recovery-code") != 0) {
+    if (recovery_code_verify(sdb, 1, session_id, codes[0]) != 1 ||
+        recovery_code_verify(sdb, 1, session_id, codes[0]) != 0 ||
+        recovery_code_verify(sdb, 1, session_id, "not-a-recovery-code") != 0) {
         log_error("Single-use: a recovery code didn't work exactly once");
         goto done;
     }
     if (recovery_code_set_create(sdb, 1, new_codes, 1, set_id) != 0 ||
-        recovery_code_verify(sdb, 1, codes[1]) != 0 ||
-        recovery_code_verify(sdb, 1, new_codes[0]) != 1) {
+        recovery_code_verify(sdb, 1, session_id, codes[1]) != 0 ||
+        recovery_code_verify(sdb, 1, session_id, new_codes[0]) != 1) {
         log_error("Single-use: a replaced set's code was accepted, or the new set's refused");
         goto done;
     }
     /* Every code of the new set used, and the used ones purged as the cleaner
        purges them: the set is still active, with nothing left to match */
     if (db_execute_direct(sdb, "DELETE FROM recovery_code WHERE is_used = 1") != 0 ||
-        recovery_code_verify(sdb, 1, new_codes[0]) != 0) {
+        recovery_code_verify(sdb, 1, session_id, new_codes[0]) != 0) {
         log_error("Single-use: a set with no codes left didn't answer no match");
         goto done;
     }
@@ -3879,9 +4059,9 @@ static int run_instance_lock(const config_t *config) {
     return test_instance_lock();
 }
 
-static int run_hashing_config(const config_t *config) {
+static int run_config(const config_t *config) {
     (void)config;
-    return test_hashing_config();
+    return test_config();
 }
 
 /* Every test, in order. Those for either backend run on both; the others write
@@ -3892,6 +4072,7 @@ static const struct {
 } TESTS[] = {
     { test_storage_at_rest, 0 },
     { test_credential_lifetimes, 0 },
+    { test_refresh_lifetime, 1 },
     { test_schema_constraints, 0 },
     { test_history_tables, 1 },
     { test_drop_history, 1 },
@@ -3906,7 +4087,7 @@ static const struct {
     { test_encryption_key_check, 0 },
     { test_encryption_params, 1 },
     { test_rekey, 1 },
-    { run_hashing_config, 0 },
+    { run_config, 0 },
     { test_rehash, 0 },
     { test_single_use, 0 },
     { test_email_removal_voids_links, 0 },

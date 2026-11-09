@@ -33,7 +33,7 @@ int try_org_key_auth(const HttpRequest *req, const char *operation,
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
         log_error("Failed to get database connection for org key auth");
-        return -1;
+        return -2;
     }
 
     const char *key_id_hex = http_request_get_header(req, "X-Org-Key-Id");
@@ -45,13 +45,17 @@ int try_org_key_auth(const HttpRequest *req, const char *operation,
 
     unsigned char key_id[16];
     if (hex_to_bytes(key_id_hex, key_id, 16) != 0) {
-        log_error("Invalid X-Org-Key-Id format");
+        log_info("Invalid X-Org-Key-Id format");
         return -1;
     }
 
     long long org_pin, key_pin;
-    if (organization_key_verify(db, key_id, key_secret, &org_pin, &key_pin) != 0) {
-        log_error("Organization key verification failed");
+    int verified = organization_key_verify(db, key_id, key_secret, &org_pin, &key_pin);
+    if (verified < 0) {
+        return -2;  /* logged */
+    }
+    if (verified != 0) {
+        log_warn("Organization key verification failed");
         return -1;
     }
 
@@ -95,18 +99,20 @@ typedef struct {
  * leg of dual authentication (session OR org key).
  *
  * Returns: 0 on success with user_pin populated, -2 if the session is valid
- *          but still owes MFA, -1 on any other failure
+ *          but still owes MFA, -3 if the check itself failed, -1 on any other
+ *          failure
  */
 static int get_authenticated_user_pin(const HttpRequest *req, long long *out_user_pin) {
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
         log_error("Failed to get database connection");
-        return -1;
+        return -3;
     }
 
     oauth_session_info_t session;
     int rc = session_authenticate(req, db, SESSION_MFA_IF_REQUIRED, &session);
     if (rc == 3) return -2;
+    if (rc == 4) return -3;
     if (rc != 0) return -1;
 
     *out_user_pin = session.user_account_pin;
@@ -127,8 +133,13 @@ static int get_authenticated_user_pin(const HttpRequest *req, long long *out_use
  * A valid session that still owes MFA ends the attempt there: it is not retried
  * as org-key auth, so the caller can say what is missing.
  *
+ * A check that failed doesn't end it: a good org key is still a real credential
+ * when the session lookup couldn't run. Only when nothing authenticated does the
+ * failed check decide the answer, since then nobody can say the request was wrong.
+ *
  * Returns: 0 on success with ctx populated, -2 if the session owes MFA,
- *          -1 if both methods fail
+ *          -3 if nothing authenticated and either check failed, -1 if both
+ *          methods refuse
  */
 static int get_auth_context(const HttpRequest *req, const char *operation,
                             auth_context_t *ctx) {
@@ -150,7 +161,8 @@ static int get_auth_context(const HttpRequest *req, const char *operation,
 
     /* Try org key authentication */
     long long org_pin, key_pin;
-    if (try_org_key_auth(req, operation, &org_pin, &key_pin) == 0) {
+    int key_rc = try_org_key_auth(req, operation, &org_pin, &key_pin);
+    if (key_rc == 0) {
         /* Org key auth succeeded */
         ctx->user_account_pin = -1;  /* Sentinel: not session auth */
         ctx->organization_pin = org_pin;
@@ -159,16 +171,15 @@ static int get_auth_context(const HttpRequest *req, const char *operation,
         return 0;
     }
 
-    /* Both methods failed */
-    return -1;
+    return session_rc == -3 || key_rc == -2 ? -3 : -1;
 }
 
 /*
  * require_auth_context - get_auth_context, answered as a response on failure
  *
  * A session that owes MFA gets 403 "MFA verification required", the answer the
- * /api/user endpoints give, which the console turns into the MFA step. Anything
- * else gets 401.
+ * /api/user endpoints give, which the console turns into the MFA step. A check
+ * that failed gets 500. Anything else gets 401.
  *
  * Returns: NULL on success with ctx populated, or the error response
  */
@@ -180,6 +191,9 @@ static HttpResponse *require_auth_context(const HttpRequest *req, const char *op
     }
     if (rc == -2) {
         return response_json_error(403, "MFA verification required");
+    }
+    if (rc == -3) {
+        return response_json_error(500, "Internal server error");
     }
     return response_json_error(401, "Authentication required");
 }
@@ -345,14 +359,18 @@ HttpResponse *admin_update_organization_handler(const HttpRequest *req) {
         return response_json_error(400, "Request body required");
     }
 
-    HttpResponse *resp = NULL;
-    char *display_name = json_get_string(req->body, "display_name");
-    char *note = json_get_string(req->body, "note");
+    HttpResponse *resp = NULL, *bad = NULL;
+    char *display_name = read_text_field(req->body, "display_name", &bad);
+    char *note = read_text_field(req->body, "note", &bad);
 
     int is_active_val;
     int *is_active = NULL;
-    if (json_get_bool(req->body, "is_active", &is_active_val) == 0) {
+    if (read_bool_field(req->body, "is_active", &is_active_val, &bad)) {
         is_active = &is_active_val;
+    }
+    if (bad) {
+        resp = bad;
+        goto cleanup;
     }
 
     /* Validate input formats */
@@ -550,12 +568,16 @@ HttpResponse *admin_create_resource_server_handler(const HttpRequest *req) {
         return response_json_error(400, "Request body required");
     }
 
-    HttpResponse *resp = NULL;
-    char *org_id_str = json_get_string(req->body, "organization_id");
-    char *code_name = json_get_string(req->body, "code_name");
-    char *display_name = json_get_string(req->body, "display_name");
-    char *address = json_get_string(req->body, "address");
-    char *note = json_get_string(req->body, "note");
+    HttpResponse *resp = NULL, *bad = NULL;
+    char *org_id_str = read_text_field(req->body, "organization_id", &bad);
+    char *code_name = read_text_field(req->body, "code_name", &bad);
+    char *display_name = read_text_field(req->body, "display_name", &bad);
+    char *address = read_text_field(req->body, "address", &bad);
+    char *note = read_text_field(req->body, "note", &bad);
+    if (bad) {
+        resp = bad;
+        goto cleanup;
+    }
 
     if (!org_id_str || !code_name || !*code_name || !display_name || !*display_name || !address || !*address) {
         resp = response_json_error(400, "organization_id, code_name, display_name, and address are required");
@@ -595,8 +617,14 @@ HttpResponse *admin_create_resource_server_handler(const HttpRequest *req) {
     int result = admin_create_resource_server(db, ctx.user_account_pin, ctx.organization_key_pin,
                                                org_id, code_name, display_name, address, note, server_id);
 
-    if (result != 0) {
-        resp = response_json_error(409, "Resource server creation failed (possibly duplicate code_name or address)");
+    if (result == 1) {
+        resp = response_json_error(409, "Another active resource server in this organization has this address");
+    } else if (result == 2) {
+        resp = response_json_error(409, "Another active resource server in this organization has this code name");
+    } else if (result == 3) {
+        resp = response_json_error(404, "Organization not found or access denied");
+    } else if (result != 0) {
+        resp = response_json_error(500, "Resource server creation failed");
     } else {
         char server_id_hex[33];
         bytes_to_hex(server_id, 16, server_id_hex, sizeof(server_id_hex));
@@ -662,21 +690,25 @@ HttpResponse *admin_update_resource_server_handler(const HttpRequest *req) {
         return response_json_error(400, "Request body required");
     }
 
-    HttpResponse *resp = NULL;
-    char *display_name = json_get_string(req->body, "display_name");
-    char *address = json_get_string(req->body, "address");
-    char *note = json_get_string(req->body, "note");
+    HttpResponse *resp = NULL, *bad = NULL;
+    char *display_name = read_text_field(req->body, "display_name", &bad);
+    char *address = read_text_field(req->body, "address", &bad);
+    char *note = read_text_field(req->body, "note", &bad);
 
     int is_active_val;
     int *is_active = NULL;
-    if (json_get_bool(req->body, "is_active", &is_active_val) == 0) {
+    if (read_bool_field(req->body, "is_active", &is_active_val, &bad)) {
         is_active = &is_active_val;
     }
 
     int allow_user_provisioning_val;
     int *allow_user_provisioning = NULL;
-    if (json_get_bool(req->body, "allow_user_provisioning", &allow_user_provisioning_val) == 0) {
+    if (read_bool_field(req->body, "allow_user_provisioning", &allow_user_provisioning_val, &bad)) {
         allow_user_provisioning = &allow_user_provisioning_val;
+    }
+    if (bad) {
+        resp = bad;
+        goto cleanup;
     }
 
     /* Validate input formats */
@@ -704,7 +736,11 @@ HttpResponse *admin_update_resource_server_handler(const HttpRequest *req) {
 
     int result = admin_update_resource_server(db, ctx.user_account_pin, ctx.organization_key_pin, server_id, display_name, address, note, is_active, allow_user_provisioning);
 
-    if (result != 0) {
+    if (result == 1) {
+        resp = response_json_error(409, "Another active resource server in this organization has this address");
+    } else if (result == 2) {
+        resp = response_json_error(409, "Another active resource server in this organization has this code name");
+    } else if (result != 0) {
         resp = response_json_error(404, "Resource server not found or update failed");
     } else {
         resp = response_json_ok("{\"message\":\"Resource server updated successfully\"}");
@@ -852,6 +888,46 @@ HttpResponse *admin_get_clients_handler(const HttpRequest *req) {
 }
 
 /*
+ * A client's durations, in seconds, and what each takes: from its lowest value
+ * up, 0 counting as zero seconds like any other number; and -1, no limit (stored
+ * as NULL), for all but the access token's. The session limit starts at 1: it's
+ * checked at /authorize, where 0 would accept a session only in the second it
+ * began, and send the rest straight back to sign in. Anything else is refused,
+ * naming the field.
+ */
+static const struct {
+    const char *field;
+    int lowest;
+    int no_limit;  /* takes -1 */
+} CLIENT_DURATIONS[4] = {
+    { "access_token_ttl_seconds",  0, 0 },
+    { "refresh_token_ttl_seconds", 0, 1 },
+    { "maximum_session_seconds",   1, 1 },
+    { "secret_rotation_seconds",   0, 1 },
+};
+
+/* values: the durations in CLIENT_DURATIONS' order, NULL for one not sent.
+   Returns the 400 to answer, or NULL if each is one its field takes. */
+static HttpResponse *check_client_durations(const int *values[4]) {
+    for (size_t i = 0; i < 4; i++) {
+        if (!values[i] || *values[i] >= CLIENT_DURATIONS[i].lowest ||
+            (CLIENT_DURATIONS[i].no_limit && *values[i] == -1)) {
+            continue;
+        }
+        char message[128];
+        if (CLIENT_DURATIONS[i].no_limit) {
+            snprintf(message, sizeof(message), "%s must be -1 (no limit), or %d or more",
+                     CLIENT_DURATIONS[i].field, CLIENT_DURATIONS[i].lowest);
+        } else {
+            snprintf(message, sizeof(message), "%s must be %d or more",
+                     CLIENT_DURATIONS[i].field, CLIENT_DURATIONS[i].lowest);
+        }
+        return response_json_error(400, message);
+    }
+    return NULL;
+}
+
+/*
  * POST /api/admin/clients
  *
  * Body: organization_id, code_name, display_name, client_type, grant_type,
@@ -875,18 +951,31 @@ HttpResponse *admin_create_client_handler(const HttpRequest *req) {
         return response_json_error(400, "Request body required");
     }
 
-    HttpResponse *resp = NULL;
-    char *org_id_str = json_get_string(req->body, "organization_id");
-    char *code_name = json_get_string(req->body, "code_name");
-    char *display_name = json_get_string(req->body, "display_name");
-    char *client_type = json_get_string(req->body, "client_type");
-    char *grant_type = json_get_string(req->body, "grant_type");
-    char *note = json_get_string(req->body, "note");
+    HttpResponse *resp = NULL, *bad = NULL;
+    char *org_id_str = read_text_field(req->body, "organization_id", &bad);
+    char *code_name = read_text_field(req->body, "code_name", &bad);
+    char *display_name = read_text_field(req->body, "display_name", &bad);
+    char *client_type = read_text_field(req->body, "client_type", &bad);
+    char *grant_type = read_text_field(req->body, "grant_type", &bad);
+    char *note = read_text_field(req->body, "note", &bad);
 
-    int require_mfa = 0, access_ttl, issue_refresh = 0, refresh_ttl, max_session, secret_rotation;
+    /* The numbers and true/false fields. Left out, a true/false field is false and
+       a duration is -1, no limit, but access_token_ttl_seconds is required (below) */
+    int access_ttl = 0, require_mfa = 0, issue_refresh = 0;
+    int refresh_ttl = -1, max_session = -1, secret_rotation = -1;
+    int has_access_ttl = read_int_field(req->body, "access_token_ttl_seconds", &access_ttl, &bad);
+    read_bool_field(req->body, "require_mfa", &require_mfa, &bad);
+    read_bool_field(req->body, "issue_refresh_tokens", &issue_refresh, &bad);
+    read_int_field(req->body, "refresh_token_ttl_seconds", &refresh_ttl, &bad);
+    read_int_field(req->body, "maximum_session_seconds", &max_session, &bad);
+    read_int_field(req->body, "secret_rotation_seconds", &secret_rotation, &bad);
+    if (bad) {
+        resp = bad;
+        goto cleanup;
+    }
+
     if (!org_id_str || !code_name || !*code_name || !display_name || !*display_name ||
-        !client_type || !*client_type || !grant_type || !*grant_type ||
-        json_get_int(req->body, "access_token_ttl_seconds", &access_ttl) != 0) {
+        !client_type || !*client_type || !grant_type || !*grant_type || !has_access_ttl) {
         resp = response_json_error(400, "Missing required fields");
         goto cleanup;
     }
@@ -909,19 +998,33 @@ HttpResponse *admin_create_client_handler(const HttpRequest *req) {
         goto cleanup;
     }
 
+    /* The types and their pairs the schema's CHECKs allow, checked here so a
+       wrong one answers 400 naming it, not the failed insert's 409 */
+    if (strcmp(client_type, "public") != 0 && strcmp(client_type, "confidential") != 0) {
+        resp = response_json_error(400, "client_type must be public or confidential");
+        goto cleanup;
+    }
+    if (strcmp(grant_type, "authorization_code") != 0 &&
+        strcmp(grant_type, "client_credentials") != 0) {
+        resp = response_json_error(400,
+                                   "grant_type must be authorization_code or client_credentials");
+        goto cleanup;
+    }
+    if (strcmp(client_type, "public") == 0 && strcmp(grant_type, "authorization_code") != 0) {
+        resp = response_json_error(400, "A public client's grant_type must be authorization_code");
+        goto cleanup;
+    }
+
+    const int *durations[4] = { &access_ttl, &refresh_ttl, &max_session, &secret_rotation };
+    resp = check_client_durations(durations);
+    if (resp) goto cleanup;
+
     if (access_ttl > g_config->max_access_token_ttl_seconds) {
         snprintf(validation_error, sizeof(validation_error),
                  "access_token_ttl_seconds cannot exceed %d", g_config->max_access_token_ttl_seconds);
         resp = response_json_error(400, validation_error);
         goto cleanup;
     }
-
-    /* Optional fields - default to 0/false if not provided */
-    json_get_bool(req->body, "require_mfa", &require_mfa);
-    json_get_bool(req->body, "issue_refresh_tokens", &issue_refresh);
-    if (json_get_int(req->body, "refresh_token_ttl_seconds", &refresh_ttl) != 0) refresh_ttl = -1;
-    if (json_get_int(req->body, "maximum_session_seconds", &max_session) != 0) max_session = -1;
-    if (json_get_int(req->body, "secret_rotation_seconds", &secret_rotation) != 0) secret_rotation = -1;
 
     unsigned char org_id[16], client_id[16];
     if (hex_to_bytes(org_id_str, org_id, 16) != 0) {
@@ -934,8 +1037,12 @@ HttpResponse *admin_create_client_handler(const HttpRequest *req) {
                                      client_type, grant_type, note, require_mfa, access_ttl,
                                      issue_refresh, refresh_ttl, max_session, secret_rotation, client_id);
 
-    if (result != 0) {
-        resp = response_json_error(409, "Client creation failed");
+    if (result == 1) {
+        resp = response_json_error(409, "Another active client in this organization has this code name");
+    } else if (result == 2) {
+        resp = response_json_error(404, "Organization not found or access denied");
+    } else if (result != 0) {
+        resp = response_json_error(500, "Client creation failed");
     } else {
         char client_id_hex[33];
         bytes_to_hex(client_id, 16, client_id_hex, sizeof(client_id_hex));
@@ -996,22 +1103,27 @@ HttpResponse *admin_update_client_handler(const HttpRequest *req) {
         return response_json_error(400, "Request body required");
     }
 
-    HttpResponse *resp = NULL;
-    char *display_name = json_get_string(req->body, "display_name");
-    char *note = json_get_string(req->body, "note");
+    const char *body = req->body;
+    HttpResponse *resp = NULL, *bad = NULL;
+    char *display_name = read_text_field(body, "display_name", &bad);
+    char *note = read_text_field(body, "note", &bad);
 
     int require_mfa_val, access_ttl_val, issue_refresh_val, refresh_ttl_val;
     int max_session_val, secret_rotation_val, is_active_val;
     int *require_mfa = NULL, *access_ttl = NULL, *issue_refresh = NULL;
     int *refresh_ttl = NULL, *max_session = NULL, *secret_rotation = NULL, *is_active = NULL;
 
-    if (json_get_bool(req->body, "require_mfa", &require_mfa_val) == 0) require_mfa = &require_mfa_val;
-    if (json_get_int(req->body, "access_token_ttl_seconds", &access_ttl_val) == 0) access_ttl = &access_ttl_val;
-    if (json_get_bool(req->body, "issue_refresh_tokens", &issue_refresh_val) == 0) issue_refresh = &issue_refresh_val;
-    if (json_get_int(req->body, "refresh_token_ttl_seconds", &refresh_ttl_val) == 0) refresh_ttl = &refresh_ttl_val;
-    if (json_get_int(req->body, "maximum_session_seconds", &max_session_val) == 0) max_session = &max_session_val;
-    if (json_get_int(req->body, "secret_rotation_seconds", &secret_rotation_val) == 0) secret_rotation = &secret_rotation_val;
-    if (json_get_bool(req->body, "is_active", &is_active_val) == 0) is_active = &is_active_val;
+    if (read_bool_field(body, "require_mfa", &require_mfa_val, &bad)) require_mfa = &require_mfa_val;
+    if (read_int_field(body, "access_token_ttl_seconds", &access_ttl_val, &bad)) access_ttl = &access_ttl_val;
+    if (read_bool_field(body, "issue_refresh_tokens", &issue_refresh_val, &bad)) issue_refresh = &issue_refresh_val;
+    if (read_int_field(body, "refresh_token_ttl_seconds", &refresh_ttl_val, &bad)) refresh_ttl = &refresh_ttl_val;
+    if (read_int_field(body, "maximum_session_seconds", &max_session_val, &bad)) max_session = &max_session_val;
+    if (read_int_field(body, "secret_rotation_seconds", &secret_rotation_val, &bad)) secret_rotation = &secret_rotation_val;
+    if (read_bool_field(body, "is_active", &is_active_val, &bad)) is_active = &is_active_val;
+    if (bad) {
+        resp = bad;
+        goto cleanup;
+    }
 
     /* Validate input formats */
     char validation_error[256];
@@ -1032,6 +1144,10 @@ HttpResponse *admin_update_client_handler(const HttpRequest *req) {
         goto cleanup;
     }
 
+    const int *durations[4] = { access_ttl, refresh_ttl, max_session, secret_rotation };
+    resp = check_client_durations(durations);
+    if (resp) goto cleanup;
+
     if (access_ttl && *access_ttl > g_config->max_access_token_ttl_seconds) {
         snprintf(validation_error, sizeof(validation_error),
                  "access_token_ttl_seconds cannot exceed %d", g_config->max_access_token_ttl_seconds);
@@ -1043,7 +1159,9 @@ HttpResponse *admin_update_client_handler(const HttpRequest *req) {
                                      access_ttl, issue_refresh, refresh_ttl, max_session,
                                      secret_rotation, is_active);
 
-    if (result != 0) {
+    if (result == 1) {
+        resp = response_json_error(409, "Another active client in this organization has this code name");
+    } else if (result != 0) {
         resp = response_json_error(404, "Client not found or update failed");
     } else {
         resp = response_json_ok("{\"message\":\"Client updated successfully\"}");
@@ -1139,9 +1257,14 @@ HttpResponse *admin_create_client_redirect_uri_handler(const HttpRequest *req) {
         return response_json_error(400, "Request body required");
     }
 
-    char *client_id_str = json_get_string(req->body, "client_id");
-    char *redirect_uri = json_get_string(req->body, "redirect_uri");
-    char *note = json_get_string(req->body, "note");
+    HttpResponse *bad = NULL;
+    char *client_id_str = read_text_field(req->body, "client_id", &bad);
+    char *redirect_uri = read_text_field(req->body, "redirect_uri", &bad);
+    char *note = read_text_field(req->body, "note", &bad);
+    if (bad) {
+        free(client_id_str); free(redirect_uri); free(note);
+        return bad;
+    }
 
     if (!client_id_str || !redirect_uri) {
         free(client_id_str); free(redirect_uri); free(note);
@@ -1175,8 +1298,13 @@ HttpResponse *admin_create_client_redirect_uri_handler(const HttpRequest *req) {
     if (result == 1) {
         return response_json_error(404, "Client not found");
     }
+    if (result == 2) {
+        /* A repeat succeeds, as a repeated client-resource-server link does, and
+           says so: the note sent with it isn't saved */
+        return response_json_ok("{\"message\":\"Redirect URI already registered; nothing changed\"}");
+    }
     if (result != 0) {
-        return response_json_error(409, "Failed to create redirect URI");
+        return response_json_error(500, "Failed to create redirect URI");
     }
 
     return response_json_ok("{\"message\":\"Redirect URI created successfully\"}");
@@ -1395,8 +1523,13 @@ HttpResponse *admin_create_client_resource_server_link_handler(const HttpRequest
         return response_json_error(400, "Request body required");
     }
 
-    char *client_id_str = json_get_string(req->body, "client_id");
-    char *server_id_str = json_get_string(req->body, "resource_server_id");
+    HttpResponse *bad = NULL;
+    char *client_id_str = read_text_field(req->body, "client_id", &bad);
+    char *server_id_str = read_text_field(req->body, "resource_server_id", &bad);
+    if (bad) {
+        free(client_id_str); free(server_id_str);
+        return bad;
+    }
 
     if (!client_id_str || !server_id_str) {
         free(client_id_str); free(server_id_str);
@@ -1507,9 +1640,16 @@ HttpResponse *admin_create_resource_server_key_handler(const HttpRequest *req) {
         return response_json_error(400, "Request body required");
     }
 
-    char *rs_id_str = json_get_string(req->body, "resource_server_id");
-    char *note = json_get_string(req->body, "note");
-    char *user_secret = json_get_string(req->body, "secret");
+    HttpResponse *bad = NULL;
+    char *rs_id_str = read_text_field(req->body, "resource_server_id", &bad);
+    char *note = read_text_field(req->body, "note", &bad);
+    char *user_secret = read_text_field(req->body, "secret", &bad);
+    if (bad) {
+        free(rs_id_str); free(note);
+        if (user_secret) OPENSSL_cleanse(user_secret, strlen(user_secret));
+        free(user_secret);
+        return bad;
+    }
 
     /* Validate input formats */
     char validation_error[256];
@@ -1575,7 +1715,8 @@ HttpResponse *admin_create_resource_server_key_handler(const HttpRequest *req) {
         OPENSSL_cleanse(generated_secret, sizeof(generated_secret));
         char msg[128];
         snprintf(msg, sizeof(msg),
-                 "Secret must be at least %d characters", crypto_password_min_length());
+                 "Secret must be between %d and %d characters",
+                 crypto_password_min_length(), PASSWORD_MAX_LENGTH);
         return response_json_error(400, msg);
     }
     if (result == 1) {
@@ -1771,11 +1912,15 @@ HttpResponse *admin_create_client_key_handler(const HttpRequest *req) {
         return response_json_error(400, "Request body required");
     }
 
-    HttpResponse *resp = NULL;
-    char *client_id_str = json_get_string(req->body, "client_id");
-    char *note = json_get_string(req->body, "note");
-    char *user_secret = json_get_string(req->body, "secret");
+    HttpResponse *resp = NULL, *bad = NULL;
+    char *client_id_str = read_text_field(req->body, "client_id", &bad);
+    char *note = read_text_field(req->body, "note", &bad);
+    char *user_secret = read_text_field(req->body, "secret", &bad);
     char generated_secret[64] = {0};
+    if (bad) {
+        resp = bad;
+        goto cleanup;
+    }
 
     /* Validate input formats */
     char validation_error[256];
@@ -1823,7 +1968,8 @@ HttpResponse *admin_create_client_key_handler(const HttpRequest *req) {
     if (result == -2) {
         char msg[128];
         snprintf(msg, sizeof(msg),
-                 "Secret must be at least %d characters", crypto_password_min_length());
+                 "Secret must be between %d and %d characters",
+                 crypto_password_min_length(), PASSWORD_MAX_LENGTH);
         resp = response_json_error(400, msg);
     } else if (result == 1) {
         resp = response_json_error(409, "Key creation failed: client not found, or not a confidential client");

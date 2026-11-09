@@ -11,14 +11,6 @@
  */
 
 /*
- * Check if active client with code_name exists in organization
- *
- * Returns: 1 if exists, 0 if not exists, -1 on error
- */
-int client_code_name_exists(db_handle_t *db, const char *org_code_name,
-                            const char *code_name);
-
-/*
  * Create client (bootstrap use)
  *
  * Creates client record within an organization.
@@ -102,6 +94,10 @@ int client_add_redirect_uri_bootstrap(db_handle_t *db, const unsigned char *clie
  * - Session auth: Verifies user is org admin
  * - Org key auth: Verifies specific key is active
  *
+ * The organization and uniqueness among active clients are the caller's to
+ * check first (org_get_by_id, client_active_code_name_taken), as
+ * admin_create_client does. The INSERT's own guards refuse what changed since.
+ *
  * Returns: 0 on success, -1 on error
  */
 int client_create(db_handle_t *db,
@@ -174,6 +170,9 @@ int client_redirect_uri_list(db_handle_t *db, long long user_account_pin,
  * Authorization:
  * - Session auth: Verifies user is org admin
  * - Org key auth: Verifies specific key is active
+ *
+ * Whether the client has the URI already is the caller's to check first, as
+ * admin_create_client_redirect_uri does: the unique index refuses a repeat.
  *
  * Returns: 0 on success, 1 if nothing was inserted (client not found or caller
  *          not authorized), -1 on error
@@ -427,7 +426,8 @@ int client_list_all(db_handle_t *db, long long user_account_pin,
  * - Session auth: Verifies user is org admin
  * - Org key auth: Verifies specific key is active
  *
- * Returns: 0 on success, -1 on error or not found
+ * Returns: 0 on success, 1 if there's no such client or the caller can't
+ * administer it (the two look alike), -1 on error
  */
 int client_get_by_id(db_handle_t *db, const unsigned char *client_id,
                      long long user_account_pin,
@@ -459,7 +459,11 @@ int client_get_by_id(db_handle_t *db, const unsigned char *client_id,
  * - Session auth: Verifies user is org admin
  * - Org key auth: Verifies specific key is active
  *
- * Returns: 0 on success, -1 on error or not found
+ * Uniqueness among active clients is the caller's to check first, with
+ * client_active_code_name_taken.
+ *
+ * Returns: 0 once the statement runs, whether or not a row matched (the
+ * caller's read of the client is what finds "not found"), -1 on error
  */
 int client_update(db_handle_t *db, const unsigned char *client_id,
                   long long user_account_pin,
@@ -472,6 +476,17 @@ int client_update(db_handle_t *db, const unsigned char *client_id,
                   const int *maximum_session_seconds,
                   const int *secret_rotation_seconds,
                   const int *is_active);
+
+/*
+ * Whether another active client in the organization has this code name: what
+ * the partial unique index uix_client_org_code holds. The client itself
+ * (client_pin) doesn't count; -1 for one being created. No authorization: the
+ * caller has read the client, or the organization it's created in, already.
+ *
+ * Returns: 1 if it's held, 0 if not, -1 on error
+ */
+int client_active_code_name_taken(db_handle_t *db, long long organization_pin,
+                                  long long client_pin, const char *code_name);
 
 /*
  * Client Key data structure

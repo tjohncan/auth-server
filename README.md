@@ -262,7 +262,7 @@ Business logic for OAuth2 token operations.
 - **Responsibility**: PKCE validation, token generation, transaction-wrapped token exchanges
 - **Used by**: Token endpoint, introspection/revocation endpoints
 - **Design**: All token operations wrapped in transactions for atomicity
-- **Security**: Replay attack detection via return codes (0=success, 1=replay, -1=error)
+- **Security**: Replay attack detection via return codes (0=success, 1=replay, -1=refused, -2=server failure, and for a resource, scope or grant type the credential doesn't cover -3, -4 and -5)
 
 Examples:
 - `oauth_exchange_authorization_code(db, client_id, code, redirect_uri, verifier, resource, out_response)` - Exchange auth code for tokens
@@ -585,7 +585,7 @@ vendor/
     PostgreSQL's server programs (initdb, pg_ctl): from `PG_BIN`, `PATH`, or Debian's and
     Ubuntu's `/usr/lib/postgresql/<version>/bin`. On PostgreSQL, test-db runs the tests written
     for either backend and PostgreSQL's own; the rest are SQLite's. CI runs it against the
-    oldest PostgreSQL still supported, the schema's floor, and the newest (14 and 18), side
+    oldest PostgreSQL still supported, the schema's floor, and the newest (15 and 18), side
     by side; its manual Run workflow button takes any list of versions.
 - `make test-email` - Deliver a test email through the deployed "send script" (optional infrastructure)
 
@@ -718,7 +718,8 @@ the project; taxing every newcomer to protect a deployer who ignored both a star
 and stated: keep PII out of plain view of whoever is reading the database — not defeat an
 attacker who holds the database *and* the configuration. A production deployment sets
 `strict = true` (or `AUTH_STRICT=true`), and then the server refuses to start on either: the
-placeholder key, or a password minimum under 8.
+placeholder key, or a password minimum under 8. A value it can't read refuses the start too, so a
+typo can't leave strict quietly off.
 One default is strict on purpose. New usernames, code names and email addresses take a
 conservative ASCII shape (letters, digits, `. _ + -`; an address like `name@example.com`). A name
 with a Cyrillic а or an invisible space looks identical to the real one in every list an admin

@@ -57,24 +57,24 @@
 #define MAX_LINE_LENGTH 1024
 
 /*
- * Parse log level string to LogLevel enum
- * Returns: LogLevel on success, LOG_INFO on unknown value
+ * Parse a log level name (debug, info, warn, error) into *out
+ * Returns: 0 on success, -1 for any other name, leaving *out as it was
  */
-static LogLevel parse_log_level(const char *level_str) {
-    if (!level_str) return LOG_INFO;
+static int parse_log_level(const char *level_str, LogLevel *out) {
+    if (!level_str) return -1;
 
     if (strcmp(level_str, "debug") == 0) {
-        return LOG_DEBUG;
+        *out = LOG_DEBUG;
     } else if (strcmp(level_str, "info") == 0) {
-        return LOG_INFO;
+        *out = LOG_INFO;
     } else if (strcmp(level_str, "warn") == 0) {
-        return LOG_WARN;
+        *out = LOG_WARN;
     } else if (strcmp(level_str, "error") == 0) {
-        return LOG_ERROR;
+        *out = LOG_ERROR;
     } else {
-        log_warn("Unknown log level '%s', defaulting to 'info'", level_str);
-        return LOG_INFO;
+        return -1;
     }
+    return 0;
 }
 
 /*
@@ -295,17 +295,15 @@ static void set_config_value(config_t *config, const char *key, const char *valu
             log_warn("Unknown db_type '%s', keeping current value", value);
         }
     } else if (strcmp(key, "db_path") == 0) {
-        /* Reject obvious path traversal attempts (defense in depth) */
-        if (strstr(value, "..") != NULL) {
-            log_warn("Rejected db_path with path traversal sequence: %s", value);
+        /* Taken as written, relative or absolute, ".." included. auth.conf is the
+           operator's own file, so refusing ".." would guard against nothing, and
+           falling back to the default would start the server on another database */
+        new_value = str_dup(value);
+        if (new_value) {
+            free(config->db_path);
+            config->db_path = new_value;
         } else {
-            new_value = str_dup(value);
-            if (new_value) {
-                free(config->db_path);
-                config->db_path = new_value;
-            } else {
-                log_error("Failed to allocate memory for db_path");
-            }
+            log_error("Failed to allocate memory for db_path");
         }
     } else if (strcmp(key, "db_host") == 0) {
         new_value = str_dup(value);
@@ -420,17 +418,15 @@ static void set_config_value(config_t *config, const char *key, const char *valu
     }
     /* Paths */
     else if (strcmp(key, "schema_dir") == 0) {
-        /* Reject obvious path traversal attempts (defense in depth) */
-        if (strstr(value, "..") != NULL) {
-            log_warn("Rejected schema_dir with path traversal sequence: %s", value);
+        /* Taken as written: db_init's validate_schema_dir refuses an absolute path or
+           one with "..", at every start. Refusing it here as well would only fall back
+           to the default without a word */
+        new_value = str_dup(value);
+        if (new_value) {
+            free(config->schema_dir);
+            config->schema_dir = new_value;
         } else {
-            new_value = str_dup(value);
-            if (new_value) {
-                free(config->schema_dir);
-                config->schema_dir = new_value;
-            } else {
-                log_error("Failed to allocate memory for schema_dir");
-            }
+            log_error("Failed to allocate memory for schema_dir");
         }
     }
     /* Database features */
@@ -503,13 +499,18 @@ static void set_config_value(config_t *config, const char *key, const char *valu
             config->password_min_length = len;
         }
     } else if (strcmp(key, "strict") == 0) {
+        /* A value it can't read isn't kept at the current one, as other settings'
+         * are: strict is there to stop a start on unsafe defaults, so a typo mustn't
+         * leave it quietly off. -1 marks it, and config_load refuses the start
+         * unless AUTH_STRICT (or the variable strict_env names), which wins over the
+         * file, can be read. */
         if (strcmp(value, "true") == 0 || strcmp(value, "1") == 0) {
             config->strict = 1;
         } else if (strcmp(value, "false") == 0 || strcmp(value, "0") == 0) {
             config->strict = 0;
         } else {
-            log_warn("Invalid strict value '%s', must be true/false or 1/0. Keeping current: %d",
-                    value, config->strict);
+            log_warn("Invalid strict value '%s', must be true/false or 1/0", value);
+            config->strict = -1;
         }
     }
 
@@ -676,7 +677,9 @@ static void set_config_value(config_t *config, const char *key, const char *valu
     /* Logging settings */
     else if (strcmp(key, "log_level") == 0) {
         /* Parse string to enum immediately, don't store string */
-        config->log_level = parse_log_level(value);
+        if (parse_log_level(value, &config->log_level) != 0) {
+            log_warn("Unknown log_level '%s', keeping current value", value);
+        }
     } else if (strcmp(key, "log_level_env") == 0) {
         new_value = str_dup(value);
         if (new_value) {
@@ -684,6 +687,14 @@ static void set_config_value(config_t *config, const char *key, const char *valu
             config->log_level_env = new_value;
         } else {
             log_error("Failed to allocate memory for log_level_env");
+        }
+    } else if (strcmp(key, "strict_env") == 0) {
+        new_value = str_dup(value);
+        if (new_value) {
+            free(config->strict_env);
+            config->strict_env = new_value;
+        } else {
+            log_error("Failed to allocate memory for strict_env");
         }
     }
 #ifdef EMAIL_SUPPORT
@@ -769,6 +780,15 @@ static void set_config_value(config_t *config, const char *key, const char *valu
 
 /*
  * Apply environment variable overrides
+ *
+ * A variable wins over the file, and is read by the file's rules: a value it
+ * can't read is warned about, and the setting keeps its value (strict refuses
+ * the start instead; see set_config_value). Set but empty counts as unset where
+ * empty can't be a value, as for a number, true/false or a choice:
+ * docker-compose's ${VAR:-} passes a host variable that isn't set as exactly
+ * that. A text setting takes empty as its value, as in the file (an empty
+ * admin_socket is none); an empty server_host, from either, then refuses the
+ * start (set_public_base_url).
  */
 static void apply_env_overrides(config_t *config) {
     char *env_value;
@@ -780,6 +800,11 @@ static void apply_env_overrides(config_t *config) {
     if (env_value) {
         char *new_value = str_dup(env_value);
         if (new_value) {
+            /* Trimmed, as the file's value is: a host name has no spaces, so one
+               of only spaces is empty, and refused (set_public_base_url), and a
+               trailing one would end up in every URL built from it. The other
+               text variables keep theirs, as a secret's spaces are its own. */
+            trim(new_value);
             free(config->host);
             config->host = new_value;
             log_info("Config override from %s", env_var_name);
@@ -791,7 +816,7 @@ static void apply_env_overrides(config_t *config) {
     /* SERVER_PORT */
     env_var_name = config->server_port_env ? config->server_port_env : "AUTH_SERVER_PORT";
     env_value = getenv(env_var_name);
-    if (env_value) {
+    if (env_value && *env_value) {
         int port = 0;
         parse_int(env_value, &port);
         if (port > 0 && port <= 65535) {
@@ -805,7 +830,7 @@ static void apply_env_overrides(config_t *config) {
     /* ADMIN_PORT */
     env_var_name = config->admin_port_env ? config->admin_port_env : "AUTH_ADMIN_PORT";
     env_value = getenv(env_var_name);
-    if (env_value) {
+    if (env_value && *env_value) {
         int port = -1;
         parse_int(env_value, &port);
         if (port >= 0 && port <= 65535) {
@@ -833,13 +858,15 @@ static void apply_env_overrides(config_t *config) {
     /* DB_TYPE: Use custom env var name if specified, else default AUTH_DB_TYPE */
     env_var_name = config->db_type_env ? config->db_type_env : "AUTH_DB_TYPE";
     env_value = getenv(env_var_name);
-    if (env_value) {
+    if (env_value && *env_value) {
         if (strcmp(env_value, "sqlite") == 0) {
             config->db_type = DB_TYPE_SQLITE;
             log_info("Config override from %s: sqlite", env_var_name);
         } else if (strcmp(env_value, "postgresql") == 0) {
             config->db_type = DB_TYPE_POSTGRESQL;
             log_info("Config override from %s: postgresql", env_var_name);
+        } else {
+            log_warn("Unknown %s '%s', keeping current value", env_var_name, env_value);
         }
     }
 
@@ -860,7 +887,7 @@ static void apply_env_overrides(config_t *config) {
     /* DB_PORT */
     env_var_name = config->db_port_env ? config->db_port_env : "AUTH_DB_PORT";
     env_value = getenv(env_var_name);
-    if (env_value) {
+    if (env_value && *env_value) {
         int port = 0;
         parse_int(env_value, &port);
         if (port > 0 && port <= 65535) {
@@ -982,39 +1009,50 @@ static void apply_env_overrides(config_t *config) {
     /* LOG_LEVEL */
     env_var_name = config->log_level_env ? config->log_level_env : "AUTH_LOG_LEVEL";
     env_value = getenv(env_var_name);
-    if (env_value) {
+    if (env_value && *env_value) {
         /* Parse string to enum immediately, don't store string */
-        config->log_level = parse_log_level(env_value);
-        log_info("Config override from %s: %s", env_var_name, env_value);
+        if (parse_log_level(env_value, &config->log_level) == 0) {
+            log_info("Config override from %s: %s", env_var_name, env_value);
+        } else {
+            log_warn("Unknown %s '%s', keeping current value", env_var_name, env_value);
+        }
     }
 
-    /* STRICT */
-    env_value = getenv("AUTH_STRICT");
-    if (env_value) {
+    /* STRICT: a value it can't read marks strict -1, as the file's does (see
+       set_config_value) */
+    env_var_name = config->strict_env ? config->strict_env : "AUTH_STRICT";
+    env_value = getenv(env_var_name);
+    if (env_value && *env_value) {
         if (strcmp(env_value, "true") == 0 || strcmp(env_value, "1") == 0) {
             config->strict = 1;
-            log_info("Config override from AUTH_STRICT: on");
+            log_info("Config override from %s: on", env_var_name);
         } else if (strcmp(env_value, "false") == 0 || strcmp(env_value, "0") == 0) {
             config->strict = 0;
-            log_info("Config override from AUTH_STRICT: off");
+            log_info("Config override from %s: off", env_var_name);
+        } else {
+            log_warn("Invalid %s value '%s', must be true/false or 1/0", env_var_name, env_value);
+            config->strict = -1;
         }
     }
 
     /* CLEANER_ENABLED */
     env_value = getenv("AUTH_CLEANER_ENABLED");
-    if (env_value) {
+    if (env_value && *env_value) {
         if (strcmp(env_value, "true") == 0 || strcmp(env_value, "1") == 0) {
             config->cleaner_enabled = 1;
             log_info("Config override from AUTH_CLEANER_ENABLED: enabled");
         } else if (strcmp(env_value, "false") == 0 || strcmp(env_value, "0") == 0) {
             config->cleaner_enabled = 0;
             log_info("Config override from AUTH_CLEANER_ENABLED: disabled");
+        } else {
+            log_warn("Invalid AUTH_CLEANER_ENABLED value '%s', must be true/false or 1/0. "
+                     "Keeping current: %d", env_value, config->cleaner_enabled);
         }
     }
 
     /* CLEANER_INTERVAL_SECONDS */
     env_value = getenv("AUTH_CLEANER_INTERVAL_SECONDS");
-    if (env_value) {
+    if (env_value && *env_value) {
         int interval = 0;
         parse_int(env_value, &interval);
         if (interval >= 1) {
@@ -1027,7 +1065,7 @@ static void apply_env_overrides(config_t *config) {
 
     /* CLEANER_BATCH_SIZE */
     env_value = getenv("AUTH_CLEANER_BATCH_SIZE");
-    if (env_value) {
+    if (env_value && *env_value) {
         int batch = 0;
         parse_int(env_value, &batch);
         if (batch >= 1) {
@@ -1040,7 +1078,7 @@ static void apply_env_overrides(config_t *config) {
 
     /* CLEANER_SQLITE_VACUUM_PAGES */
     env_value = getenv("AUTH_CLEANER_SQLITE_VACUUM_PAGES");
-    if (env_value) {
+    if (env_value && *env_value) {
         int pages = 0;
         parse_int(env_value, &pages);
         if (pages >= 1) {
@@ -1053,19 +1091,22 @@ static void apply_env_overrides(config_t *config) {
 
     /* CLEANER_POSTGRES_VACUUM_ENABLED */
     env_value = getenv("AUTH_CLEANER_POSTGRES_VACUUM_ENABLED");
-    if (env_value) {
+    if (env_value && *env_value) {
         if (strcmp(env_value, "true") == 0 || strcmp(env_value, "1") == 0) {
             config->cleaner_postgres_vacuum_enabled = 1;
             log_info("Config override from AUTH_CLEANER_POSTGRES_VACUUM_ENABLED: enabled");
         } else if (strcmp(env_value, "false") == 0 || strcmp(env_value, "0") == 0) {
             config->cleaner_postgres_vacuum_enabled = 0;
             log_info("Config override from AUTH_CLEANER_POSTGRES_VACUUM_ENABLED: disabled");
+        } else {
+            log_warn("Invalid AUTH_CLEANER_POSTGRES_VACUUM_ENABLED value '%s', must be true/false "
+                     "or 1/0. Keeping current: %d", env_value, config->cleaner_postgres_vacuum_enabled);
         }
     }
 
     /* RETENTION_USAGE_LOGS_DAYS */
     env_value = getenv("AUTH_RETENTION_USAGE_LOGS_DAYS");
-    if (env_value) {
+    if (env_value && *env_value) {
         int days = 0;
         parse_int(env_value, &days);
         if (days >= 1) {
@@ -1078,7 +1119,7 @@ static void apply_env_overrides(config_t *config) {
 
     /* RETENTION_HISTORY_DAYS */
     env_value = getenv("AUTH_RETENTION_HISTORY_DAYS");
-    if (env_value) {
+    if (env_value && *env_value) {
         int days = 0;
         parse_int(env_value, &days);
         if (days >= 1) {
@@ -1091,7 +1132,7 @@ static void apply_env_overrides(config_t *config) {
 
     /* RETENTION_SESSIONS_GRACE_DAYS */
     env_value = getenv("AUTH_RETENTION_SESSIONS_GRACE_DAYS");
-    if (env_value) {
+    if (env_value && *env_value) {
         int days = 0;
         parse_int(env_value, &days);
         if (days >= 1) {
@@ -1104,7 +1145,7 @@ static void apply_env_overrides(config_t *config) {
 
     /* RETENTION_TOKENS_GRACE_DAYS */
     env_value = getenv("AUTH_RETENTION_TOKENS_GRACE_DAYS");
-    if (env_value) {
+    if (env_value && *env_value) {
         int days = 0;
         parse_int(env_value, &days);
         if (days >= 1) {
@@ -1162,13 +1203,16 @@ static void apply_env_overrides(config_t *config) {
 
     /* ENABLE_HISTORY_TABLES */
     env_value = getenv("AUTH_ENABLE_HISTORY_TABLES");
-    if (env_value) {
+    if (env_value && *env_value) {
         if (strcmp(env_value, "true") == 0 || strcmp(env_value, "1") == 0) {
             config->enable_history_tables = 1;
             log_info("Config override from AUTH_ENABLE_HISTORY_TABLES: enabled");
         } else if (strcmp(env_value, "false") == 0 || strcmp(env_value, "0") == 0) {
             config->enable_history_tables = 0;
             log_info("Config override from AUTH_ENABLE_HISTORY_TABLES: disabled");
+        } else {
+            log_warn("Invalid AUTH_ENABLE_HISTORY_TABLES value '%s', must be true/false or 1/0. "
+                     "Keeping current: %d", env_value, config->enable_history_tables);
         }
     }
 }
@@ -1176,9 +1220,17 @@ static void apply_env_overrides(config_t *config) {
 /*
  * Derive public_base_url (see config.h) once host and port are final. localhost
  * is a development setup reached directly, so http and the listen port; any other
- * host is reached through the TLS-terminating proxy, on the default port.
+ * host is reached through the TLS-terminating proxy, on the default port. An empty
+ * host refuses the start: token issuers, links in emails and the console's
+ * addresses (stored at bootstrap) would all be "https://".
  */
 static int set_public_base_url(config_t *config) {
+    if (config->host[0] == '\0') {
+        log_error("server_host is empty (in auth.conf, or %s): the server's public address, "
+                  "https:// and the host, needs one",
+                  config->server_host_env ? config->server_host_env : "AUTH_SERVER_HOST");
+        return -1;
+    }
     size_t size = sizeof(config->public_base_url);
     int n = strcmp(config->host, "localhost") == 0
         ? snprintf(config->public_base_url, size, "http://localhost:%d", config->port)
@@ -1293,8 +1345,9 @@ config_t *config_load(const char *config_file) {
     config->retention_tokens_grace_days = DEFAULT_RETENTION_TOKENS_GRACE_DAYS;
 
     /* Logging defaults */
-    config->log_level = parse_log_level(DEFAULT_LOG_LEVEL);
+    parse_log_level(DEFAULT_LOG_LEVEL, &config->log_level);
     config->log_level_env = NULL;
+    config->strict_env = NULL;
 
     config->schema_dir = str_dup(DEFAULT_SCHEMA_DIR);
     if (!config->schema_dir) {
@@ -1415,6 +1468,31 @@ config_t *config_load(const char *config_file) {
 
     /* Apply environment variable overrides */
     apply_env_overrides(config);
+
+    if (config->strict < 0) {
+        log_error("strict must be true or false (or 1 or 0): the server won't start without "
+                  "knowing whether to refuse unsafe defaults");
+        config_free(config);
+        return NULL;
+    }
+
+    /* Refused rather than kept at the current value, as other numbers are: that would
+       leave the default of 1 in place for someone asking for more */
+    if (config->password_min_length > PASSWORD_MIN_LENGTH_CAP) {
+        log_error("password_min_length is %d, over its limit of %d: a generated key secret "
+                  "is %d characters, and the same minimum applies to it",
+                  config->password_min_length, PASSWORD_MIN_LENGTH_CAP, PASSWORD_MIN_LENGTH_CAP);
+        config_free(config);
+        return NULL;
+    }
+
+    /* SQLite takes an empty file name for a temporary database, which keeps nothing */
+    if (config->db_type == DB_TYPE_SQLITE && config->db_path[0] == '\0') {
+        log_error("db_path is empty (in auth.conf): SQLite would open a temporary database, "
+                  "and keep nothing");
+        config_free(config);
+        return NULL;
+    }
 
     if (set_public_base_url(config) != 0) {
         config_free(config);
@@ -1579,6 +1657,7 @@ void config_free(config_t *config) {
     free(config->encryption_key_env);
     free(config->encryption_key_previous_env);
     free(config->log_level_env);
+    free(config->strict_env);
     free(config->server_host_env);
     free(config->server_port_env);
     free(config->admin_port_env);

@@ -73,7 +73,10 @@
  *
  * Use for current timestamp in queries.
  * UNIX_TS(expr) converts a datetime expression to Unix epoch seconds.
- * INTERVAL_SECONDS(expr) creates a relative time offset from now.
+ * INTERVAL_SECONDS(expr) creates a relative time offset from now. expr is a
+ *   number of seconds, bound with db_bind_int: either kind concatenates into the
+ *   offset, but a comparison beside it (CASE WHEN ?7 = -1) is true only of an
+ *   integer, since SQLite never equates the text '-1' with -1.
  * DAYS_AGO(n) creates a timestamp N days in the past (for cleanup queries).
  * SECONDS_AGO(n) creates a timestamp N seconds in the past (for rate limiting, etc.).
  *   Note: n must be a string literal (compile-time concatenation).

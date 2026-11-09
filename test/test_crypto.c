@@ -555,159 +555,6 @@ int main(void) {
     log_info("SHA-256 output is 64 lowercase hex chars: PASS\n");
 
     log_info("==========================================================");
-    log_info("JWT Tests");
-    log_info("==========================================================\n");
-
-    const char *jwt_secret = "test-secret-key-256-bits-long!!!";
-    size_t jwt_secret_len = strlen(jwt_secret);
-
-    /* JWT encoding (create access token) */
-    log_info("Test: JWT encoding (create access token)");
-    jwt_claims_t claims_out = {0};
-    strcpy(claims_out.iss, "https://auth.example.com");
-    strcpy(claims_out.sub, "user123");
-    strcpy(claims_out.aud, "https://api.example.com");
-    claims_out.exp = time(NULL) + 3600;  /* 1 hour from now */
-    claims_out.iat = time(NULL);
-    strcpy(claims_out.scope, "read write delete");
-    strcpy(claims_out.client_id, "webapp-client");
-
-    char jwt_token[JWT_MAX_TOKEN_LENGTH];
-    if (jwt_encode(&claims_out, (unsigned char *)jwt_secret, jwt_secret_len,
-                  jwt_token, sizeof(jwt_token)) != 0) {
-        log_error("JWT encoding failed");
-        return 1;
-    }
-
-    log_info("JWT token created (length=%zu)", strlen(jwt_token));
-    log_info("Token: %s", jwt_token);
-    log_info("JWT encoding: PASS\n");
-
-    /* JWT decoding and verification */
-    log_info("Test: JWT decoding and verification");
-    jwt_claims_t claims_in = {0};
-
-    if (jwt_decode(jwt_token, (unsigned char *)jwt_secret, jwt_secret_len,
-                  &claims_in) != 0) {
-        log_error("JWT decoding failed");
-        return 1;
-    }
-
-    /* Verify claims match */
-    if (strcmp(claims_in.iss, claims_out.iss) != 0 ||
-        strcmp(claims_in.sub, claims_out.sub) != 0 ||
-        strcmp(claims_in.aud, claims_out.aud) != 0 ||
-        strcmp(claims_in.scope, claims_out.scope) != 0 ||
-        strcmp(claims_in.client_id, claims_out.client_id) != 0) {
-        log_error("Decoded claims don't match original");
-        return 1;
-    }
-
-    log_info("Decoded claims:");
-    log_info("  iss: %s", claims_in.iss);
-    log_info("  sub: %s", claims_in.sub);
-    log_info("  aud: %s", claims_in.aud);
-    log_info("  exp: %ld", (long)claims_in.exp);
-    log_info("  iat: %ld", (long)claims_in.iat);
-    log_info("  scope: %s", claims_in.scope);
-    log_info("  client_id: %s", claims_in.client_id);
-    log_info("JWT decoding: PASS\n");
-
-    /* JWT validation (fast path) */
-    log_info("Test: JWT validation (fast path)");
-    if (jwt_validate(jwt_token, (unsigned char *)jwt_secret, jwt_secret_len) != 1) {
-        log_error("JWT validation failed for valid token");
-        return 1;
-    }
-    log_info("Valid token accepted: PASS\n");
-
-    /* JWT signature verification (wrong secret) */
-    log_info("Test: JWT signature verification with wrong secret");
-    const char *wrong_secret = "wrong-secret-key";
-    if (jwt_decode(jwt_token, (unsigned char *)wrong_secret, strlen(wrong_secret),
-                  &claims_in) == 0) {
-        log_error("JWT accepted with wrong secret!");
-        return 1;
-    }
-    log_info("Wrong secret correctly rejected: PASS\n");
-
-    /* JWT token tampering detection */
-    log_info("Test: JWT token tampering detection");
-    char tampered_token[JWT_MAX_TOKEN_LENGTH];
-    strcpy(tampered_token, jwt_token);
-
-    /* Tamper with payload (change one character) */
-    char *payload_start = strchr(tampered_token, '.') + 1;
-    char *payload_end = strchr(payload_start, '.');
-    if (payload_end > payload_start) {
-        payload_start[0] = (payload_start[0] == 'A') ? 'B' : 'A';  /* Flip character */
-    }
-
-    if (jwt_decode(tampered_token, (unsigned char *)jwt_secret, jwt_secret_len,
-                  &claims_in) == 0) {
-        log_error("Tampered JWT was accepted!");
-        return 1;
-    }
-    log_info("Tampered token correctly rejected: PASS\n");
-
-    /* Expired JWT rejection */
-    log_info("Test: Expired JWT rejection");
-    jwt_claims_t expired_claims = {0};
-    strcpy(expired_claims.iss, "https://auth.example.com");
-    strcpy(expired_claims.sub, "user456");
-    strcpy(expired_claims.aud, "https://api.example.com");
-    expired_claims.exp = time(NULL) - 60;  /* Expired 60 seconds ago */
-    expired_claims.iat = time(NULL) - 3660;
-    strcpy(expired_claims.scope, "read");
-    strcpy(expired_claims.client_id, "test-client");
-
-    char expired_token[JWT_MAX_TOKEN_LENGTH];
-    if (jwt_encode(&expired_claims, (unsigned char *)jwt_secret, jwt_secret_len,
-                  expired_token, sizeof(expired_token)) != 0) {
-        log_error("Failed to create expired token");
-        return 1;
-    }
-
-    if (jwt_decode(expired_token, (unsigned char *)jwt_secret, jwt_secret_len,
-                  &claims_in) == 0) {
-        log_error("Expired JWT was accepted!");
-        return 1;
-    }
-    log_info("Expired token correctly rejected: PASS\n");
-
-    /* JWT round-trip with special characters */
-    log_info("Test: JWT round-trip with special characters in claims");
-    jwt_claims_t special_claims = {0};
-    strcpy(special_claims.iss, "https://auth.example.com:8443/oauth2");
-    strcpy(special_claims.sub, "user@example.com");
-    strcpy(special_claims.aud, "api://default");
-    special_claims.exp = time(NULL) + 1800;
-    special_claims.iat = time(NULL);
-    strcpy(special_claims.scope, "openid profile email");
-    strcpy(special_claims.client_id, "spa-client-v2");
-
-    char special_token[JWT_MAX_TOKEN_LENGTH];
-    if (jwt_encode(&special_claims, (unsigned char *)jwt_secret, jwt_secret_len,
-                  special_token, sizeof(special_token)) != 0) {
-        log_error("Failed to encode JWT with special characters");
-        return 1;
-    }
-
-    jwt_claims_t special_decoded = {0};
-    if (jwt_decode(special_token, (unsigned char *)jwt_secret, jwt_secret_len,
-                  &special_decoded) != 0) {
-        log_error("Failed to decode JWT with special characters");
-        return 1;
-    }
-
-    if (strcmp(special_decoded.sub, special_claims.sub) != 0) {
-        log_error("Special characters not preserved (sub)");
-        return 1;
-    }
-
-    log_info("Special characters preserved: PASS\n");
-
-    log_info("==========================================================");
     log_info("ES256 JWT Tests");
     log_info("==========================================================\n");
 
@@ -1400,6 +1247,32 @@ int main(void) {
         return 1;
     }
     log_info("Prior secret fallback: PASS\n");
+
+    /* Test: a code that's been altered, or has expired, is refused */
+    log_info("Test: Auth request JWT rejected when tampered with or expired");
+    char tampered[JWT_MAX_TOKEN_LENGTH];
+    snprintf(tampered, sizeof(tampered), "%s", ar_token);
+    char *ar_payload = strchr(tampered, '.') + 1;
+    *ar_payload = *ar_payload == 'A' ? 'B' : 'A';
+    if (jwt_decode_auth_request(tampered, ar_secret_b64, NULL, &wrong_decoded) == 0) {
+        log_error("Tampered auth request JWT was accepted!");
+        return 1;
+    }
+
+    auth_request_claims_t expired_claims = ar_claims;
+    expired_claims.iat = time(NULL) - 120;
+    expired_claims.exp = time(NULL) - 60;
+    char expired_ar_token[JWT_MAX_TOKEN_LENGTH];
+    if (jwt_encode_auth_request(&expired_claims, ar_secret, sizeof(ar_secret),
+                                 expired_ar_token, sizeof(expired_ar_token)) != 0) {
+        log_error("Auth request JWT encoding failed for an expired code");
+        return 1;
+    }
+    if (jwt_decode_auth_request(expired_ar_token, ar_secret_b64, NULL, &wrong_decoded) == 0) {
+        log_error("Expired auth request JWT was accepted!");
+        return 1;
+    }
+    log_info("Tampered and expired codes rejected: PASS\n");
 
     /* Test: redirect_uri longer than JWT_MAX_CLAIM_VALUE_LENGTH
      *

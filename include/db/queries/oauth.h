@@ -38,7 +38,8 @@ typedef struct {
  *   client_id   - Client UUID (16 bytes)
  *   out_client  - Output: Client configuration
  *
- * Returns: 0 on success (client found and active), -1 on error or not found
+ * Returns: 0 on success (client found and active), -1 if it isn't found or
+ *          isn't active, -2 on error (nothing is wrong with the caller's request)
  */
 int oauth_client_lookup(db_handle_t *db, const unsigned char *client_id,
                         oauth_client_info_t *out_client);
@@ -129,7 +130,7 @@ typedef struct {
  *   session_token - Session token from cookie
  *   out_session   - Output: Session information
  *
- * Returns: 0 on success (found active session), -1 on error or not found
+ * Returns: 0 on success (found active session), 1 if there's none, -1 on error
  */
 int oauth_session_get_by_token(db_handle_t *db, const char *session_token,
                                 oauth_session_info_t *out_session);
@@ -144,7 +145,8 @@ int oauth_session_get_by_token(db_handle_t *db, const char *session_token,
  *   db            - Database handle
  *   session_token - Session token from cookie
  *
- * Returns: 0 on success (session closed), -1 on error or not found
+ * Returns: 0 on success (session closed), 1 if no open session has this token
+ *          (closed already, or unknown), -1 on error
  */
 int oauth_session_close(db_handle_t *db, const char *session_token);
 
@@ -215,7 +217,8 @@ typedef struct {
  *
  * Returns: 0 on success (code valid and consumed),
  *          1 if already exchanged (replay attack detected),
- *          -1 on error or not found/expired
+ *          2 if not found or expired,
+ *          -1 on error
  */
 int oauth_auth_code_consume(db_handle_t *db, const char *code,
                              oauth_auth_code_data_t *out_data);
@@ -302,7 +305,8 @@ typedef struct {
  *
  * Returns: 0 on success (rotated),
  *          1 if already exchanged (replay attack detected),
- *          -1 on error or not found/expired/revoked
+ *          2 if not found, expired or revoked,
+ *          -1 on error
  */
 int oauth_token_rotate_refresh(db_handle_t *db, const char *old_token,
                                 const char *new_token, int ttl_seconds,
@@ -354,7 +358,8 @@ int oauth_client_authenticate(db_handle_t *db,
  *   out_resource_server_id  - Output: Resource server UUID (16 bytes)
  *
  * Returns: 0 on success (resource resolved),
- *          -1 on error (not found, not linked, inactive, or ambiguous)
+ *          1 if none fits (not found, not linked, inactive, or ambiguous),
+ *          -1 on error
  */
 int oauth_resolve_resource_server(db_handle_t *db, long long client_pin,
                                     const char *resource_address,
@@ -424,7 +429,9 @@ int oauth_resource_server_authenticate(db_handle_t *db,
  *   out_expires_at         - Output: expiration timestamp (0 if not active)
  *   out_issued_at          - Output: issued timestamp (0 if not active)
  *
- * Returns: 0 on success, -1 on error
+ * Returns: 0 when the token's state is known (out_active says which), -1 on
+ *          error (a failed query, or a malformed id in the token's row), which
+ *          says nothing about the token
  */
 int oauth_introspect_token(db_handle_t *db,
                            const char *token,

@@ -65,28 +65,52 @@ int json_utf8_valid(const char *text, size_t len);
 char *json_get_string(const char *json, const char *key);
 
 /*
+ * json_get_text - Extract a string value from JSON body, telling a field left out
+ * apart from one holding another kind of value
+ *
+ * As json_get_string, for a caller that refuses a value of another kind rather
+ * than taking it as left out, as json_get_int's and json_get_bool's callers do.
+ *
+ * Parameters:
+ *   json      - JSON string to parse
+ *   key       - Key to search for
+ *   out_value - Output: newly allocated string (caller must free) when 0 is
+ *               returned; NULL otherwise
+ *
+ * Returns: 0 on success; 1 if the key isn't there, or its value is null; -1 if
+ *          its value is anything but a string (12345, true, an array), or a
+ *          string json_get_string can't read
+ */
+int json_get_text(const char *json, const char *key, char **out_value);
+
+/*
  * json_get_int - Extract integer value from JSON body
  *
  * Parameters:
  *   json      - JSON string to parse
  *   key       - Key to search for
- *   out_value - Output: parsed integer value
+ *   out_value - Output: parsed integer value, set only when 0 is returned
  *
- * Returns: 0 on success, -1 if key not found or value not an integer
+ * Returns: 0 on success; 1 if the key isn't there, or its value is null; -1 if
+ *          its value is anything but a whole number in int's range ("3600" in
+ *          quotes, 1.5, 1e3, true). A caller that takes 1 as "left out" should
+ *          refuse -1, not take it as left out too.
  */
 int json_get_int(const char *json, const char *key, int *out_value);
 
 /*
  * json_get_bool - Extract boolean value from JSON body
  *
- * Parses true, false, or null values.
- *
  * Parameters:
  *   json      - JSON string to parse
  *   key       - Key to search for
- *   out_value - Output: 1 for true, 0 for false/null
+ *   out_value - Output: 1 for true, 0 for false, set only when 0 is returned
  *
- * Returns: 0 on success, -1 if key not found or value not a boolean
+ * Returns: 0 on success; 1 if the key isn't there, or its value is null (never
+ *          false: a caller that sends null for a field it isn't changing mustn't
+ *          switch it off); -1 if its value is anything but true, false or null
+ *          ("true" in quotes, 1). As for json_get_int, a caller should refuse -1
+ *          rather than take it as left out.
  */
 int json_get_bool(const char *json, const char *key, int *out_value);
 

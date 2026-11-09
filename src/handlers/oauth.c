@@ -137,7 +137,7 @@ static int validate_scope_subset(const char *requested, const char *allowed) {
             }
         }
         if (!found) {
-            log_warn("Requested scope '%s' not in allowed scopes '%s'",
+            log_info("Requested scope '%s' not in allowed scopes '%s'",
                      requested_scopes[i], allowed);
             result = -1;
             break;
@@ -169,24 +169,27 @@ int oauth_authorize(db_handle_t *db,
                     const char *state,
                     const char *session_token,
                     oauth_authorize_response_t *out_response) {
-    if (!db || !client_id || !redirect_uri || !out_response) {
+    if (!db || !client_id || !out_response) {
         log_error("Invalid arguments to oauth_authorize");
-        return -1;
+        return -6;
     }
 
     memset(out_response, 0, sizeof(*out_response));
 
     /* Step 1: Look up client */
     oauth_client_info_t client;
-    if (oauth_client_lookup(db, client_id, &client) != 0) {
-        log_error("Client not found or inactive");
+    int lookup = oauth_client_lookup(db, client_id, &client);
+    if (lookup == -2) return -6;  /* logged */
+    if (lookup != 0) {
+        log_info("Client not found or inactive");
         return -4;  /* Pre-trust: do NOT redirect to unverified URI */
     }
 
-    /* Step 2: Validate redirect_uri is registered for client */
-    int uri_valid = oauth_redirect_uri_validate(db, client.pin, redirect_uri);
+    /* Step 2: Validate redirect_uri is registered for client (an empty one never is) */
+    int uri_valid = redirect_uri ? oauth_redirect_uri_validate(db, client.pin, redirect_uri) : 0;
+    if (uri_valid < 0) return -6;  /* logged */
     if (uri_valid != 1) {
-        log_error("Redirect URI not registered for client");
+        log_info("Redirect URI not registered for client");
         return -4;  /* Pre-trust: do NOT redirect to unverified URI */
     }
 
@@ -197,7 +200,9 @@ int oauth_authorize(db_handle_t *db,
     }
 
     oauth_session_info_t session;
-    if (oauth_session_get_by_token(db, session_token, &session) != 0) {
+    int session_rc = oauth_session_get_by_token(db, session_token, &session);
+    if (session_rc < 0) return -7;  /* logged */
+    if (session_rc != 0) {
         log_info("Session not found or expired");
         return -2;  /* Not authenticated */
     }
@@ -215,8 +220,9 @@ int oauth_authorize(db_handle_t *db,
         return -3;  /* MFA required */
     }
 
-    /* Step 6: Check maximum session duration for this client */
-    if (client.maximum_session_seconds > 0) {
+    /* Step 6: Check maximum session duration for this client (-1, stored as NULL,
+     * is no limit) */
+    if (client.maximum_session_seconds >= 0) {
         time_t session_age = time(NULL) - session.started_at;
         if (session_age > client.maximum_session_seconds) {
             log_info("Session too old for client %s: age=%ld, max=%d",
@@ -230,7 +236,7 @@ int oauth_authorize(db_handle_t *db,
         int link_rc = oauth_client_user_check(db, client.pin, session.user_account_pin);
         if (link_rc < 0) {
             log_error("Failed to check client_user link");
-            return -1;
+            return -7;
         }
         if (link_rc == 0) {
             char denied_client_id_hex[33], denied_user_id_hex[33];
@@ -246,15 +252,15 @@ int oauth_authorize(db_handle_t *db,
 
     /* Step 8: Validate PKCE (OAuth 2.1 — required for all authorization_code clients) */
     if (!code_challenge || code_challenge[0] == '\0') {
-        log_error("PKCE code_challenge required");
+        log_info("PKCE code_challenge required");
         return -1;
     }
     if (!code_challenge_method || code_challenge_method[0] == '\0') {
-        log_error("PKCE code_challenge_method required");
+        log_info("PKCE code_challenge_method required");
         return -1;
     }
     if (strcmp(code_challenge_method, "S256") != 0) {
-        log_error("Only S256 PKCE method is supported, got: %s", code_challenge_method);
+        log_info("Only S256 PKCE method is supported, got: %s", code_challenge_method);
         return -1;
     }
     /* An S256 challenge is a SHA-256 in base64url: 43 of A-Z a-z 0-9 - _ (RFC 7636
@@ -263,7 +269,7 @@ int oauth_authorize(db_handle_t *db,
     if (strlen(code_challenge) != 43 ||
         strspn(code_challenge, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
                                "0123456789-_") != 43) {
-        log_error("PKCE code_challenge isn't an S256 challenge (43 base64url characters)");
+        log_info("PKCE code_challenge isn't an S256 challenge (43 base64url characters)");
         return -1;
     }
 
@@ -271,7 +277,7 @@ int oauth_authorize(db_handle_t *db,
     signing_key_t *auth_signing_key = NULL;
     if (signing_key_get_or_rotate(db, SIGNING_KEY_AUTH_REQUEST, &auth_signing_key) != 0) {
         log_error("Failed to get auth request signing key");
-        return -1;
+        return -7;
     }
 
     /* Step 10: Build JWT claims */
@@ -299,7 +305,7 @@ int oauth_authorize(db_handle_t *db,
     if (crypto_random_bytes(nonce_bytes, sizeof(nonce_bytes)) != 0) {
         signing_key_free(auth_signing_key);
         log_error("Failed to generate nonce");
-        return -1;
+        return -7;
     }
 
     /* Convert nonce to hex string */
@@ -320,7 +326,7 @@ int oauth_authorize(db_handle_t *db,
         OPENSSL_cleanse(secret_bytes, sizeof(secret_bytes));
         signing_key_free(auth_signing_key);
         log_error("Failed to decode signing secret");
-        return -1;
+        return -7;
     }
 
     signing_key_free(auth_signing_key);
@@ -330,7 +336,7 @@ int oauth_authorize(db_handle_t *db,
     if (!code_jwt) {
         OPENSSL_cleanse(secret_bytes, sizeof(secret_bytes));
         log_error("Failed to allocate memory for JWT");
-        return -1;
+        return -7;
     }
 
     if (jwt_encode_auth_request(&claims,
@@ -340,7 +346,7 @@ int oauth_authorize(db_handle_t *db,
         OPENSSL_cleanse(secret_bytes, sizeof(secret_bytes));
         OPENSSL_cleanse(code_jwt, JWT_MAX_TOKEN_LENGTH); free(code_jwt);
         log_error("Failed to encode authorization code JWT");
-        return -1;
+        return -7;
     }
 
     /* Secret no longer needed */
@@ -357,7 +363,7 @@ int oauth_authorize(db_handle_t *db,
                                 auth_code_id) != 0) {
         OPENSSL_cleanse(code_jwt, JWT_MAX_TOKEN_LENGTH); free(code_jwt);
         log_error("Failed to create authorization code record");
-        return -1;
+        return -7;
     }
 
     /* Step 14: Prepare response */
@@ -369,7 +375,7 @@ int oauth_authorize(db_handle_t *db,
             OPENSSL_cleanse(code_jwt, JWT_MAX_TOKEN_LENGTH); free(code_jwt);
             out_response->code = NULL;
             log_error("Failed to duplicate state");
-            return -1;
+            return -7;
         }
     }
 
@@ -397,6 +403,8 @@ int oauth_authorize(db_handle_t *db,
  *
  * Fills out_response's access_token, expires_in and token_type. The caller keeps
  * the signing key and the transaction.
+ *
+ * Returns: 0, or -2: every failure here is the server's
  */
 static int issue_access_token(db_handle_t *db, const signing_key_t *signing_key,
                               const oauth_client_info_t *client,
@@ -430,7 +438,7 @@ static int issue_access_token(db_handle_t *db, const signing_key_t *signing_key,
     char *access_token = malloc(JWT_MAX_TOKEN_LENGTH);
     if (!access_token) {
         log_error("Failed to allocate access token");
-        return -1;
+        return -2;
     }
 
     const char *active_private = signing_key_active_private(signing_key);
@@ -440,7 +448,7 @@ static int issue_access_token(db_handle_t *db, const signing_key_t *signing_key,
                          access_token, JWT_MAX_TOKEN_LENGTH) != 0) {
         OPENSSL_cleanse(access_token, JWT_MAX_TOKEN_LENGTH); free(access_token);
         log_error("Failed to generate ES256 JWT access token");
-        return -1;
+        return -2;
     }
 
     unsigned char access_token_id[16];
@@ -449,7 +457,7 @@ static int issue_access_token(db_handle_t *db, const signing_key_t *signing_key,
                                    access_token, scope, ttl, access_token_id) != 0) {
         OPENSSL_cleanse(access_token, JWT_MAX_TOKEN_LENGTH); free(access_token);
         log_error("Failed to create access token");
-        return -1;
+        return -2;
     }
 
     out_response->access_token = access_token;
@@ -467,29 +475,31 @@ int oauth_exchange_authorization_code(db_handle_t *db,
                                        oauth_token_response_t *out_response) {
     if (!db || !client_id || !code || !redirect_uri || !out_response) {
         log_error("Invalid arguments to oauth_exchange_authorization_code");
-        return -1;
+        return -2;
     }
 
     memset(out_response, 0, sizeof(*out_response));
 
     /* Step 1: Look up client */
     oauth_client_info_t client;
-    if (oauth_client_lookup(db, client_id, &client) != 0) {
-        log_error("Client not found");
+    int lookup = oauth_client_lookup(db, client_id, &client);
+    if (lookup != 0) {
+        if (lookup == -2) return -2;  /* logged */
+        log_info("Client not found");
         return -1;
     }
 
     /* Step 1b: Validate grant type */
     if (strcmp(client.grant_type, "authorization_code") != 0) {
-        log_error("Client not configured for authorization_code grant");
-        return -1;
+        log_info("Client not configured for authorization_code grant");
+        return -5;
     }
 
     /* Step 2: Decode and verify authorization code JWT (stateless) */
     signing_key_t *auth_signing_key = NULL;
     if (signing_key_get_or_rotate(db, SIGNING_KEY_AUTH_REQUEST, &auth_signing_key) != 0) {
         log_error("Failed to get auth request signing key");
-        return -1;
+        return -2;
     }
 
     auth_request_claims_t auth_claims;
@@ -498,7 +508,7 @@ int oauth_exchange_authorization_code(db_handle_t *db,
                                  auth_signing_key->prior_secret,
                                  &auth_claims) != 0) {
         signing_key_free(auth_signing_key);
-        log_error("Failed to decode or verify authorization code JWT");
+        log_info("Failed to decode or verify authorization code JWT");
         return -1;
     }
 
@@ -506,28 +516,29 @@ int oauth_exchange_authorization_code(db_handle_t *db,
 
     /* Step 3: Validate client_id matches */
     if (memcmp(auth_claims.client_id, client.id, 16) != 0) {
-        log_error("Client ID mismatch in authorization code");
+        log_warn("Client ID mismatch in authorization code");
         return -1;
     }
 
     /* Step 4: Validate redirect_uri matches */
     if (strcmp(redirect_uri, auth_claims.redirect_uri) != 0) {
-        log_error("Redirect URI mismatch");
+        log_info("Redirect URI mismatch");
         return -1;
     }
 
     /* Step 5: Validate PKCE (required for all authorization_code clients) */
     if (auth_claims.code_challenge[0] == '\0') {
+        /* The code's signature checked out, so the server made it this way */
         log_error("PKCE code_challenge missing from authorization code");
-        return -1;
+        return -2;
     }
     if (!code_verifier) {
-        log_error("PKCE code_verifier required but not provided");
+        log_info("PKCE code_verifier required but not provided");
         return -1;
     }
     if (!validate_pkce(code_verifier, auth_claims.code_challenge,
                        auth_claims.code_challenge_method)) {
-        log_error("PKCE validation failed");
+        log_warn("PKCE validation failed");
         return -1;
     }
 
@@ -541,7 +552,7 @@ int oauth_exchange_authorization_code(db_handle_t *db,
     db_stmt_t *user_stmt = NULL;
     if (db_prepare(db, &user_stmt, user_lookup_sql) != 0) {
         log_error("Failed to prepare user lookup statement");
-        return -1;
+        return -2;
     }
 
     db_bind_blob(user_stmt, 1, auth_claims.user_account_id, 16);
@@ -552,7 +563,11 @@ int oauth_exchange_authorization_code(db_handle_t *db,
         db_finalize(user_stmt);
     } else {
         db_finalize(user_stmt);
-        log_error("User account not found or inactive");
+        if (user_rc != DB_DONE) {
+            log_error("Failed to look up the code's user account");
+            return -2;
+        }
+        log_info("User account not found or inactive");
         return -1;
     }
 
@@ -560,14 +575,14 @@ int oauth_exchange_authorization_code(db_handle_t *db,
     signing_key_t *signing_key = NULL;
     if (signing_key_get_or_rotate(db, SIGNING_KEY_ACCESS_TOKEN, &signing_key) != 0) {
         log_error("Failed to get access token signing key");
-        return -1;
+        return -2;
     }
 
     /* Begin transaction for token creation */
     if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
         signing_key_free(signing_key);
         log_error("Failed to begin transaction");
-        return -1;
+        return -2;
     }
 
     /* Step 8: Consume authorization code from DB (atomic, replay detection) */
@@ -595,11 +610,14 @@ int oauth_exchange_authorization_code(db_handle_t *db,
     }
 
     if (consume_rc != 0) {
-        /* Not found, expired, or error */
         signing_key_free(signing_key);
         db_execute_trusted(db, "ROLLBACK");
+        if (consume_rc == 2) {
+            log_info("Authorization code not found or expired");
+            return -1;
+        }
         log_error("Failed to consume authorization code from DB");
-        return -1;
+        return -2;
     }
 
     /* Step 9: Validate JWT claims match DB record (integrity check) */
@@ -607,14 +625,14 @@ int oauth_exchange_authorization_code(db_handle_t *db,
         signing_key_free(signing_key);
         db_execute_trusted(db, "ROLLBACK");
         log_error("Client PIN mismatch between JWT and DB record");
-        return -1;
+        return -2;
     }
 
     if (db_code_data.user_account_pin != user_account_pin) {
         signing_key_free(signing_key);
         db_execute_trusted(db, "ROLLBACK");
         log_error("User account PIN mismatch between JWT and DB record");
-        return -1;
+        return -2;
     }
 
     /* Step 9b: Verify user is still linked to this client (skipped for universal
@@ -627,7 +645,7 @@ int oauth_exchange_authorization_code(db_handle_t *db,
             signing_key_free(signing_key);
             db_execute_trusted(db, "ROLLBACK");
             log_error("Failed to check client_user link");
-            return -1;
+            return -2;
         }
         if (link_rc == 0) {
             signing_key_free(signing_key);
@@ -643,12 +661,14 @@ int oauth_exchange_authorization_code(db_handle_t *db,
     /* Step 10: Resolve resource server (RFC 8707) */
     long long resource_server_pin;
     unsigned char resource_server_id[16];
-    if (oauth_resolve_resource_server(db, client.pin, resource,
-                                       &resource_server_pin, resource_server_id) != 0) {
+    int resolved = oauth_resolve_resource_server(db, client.pin, resource,
+                                                 &resource_server_pin, resource_server_id);
+    if (resolved != 0) {
         signing_key_free(signing_key);
         db_execute_trusted(db, "ROLLBACK");
-        log_error("Failed to resolve resource server");
-        return -1;
+        if (resolved < 0) return -2;  /* logged */
+        log_info("Failed to resolve resource server");
+        return -3;
     }
 
     /* Step 11: Issue the access token, descended from the code */
@@ -660,7 +680,7 @@ int oauth_exchange_authorization_code(db_handle_t *db,
     signing_key_free(signing_key);
     if (issue_rc != 0) {
         db_execute_trusted(db, "ROLLBACK");
-        return -1;
+        return -2;
     }
 
     /* Step 12: Create refresh token (if configured) */
@@ -672,7 +692,7 @@ int oauth_exchange_authorization_code(db_handle_t *db,
             oauth_token_response_free(out_response);
             db_execute_trusted(db, "ROLLBACK");
             log_error("Failed to allocate refresh token");
-            return -1;
+            return -2;
         }
 
         if (crypto_random_token(refresh_token, refresh_token_size, REFRESH_TOKEN_BYTES) <= 0) {
@@ -680,7 +700,7 @@ int oauth_exchange_authorization_code(db_handle_t *db,
             cleanse_free(refresh_token);
             db_execute_trusted(db, "ROLLBACK");
             log_error("Failed to generate refresh token");
-            return -1;
+            return -2;
         }
 
         unsigned char refresh_token_id[16];
@@ -692,7 +712,7 @@ int oauth_exchange_authorization_code(db_handle_t *db,
             cleanse_free(refresh_token);
             db_execute_trusted(db, "ROLLBACK");
             log_error("Failed to create refresh token");
-            return -1;
+            return -2;
         }
     }
 
@@ -700,8 +720,9 @@ int oauth_exchange_authorization_code(db_handle_t *db,
     if (db_execute_trusted(db, "COMMIT") != 0) {
         oauth_token_response_free(out_response);
         cleanse_free(refresh_token);
+        db_execute_trusted(db, "ROLLBACK");
         log_error("Failed to commit transaction");
-        return -1;
+        return -2;
     }
 
     /* Build the rest of the response */
@@ -729,21 +750,23 @@ int oauth_refresh_access_token(db_handle_t *db,
                                 oauth_token_response_t *out_response) {
     if (!db || !client_id || !refresh_token || !out_response) {
         log_error("Invalid arguments to oauth_refresh_access_token");
-        return -1;
+        return -2;
     }
 
     memset(out_response, 0, sizeof(*out_response));
 
     /* Step 1: Look up client */
     oauth_client_info_t client;
-    if (oauth_client_lookup(db, client_id, &client) != 0) {
-        log_error("Client not found");
+    int lookup = oauth_client_lookup(db, client_id, &client);
+    if (lookup != 0) {
+        if (lookup == -2) return -2;  /* logged */
+        log_info("Client not found");
         return -1;
     }
 
     /* Check client issues refresh tokens */
     if (!client.issue_refresh_tokens) {
-        log_error("Client not configured to issue refresh tokens");
+        log_info("Client not configured to issue refresh tokens");
         return -1;
     }
 
@@ -751,14 +774,14 @@ int oauth_refresh_access_token(db_handle_t *db,
     signing_key_t *signing_key = NULL;
     if (signing_key_get_or_rotate(db, SIGNING_KEY_ACCESS_TOKEN, &signing_key) != 0) {
         log_error("Failed to get access token signing key");
-        return -1;
+        return -2;
     }
 
     /* Step 3: Begin transaction */
     if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
         signing_key_free(signing_key);
         log_error("Failed to begin transaction");
-        return -1;
+        return -2;
     }
 
     /* Step 4: Generate new refresh token */
@@ -768,7 +791,7 @@ int oauth_refresh_access_token(db_handle_t *db,
         signing_key_free(signing_key);
         db_execute_trusted(db, "ROLLBACK");
         log_error("Failed to allocate new refresh token");
-        return -1;
+        return -2;
     }
 
     if (crypto_random_token(new_refresh_token, new_refresh_token_size, REFRESH_TOKEN_BYTES) <= 0) {
@@ -776,7 +799,7 @@ int oauth_refresh_access_token(db_handle_t *db,
         signing_key_free(signing_key);
         db_execute_trusted(db, "ROLLBACK");
         log_error("Failed to generate new refresh token");
-        return -1;
+        return -2;
     }
 
     /* Step 5: Rotate refresh token (atomic) */
@@ -806,12 +829,15 @@ int oauth_refresh_access_token(db_handle_t *db,
     }
 
     if (rotate_rc != 0) {
-        /* Not found, expired, revoked, or error */
         cleanse_free(new_refresh_token);
         signing_key_free(signing_key);
         db_execute_trusted(db, "ROLLBACK");
-        log_error("Failed to rotate refresh token");
-        return -1;
+        if (rotate_rc == 2) {
+            /* Not found, expired, or revoked */
+            log_info("Failed to rotate refresh token");
+            return -1;
+        }
+        return -2;  /* logged */
     }
 
     /* Step 6: Validate client matches */
@@ -819,7 +845,7 @@ int oauth_refresh_access_token(db_handle_t *db,
         cleanse_free(new_refresh_token);
         signing_key_free(signing_key);
         db_execute_trusted(db, "ROLLBACK");
-        log_error("Client PIN mismatch in refresh token");
+        log_warn("Client PIN mismatch in refresh token");
         return -1;
     }
 
@@ -831,7 +857,7 @@ int oauth_refresh_access_token(db_handle_t *db,
             signing_key_free(signing_key);
             db_execute_trusted(db, "ROLLBACK");
             log_error("Failed to check client_user link");
-            return -1;
+            return -2;
         }
         if (link_rc == 0) {
             cleanse_free(new_refresh_token);
@@ -850,8 +876,8 @@ int oauth_refresh_access_token(db_handle_t *db,
             cleanse_free(new_refresh_token);
             signing_key_free(signing_key);
             db_execute_trusted(db, "ROLLBACK");
-            log_error("Requested scope exceeds original grant");
-            return -1;
+            log_info("Requested scope exceeds original grant");
+            return -4;
         }
         final_scope = scope;  /* Use downscoped request */
         log_debug("Downscoped from '%s' to '%s'", token_data.scopes, scope);
@@ -860,13 +886,15 @@ int oauth_refresh_access_token(db_handle_t *db,
     /* Step 8: Resolve resource server (RFC 8707) */
     long long resource_server_pin;
     unsigned char resource_server_id[16];
-    if (oauth_resolve_resource_server(db, client.pin, resource,
-                                       &resource_server_pin, resource_server_id) != 0) {
+    int resolved = oauth_resolve_resource_server(db, client.pin, resource,
+                                                 &resource_server_pin, resource_server_id);
+    if (resolved != 0) {
         cleanse_free(new_refresh_token);
         signing_key_free(signing_key);
         db_execute_trusted(db, "ROLLBACK");
-        log_error("Failed to resolve resource server");
-        return -1;
+        if (resolved < 0) return -2;  /* logged */
+        log_info("Failed to resolve resource server");
+        return -3;
     }
 
     /* Step 8b: Look up user UUID and verify still active */
@@ -882,12 +910,13 @@ int oauth_refresh_access_token(db_handle_t *db,
         signing_key_free(signing_key);
         db_execute_trusted(db, "ROLLBACK");
         log_error("Failed to prepare user lookup statement");
-        return -1;
+        return -2;
     }
 
     db_bind_int64(user_stmt, 1, token_data.user_account_pin);
 
-    if (db_step(user_stmt) == DB_ROW) {
+    int user_rc = db_step(user_stmt);
+    if (user_rc == DB_ROW) {
         const unsigned char *id_blob = db_column_blob(user_stmt, 0);
         int id_blob_len = db_column_bytes(user_stmt, 0);
         if (id_blob_len != 16) {
@@ -896,7 +925,7 @@ int oauth_refresh_access_token(db_handle_t *db,
             cleanse_free(new_refresh_token);
             signing_key_free(signing_key);
             db_execute_trusted(db, "ROLLBACK");
-            return -1;
+            return -2;
         }
         memcpy(user_account_id, id_blob, 16);
         db_finalize(user_stmt);
@@ -905,7 +934,11 @@ int oauth_refresh_access_token(db_handle_t *db,
         cleanse_free(new_refresh_token);
         signing_key_free(signing_key);
         db_execute_trusted(db, "ROLLBACK");
-        log_error("User account not found or inactive");
+        if (user_rc != DB_DONE) {
+            log_error("Failed to look up the refresh token's user account");
+            return -2;
+        }
+        log_info("User account not found or inactive");
         return -1;
     }
 
@@ -919,15 +952,16 @@ int oauth_refresh_access_token(db_handle_t *db,
     if (issue_rc != 0) {
         cleanse_free(new_refresh_token);
         db_execute_trusted(db, "ROLLBACK");
-        return -1;
+        return -2;
     }
 
     /* Commit transaction */
     if (db_execute_trusted(db, "COMMIT") != 0) {
         oauth_token_response_free(out_response);
         cleanse_free(new_refresh_token);
+        db_execute_trusted(db, "ROLLBACK");
         log_error("Failed to commit transaction");
-        return -1;
+        return -2;
     }
 
     /* Build the rest of the response */
@@ -957,7 +991,7 @@ int oauth_client_credentials(db_handle_t *db,
                               oauth_token_response_t *out_response) {
     if (!db || !client_id || !client_key_id || !client_secret || !out_response) {
         log_error("Invalid arguments to oauth_client_credentials");
-        return -1;
+        return -2;
     }
 
     memset(out_response, 0, sizeof(*out_response));
@@ -969,7 +1003,8 @@ int oauth_client_credentials(db_handle_t *db,
                                                  client_secret, &client_pin, &key_pin);
 
     if (auth_result != 1) {
-        log_error("Client authentication failed");
+        if (auth_result < 0) return -2;  /* logged */
+        log_warn("Client authentication failed");
         return -1;
     }
 
@@ -980,35 +1015,37 @@ int oauth_client_credentials(db_handle_t *db,
     oauth_client_info_t client;
     if (oauth_client_lookup(db, client_id, &client) != 0) {
         log_error("Client not found after successful authentication");
-        return -1;
+        return -2;
     }
 
     /* Validate grant type is client_credentials */
     if (strcmp(client.grant_type, "client_credentials") != 0) {
-        log_error("Client not configured for client_credentials grant");
-        return -1;
+        log_info("Client not configured for client_credentials grant");
+        return -5;
     }
 
     /* Validate client type is confidential */
     if (strcmp(client.client_type, "confidential") != 0) {
-        log_error("Client credentials grant requires confidential client");
-        return -1;
+        log_info("Client credentials grant requires confidential client");
+        return -5;
     }
 
     /* Step 3: Resolve resource server */
     long long resource_server_pin;
     unsigned char resource_server_id[16];
-    if (oauth_resolve_resource_server(db, client.pin, resource,
-                                       &resource_server_pin, resource_server_id) != 0) {
-        log_error("Failed to resolve resource server");
-        return -1;
+    int resolved = oauth_resolve_resource_server(db, client.pin, resource,
+                                                 &resource_server_pin, resource_server_id);
+    if (resolved != 0) {
+        if (resolved < 0) return -2;  /* logged */
+        log_info("Failed to resolve resource server");
+        return -3;
     }
 
     /* Step 4: Get signing key for access token JWT */
     signing_key_t *signing_key = NULL;
     if (signing_key_get_or_rotate(db, SIGNING_KEY_ACCESS_TOKEN, &signing_key) != 0) {
         log_error("Failed to get access token signing key");
-        return -1;
+        return -2;
     }
 
     /* Step 5: Issue the access token. No user, so its subject is the client
@@ -1020,7 +1057,7 @@ int oauth_client_credentials(db_handle_t *db,
                                       scope ? scope : "", out_response);
     signing_key_free(signing_key);
     if (issue_rc != 0) {
-        return -1;
+        return -2;
     }
 
     /* Step 6: Build the rest of the response */
@@ -1042,21 +1079,6 @@ int oauth_client_credentials(db_handle_t *db,
 /* ============================================================================
  * Handler wrappers for authentication, revocation, and introspection
  * ========================================================================== */
-
-int oauth_handler_client_authenticate(db_handle_t *db,
-                                       const unsigned char *client_id,
-                                       const unsigned char *client_key_id,
-                                       const char *secret,
-                                       long long *out_pin,
-                                       long long *out_key_pin) {
-    if (!db || !client_id || !client_key_id || !secret || !out_pin) {
-        log_error("Invalid arguments to oauth_handler_client_authenticate");
-        return -1;
-    }
-
-    return oauth_client_authenticate(db, client_id, client_key_id, secret,
-                                      out_pin, out_key_pin);
-}
 
 int oauth_handler_resource_server_authenticate(db_handle_t *db,
                                                 const unsigned char *resource_server_id,

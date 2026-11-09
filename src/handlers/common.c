@@ -28,6 +28,30 @@ HttpResponse *response_json_ok(const char *json) {
     return resp;
 }
 
+static HttpResponse *field_kind_error(const char *field, const char *kind) {
+    char message[128];
+    snprintf(message, sizeof(message), "%s must be %s", field, kind);
+    return response_json_error(400, message);
+}
+
+int read_int_field(const char *body, const char *field, int *out, HttpResponse **bad) {
+    int rc = json_get_int(body, field, out);
+    if (rc < 0 && !*bad) *bad = field_kind_error(field, "a whole number");
+    return rc == 0;
+}
+
+int read_bool_field(const char *body, const char *field, int *out, HttpResponse **bad) {
+    int rc = json_get_bool(body, field, out);
+    if (rc < 0 && !*bad) *bad = field_kind_error(field, "true or false");
+    return rc == 0;
+}
+
+char *read_text_field(const char *body, const char *field, HttpResponse **bad) {
+    char *text = NULL;
+    if (json_get_text(body, field, &text) < 0 && !*bad) *bad = field_kind_error(field, "text");
+    return text;
+}
+
 HttpResponse *response_json_error(int status_code, const char *message) {
     HttpResponse *resp = http_response_new(status_code);
     if (resp) {

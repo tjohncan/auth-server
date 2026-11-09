@@ -290,10 +290,14 @@ int crypto_totp_generate_qr_url(const char *secret, const char *username,
         return -1;
     }
 
-    /* Format: otpauth://totp/Issuer:username?secret=SECRET&issuer=Issuer */
-    int written = snprintf(out_url, url_size,
-                          "otpauth://totp/%s:%s?secret=%s&issuer=%s",
-                          encoded_issuer, encoded_username, secret, encoded_issuer);
+    /* Format: otpauth://totp/Issuer:username?secret=SECRET&issuer=Issuer. An
+       account without a username has the issuer alone as its label, rather
+       than "Issuer:" with nothing after the colon. */
+    int written = username[0]
+        ? snprintf(out_url, url_size, "otpauth://totp/%s:%s?secret=%s&issuer=%s",
+                   encoded_issuer, encoded_username, secret, encoded_issuer)
+        : snprintf(out_url, url_size, "otpauth://totp/%s?secret=%s&issuer=%s",
+                   encoded_issuer, secret, encoded_issuer);
 
     if (written < 0 || (size_t)written >= url_size) {
         log_error("TOTP QR URL buffer too small");

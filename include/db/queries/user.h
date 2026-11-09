@@ -11,7 +11,11 @@
  */
 
 /*
- * Check if username exists (case-insensitive)
+ * Check if username exists (case-insensitive), on any account, deactivated ones
+ * included: the unique index on username_hash covers every account, so a
+ * deactivated account keeps its name. Deactivation can be undone, and the name
+ * reaches apps as preferred_username, so handing it to someone else would hand
+ * them what an app keeps under it.
  *
  * Returns: 1 if exists, 0 if not exists, -1 on error
  */
@@ -208,7 +212,7 @@ typedef struct {
  *   user_id  - User UUID (16 bytes)
  *   out      - Output: UserInfo data
  *
- * Returns: 0 on success, -1 on error or user not found
+ * Returns: 0 on success, 1 if the user isn't found or isn't active, -1 on error
  */
 int user_get_userinfo_by_id(db_handle_t *db, const unsigned char *user_id,
                             user_userinfo_t *out);
@@ -357,7 +361,9 @@ int user_set_password(db_handle_t *db, const unsigned char *user_id,
 /*
  * Change username
  *
- * Validates format, checks uniqueness, and updates username.
+ * Validates format and updates username, unless another account holds it
+ * (case-insensitive; deactivated accounts included, as for user_username_exists).
+ * The caller's own name in another case is theirs to take.
  *
  * Parameters:
  *   db                  - Database handle
@@ -366,7 +372,7 @@ int user_set_password(db_handle_t *db, const unsigned char *user_id,
  *   new_username        - New username (validated and checked for uniqueness)
  *
  * Returns: 1 if username changed successfully,
- *          0 if username already taken,
+ *          0 if another account holds it (or the caller's account isn't active),
  *          -1 on error (validation failure or database error)
  */
 int user_change_username(db_handle_t *db, long long user_account_pin,

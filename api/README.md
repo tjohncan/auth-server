@@ -2,12 +2,27 @@
 
 HTTP endpoints for the OAuth2 authentication server.
 
+A path the server serves, asked with a method it doesn't take, answers
+`405 {"error": "Method not allowed"}` with an `Allow` header naming the methods it does
+(`HEAD` comes with `GET`). A path it doesn't serve answers `404`. `OPTIONS` is the
+exception: it's answered only on the paths a browser may call from another origin
+(`/token`, `/revoke`, `/userinfo` and `/.well-known/jwks.json`), as a CORS preflight, and is
+`404` on any other.
+
+A `5xx` means the server failed, as during a database fault, and says nothing about what was
+sent: keep any tokens and credentials, and try again. A refused credential is never a `5xx`.
+
 Any request body that is not form-encoded is checked for JSON string escapes before the
 endpoint runs. A body containing an escape that cannot be decoded (an escaped NUL, a lone
 UTF-16 surrogate, a malformed or unknown escape) is refused with
 `400 {"error": "Invalid JSON string escape"}`, whichever field carries it. A body that isn't
 well-formed UTF-8, as JSON has to be, is refused the same way, with
 `400 {"error": "Request body is not valid UTF-8"}`.
+
+A query string or form-encoded body is checked the same way, as it decodes. One holding anything
+but well-formed UTF-8, or an encoded NUL (`%00`), is refused with
+`400 {"error": "Request parameters are not valid UTF-8 text"}`, whichever parameter carries it.
+An endpoint given a `Content-Type` it doesn't take answers `415`.
 
 A new username, email address or code name must match the server's pattern for it, set in
 auth.conf (`username_pattern`, `email_pattern`, `code_name_pattern`). By default:
@@ -72,6 +87,10 @@ It exits 0 for a 2xx answer, 1 for any other (its status on standard error), and
 couldn't be made. curl works as well:
 `curl --unix-socket ./data/admin.sock -H 'Content-Type: application/json' -d @body.json http://localhost/api/admin/...`
 
+Request bodies here follow the same rule as in the Organization Management API below. A field
+of another kind, such as `12345` for a name or secret, is refused with `400`, naming the field.
+A field sent as `null` counts as left out, so it takes its default, where it has one.
+
 ### Security Model
 
 - **Access Control**: a listener of their own. On the socket, its file's mode decides who may
@@ -103,6 +122,15 @@ Bootstrap the authentication system with initial organization and management UI.
    management API resource server, management UI client, and first admin user.
 
 **Note**: NOT idempotent - fails if requested organization code_name or username already exists.
+A deactivated account's username counts as existing: the account keeps it, and can be
+reactivated. A bootstrap that fails part-way (a `500`) makes nothing, so the same request can
+be sent again once the cause is fixed.
+
+Reactivating takes the account's `user_id` (`POST /api/admin/users/activate`). Nothing on the
+admin listener finds the id from the name: use the one `POST /api/admin/users` returned when
+the account was made. Alternatively, a resource server allowed to provision users can find it
+by name with `POST /api/rs/users`, which returns an existing account, a deactivated one
+included, rather than making another.
 
 **Request Body**:
 ```json
@@ -141,9 +169,19 @@ Bootstrap the authentication system with initial organization and management UI.
 {"error": "Organization 'system' already exists. Use a different org_code_name."}
 ```
 
+- **409 Conflict** (the username exists, a deactivated account's included):
+```json
+{"error": "Username 'admin' already exists. Use a different username."}
+```
+
 - **400 Bad Request** (validation error):
 ```json
 {"error": "username and password are required"}
+```
+
+- **500 Internal Server Error** (a step failed part-way; nothing is left made):
+```json
+{"error": "Bootstrap failed"}
 ```
 
 **Creates**:
@@ -238,7 +276,8 @@ Create a user account (not attached to any organization or client).
 
 **Purpose**: Create user who can later be granted org admin privileges or added to clients.
 
-**Idempotency**: NOT idempotent - fails if username or email already exists.
+**Idempotency**: NOT idempotent - fails if username or email already exists, a deactivated
+account's included.
 
 **Request Body**:
 ```json
@@ -677,7 +716,13 @@ Authenticated endpoints for organization administrators
 
 A session that still owes MFA gets `403 {"error": "MFA verification required"}`, as on
 `/api/user`, even when the request also carries org-key headers; any other authentication
-failure gets `401`.
+failure gets `401`. A session or org key the server couldn't check gets `500`, unless the
+other one authenticates the request.
+
+In this section's request bodies, a text field takes a string, a number field a whole number,
+and a true/false field `true` or `false`. A value of another kind, such as `12345` for a name,
+`"3600"` in quotes, `1.5` or `1` for true, is refused with `400`, naming the field, rather than
+taken as left out. A field sent as `null` counts as left out, as if it weren't in the body.
 
 ### Organizations
 
@@ -715,11 +760,21 @@ Create new resource server.
 
 Body: `organization_id`, `code_name`, `display_name`, `address`, `note` (required except note)
 
+Returns `404` if the organization doesn't exist or the caller doesn't administer it, and `409`,
+naming which, if another active resource server in it has the address or the code name (the
+rule below). Neither makes anything.
+
 **PUT /api/admin/resource-servers**
 Update resource server.
 
 Query: `id` (required)
 Body: `display_name`, `address`, `note`, `is_active`, `allow_user_provisioning` (all optional)
+
+In an organization, only one active resource server may have a given address, and only one a
+given code name. An update that would leave this server active with an address or code name
+another active server has answers `409`, naming which, and changes nothing. Only reactivating a
+server, or giving an active one another address, can do that: a deactivated server can keep an
+address an active one has taken, and its other changes still save.
 
 Deactivating a resource server stops tokens being issued for it, and from then on its
 outstanding access tokens fail introspection and `/userinfo`. If the server itself only
@@ -744,9 +799,22 @@ Body: `organization_id`, `code_name`, `display_name`, `client_type`, `grant_type
     `maximum_session_seconds` (enforced at `/authorize` — sessions older than this are rejected),
     `secret_rotation_seconds` (enforced at authentication — client keys older than this are rejected)
 
-`access_token_ttl_seconds` may not exceed the server's `max_access_token_ttl_seconds`
-(default 59 days); a larger value is refused with `400`. A client stored with a larger value
-before the limit existed gets tokens issued at the limit, and `expires_in` reports it.
+`client_type` is `public` or `confidential`, and `grant_type` is `authorization_code` or
+`client_credentials`; a public client takes only `authorization_code`.
+
+The durations are in seconds, 0 included:
+- `access_token_ttl_seconds`: 0 up to the server's `max_access_token_ttl_seconds` (default
+  59 days).
+- `refresh_token_ttl_seconds` and `secret_rotation_seconds`: 0 or more, or -1 for no limit.
+- `maximum_session_seconds`: 1 or more, or -1 for no limit.
+
+Left out on create, the last three are no limit. A value outside these, or one that isn't a
+whole number, is refused with `400`, naming the field. The access-token limit is a server
+setting, so a client can hold a larger value from before it was lowered: its tokens are issued
+at the limit, and `expires_in` reports it.
+
+Returns `404` if the organization doesn't exist or the caller doesn't administer it, and `409`
+if another active client in it has the code name (the rule below). Neither makes anything.
 
 **PUT /api/admin/clients**
 Update client configuration.
@@ -754,9 +822,12 @@ Update client configuration.
 Query: `id` (required)
 Body: `display_name`, `note`, TTL/MFA settings, `is_active` (all optional)
 
-`access_token_ttl_seconds` has the same limit as on create. The console's edit form sends the
-stored TTL back with every change, so a client stored over the limit can't be edited there
-until its TTL is lowered.
+The durations follow the same rules as on create. The console's edit form sends the stored
+TTL back with every change, so a client stored over the access-token limit can't be edited
+there until its TTL is lowered.
+
+In an organization, only one active client may have a given code name. Reactivating a client
+while another active client has its code name answers `409`, and changes nothing.
 
 ### Client Redirect URIs
 
@@ -770,14 +841,18 @@ Add redirect URI to client.
 
 Body: `client_id`, `redirect_uri`, `note` (required except note)
 
-The URI must use http or https, and must not contain a fragment (`#`), where the code would
-land and never reach the client's server (RFC 6749 §3.1.2); either answers `400`. URIs
+The URI must use http or https, in either case (RFC 3986 §3.1), and must not contain a fragment
+(`#`), where the code would land and never reach the client's server (RFC 6749 §3.1.2); either
+answers `400`. `/authorize` compares a URI exactly, so a client sends it as registered. URIs
 registered before the fragment rule aren't rechecked. Plain http is allowed to any host: it
 exposes the code and state on the wire to that client's own users only, PKCE keeps a code seen
 there from being redeemed, and it's the client deployer's call. (OAuth 2.1 and RFC 9700 §2.6
 would allow it only to localhost.)
 
 Returns `404` if the client doesn't exist or isn't in an organization the caller administers.
+A URI the client already has answers `200` `{"message": "Redirect URI already registered;
+nothing changed"}`, so a setup script can run twice; a `note` sent with it isn't saved. To
+change a URI's note, remove the URI and add it again.
 
 **DELETE /api/admin/client-redirect-uris**
 Remove redirect URI from client.
@@ -810,6 +885,10 @@ Body: `client_id`, `resource_server_id` (both required)
 
 Linking a pair that is already linked succeeds. Returns `404` if either side doesn't exist,
 they are in different organizations, or the caller doesn't administer them.
+
+A client that sends no `resource` falls back on its one link, so a second link makes its code
+exchanges and refreshes answer `invalid_target`. The bundled library and the console's own client
+send none: for them, signing in stops working until the second link is removed.
 
 **DELETE /api/admin/client-resource-servers**
 Unlink client from resource server.
@@ -940,10 +1019,16 @@ Response (user-provided secret):
 }
 ```
 
+Returns `404` if the organization doesn't exist or is deactivated, and `400` if a secret given
+doesn't meet the secret rules (`machine_secret_pattern` and the length limits).
+
 **GET /api/admin/organization-keys** (Dual-auth: the admin listener, or an org key)
 List organization API keys.
 
-Query: `organization_code_name` (required), `limit`, `offset`, `is_active`
+Query: `organization_code_name`, `limit`, `offset`, `is_active`
+
+On the admin listener, `organization_code_name` is required. With an org key it's optional:
+the key names its own organization, and another organization's code name is refused.
 
 Response:
 ```json
@@ -1049,6 +1134,8 @@ Content-Type: application/json
 {"message": "Login successful"}
 ```
 
+The cookie's `Max-Age` is `session_ttl_seconds`, 604800 (seven days) by default.
+
 **Success Response — user requires MFA** (200 OK):
 ```http
 HTTP/1.0 200 OK
@@ -1112,6 +1199,13 @@ OAuth2 token endpoint (RFC 6749 Section 3.2). Exchanges authorization codes or r
 - **Access tokens**: ES256-signed JWTs (JSON Web Tokens) with cryptographic signatures
 - **Refresh tokens**: Opaque random strings (32-byte base64url-encoded)
 - Clients should treat both token types as opaque strings
+
+**A `500`** (`{"error": "Internal server error"}`, on any grant) means the server failed. The code, refresh token or secret still holds: keep it and retry.
+
+**Refusals that leave the credential holding**, each with `400` on any grant that can reach it. Only `invalid_grant` says the code or refresh token is dead, and only that should make a client discard it. `invalid_client` says the client or its key was refused; the code or token still holds once that's put right.
+- `invalid_target` (RFC 8707): the `resource` names no resource server linked to this client, or it's left out and the client hasn't exactly one to fall back on. Name one and retry.
+- `invalid_scope`: on a refresh, the `scope` goes beyond the grant. Ask for the grant's scope, or leave it out.
+- `unauthorized_client`: this client's type doesn't use this grant.
 
 #### Authorization Code Grant
 
@@ -1340,6 +1434,16 @@ Location: https://app.example.com/callback?error=access_denied&error_description
 Location: https://app.example.com/callback?error=invalid_request&error_description=Invalid%20authorization%20request&state=abc123
 ```
 
+- **302 Found** (the server failed, after the redirect_uri was trusted — redirects with OAuth2 error, and a retry may work):
+```http
+Location: https://app.example.com/callback?error=server_error&error_description=The%20server%20failed%3B%20try%20again&state=abc123
+```
+
+- **500 Internal Server Error** (the server failed before the redirect_uri could be trusted — no redirect):
+```json
+{"error": "Internal server error"}
+```
+
 **Authorization Code**:
 - Format: Stateless JWT signed with HMAC-SHA256
 - Lifetime: 60 seconds
@@ -1551,6 +1655,7 @@ resource_server_secret=<resource_server_secret>
   - Tokens not belonging to the authenticated resource server
   - Authentication failures
 - This prevents information disclosure per RFC 7662
+- A `500` (`{"error": "Internal server error"}`) means the check itself failed, and says nothing about the token: don't take it as inactive, or as active
 - Primarily used by resource servers to validate access tokens before granting access to protected resources
 - The `sub` field is omitted for machine-to-machine (client_credentials) tokens
 
@@ -2020,7 +2125,7 @@ Change current user's username.
 }
 ```
 
-- **409 Conflict** (username taken):
+- **409 Conflict** (another account holds the username, a deactivated one included):
 ```json
 {
   "error": "Username already taken"
@@ -2038,7 +2143,8 @@ Change current user's username.
 - Not empty, at most 100 characters, no spaces, no `@`, well-formed UTF-8
 - Matches `username_pattern`: by default letters, digits and `. _ + -`, with no dot first, last
   or doubled (the rules at the top of this document)
-- Must be unique (case-insensitive)
+- Must be unique (case-insensitive) across every account, deactivated ones included. Your own
+  name in another case is yours to take.
 
 **Example**:
 ```bash
@@ -2117,21 +2223,36 @@ Log out current user (close browser session).
 }
 ```
 
-**Response Headers**:
+A session that's already closed, or unknown, gets the same answer: there's nothing left to
+close.
+
+**Response Headers** (with the 200, and with the 500 below):
 ```
 Set-Cookie: __Host-session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0
 ```
 
-**Error Response** (401 Unauthorized):
+**Error Responses**:
+
+- **401 Unauthorized** (the request carries no session cookie):
 ```json
 {
   "error": "No session to logout"
 }
 ```
 
+- **500 Internal Server Error** (the database couldn't close the session):
+```json
+{
+  "error": "Failed to close session"
+}
+```
+The cookie is cleared all the same, so the browser doesn't keep a session the user logged out
+of. The session itself stays open until it expires.
+
 **Security**:
 - Marks session as closed in database (`is_closed = TRUE`, `closed_at = now()`)
-- Clears session cookie via `Set-Cookie` header with `Max-Age=0`
+- Clears the session cookie (`Set-Cookie` with `Max-Age=0`), also when the session couldn't be
+  closed
 - Even if cookie persists client-side, closed sessions are rejected server-side
 - Client should also clear OAuth tokens from localStorage
 
@@ -2376,7 +2497,7 @@ Request a password reset email.
 |-------|--------|----------|------------------------------|
 | email | string | Yes      | Email address of the account |
 
-**Response** (200 OK — always, to prevent user enumeration):
+**Response** (200 OK, whether or not the address has an account, to prevent user enumeration):
 ```json
 {
   "message": "If that email belongs to a verified account, a reset link has been sent. Check your inbox."
@@ -2384,7 +2505,8 @@ Request a password reset email.
 ```
 
 **Notes**:
-- Always returns 200 regardless of whether the email exists
+- Returns 200 regardless of whether the email exists
+- **500** when the server's own query fails, which says nothing about the address
 - Only verified email addresses can trigger a reset
 - Rate limited: maximum 5 reset tokens per user per hour
 - Token TTL is configured via `password_reset_token_ttl_seconds`
@@ -2523,7 +2645,7 @@ Request a passwordless login email.
 | email     | string | Yes      | Email address of the account                   |
 | return_to | string | No       | Authorize query string for post-login redirect |
 
-**Response** (200 OK — always, to prevent user enumeration):
+**Response** (200 OK, whether or not the address has an account, to prevent user enumeration):
 ```json
 {
   "message": "If that email belongs to a verified account with passwordless login enabled, a login link has been sent. Check your inbox."
@@ -2531,7 +2653,8 @@ Request a passwordless login email.
 ```
 
 **Notes**:
-- Always returns 200 regardless of whether the email exists or passwordless is enabled
+- Returns 200 regardless of whether the email exists or passwordless is enabled
+- **500** when the server's own query fails, which says nothing about the address
 - Only verified email addresses on accounts with `allow_passwordless_login` can trigger a token
 - Rate limited: maximum 5 tokens per user per hour
 - Token TTL is configured via `passwordless_login_token_ttl_seconds` (default 600s / 10 min)
@@ -2765,9 +2888,14 @@ recovery codes are generated and returned (shown once — user must save them).
 }
 ```
 
+**Other errors**:
+- **404** "MFA method not found": no such method, or another user's. Both answer alike, so
+  method ids can't be told apart.
+- **409** "MFA method is already confirmed".
+
 **Notes**:
 - Recovery codes (10 × 20-char hex) are only returned on first confirmed method. Subsequent enrollments reuse the existing set.
-- Caller must free/discard recovery codes after displaying — they cannot be retrieved again (only masked versions available).
+- Caller must free/discard recovery codes after displaying — they cannot be retrieved again (`GET /api/user/mfa/recovery-codes` lists their last four characters).
 
 ---
 
@@ -2805,6 +2933,8 @@ or
 - **503** `{"error": "MFA verification is unavailable, try again soon"}` when the attempt can't
   be recorded. The limits count recorded attempts, so one that can't be recorded gets no
   verdict, right code or wrong. Retry it; don't take it for a wrong code.
+- **500** when the session can't be marked complete: the code was right, and the step isn't
+  done. Retry it.
 
 ---
 
@@ -2832,6 +2962,8 @@ or
 - Each recovery code is single-use. Once used it cannot be reused.
 - 10 codes per set. Regenerate with `POST /api/user/mfa/recovery-codes/regenerate` when running low.
 - On success (`valid: true`), sets `mfa_completed = true` on the session, unblocking `/authorize`.
+- **500** when the code can't be marked used or the session complete. Those are one transaction,
+  so the code stays unused and can be tried again.
 
 ---
 
@@ -2877,9 +3009,39 @@ Delete an MFA method. The `id` query parameter is the 32-char hex method UUID.
 }
 ```
 
+**Error**: **404** "MFA method not found": no such method, or another user's.
+
 **Example**:
 ```bash
 curl -X DELETE "http://localhost:8080/api/user/mfa/methods?id=a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4" \
+  -H "Cookie: __Host-session=<token>"
+```
+
+---
+
+### GET /api/user/mfa/recovery-codes
+
+The caller's own recovery codes, masked: the last four characters of each code in the active
+set, and whether it's been used, in the order they were made. The whole codes are shown once,
+when they're made, and only their hashes are kept. The session picks the account and the
+request names none, so no one can list another account's codes. An account with MFA must have
+completed the MFA step in this session, as for the other factor-management endpoints.
+
+**Success Response** (200 OK):
+```json
+{
+  "recovery_codes": [
+    {"last4": "c9d0", "used": false},
+    {"last4": "7e1f", "used": true}
+  ]
+}
+```
+
+An account without recovery codes gets an empty list.
+
+**Example**:
+```bash
+curl http://localhost:8080/api/user/mfa/recovery-codes \
   -H "Cookie: __Host-session=<token>"
 ```
 
@@ -2902,6 +3064,8 @@ gets `415`, which keeps a plain HTML form from triggering this.
   ]
 }
 ```
+
+**Error**: **409** "Recovery codes need a confirmed MFA method", for an account without one.
 
 **Notes**:
 - Returns all 10 plaintext codes. Save them immediately — they cannot be retrieved again.
@@ -2967,6 +3131,9 @@ All endpoints require RS key authentication and `allow_user_provisioning = true`
 
 - **Authentication**: RS key credentials in JSON body (same key pair used for `/introspect`)
 - **Authorization**: `allow_user_provisioning` must be enabled on the resource server
+- **Fields**: a text field takes a string and a number field a whole number. A value of another
+  kind, such as `123` for a username, is refused with `400`, naming the field, rather than taken
+  as left out. A field sent as `null` counts as left out.
 - **What it opens**: lookups and provisioning reach every user on the server, not only those
   linked to this resource server's clients. That's what lets a resource server tell whether
   someone already has an account before it invites them. It can find anyone by `user_id`,
@@ -3181,6 +3348,9 @@ curl -X GET http://localhost:8080/api/rs/users \
 Link a user to a client. Idempotent — succeeds if already linked.
 
 The client must be linked to the authenticated resource server via `client_resource_server`.
+
+Links can be set up while the client is deactivated, as a client is prepared before it goes
+live: they take effect when the client is reactivated. Removing one works the same way.
 
 **Request Body**:
 ```json

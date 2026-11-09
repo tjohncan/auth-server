@@ -11,22 +11,6 @@
  */
 
 /*
- * Check if active resource server with code_name exists in organization
- *
- * Returns: 1 if exists, 0 if not exists, -1 on error
- */
-int resource_server_code_name_exists(db_handle_t *db, const char *org_code_name,
-                                     const char *code_name);
-
-/*
- * Check if active resource server with address exists in organization
- *
- * Returns: 1 if exists, 0 if not exists, -1 on error
- */
-int resource_server_address_exists(db_handle_t *db, const char *org_code_name,
-                                   const char *address);
-
-/*
  * Create resource server (bootstrap use)
  *
  * Creates resource_server record within an organization.
@@ -69,6 +53,11 @@ int resource_server_create_bootstrap(db_handle_t *db, const char *org_code_name,
  * Authorization:
  * - Session auth: Verifies user is org admin
  * - Org key auth: Verifies specific key is active
+ *
+ * The organization and uniqueness among active servers are the caller's to
+ * check first (org_get_by_id, resource_server_active_clash), as
+ * admin_create_resource_server does. The INSERT's own guards refuse what
+ * changed since.
  *
  * Returns: 0 on success, -1 on error
  */
@@ -170,7 +159,11 @@ int resource_server_get_by_id(db_handle_t *db, const unsigned char *server_id,
  * - Session auth: Verifies user is org admin
  * - Org key auth: Verifies specific key is active
  *
- * Returns: 0 on success, -1 on error or not found
+ * Uniqueness among active servers is the caller's to check first, with
+ * resource_server_active_clash.
+ *
+ * Returns: 0 once the statement runs, whether or not a row matched (the
+ * caller's read of the server is what finds "not found"), -1 on error
  */
 int resource_server_update(db_handle_t *db, const unsigned char *server_id,
                            long long user_account_pin,
@@ -178,6 +171,20 @@ int resource_server_update(db_handle_t *db, const unsigned char *server_id,
                            const char *display_name, const char *address,
                            const char *note, const int *is_active,
                            const int *allow_user_provisioning);
+
+/*
+ * Whether another active resource server in the organization has this address
+ * or this code name: what the partial unique indexes uix_resource_server_org_address
+ * and uix_resource_server_org_code hold. The server itself (server_pin) doesn't
+ * count; -1 for one being created. No authorization: the caller has read the
+ * server, or the organization it's created in, already.
+ *
+ * Returns: 0 if neither is held, 1 if the address is (named first when both
+ * are), 2 if the code name is, -1 on error
+ */
+int resource_server_active_clash(db_handle_t *db, long long organization_pin,
+                                 long long server_pin, const char *address,
+                                 const char *code_name);
 
 /*
  * Resource Server Key data structure

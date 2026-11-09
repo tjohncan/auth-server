@@ -191,6 +191,12 @@ HttpResponse *mfa_totp_confirm_handler(const HttpRequest *req) {
     if (rc == 1) {
         return response_json_error(400, "Invalid TOTP code");
     }
+    if (rc == 2) {
+        return response_json_error(404, "MFA method not found");
+    }
+    if (rc == 3) {
+        return response_json_error(409, "MFA method is already confirmed");
+    }
     if (rc != 0) {
         return response_json_error(500, "Failed to confirm MFA method");
     }
@@ -198,7 +204,9 @@ HttpResponse *mfa_totp_confirm_handler(const HttpRequest *req) {
     /* A valid code from the authenticator just registered proves possession of
      * it, so this session has completed MFA. Without this, a first enrollment
      * would be followed by a bounce to the MFA step on the very next MFA-management
-     * call. For an additional method the gate above already required completion. */
+     * call. For an additional method the gate above already required completion.
+     * A failure here still answers 200: the method is confirmed, and the recovery
+     * codes below can't be shown again. That bounce is all it costs. */
     oauth_session_set_mfa_completed(db, session.id);
 
     /* Build response */
@@ -285,7 +293,9 @@ HttpResponse *mfa_verify_handler(const HttpRequest *req) {
     free(code);
 
     if (result == 1) {
-        oauth_session_set_mfa_completed(db, session.id);
+        if (oauth_session_set_mfa_completed(db, session.id) != 0) {
+            return response_json_error(500, "MFA verification error");
+        }
         return response_json_ok("{\"valid\":true}");
     } else if (result == -2) {
         return response_json_error(429, "Too many attempts, try again soon!");
@@ -340,13 +350,12 @@ HttpResponse *mfa_recover_handler(const HttpRequest *req) {
         return response_json_error(400, "recovery_code required");
     }
 
-    /* Verify recovery code */
-    int result = mfa_recover(db, session.user_account_pin, recovery_code);
+    /* Verify recovery code: a valid one also completes MFA on this session */
+    int result = mfa_recover(db, session.user_account_pin, session.id, recovery_code);
     OPENSSL_cleanse(recovery_code, strlen(recovery_code));
     free(recovery_code);
 
     if (result == 1) {
-        oauth_session_set_mfa_completed(db, session.id);
         return response_json_ok("{\"valid\":true}");
     } else if (result == 0) {
         return response_json_ok("{\"valid\":false}");
@@ -470,11 +479,64 @@ HttpResponse *mfa_delete_method_handler(const HttpRequest *req) {
     free(id_hex);
 
     /* Delete method */
-    if (mfa_delete_method(db, session.user_account_pin, method_id) != 0) {
+    int rc = mfa_delete_method(db, session.user_account_pin, method_id);
+    if (rc == 1) {
+        return response_json_error(404, "MFA method not found");
+    }
+    if (rc != 0) {
         return response_json_error(500, "Failed to delete MFA method");
     }
 
     return response_json_ok("{\"message\":\"MFA method deleted\"}");
+}
+
+/* ============================================================================
+ * GET /api/user/mfa/recovery-codes
+ * ========================================================================== */
+
+/*
+ * GET /api/user/mfa/recovery-codes
+ *
+ * The caller's own recovery codes, masked: each code's last four characters,
+ * and whether it's been used. The session picks the account; nothing in the
+ * request names one. Like the other factor-management endpoints, it wants the
+ * factor first from an account that has one.
+ *
+ * Response:
+ *   200 OK
+ *   {"recovery_codes":[{"last4":"a1b2","used":false},...]}
+ */
+HttpResponse *mfa_list_recovery_codes_handler(const HttpRequest *req) {
+
+    db_handle_t *db = db_pool_get_connection();
+    if (!db) {
+        log_error("Failed to get database connection");
+        return response_json_error(500, "Internal server error");
+    }
+
+    oauth_session_info_t session;
+    HttpResponse *auth_err = session_require(req, db, SESSION_MFA_IF_ENROLLED, &session);
+    if (auth_err) return auth_err;
+
+    recovery_code_masked_t *codes = NULL;
+    int count = 0;
+    if (recovery_code_get_masked_list(db, session.user_account_pin, &codes, &count) != 0) {
+        return response_json_error(500, "Failed to list recovery codes");
+    }
+
+    JsonBuf *jb = jsonbuf_new(2048 + count * 64);
+    jsonbuf_appendf(jb, "{\"recovery_codes\":[");
+    for (int i = 0; i < count; i++) {
+        jsonbuf_appendf(jb, "%s{\"last4\":\"", i > 0 ? "," : "");
+        jsonbuf_append_escaped(jb, codes[i].last4);
+        jsonbuf_appendf(jb, "\",\"used\":%s}", codes[i].is_used ? "true" : "false");
+    }
+    jsonbuf_appendf(jb, "]}");
+
+    OPENSSL_cleanse(codes, (size_t)count * sizeof(*codes));
+    free(codes);
+
+    return jsonbuf_to_response(jb, 200);
 }
 
 /* ============================================================================
@@ -514,7 +576,11 @@ HttpResponse *mfa_regenerate_recovery_codes_handler(const HttpRequest *req) {
     char **codes = NULL;
     int count = 0;
 
-    if (mfa_regenerate_recovery_codes(db, session.user_account_pin, &codes, &count) != 0) {
+    int rc = mfa_regenerate_recovery_codes(db, session.user_account_pin, &codes, &count);
+    if (rc == 1) {
+        return response_json_error(409, "Recovery codes need a confirmed MFA method");
+    }
+    if (rc != 0) {
         return response_json_error(500, "Failed to regenerate recovery codes");
     }
 

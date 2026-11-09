@@ -35,6 +35,15 @@ RUN if [ "$DB_BACKEND" = "sqlite" ]; then sh vendor/verify-sqlite.sh; fi
 
 RUN make clean && make DB_BACKEND=${DB_BACKEND} EMAIL_SUPPORT=${EMAIL_SUPPORT}
 
+# The files the server reads at run time, readable by everyone and writable by
+# root alone, whatever modes the build context gave them: a checkout made under
+# umask 077 leaves them unreadable to the server's user, and one under umask 000
+# writable by it. Set here, so the runtime stage takes them in one layer.
+COPY static/ /stage/static/
+COPY sql/ /stage/sql/
+COPY templates/ /stage/templates/
+RUN chmod -R a+rX,go-w /stage
+
 # -----------------------------------------------------------------------------
 # Stage 2: Runtime
 # -----------------------------------------------------------------------------
@@ -59,19 +68,21 @@ RUN apk add --no-cache \
     && addgroup -g 1000 authserver \
     && adduser -u 1000 -G authserver -s /bin/sh -D authserver \
     && mkdir -p /app/data \
-    && chown -R authserver:authserver /app
+    && chown authserver:authserver /app/data
 
 WORKDIR /app
+
+# The server owns /app/data alone: the database, its lock file and the admin
+# socket. The binary and the files it serves or reads stay root's, readable and
+# not writable by the server, so a server that's been taken over can't rewrite
+# them.
 
 # Binary from build stage
 COPY --from=builder /build/auth-server /app/auth-server
 
-# Runtime files (static assets, SQL schemas)
-COPY static/ /app/static/
-COPY sql/ /app/sql/
-COPY templates/ /app/templates/
-
-RUN chown -R authserver:authserver /app
+# Runtime files (static assets, SQL schemas, templates), as the build stage
+# left them
+COPY --from=builder /stage/ /app/
 
 USER authserver
 

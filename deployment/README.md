@@ -32,11 +32,16 @@ those responsibilities belong to the infrastructure layer in front of it.
 Internal traffic between the proxy and auth-server is unencrypted within the trusted network.
 
 **Rate limiting** is handled by nginx (`limit_req_zone`, configured at 10 req/s per IP with
-burst of 20) or a cloud WAF. This is a deliberate architectural choice: rate limiting at
+burst of 20; and per IP, 10 a minute for sign-ins and recovery codes, `POST /login` and
+`POST /api/user/mfa/recover`, and 30 a minute for `/revoke`) or a cloud WAF. This is a deliberate architectural choice: rate limiting at
 the infrastructure edge is simpler, more efficient, and easier to tune than application-level
 throttling. The server's job is authentication logic, not traffic policing.
 
 ## Quick Start (Local Development)
+
+Run this way, with no `auth.conf`, the server takes its defaults, the published placeholder
+`encryption_key` included: for trying it out, not for keeping data. For anything that
+stays, start from `auth.conf.example`, as the production setup below does.
 
 ```bash
 # From project root
@@ -63,7 +68,13 @@ For multi-server deployments, use a load balancer with managed certificates inst
 ```bash
 cd deployment
 cp .env.example .env
-# Edit .env with your domain, database settings, etc.
+# Edit .env with your domain, database settings, etc. The compose file always passes
+# DB_BACKEND and POSTGRES_* to the server as AUTH_DB_TYPE, _HOST, _PORT, _NAME, _USER and
+# _PASSWORD, and AFFILIATE as AUTH_MOTHERSHIP_URL. It passes each whether .env sets it or not
+# (unset, each is a default or empty), and a variable wins over auth.conf. So set those here,
+# not in auth.conf's db_type, db_host, db_port, db_name, db_user, db_password and
+# mothership_url. The image also sets AUTH_SERVER_PORT=8080, which compose and nginx expect.
+# The rest go in auth.conf, including email's settings, db_path and db_owner_role.
 
 # The server's own settings, at the project root. The compose file mounts ../auth.conf and
 # ../data; a mount whose source is missing comes up as an empty directory, which the server
@@ -72,7 +83,7 @@ cp .env.example .env
 #                                        carry it as their issuer, and emailed links use it;
 #                                        bootstrap can't be re-run to change them)
 #   encryption_key = <a long random secret>
-#   password_min_length = 8             (or more)
+#   password_min_length = 8             (or more, up to 43)
 #   strict = true                       (then the server refuses to start on the placeholder
 #                                        key or a password minimum under 8)
 # auth.conf must be readable by uid 1000 (the container's user): the server refuses one it
@@ -180,9 +191,9 @@ last entry. (Putting nginx between the ALB and the server, with `real_ip` config
 2. Create a service user: `useradd -r -s /bin/false authserver`
 3. Place the project in `/opt/auth-server` and configure `auth.conf`. Set `server_host` to the
    public hostname and `encryption_key` before the first start: bootstrap stores the console's
-   URLs from `server_host`, and can't be re-run to change them. Set `password_min_length` (8 or
-   more) and `strict = true`, so the server refuses to start on the placeholder key or a
-   shorter password minimum
+   URLs from `server_host`, and can't be re-run to change them. Set `password_min_length` (8 to
+   43) and `strict = true`, so the server refuses to start on the placeholder key or a shorter
+   password minimum
 4. Set ownership: `chown -R authserver:authserver /opt/auth-server/data`
 5. Create the systemd unit file at `/etc/systemd/system/auth-server.service`:
 
@@ -218,7 +229,15 @@ systemctl status auth-server
 
 The server loads `auth.conf` from its working directory. These settings can also be set by
 environment variable, which wins over the file (useful for Docker and secrets management); the
-rest go in `auth.conf`.
+rest go in `auth.conf`. A variable is read as its `auth.conf` key is: a value the server can't
+read is logged as a warning and the setting keeps its value (for `strict`, the server refuses to
+start instead). Set but empty, a variable counts as unset, which is how docker-compose's
+`${VAR:-}` passes one the host didn't set; a text setting is the exception, taking empty as its
+value (an empty `AUTH_ADMIN_SOCKET` means no socket). A text variable is taken as it is, spaces
+included, since a secret's spaces are its own; `AUTH_SERVER_HOST` is the exception, trimmed as
+the file trims every value. An empty `server_host`, from the file or `AUTH_SERVER_HOST`, refuses
+the start: the server's public address is built from it. So does an empty `db_path` with
+SQLite, which would otherwise open a temporary database.
 
 | Environment Variable  | auth.conf key    | Description              | Default        |
 |-----------------------|------------------|--------------------------|----------------|

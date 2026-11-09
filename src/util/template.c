@@ -8,6 +8,7 @@
 #include <dirent.h>
 #include <stdarg.h>
 #include <stdint.h>
+#include <errno.h>
 
 /* --------------------------------------------------------------------
  * In-memory template cache
@@ -147,6 +148,13 @@ static int scan_templates(const char *dir_path, const char *prefix) {
 int template_init(const char *templates_dir) {
     memset(template_hash_buckets, -1, sizeof(template_hash_buckets));
 
+    DIR *top = opendir(templates_dir);
+    if (!top) {
+        log_error("Can't read the templates directory %s: %s", templates_dir, strerror(errno));
+        return -1;
+    }
+    closedir(top);
+
     log_info("Scanning %s for templates...", templates_dir);
     int count = scan_templates(templates_dir, "");
 
@@ -252,6 +260,10 @@ char *template_render_pairs(const char *name,
     *w = '\0';
 
     return result;
+}
+
+int template_exists(const char *name) {
+    return name && find_template(name) != NULL;
 }
 
 char *template_render(const char *name, ...) {

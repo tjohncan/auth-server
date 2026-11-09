@@ -104,6 +104,8 @@ new OAuthClient(config)
 - `config.onTokenRefresh` (function, optional) - Called after successful token refresh with new token data
 - `config.tokenStorage` (string, optional) - Token storage: `'local'` (default, cross-tab) or `'session'` (per-tab, disables cross-tab coordination)
 
+The library sends no `resource`, so the client needs exactly one linked resource server. With more, the code exchange and every refresh answer `invalid_target`.
+
 ### Methods
 
 #### `authorize()`
@@ -149,7 +151,7 @@ const freshTokens = await client.startAutoRefresh();
 
 **Returns:** Promise resolving to fresh token data (if immediate refresh occurred) or `null` (if timer was scheduled)
 
-**Throws:** Error if refresh fails (also triggers `onSessionExpired`)
+**Throws:** Error if refresh fails (a dead refresh token also triggers `onSessionExpired`)
 
 ---
 
@@ -163,7 +165,7 @@ const tokens = await client.refreshAccessToken();
 
 **Returns:** Promise resolving to new token data
 
-**Throws:** Error if refresh fails (also triggers `onSessionExpired`)
+**Throws:** Error if refresh fails. A dead refresh token (`invalid_grant`) clears the tokens and triggers `onSessionExpired`. Any other failure keeps them. A `5xx` can be retried. `invalid_target` can't: it lasts until the client has exactly one resource server, and `logout()` gets out of it.
 
 ---
 
@@ -184,7 +186,7 @@ const response = await client.fetchWithToken('/api/resource', {
 
 **Returns:** Promise resolving to Response object
 
-**Throws:** Error if not authenticated and cannot refresh (also triggers `onSessionExpired`)
+**Throws:** Error if not authenticated and cannot refresh (a dead refresh token also triggers `onSessionExpired`)
 
 ---
 
@@ -254,7 +256,7 @@ await client.logout();
 
 Cancels the scheduled refresh timer and removes the cross-tab `storage` listener. Call when the client instance is no longer needed (e.g., on page unload or when switching accounts).
 
-Deliberately does **not** release the refresh lock. A tab destroyed mid-refresh keeps its claim until the 10-second TTL expires, and that window is what lets its in-flight response still land and write the new tokens for other tabs to pick up. Past storing them, a destroyed instance schedules no refresh and calls none of its callbacks. Releasing eagerly would hand the lock to a tab that would then send the old refresh token — already invalidated by the in-flight rotation — and take a `4xx` that logs every tab out.
+Deliberately does **not** release the refresh lock. A tab destroyed mid-refresh keeps its claim until the 10-second TTL expires, and that window is what lets its in-flight response still land and write the new tokens for other tabs to pick up. Past storing them, a destroyed instance schedules no refresh and calls none of its callbacks. Releasing eagerly would hand the lock to a tab that would then send the old refresh token — already invalidated by the in-flight rotation — and take an `invalid_grant` that logs every tab out.
 
 ```javascript
 client.destroy();
@@ -268,7 +270,7 @@ The library automatically manages token lifecycle:
 2. **On `startAutoRefresh()`** — resumes the timer from stored tokens (call on page load)
 3. **In `fetchWithToken()`** — if the access token is already expired, transparently refreshes before making the request
 4. **On 401 response** — retries the request once with a freshly refreshed token (handles server-side revocation)
-5. **On refresh failure** — calls `onSessionExpired` so your app can redirect to login
+5. **On a dead refresh token** (`invalid_grant`) — clears the tokens and calls `onSessionExpired`, so your app can redirect to login. Any other failed refresh keeps them
 6. **Concurrent safety** — multiple simultaneous `fetchWithToken()` calls that trigger a refresh share a single refresh request
 
 ### Token Rotation

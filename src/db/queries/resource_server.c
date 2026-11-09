@@ -10,76 +10,6 @@
 #include <stdio.h>
 #include <string.h>
 
-int resource_server_code_name_exists(db_handle_t *db, const char *org_code_name,
-                                     const char *code_name) {
-    if (!db || !org_code_name || !code_name) {
-        log_error("Invalid arguments to resource_server_code_name_exists");
-        return -1;
-    }
-
-    const char *sql =
-        "SELECT 1 FROM " TBL_RESOURCE_SERVER " A "
-        "JOIN " TBL_ORGANIZATION " B ON A.organization_pin = B.pin "
-        "WHERE B.code_name = " P"1 AND A.code_name = " P"2 AND A.is_active = " BOOL_TRUE " "
-        "LIMIT 1";
-
-    db_stmt_t *stmt = NULL;
-    if (db_prepare(db, &stmt, sql) != 0) {
-        log_error("Failed to prepare resource_server_code_name_exists statement");
-        return -1;
-    }
-
-    db_bind_text(stmt, 1, org_code_name, -1);
-    db_bind_text(stmt, 2, code_name, -1);
-
-    int rc = db_step(stmt);
-    db_finalize(stmt);
-
-    if (rc == DB_ROW) {
-        return 1;  /* Exists */
-    } else if (rc == DB_DONE) {
-        return 0;  /* Does not exist */
-    } else {
-        log_error("Error checking resource server code_name existence");
-        return -1;
-    }
-}
-
-int resource_server_address_exists(db_handle_t *db, const char *org_code_name,
-                                   const char *address) {
-    if (!db || !org_code_name || !address) {
-        log_error("Invalid arguments to resource_server_address_exists");
-        return -1;
-    }
-
-    const char *sql =
-        "SELECT 1 FROM " TBL_RESOURCE_SERVER " A "
-        "JOIN " TBL_ORGANIZATION " B ON A.organization_pin = B.pin "
-        "WHERE B.code_name = " P"1 AND A.address = " P"2 AND A.is_active = " BOOL_TRUE " "
-        "LIMIT 1";
-
-    db_stmt_t *stmt = NULL;
-    if (db_prepare(db, &stmt, sql) != 0) {
-        log_error("Failed to prepare resource_server_address_exists statement");
-        return -1;
-    }
-
-    db_bind_text(stmt, 1, org_code_name, -1);
-    db_bind_text(stmt, 2, address, -1);
-
-    int rc = db_step(stmt);
-    db_finalize(stmt);
-
-    if (rc == DB_ROW) {
-        return 1;  /* Exists */
-    } else if (rc == DB_DONE) {
-        return 0;  /* Does not exist */
-    } else {
-        log_error("Error checking resource server address existence");
-        return -1;
-    }
-}
-
 int resource_server_create_bootstrap(db_handle_t *db, const char *org_code_name,
                                       const char *code_name, const char *display_name,
                                       const char *address, const char *note,
@@ -238,7 +168,12 @@ int resource_server_create(db_handle_t *db,
     db_finalize(stmt);
 
     if (rc != DB_ROW) {
-        log_error("Failed to insert resource server (unauthorized or constraint violation)");
+        /* The caller checked the organization and the clashes first, so nothing
+           matching means one of them changed since */
+        log_error(rc == DB_DONE
+                  ? "Resource server not inserted: its organization or an active server "
+                    "changed since the check"
+                  : "Failed to insert resource server");
         return -1;
     }
 
@@ -341,7 +276,8 @@ int resource_server_list_all(db_handle_t *db, long long user_account_pin,
     int total_count = 0;
     int first_row = 1;
 
-    while (db_step(stmt) == DB_ROW) {
+    int rc;
+    while ((rc = db_step(stmt)) == DB_ROW) {
         resource_server_data_t server;
         memset(&server, 0, sizeof(server));
 
@@ -394,6 +330,12 @@ int resource_server_list_all(db_handle_t *db, long long user_account_pin,
     }
 
     db_finalize(stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Error listing resource servers");
+        db_results_free(list);
+        return -1;
+    }
 
     /* Convert list to array */
     int count;
@@ -549,7 +491,6 @@ int resource_server_update(db_handle_t *db, const unsigned char *server_id,
     int build_rc = 0;
     int param = 3;  /* ?1 is server_id, ?2 is auth PIN (user or key) */
     int conditions = 0;
-    int address_check_param = 0;  /* Track address param for uniqueness check */
 
     /* Start with UPDATE SET */
     build_rc |= str_appendf(sql, sizeof(sql), &pos,
@@ -598,31 +539,9 @@ int resource_server_update(db_handle_t *db, const unsigned char *server_id,
 
     build_rc |= str_appendf(sql, sizeof(sql), &pos, ") ");
 
-    /* Add uniqueness check for address if being updated */
-    if (address) {
-        address_check_param = param++;
-        build_rc |= str_appendf(sql, sizeof(sql), &pos,
-            "AND NOT EXISTS ("
-                "SELECT 1 FROM " TBL_RESOURCE_SERVER " other "
-                "WHERE other.organization_pin = " TBL_RESOURCE_SERVER ".organization_pin "
-                "AND other.address = " P"%d "
-                "AND other.is_active = " BOOL_TRUE " "
-                "AND other.id != " TBL_RESOURCE_SERVER ".id"
-            ") ", address_check_param);
-    }
-
-    /* Add uniqueness check when reactivating (is_active -> TRUE) */
-    /* Check existing address doesn't collide with active records */
-    if (is_active && *is_active == 1) {
-        build_rc |= str_appendf(sql, sizeof(sql), &pos,
-            "AND NOT EXISTS ("
-                "SELECT 1 FROM " TBL_RESOURCE_SERVER " other "
-                "WHERE other.organization_pin = " TBL_RESOURCE_SERVER ".organization_pin "
-                "AND other.address = " TBL_RESOURCE_SERVER ".address "
-                "AND other.is_active = " BOOL_TRUE " "
-                "AND other.id != " TBL_RESOURCE_SERVER ".id"
-            ") ");
-    }
+    /* Uniqueness among active servers isn't decided here: the caller checks it
+       first (resource_server_active_clash), and the partial unique indexes are
+       the database's backstop. */
 
     build_rc |= str_appendf(sql, sizeof(sql), &pos, "AND (");
 
@@ -709,11 +628,6 @@ int resource_server_update(db_handle_t *db, const unsigned char *server_id,
         db_bind_int(stmt, param++, *allow_user_provisioning);
     }
 
-    /* Bind uniqueness check parameter for address if needed */
-    if (address) {
-        db_bind_text(stmt, address_check_param, address, -1);
-    }
-
     int rc = db_step(stmt);
     db_finalize(stmt);
 
@@ -724,6 +638,48 @@ int resource_server_update(db_handle_t *db, const unsigned char *server_id,
 
     log_info("Updated resource server");
     return 0;
+}
+
+int resource_server_active_clash(db_handle_t *db, long long organization_pin,
+                                 long long server_pin, const char *address,
+                                 const char *code_name) {
+    if (!db || !address || !code_name) {
+        log_error("Invalid arguments to resource_server_active_clash");
+        return -1;
+    }
+
+    /* The address is named first when both are held */
+    const char *sql =
+        "SELECT CASE WHEN address = " P"3 THEN 1 ELSE 2 END AS clash "
+        "FROM " TBL_RESOURCE_SERVER " "
+        "WHERE organization_pin = " P"1 "
+        "AND pin <> " P"2 "
+        "AND is_active = " BOOL_TRUE " "
+        "AND (address = " P"3 OR code_name = " P"4) "
+        "ORDER BY clash "
+        "LIMIT 1";
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        log_error("Failed to prepare resource_server_active_clash statement");
+        return -1;
+    }
+
+    db_bind_int64(stmt, 1, organization_pin);
+    db_bind_int64(stmt, 2, server_pin);
+    db_bind_text(stmt, 3, address, -1);
+    db_bind_text(stmt, 4, code_name, -1);
+
+    int rc = db_step(stmt);
+    int clash = (rc == DB_ROW) ? db_column_int(stmt, 0) : 0;
+    db_finalize(stmt);
+
+    if (rc != DB_ROW && rc != DB_DONE) {
+        log_error("Failed to check resource server uniqueness");
+        return -1;
+    }
+
+    return clash;
 }
 
 /* ============================================================================
@@ -761,8 +717,12 @@ int resource_server_key_create(db_handle_t *db,
     if (hash_rc != 0) {
         OPENSSL_cleanse(salt_hex, sizeof(salt_hex));
         OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
+        if (hash_rc == -2) {
+            log_info("Secret refused: its length is out of range");
+            return -2;
+        }
         log_error("Failed to hash secret");
-        return (hash_rc == -2) ? -2 : -1;
+        return -1;
     }
 
     const char *sql;
@@ -938,7 +898,8 @@ int resource_server_key_list(db_handle_t *db,
     int total_count = 0;
     int first_row = 1;
 
-    while (db_step(stmt) == DB_ROW) {
+    int rc;
+    while ((rc = db_step(stmt)) == DB_ROW) {
         resource_server_key_data_t key;
         memset(&key, 0, sizeof(key));
 
@@ -977,6 +938,12 @@ int resource_server_key_list(db_handle_t *db,
     }
 
     db_finalize(stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Error listing resource server keys");
+        db_results_free(list);
+        return -1;
+    }
 
     /* Convert list to array */
     int count;
@@ -1343,7 +1310,8 @@ int rs_client_user_list(db_handle_t *db, long long client_pin,
     int total_count = 0;
     int first_row = 1;
 
-    while (db_step(stmt) == DB_ROW) {
+    int rc;
+    while ((rc = db_step(stmt)) == DB_ROW) {
         rs_client_user_t entry;
         memset(&entry, 0, sizeof(entry));
 
@@ -1380,6 +1348,12 @@ int rs_client_user_list(db_handle_t *db, long long client_pin,
     }
 
     db_finalize(stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Error listing a client's users");
+        db_results_free(list);
+        return -1;
+    }
 
     int count;
     rs_client_user_t *users = DB_RESULTS_TO_ARRAY(list, &count, rs_client_user_t);

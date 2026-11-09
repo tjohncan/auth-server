@@ -9,41 +9,6 @@
 #include <stdio.h>
 #include <string.h>
 
-int client_code_name_exists(db_handle_t *db, const char *org_code_name,
-                            const char *code_name) {
-    if (!db || !org_code_name || !code_name) {
-        log_error("Invalid arguments to client_code_name_exists");
-        return -1;
-    }
-
-    const char *sql =
-        "SELECT 1 FROM " TBL_CLIENT " A "
-        "JOIN " TBL_ORGANIZATION " B ON A.organization_pin = B.pin "
-        "WHERE B.code_name = " P"1 AND A.code_name = " P"2 AND A.is_active = " BOOL_TRUE " "
-        "LIMIT 1";
-
-    db_stmt_t *stmt = NULL;
-    if (db_prepare(db, &stmt, sql) != 0) {
-        log_error("Failed to prepare client_code_name_exists statement");
-        return -1;
-    }
-
-    db_bind_text(stmt, 1, org_code_name, -1);
-    db_bind_text(stmt, 2, code_name, -1);
-
-    int rc = db_step(stmt);
-    db_finalize(stmt);
-
-    if (rc == DB_ROW) {
-        return 1;  /* Exists */
-    } else if (rc == DB_DONE) {
-        return 0;  /* Does not exist */
-    } else {
-        log_error("Error checking client code_name existence");
-        return -1;
-    }
-}
-
 int client_create_bootstrap(db_handle_t *db, const char *org_code_name,
                              const char *code_name, const char *display_name,
                              const char *client_type, const char *grant_type,
@@ -300,11 +265,14 @@ int client_create(db_handle_t *db,
     /* Execute and verify a row was actually inserted */
     int rc = db_step(stmt);
 
-    if (rc == DB_ROW) {
-        db_finalize(stmt);
-    } else {
-        db_finalize(stmt);
-        log_error("Failed to insert client (unauthorized or constraint violation)");
+    db_finalize(stmt);
+    if (rc != DB_ROW) {
+        /* The caller checked the organization and the code name first, so nothing
+           matching means one of them changed since */
+        log_error(rc == DB_DONE
+                  ? "Client not inserted: its organization or an active client changed "
+                    "since the check"
+                  : "Failed to insert client");
         return -1;
     }
 
@@ -460,7 +428,8 @@ int client_list_all(db_handle_t *db, long long user_account_pin,
     int total_count = 0;
     int first_row = 1;
 
-    while (db_step(stmt) == DB_ROW) {
+    int rc;
+    while ((rc = db_step(stmt)) == DB_ROW) {
         client_data_t client;
         memset(&client, 0, sizeof(client));
 
@@ -541,6 +510,12 @@ int client_list_all(db_handle_t *db, long long user_account_pin,
     }
 
     db_finalize(stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Error listing clients");
+        db_results_free(list);
+        return -1;
+    }
 
     /* Convert list to array */
     int count;
@@ -631,7 +606,11 @@ int client_get_by_id(db_handle_t *db, const unsigned char *client_id,
 
     if (rc != DB_ROW) {
         db_finalize(stmt);
-        log_debug("Client not found or user not authorized");
+        if (rc == DB_DONE) {
+            log_debug("Client not found or user not authorized");
+            return 1;
+        }
+        log_error("Failed to look up client");
         return -1;
     }
 
@@ -807,18 +786,9 @@ int client_update(db_handle_t *db, const unsigned char *client_id,
 
     build_rc |= str_appendf(sql, sizeof(sql), &pos, ") ");
 
-    /* Add uniqueness check when reactivating (is_active -> TRUE) */
-    /* Check existing code_name doesn't collide with active records */
-    if (is_active && *is_active == 1) {
-        build_rc |= str_appendf(sql, sizeof(sql), &pos,
-            "AND NOT EXISTS ("
-                "SELECT 1 FROM " TBL_CLIENT " other "
-                "WHERE other.organization_pin = " TBL_CLIENT ".organization_pin "
-                "AND other.code_name = " TBL_CLIENT ".code_name "
-                "AND other.is_active = " BOOL_TRUE " "
-                "AND other.id != " TBL_CLIENT ".id"
-            ") ");
-    }
+    /* Uniqueness among active clients isn't decided here: the caller checks it
+       first (client_active_code_name_taken), and the partial unique index is the
+       database's backstop. */
 
     build_rc |= str_appendf(sql, sizeof(sql), &pos, "AND (");
 
@@ -971,6 +941,42 @@ int client_update(db_handle_t *db, const unsigned char *client_id,
     return 0;
 }
 
+int client_active_code_name_taken(db_handle_t *db, long long organization_pin,
+                                  long long client_pin, const char *code_name) {
+    if (!db || !code_name) {
+        log_error("Invalid arguments to client_active_code_name_taken");
+        return -1;
+    }
+
+    const char *sql =
+        "SELECT 1 FROM " TBL_CLIENT " "
+        "WHERE organization_pin = " P"1 "
+        "AND pin <> " P"2 "
+        "AND code_name = " P"3 "
+        "AND is_active = " BOOL_TRUE " "
+        "LIMIT 1";
+
+    db_stmt_t *stmt = NULL;
+    if (db_prepare(db, &stmt, sql) != 0) {
+        log_error("Failed to prepare client_active_code_name_taken statement");
+        return -1;
+    }
+
+    db_bind_int64(stmt, 1, organization_pin);
+    db_bind_int64(stmt, 2, client_pin);
+    db_bind_text(stmt, 3, code_name, -1);
+
+    int rc = db_step(stmt);
+    db_finalize(stmt);
+
+    if (rc != DB_ROW && rc != DB_DONE) {
+        log_error("Failed to check client code name uniqueness");
+        return -1;
+    }
+
+    return rc == DB_ROW ? 1 : 0;
+}
+
 int client_redirect_uri_list(db_handle_t *db, long long user_account_pin,
                               long long organization_key_pin,
                               const unsigned char *client_id,
@@ -1040,7 +1046,8 @@ int client_redirect_uri_list(db_handle_t *db, long long user_account_pin,
     int total_count = 0;
     int first_row = 1;
 
-    while (db_step(stmt) == DB_ROW) {
+    int rc;
+    while ((rc = db_step(stmt)) == DB_ROW) {
         client_redirect_uri_data_t uri;
         memset(&uri, 0, sizeof(uri));
 
@@ -1069,6 +1076,12 @@ int client_redirect_uri_list(db_handle_t *db, long long user_account_pin,
     }
 
     db_finalize(stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Error listing redirect URIs");
+        db_results_free(list);
+        return -1;
+    }
 
     /* Convert list to array */
     int count;
@@ -1106,13 +1119,6 @@ int client_redirect_uri_create(db_handle_t *db, long long user_account_pin,
                                 const char *note) {
     if (!db || !client_id || !redirect_uri) {
         log_error("Invalid arguments to client_redirect_uri_create");
-        return -1;
-    }
-
-    /* Validate redirect URI has proper scheme (OAuth2 spec requires absolute URI) */
-    if (strncmp(redirect_uri, "http://", 7) != 0 &&
-        strncmp(redirect_uri, "https://", 8) != 0) {
-        log_error("Invalid redirect URI: must start with http:// or https://");
         return -1;
     }
 
@@ -1326,7 +1332,8 @@ int client_resource_server_list(db_handle_t *db, long long user_account_pin,
     int total_count = 0;
     int first_row = 1;
 
-    while (db_step(stmt) == DB_ROW) {
+    int rc;
+    while ((rc = db_step(stmt)) == DB_ROW) {
         client_resource_server_data_t link;
         memset(&link, 0, sizeof(link));
 
@@ -1367,6 +1374,12 @@ int client_resource_server_list(db_handle_t *db, long long user_account_pin,
     }
 
     db_finalize(stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Error listing a client's resource servers");
+        db_results_free(list);
+        return -1;
+    }
 
     /* Convert list to array */
     int count;
@@ -1468,7 +1481,8 @@ int resource_server_client_list(db_handle_t *db, long long user_account_pin,
     int total_count = 0;
     int first_row = 1;
 
-    while (db_step(stmt) == DB_ROW) {
+    int rc;
+    while ((rc = db_step(stmt)) == DB_ROW) {
         resource_server_client_data_t link;
         memset(&link, 0, sizeof(link));
 
@@ -1504,6 +1518,12 @@ int resource_server_client_list(db_handle_t *db, long long user_account_pin,
     }
 
     db_finalize(stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Error listing a resource server's clients");
+        db_results_free(list);
+        return -1;
+    }
 
     /* Convert list to array */
     int count;
@@ -1803,8 +1823,12 @@ int client_key_create(db_handle_t *db,
     if (hash_rc != 0) {
         OPENSSL_cleanse(salt_hex, sizeof(salt_hex));
         OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
+        if (hash_rc == -2) {
+            log_info("Secret refused: its length is out of range");
+            return -2;
+        }
         log_error("Failed to hash secret");
-        return (hash_rc == -2) ? -2 : -1;
+        return -1;
     }
 
     const char *sql;
@@ -1985,7 +2009,8 @@ int client_key_list(db_handle_t *db,
     int total_count = 0;
     int first_row = 1;
 
-    while (db_step(stmt) == DB_ROW) {
+    int rc;
+    while ((rc = db_step(stmt)) == DB_ROW) {
         client_key_data_t key;
         memset(&key, 0, sizeof(key));
 
@@ -2024,6 +2049,12 @@ int client_key_list(db_handle_t *db,
     }
 
     db_finalize(stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Error listing client keys");
+        db_results_free(list);
+        return -1;
+    }
 
     /* Convert list to array */
     int count;

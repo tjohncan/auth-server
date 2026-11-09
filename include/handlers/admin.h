@@ -154,28 +154,6 @@ int admin_update_organization(db_handle_t *db, long long user_account_pin,
  * RESOURCE SERVER OPERATIONS
  * ========================================================================== */
 
-/*
- * Create resource server
- *
- * Validates code_name and address uniqueness within org, then creates.
- *
- * Parameters:
- *   db            - Database handle
- *   org_code_name - Organization code name (must exist)
- *   code_name     - Unique resource server code name within org
- *   display_name  - Human-readable name
- *   address       - API base URL
- *   note          - Optional description (can be NULL)
- *
- * Returns: 0 on success, -1 on error
- */
-int admin_create_resource_server_bootstrap(db_handle_t *db,
-                                            const char *org_code_name,
-                                            const char *code_name,
-                                            const char *display_name,
-                                            const char *address,
-                                            const char *note);
-
 typedef resource_server_data_t admin_resource_server_t;
 
 int admin_list_resource_servers(db_handle_t *db, long long user_account_pin,
@@ -187,6 +165,15 @@ int admin_list_resource_servers(db_handle_t *db, long long user_account_pin,
                                  int *out_count,
                                  int *out_total);
 
+/*
+ * Create a resource server in an organization the caller administers. Refused,
+ * with nothing made, when the organization isn't there or isn't the caller's
+ * (the two look alike), or another active server in it has the address or the
+ * code name.
+ *
+ * Returns: 0 on success, 1 if the address is held, 2 if the code name is,
+ * 3 if the organization isn't found, -1 on error
+ */
 int admin_create_resource_server(db_handle_t *db, long long user_account_pin,
                                    long long organization_key_pin,
                                    const unsigned char *organization_id,
@@ -201,6 +188,14 @@ int admin_get_resource_server(db_handle_t *db, long long user_account_pin,
                                const unsigned char *server_id,
                                admin_resource_server_t *out_server);
 
+/*
+ * Update a resource server. Refused, with nothing changed, when the result would
+ * be active with an address or code name another active server in the
+ * organization has.
+ *
+ * Returns: 0 on success (an update that changes nothing included), 1 if the
+ * address is held, 2 if the code name is, -1 on error or not found
+ */
 int admin_update_resource_server(db_handle_t *db, long long user_account_pin,
                                   long long organization_key_pin,
                                   const unsigned char *server_id,
@@ -213,47 +208,6 @@ int admin_update_resource_server(db_handle_t *db, long long user_account_pin,
 /* ============================================================================
  * CLIENT OPERATIONS
  * ========================================================================== */
-
-/*
- * Create client (bootstrap use)
- *
- * Validates code_name uniqueness within org, then creates client.
- * Full parameter list for all possible client configurations.
- *
- * Parameters:
- *   db                          - Database handle
- *   org_code_name               - Organization code name (must exist)
- *   code_name                   - Unique client code name within org
- *   display_name                - Human-readable name
- *   client_type                 - "public" or "confidential"
- *   grant_type                  - "authorization_code" or "client_credentials"
- *   note                        - Optional description (can be NULL)
- *   require_mfa                 - 1 to require MFA, 0 otherwise
- *   access_token_ttl_seconds    - Access token lifetime
- *   issue_refresh_tokens        - 1 to issue refresh tokens, 0 otherwise
- *   refresh_token_ttl_seconds   - Refresh token lifetime (use -1 for NULL)
- *   maximum_session_seconds     - Maximum session duration (use -1 for NULL)
- *   secret_rotation_seconds     - Secret rotation interval (use -1 for NULL)
- *   is_universal                - 1 if universal client, 0 otherwise
- *   out_client_id               - Output: 16-byte client UUID
- *
- * Returns: 0 on success, -1 on error
- */
-int admin_create_client_bootstrap(db_handle_t *db,
-                                   const char *org_code_name,
-                                   const char *code_name,
-                                   const char *display_name,
-                                   const char *client_type,
-                                   const char *grant_type,
-                                   const char *note,
-                                   int require_mfa,
-                                   int access_token_ttl_seconds,
-                                   int issue_refresh_tokens,
-                                   int refresh_token_ttl_seconds,
-                                   int maximum_session_seconds,
-                                   int secret_rotation_seconds,
-                                   int is_universal,
-                                   unsigned char *out_client_id);
 
 /*
  * Add redirect URI to client (bootstrap use)
@@ -303,6 +257,14 @@ int admin_list_clients(db_handle_t *db, long long user_account_pin,
                        int *out_count,
                        int *out_total);
 
+/*
+ * Create a client in an organization the caller administers. Refused, with
+ * nothing made, when the organization isn't there or isn't the caller's (the
+ * two look alike), or another active client in it has the code name.
+ *
+ * Returns: 0 on success, 1 if the code name is held, 2 if the organization
+ * isn't found, -1 on error
+ */
 int admin_create_client(db_handle_t *db, long long user_account_pin,
                          long long organization_key_pin,
                          const unsigned char *organization_id,
@@ -324,6 +286,13 @@ int admin_get_client(db_handle_t *db, long long user_account_pin,
                      const unsigned char *client_id,
                      admin_client_t *out_client);
 
+/*
+ * Update a client. Refused, with nothing changed, when it would reactivate the
+ * client while another active client in the organization has its code name.
+ *
+ * Returns: 0 on success (an update that changes nothing included), 1 if the
+ * code name is held, -1 on error or not found
+ */
 int admin_update_client(db_handle_t *db, long long user_account_pin,
                         long long organization_key_pin,
                         const unsigned char *client_id,
@@ -353,6 +322,9 @@ int admin_list_client_redirect_uris(db_handle_t *db, long long user_account_pin,
  * unchanged, including 1 for "matched nothing" -- not found, not the caller's,
  * or (keys) not confidential / already revoked. Handlers answer 1 with 404 or 409,
  * never with success. See the query headers for each function's exact meaning.
+ *
+ * admin_create_client_redirect_uri checks the client and its URIs first, and
+ * returns 2, inserting nothing, when the client has the URI already.
  */
 int admin_create_client_redirect_uri(db_handle_t *db, long long user_account_pin,
                                       long long organization_key_pin,

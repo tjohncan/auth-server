@@ -355,7 +355,7 @@ class OAuthClient {
         this._tokenStorage.removeItem(this.tokenKey);
         sessionStorage.removeItem(this.pkceKey);
         /* Release rather than removeItem: this is reachable while *another* tab holds
-         * the lock (an app calling it directly, or _executeRefresh clearing on a 4xx),
+         * the lock (an app calling it directly, or _executeRefresh on invalid_grant),
          * and deleting the key outright would stomp that tab's claim and let a third
          * tab start a competing refresh. _releaseRefreshLock() clears it only if this
          * tab is the owner. */
@@ -495,7 +495,8 @@ class OAuthClient {
      *
      * Polls storage every 200ms for as long as a lock can be held (LOCK_TTL_MS,
      * 10 seconds). Resolves as soon as the stored tokens change (the
-     * other tab finished refreshing).
+     * other tab finished refreshing). Stops as soon as the lock is gone with the
+     * tokens unchanged: that refresh failed and kept them, so nothing more is coming.
      *
      * @private
      * @param {number} originalExpiresAt - expires_at before refresh, used to detect change
@@ -518,18 +519,20 @@ class OAuthClient {
                 this._scheduleRefresh(tokens);
                 return tokens;
             }
+            if (!this._tokenStorage.getItem(this._lockKey)) break;
         }
 
-        /* The other tab never landed new tokens (it stalled, or its request failed).
-         * That is not the same as the session being over: do not evict a user whose
-         * current access token is still valid. Only a genuinely expired token is dead. */
+        /* The other refresh never landed new tokens (it stalled, or its request failed).
+         * That is not the same as the session being over, whatever the access token's
+         * age: the refresh token is kept, and only invalid_grant says it's dead. So use
+         * the access token if it's still valid, and otherwise fail this call alone. The
+         * caller's next one sends the refresh itself, and hears the real answer. */
         const tokens = this.getTokens();
         if (tokens && tokens.expires_at > Date.now()) {
             return tokens;
         }
 
-        this._handleSessionExpired();
-        throw new Error('Token refresh timed out waiting for another tab');
+        throw new Error('Token refresh did not complete — not clearing session');
     }
 
     /* ======================================================================
@@ -565,7 +568,7 @@ class OAuthClient {
      * (only one network request in flight at a time).
      *
      * @returns {Promise<Object>} New token data {access_token, refresh_token, expires_at}
-     * @throws {Error} If refresh fails (triggers onSessionExpired callback)
+     * @throws {Error} If refresh fails (a dead refresh token also triggers onSessionExpired)
      */
     async refreshAccessToken() {
         // Deduplicate concurrent refresh attempts within this tab
@@ -611,18 +614,23 @@ class OAuthClient {
         this._assertStillHeld(refreshToken);
 
         if (!response.ok) {
-            /* Only a 4xx means the grant itself is dead (revoked, replayed, expired) —
-             * that is when the tokens must go. A 5xx is the server or a proxy having a
-             * bad moment; the refresh token is very likely still good. Clearing on 5xx
-             * would log every user out of every tab during a brief outage, and they
-             * would all have to re-authenticate for no reason. Surface the error and
-             * let the caller retry instead. */
-            if (response.status >= 400 && response.status < 500) {
+            /* Only invalid_grant means the grant itself is dead (revoked, replayed,
+             * expired) — that is when the tokens must go. Anything else is no verdict on
+             * the refresh token: a 5xx is the server or a proxy having a bad moment, and
+             * invalid_target or invalid_scope a request it doesn't cover. Clearing on those
+             * would log every user out of every tab during a brief outage, or over a
+             * resource server linked to the client, and they would all have to
+             * re-authenticate for no reason. Surface the error and let the caller retry
+             * instead. */
+            const body = await this._safeJson(response);
+            const error = body && body.error;
+            this._assertStillHeld(refreshToken);
+            if (error === 'invalid_grant') {
                 this.clearTokens();
                 this._handleSessionExpired();
                 throw new Error(`Token refresh rejected (HTTP ${response.status})`);
             }
-            throw new Error(`Token refresh failed (HTTP ${response.status}) — not clearing session`);
+            throw new Error(`Token refresh failed (HTTP ${response.status}${error ? `, ${error}` : ''}) — not clearing session`);
         }
 
         const data = await response.json();
@@ -643,8 +651,8 @@ class OAuthClient {
     /**
      * Throw unless storage still holds the refresh token a refresh sent. Anything else
      * means a logout or a new sign-in landed while the refresh was out, in this tab or
-     * another: storing would bring back tokens the user is rid of, and clearing on a
-     * 4xx would end a session that isn't this one. Called with no await between it and
+     * another: storing would bring back tokens the user is rid of, and clearing on
+     * invalid_grant would end a session that isn't this one. Called with no await between it and
      * what it guards.
      *
      * @private

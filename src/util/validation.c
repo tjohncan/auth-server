@@ -1,4 +1,5 @@
 #include "util/validation.h"
+#include "crypto/password.h"  /* PASSWORD_MAX_LENGTH */
 #include "util/json.h"
 #include "util/log.h"
 #include <string.h>
@@ -465,6 +466,7 @@ static struct {
 };
 
 static int g_patterns_ready = 0;
+static int g_password_min_length = 0;
 
 void validation_cleanup(void) {
     for (int i = 0; i < PATTERN_COUNT; i++) {
@@ -475,8 +477,9 @@ void validation_cleanup(void) {
     g_patterns_ready = 0;
 }
 
-int validation_init(const validation_patterns_t *patterns) {
+int validation_init(const validation_patterns_t *patterns, int password_min_length) {
     validation_cleanup();
+    g_password_min_length = password_min_length;
     const char *configured[PATTERN_COUNT] = {
         patterns ? patterns->username : NULL,
         patterns ? patterns->email : NULL,
@@ -580,11 +583,34 @@ int validate_new_code_name(const char *code_name, char *error_msg, size_t error_
     return pattern_ok(PATTERN_CODE_NAME, code_name, error_msg, error_len) ? 0 : -1;
 }
 
+/* The length crypto_password_hash takes, in bytes as it counts them, so a
+ * secret that passes here is never refused there */
+static int secret_length_ok(const char *value, const char *what, char *error_msg,
+                            size_t error_len) {
+    size_t len = strlen(value);
+    if (len < (size_t)g_password_min_length) {
+        if (error_msg && error_len > 0) {
+            snprintf(error_msg, error_len, "%s must be at least %d character%s", what,
+                     g_password_min_length, g_password_min_length == 1 ? "" : "s");
+        }
+        return 0;
+    }
+    if (len > PASSWORD_MAX_LENGTH) {
+        if (error_msg && error_len > 0) {
+            snprintf(error_msg, error_len, "%s must be at most %d characters", what,
+                     PASSWORD_MAX_LENGTH);
+        }
+        return 0;
+    }
+    return 1;
+}
+
 int validate_new_password(const char *password, char *error_msg, size_t error_len) {
     if (!password) {
         if (error_msg && error_len > 0) snprintf(error_msg, error_len, "Password is required");
         return -1;
     }
+    if (!secret_length_ok(password, "Password", error_msg, error_len)) return -1;
     return pattern_ok(PATTERN_PASSWORD, password, error_msg, error_len) ? 0 : -1;
 }
 
@@ -593,5 +619,6 @@ int validate_new_machine_secret(const char *secret, char *error_msg, size_t erro
         if (error_msg && error_len > 0) snprintf(error_msg, error_len, "Secret is required");
         return -1;
     }
+    if (!secret_length_ok(secret, "Secret", error_msg, error_len)) return -1;
     return pattern_ok(PATTERN_MACHINE_SECRET, secret, error_msg, error_len) ? 0 : -1;
 }

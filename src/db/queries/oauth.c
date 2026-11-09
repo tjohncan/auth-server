@@ -15,7 +15,7 @@ int oauth_client_lookup(db_handle_t *db, const unsigned char *client_id,
                         oauth_client_info_t *out_client) {
     if (!db || !client_id || !out_client) {
         log_error("Invalid arguments to oauth_client_lookup");
-        return -1;
+        return -2;
     }
 
     const char *sql =
@@ -33,7 +33,7 @@ int oauth_client_lookup(db_handle_t *db, const unsigned char *client_id,
     db_stmt_t *stmt = NULL;
     if (db_prepare(db, &stmt, sql) != 0) {
         log_error("Failed to prepare oauth_client_lookup statement");
-        return -1;
+        return -2;
     }
 
     db_bind_blob(stmt, 1, client_id, 16);
@@ -47,7 +47,7 @@ int oauth_client_lookup(db_handle_t *db, const unsigned char *client_id,
         if (blob_len != 16) {
             log_error("Invalid client ID length: %d", blob_len);
             db_finalize(stmt);
-            return -1;
+            return -2;
         }
         memcpy(out_client->id, id_blob, 16);
 
@@ -63,7 +63,7 @@ int oauth_client_lookup(db_handle_t *db, const unsigned char *client_id,
         if (!code_name || !client_type || !grant_type) {
             log_error("NULL fields in client record");
             db_finalize(stmt);
-            return -1;
+            return -2;
         }
 
         str_copy(out_client->code_name, sizeof(out_client->code_name), code_name);
@@ -196,10 +196,6 @@ int oauth_session_create(db_handle_t *db, long long user_account_pin,
         return -1;
     }
 
-    /* Build TTL string for SQL */
-    char ttl_str[32];
-    snprintf(ttl_str, sizeof(ttl_str), "%d", ttl_seconds);
-
     const char *sql =
         "INSERT INTO " TBL_BROWSER " "
         "(id, user_account_pin, session_token, started_at, authenticated_at, "
@@ -243,7 +239,7 @@ int oauth_session_create(db_handle_t *db, long long user_account_pin,
         db_bind_null(stmt, 6);
     }
 
-    db_bind_text(stmt, 7, ttl_str, -1);
+    db_bind_int(stmt, 7, ttl_seconds);
 
     /* Execute and get returned id */
     int rc = db_step(stmt);
@@ -351,7 +347,7 @@ int oauth_session_get_by_token(db_handle_t *db, const char *session_token,
     } else if (rc == DB_DONE) {
         db_finalize(stmt);
         log_debug("Session not found or expired for token");
-        return -1;
+        return 1;
     } else {
         log_error("Error looking up session by token");
         db_finalize(stmt);
@@ -399,7 +395,7 @@ int oauth_session_close(db_handle_t *db, const char *session_token) {
     } else if (rc == DB_DONE) {
         db_finalize(stmt);
         log_debug("Session not found or already closed");
-        return -1;
+        return 1;
     } else {
         log_error("Error closing session");
         db_finalize(stmt);
@@ -469,10 +465,6 @@ int oauth_auth_code_create(db_handle_t *db, long long client_pin,
         return -1;
     }
 
-    /* Build TTL string for SQL */
-    char ttl_str[32];
-    snprintf(ttl_str, sizeof(ttl_str), "%d", ttl_seconds);
-
     const char *sql =
         "INSERT INTO " TBL_AUTHORIZATION_CODE " "
         "(id, client_pin, user_account_pin, code, "
@@ -507,7 +499,7 @@ int oauth_auth_code_create(db_handle_t *db, long long client_pin,
 
     db_bind_text_or_null(stmt, 6, code_challenge_method);
 
-    db_bind_text(stmt, 7, ttl_str, -1);
+    db_bind_int(stmt, 7, ttl_seconds);
 
     /* Execute and get returned id */
     int rc = db_step(stmt);
@@ -609,10 +601,14 @@ int oauth_auth_code_consume(db_handle_t *db, const char *code,
             db_finalize(check_stmt);
             log_warn("Authorization code replay attack detected");
             return 1;  /* Already exchanged - replay attack */
-        } else {
+        } else if (check_rc == DB_DONE) {
             db_finalize(check_stmt);
             log_debug("Authorization code not found or expired");
-            return -1;  /* Not found or expired */
+            return 2;  /* Not found or expired */
+        } else {
+            db_finalize(check_stmt);
+            log_error("Error checking authorization code for replay");
+            return -1;
         }
     } else {
         log_error("Error consuming authorization code");
@@ -639,10 +635,6 @@ int oauth_token_create_access(db_handle_t *db, long long resource_server_pin,
         log_error("Failed to generate UUID for access token");
         return -1;
     }
-
-    /* Build TTL string for SQL */
-    char ttl_str[32];
-    snprintf(ttl_str, sizeof(ttl_str), "%d", ttl_seconds);
 
     const char *sql =
         "INSERT INTO " TBL_ACCESS_TOKEN " "
@@ -700,7 +692,7 @@ int oauth_token_create_access(db_handle_t *db, long long resource_server_pin,
     /* Bind scopes (optional) */
     db_bind_text_or_null(stmt, 8, scopes);
 
-    db_bind_text(stmt, 9, ttl_str, -1);
+    db_bind_int(stmt, 9, ttl_seconds);
 
     /* Execute and get returned id */
     int rc = db_step(stmt);
@@ -738,10 +730,6 @@ int oauth_token_create_refresh(db_handle_t *db, long long client_pin,
         return -1;
     }
 
-    /* Build TTL string for SQL */
-    char ttl_str[32];
-    snprintf(ttl_str, sizeof(ttl_str), "%d", ttl_seconds);
-
     const char *sql =
         "INSERT INTO " TBL_REFRESH_TOKEN " "
         "(id, client_pin, user_account_pin, authorization_code_id, "
@@ -778,7 +766,7 @@ int oauth_token_create_refresh(db_handle_t *db, long long client_pin,
     /* Bind scopes (optional) */
     db_bind_text_or_null(stmt, 6, scopes);
 
-    db_bind_text(stmt, 7, ttl_str, -1);
+    db_bind_int(stmt, 7, ttl_seconds);
 
     /* Execute and get returned id */
     int rc = db_step(stmt);
@@ -912,9 +900,6 @@ int oauth_token_rotate_refresh(db_handle_t *db, const char *old_token,
             return -1;
         }
 
-        char ttl_str[32];
-        snprintf(ttl_str, sizeof(ttl_str), "%d", ttl_seconds);
-
         const char *insert_sql =
             "INSERT INTO " TBL_REFRESH_TOKEN " "
             "(id, client_pin, user_account_pin, authorization_code_id, "
@@ -947,7 +932,7 @@ int oauth_token_rotate_refresh(db_handle_t *db, const char *old_token,
             db_bind_null(insert_stmt, 8);
         }
 
-        db_bind_text(insert_stmt, 9, ttl_str, -1);
+        db_bind_int(insert_stmt, 9, ttl_seconds);
 
         int insert_rc = db_step(insert_stmt);
 
@@ -993,10 +978,14 @@ int oauth_token_rotate_refresh(db_handle_t *db, const char *old_token,
             db_finalize(check_stmt);
             log_warn("Refresh token replay attack detected");
             return 1;  /* Already exchanged - replay attack */
-        } else {
+        } else if (check_rc == DB_DONE) {
             db_finalize(check_stmt);
             log_debug("Refresh token not found, expired, or revoked");
-            return -1;  /* Not found, expired, or revoked */
+            return 2;  /* Not found, expired, or revoked */
+        } else {
+            db_finalize(check_stmt);
+            log_error("Error checking refresh token for replay");
+            return -1;
         }
     } else {
         log_error("Error rotating refresh token");
@@ -1042,6 +1031,10 @@ int oauth_client_authenticate(db_handle_t *db,
 
     if (rc != DB_ROW) {
         db_finalize(stmt);
+        if (rc != DB_DONE) {
+            log_error("Error looking up client key");
+            return -1;
+        }
         log_debug("Client key not found or inactive");
         /* As long as a wrong secret takes, so key ids aren't told apart by time */
         crypto_password_verify_dummy(SECRET_MACHINE, secret, strlen(secret));
@@ -1082,6 +1075,9 @@ int oauth_client_authenticate(db_handle_t *db,
     OPENSSL_cleanse(salt, sizeof(salt));
     OPENSSL_cleanse(hash, sizeof(hash));
 
+    if (valid < 0) {
+        return -1;  /* A stored hash that can't be checked (logged) */
+    }
     if (valid != 1) {
         char client_id_hex[33];
         bytes_to_hex(client_id, 16, client_id_hex, sizeof(client_id_hex));
@@ -1089,8 +1085,8 @@ int oauth_client_authenticate(db_handle_t *db,
         return 0;
     }
 
-    /* Check key rotation expiry */
-    if (secret_rotation_seconds > 0) {
+    /* Check key rotation expiry (-1, stored as NULL, is no limit) */
+    if (secret_rotation_seconds >= 0) {
         time_t key_age = time(NULL) - key_generated_at;
         if (key_age > secret_rotation_seconds) {
             char client_id_hex[33];
@@ -1162,9 +1158,9 @@ int oauth_resolve_resource_server(db_handle_t *db, long long client_pin,
             return 0;
         } else if (rc == DB_DONE) {
             db_finalize(stmt);
-            log_error("Resource server not found, inactive, or client not linked: address='%s'",
+            log_info("Resource server not found, inactive, or client not linked: address='%s'",
                      resource_address);
-            return -1;
+            return 1;
         } else {
             log_error("Error looking up resource server by address");
             db_finalize(stmt);
@@ -1213,10 +1209,10 @@ int oauth_resolve_resource_server(db_handle_t *db, long long client_pin,
                      *out_resource_server_pin);
             return 0;
         } else if (rc == DB_DONE) {
-            /* No result at all */
+            /* No single linked active resource server: none, or more than one */
             db_finalize(stmt);
-            log_error("Client has no linked active resource servers");
-            return -1;
+            log_info("Client has no single linked active resource server");
+            return 1;
         } else {
             log_error("Error querying linked resource servers");
             db_finalize(stmt);
@@ -1261,6 +1257,10 @@ int oauth_resource_server_authenticate(db_handle_t *db,
 
     if (rc != DB_ROW) {
         db_finalize(stmt);
+        if (rc != DB_DONE) {
+            log_error("Error looking up resource server key");
+            return -1;
+        }
         log_debug("Resource server key not found or inactive");
         /* As long as a wrong secret takes, so key ids aren't told apart by time */
         crypto_password_verify_dummy(SECRET_MACHINE, secret, strlen(secret));
@@ -1298,6 +1298,9 @@ int oauth_resource_server_authenticate(db_handle_t *db,
     OPENSSL_cleanse(salt, sizeof(salt));
     OPENSSL_cleanse(hash, sizeof(hash));
 
+    if (valid < 0) {
+        return -1;  /* A stored hash that can't be checked (logged) */
+    }
     if (valid != 1) {
         char resource_server_id_hex[33];
         bytes_to_hex(resource_server_id, 16, resource_server_id_hex, sizeof(resource_server_id_hex));
@@ -1425,11 +1428,16 @@ int oauth_introspect_token(db_handle_t *db,
 
     int rc = db_step(stmt);
 
-    if (rc != DB_ROW) {
+    if (rc == DB_DONE) {
         db_finalize(stmt);
         /* Token not found, expired, revoked, or wrong resource server */
         log_debug("Token introspection: token not active");
         return 0;  /* Not an error, just inactive token */
+    }
+    if (rc != DB_ROW) {
+        log_error("Token introspection: the token query failed");
+        db_finalize(stmt);
+        return -1;
     }
 
     /* Every id that is present must be exactly 16 bytes before the token is
@@ -1443,9 +1451,9 @@ int oauth_introspect_token(db_handle_t *db,
         }
         const void *blob = db_column_blob(stmt, col);
         if (!blob || db_column_bytes(stmt, col) != 16) {
-            log_error("Token introspection: malformed id in column %d; reporting inactive", col);
+            log_error("Token introspection: malformed id in column %d", col);
             db_finalize(stmt);
-            return 0;
+            return -1;
         }
     }
 

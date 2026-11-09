@@ -133,7 +133,7 @@ HEADERS := $(shell find include -name '*.h')
 $(filter-out vendor/%,$(OBJS)): $(HEADERS)
 
 # Nothing compiles the SQLite amalgamation until vendor/verify-sqlite.sh has checked
-# it against its pinned hashes, however it arrived. Only the object rule compiles it,
+# it against approved hashes, however it arrived. Only the object rule compiles it,
 # and the check runs whenever that rule is considered rather than once per stamp:
 # hashing both files takes a fraction of a second, and a stamp judged by file times
 # would trust a replacement whose times were restored, as unzip, cp -p and tar all do.
@@ -270,13 +270,13 @@ test-sanitized: test-str test-http test-router
 #
 # Per fuzz target: the harness, and the extra TUs it links (the http parser needs no
 # database or crypto; the jwt decoder needs the hmac/base64/json stack; the json
-# request-body helpers need only json.c). Each target owns its own corpus/ and
+# target needs only json.c and str.c). Each target owns its own corpus/ and
 # crashes/ subdirectory.
 FUZZ_SAN         = -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer
 FUZZ_HTTP_SRCS   = test/fuzz/fuzz_http.c src/server/http.c src/util/str.c src/util/json.c src/util/log.c
 FUZZ_JWT_SRCS    = test/fuzz/fuzz_jwt.c src/crypto/jwt.c src/crypto/hmac.c src/crypto/random.c \
                    src/crypto/sha256.c src/util/data.c src/util/str.c src/util/json.c src/util/log.c
-FUZZ_JSON_SRCS   = test/fuzz/fuzz_json.c src/util/json.c src/util/log.c
+FUZZ_JSON_SRCS   = test/fuzz/fuzz_json.c src/util/json.c src/util/str.c src/util/log.c
 FUZZ_TIME       ?= 60
 FUZZ_TARGET     ?= http
 

@@ -52,6 +52,15 @@ static HttpResponse *response_html_error(int status_code, const char *message) {
 }
 
 /*
+ * A one-time link's page when the query behind it failed: that says nothing about
+ * the link, so the page doesn't call it invalid, and a retry can still use it.
+ */
+static HttpResponse *link_check_failed(void) {
+    return response_html_error(500, "Something went wrong on our side, so this link "
+                                    "wasn't used. Try it again in a moment.");
+}
+
+/*
  * A form's password, URL-decoded into a new buffer (cleanse_free it). The
  * buffer is as long as the encoded value, so decoding never truncates, and the
  * limit is PASSWORD_MAX_LENGTH, as for every JSON endpoint that takes one.
@@ -75,6 +84,14 @@ static int form_password(const char *encoded, char **out_password) {
     return 0;
 }
 
+/* The one type the one-time link forms take. The router checks a form body's text by this
+ * type, and these handlers read a body as a form whatever its type, so one sent as another
+ * type would reach them unchecked: a password no sign-in can send, for one. */
+#define FORM_CONTENT_TYPE "application/x-www-form-urlencoded"
+
+/* The answer to a request for an emailed link whose query failed */
+#define EMAIL_NOT_SENT "Something went wrong on our side, so no email was sent. Try it again in a moment."
+
 /* Session token size: 32 bytes (256 bits) — matches session.c */
 #define SESSION_TOKEN_BYTES 32
 
@@ -92,9 +109,12 @@ int session_authenticate(const HttpRequest *req, db_handle_t *db,
         return 1;
     }
 
-    int found = oauth_session_get_by_token(db, session_token, out_session) == 0;
+    int found = oauth_session_get_by_token(db, session_token, out_session);
     cleanse_free(session_token);
-    if (!found) {
+    if (found < 0) {
+        return 4;
+    }
+    if (found != 0) {
         return 2;
     }
 
@@ -113,6 +133,7 @@ HttpResponse *session_require(const HttpRequest *req, db_handle_t *db,
         case 0:  return NULL;
         case 1:  return response_json_error(401, "Authentication required");
         case 2:  return response_json_error(401, "Invalid or expired session");
+        case 4:  return response_json_error(500, "Internal server error");
         default: return response_json_error(403, "MFA verification required");
     }
 }
@@ -178,6 +199,11 @@ HttpResponse *login_handler(const HttpRequest *req) {
     free(username);
     cleanse_free(password);
 
+    if (rc == -2) {
+        /* The server failed: "Invalid credentials" would tell the user a right
+           password is wrong */
+        return response_json_error(500, "Internal server error");
+    }
     if (rc != 0) {
         return response_json_error(401, "Invalid credentials");
     }
@@ -504,7 +530,8 @@ HttpResponse *change_password_handler(const HttpRequest *req) {
     } else if (result == -2) {
         char msg[128];
         snprintf(msg, sizeof(msg),
-                 "Password must be at least %d characters", crypto_password_min_length());
+                 "Password must be between %d and %d characters",
+                 crypto_password_min_length(), PASSWORD_MAX_LENGTH);
         return response_json_error(400, msg);
     } else {
         /* Error */
@@ -557,7 +584,7 @@ HttpResponse *change_username_handler(const HttpRequest *req) {
     if (result == 1) {
         return response_json_ok("{\"message\":\"Username changed successfully\"}");
     } else if (result == 0) {
-        return response_json_error(400, "Invalid username change");
+        return response_json_error(409, "Username already taken");
     } else {
         return response_json_error(500, "Failed to change username");
     }
@@ -842,6 +869,7 @@ HttpResponse *verify_email_page_handler(const HttpRequest *req) {
 
     if (rc != 0) {
         cleanse_free(token);
+        if (rc < 0) return link_check_failed();
         HttpResponse *resp = response_template(400, "pages/verify-email-invalid.html", NULL);
         return resp ? resp : response_json_error(400, "Invalid token");
     }
@@ -895,6 +923,8 @@ HttpResponse *verify_email_page_handler(const HttpRequest *req) {
  * Expects form-encoded body: token=...
  */
 HttpResponse *verify_email_handler(const HttpRequest *req) {
+    HttpResponse *ct_err = require_content_type(req, FORM_CONTENT_TYPE);
+    if (ct_err) return ct_err;
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -917,6 +947,7 @@ HttpResponse *verify_email_handler(const HttpRequest *req) {
     cleanse_free(token);
 
     if (rc != 0) {
+        if (rc < 0) return link_check_failed();
         HttpResponse *resp = response_template(400, "pages/verify-email-error.html", NULL);
         return resp ? resp : response_json_error(400, "Verification failed");
     }
@@ -1003,7 +1034,12 @@ HttpResponse *request_password_reset_handler(const HttpRequest *req) {
 
     free(email);
 
-    /* Always return success to prevent enumeration */
+    /* A failed query says nothing about the address, so it's answered as what it is */
+    if (result < 0) {
+        return response_json_error(500, EMAIL_NOT_SENT);
+    }
+
+    /* The same answer, whether or not the address has an account, to prevent enumeration */
     return response_json_ok(
         "{\"message\":\"If that email belongs to a verified account, "
         "a reset link has been sent. Check your inbox.\"}");
@@ -1032,6 +1068,7 @@ HttpResponse *reset_password_page_handler(const HttpRequest *req) {
 
     if (rc != 0) {
         cleanse_free(token);
+        if (rc < 0) return link_check_failed();
         HttpResponse *resp = response_template(400, "pages/reset-password-invalid.html", NULL);
         return resp ? resp : response_json_error(400, "Invalid token");
     }
@@ -1058,6 +1095,8 @@ HttpResponse *reset_password_page_handler(const HttpRequest *req) {
  * Expects form-encoded body: token=...&password=...
  */
 HttpResponse *reset_password_handler(const HttpRequest *req) {
+    HttpResponse *ct_err = require_content_type(req, FORM_CONTENT_TYPE);
+    if (ct_err) return ct_err;
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -1118,6 +1157,7 @@ HttpResponse *reset_password_handler(const HttpRequest *req) {
         return resp ? resp : response_json_error(400, msg);
     }
     if (rc != 0) {
+        if (rc < 0) return link_check_failed();
         HttpResponse *resp = response_template(400, "pages/reset-password-error.html",
             "MESSAGE", "This password reset link is invalid, expired, or has already been used.",
             NULL);
@@ -1159,6 +1199,7 @@ HttpResponse *accept_invitation_page_handler(const HttpRequest *req) {
 
     if (rc != 0) {
         cleanse_free(token);
+        if (rc < 0) return link_check_failed();
         HttpResponse *resp = response_template(400, "pages/accept-invitation-invalid.html", NULL);
         return resp ? resp : response_json_error(400, "Invalid token");
     }
@@ -1218,6 +1259,8 @@ HttpResponse *accept_invitation_page_handler(const HttpRequest *req) {
  * Expects form-encoded body: token=...&password=...
  */
 HttpResponse *accept_invitation_handler(const HttpRequest *req) {
+    HttpResponse *ct_err = require_content_type(req, FORM_CONTENT_TYPE);
+    if (ct_err) return ct_err;
 
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -1287,6 +1330,7 @@ HttpResponse *accept_invitation_handler(const HttpRequest *req) {
     }
 
     if (rc != 0) {
+        if (rc < 0) return link_check_failed();
         HttpResponse *resp = response_template(400, "pages/accept-invitation-invalid.html", NULL);
         return resp ? resp : response_json_error(400, "Invalid invitation");
     }
@@ -1398,6 +1442,11 @@ HttpResponse *request_passwordless_login_handler(const HttpRequest *req) {
     free(email);
     free(return_to);
 
+    /* A failed query says nothing about the address, so it's answered as what it is */
+    if (result < 0) {
+        return response_json_error(500, EMAIL_NOT_SENT);
+    }
+
     return response_json_ok(
         "{\"message\":\"If that email belongs to a verified account "
         "with passwordless login enabled, a login link has been sent. "
@@ -1428,6 +1477,7 @@ HttpResponse *passwordless_login_page_handler(const HttpRequest *req) {
 
     if (rc != 0) {
         cleanse_free(token);
+        if (rc < 0) return link_check_failed();
         HttpResponse *resp = response_template(400, "pages/passwordless-login-invalid.html", NULL);
         return resp ? resp : response_json_error(400, "Invalid token");
     }
@@ -1476,6 +1526,9 @@ HttpResponse *passwordless_login_handler(const HttpRequest *req) {
         return response_html_error(403, "Cross-site request refused");
     }
 
+    HttpResponse *ct_err = require_content_type(req, FORM_CONTENT_TYPE);
+    if (ct_err) return ct_err;
+
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
         log_error("Failed to get database connection");
@@ -1498,6 +1551,7 @@ HttpResponse *passwordless_login_handler(const HttpRequest *req) {
     cleanse_free(token);
 
     if (rc != 0) {
+        if (rc < 0) return link_check_failed();
         HttpResponse *resp = response_template(400, "pages/passwordless-login-invalid.html", NULL);
         return resp ? resp : response_html_error(400, "Invalid login link");
     }
@@ -1626,13 +1680,6 @@ HttpResponse *passwordless_login_toggle_handler(const HttpRequest *req) {
 
 HttpResponse *logout_handler(const HttpRequest *req) {
 
-    /* Get database connection */
-    db_handle_t *db = db_pool_get_connection();
-    if (!db) {
-        log_error("Failed to get database connection");
-        return response_json_error(500, "Database connection failed");
-    }
-
     /* Get session cookie */
     char *session_token = NULL;
     const char *cookie_header = http_request_get_header(req, "Cookie");
@@ -1644,16 +1691,19 @@ HttpResponse *logout_handler(const HttpRequest *req) {
         return response_json_error(401, "No session to logout");
     }
 
-    /* Close session in database */
-    int result = oauth_session_close(db, session_token);
+    /* Close session in database: 0 closed it, 1 found none open, -1 failed,
+     * no connection included (db_pool_get_connection logs that) */
+    db_handle_t *db = db_pool_get_connection();
+    int result = db ? oauth_session_close(db, session_token) : -1;
     cleanse_free(session_token);
 
-    if (result != 0) {
-        return response_json_error(500, "Failed to close session");
-    }
-
-    /* Build response with Set-Cookie header to clear cookie */
-    HttpResponse *response = response_json_ok("{\"message\":\"Logged out successfully\"}");
+    /* The cookie is cleared with the 500 too. Keeping it on a failure would
+     * allow a retry, but the console doesn't retry, and the browser would be
+     * left holding a live session after the user logged out. A session that
+     * couldn't be closed stays open until it expires; the 500 reports that. */
+    HttpResponse *response = result < 0
+        ? response_json_error(500, "Failed to close session")
+        : response_json_ok("{\"message\":\"Logged out successfully\"}");
 
     if (response) {
         char clear_cookie[256];

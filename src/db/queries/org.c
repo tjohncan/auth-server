@@ -158,7 +158,8 @@ int org_list_all_unscoped(db_handle_t *db,
     int total_count = 0;
     int first_row = 1;
 
-    while (db_step(stmt) == DB_ROW) {
+    int rc;
+    while ((rc = db_step(stmt)) == DB_ROW) {
         org_data_t org;
         memset(&org, 0, sizeof(org));
 
@@ -204,6 +205,12 @@ int org_list_all_unscoped(db_handle_t *db,
     }
 
     db_finalize(stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Error listing organizations");
+        db_results_free(list);
+        return -1;
+    }
 
     /* Convert list to array */
     int count;
@@ -314,7 +321,8 @@ int org_list_all(db_handle_t *db, long long user_account_pin,
     int total_count = 0;
     int first_row = 1;
 
-    while (db_step(stmt) == DB_ROW) {
+    int rc;
+    while ((rc = db_step(stmt)) == DB_ROW) {
         org_data_t org;
         memset(&org, 0, sizeof(org));
 
@@ -360,6 +368,12 @@ int org_list_all(db_handle_t *db, long long user_account_pin,
     }
 
     db_finalize(stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Error listing a user's organizations");
+        db_results_free(list);
+        return -1;
+    }
 
     /* Convert list to array */
     int count;
@@ -441,7 +455,11 @@ int org_get_by_id(db_handle_t *db, const unsigned char *org_id,
 
     if (rc != DB_ROW) {
         db_finalize(stmt);
-        log_debug("Organization not found or user not authorized");
+        if (rc == DB_DONE) {
+            log_debug("Organization not found or user not authorized");
+            return 1;
+        }
+        log_error("Failed to look up organization");
         return -1;
     }
 
@@ -643,9 +661,14 @@ int organization_get_pin_by_code_name(db_handle_t *db,
     db_bind_text(stmt, 1, organization_code_name, -1);
 
     int result = db_step(stmt);
-    if (result != DB_ROW) {
+    if (result == DB_DONE) {
         db_finalize(stmt);
-        return -1;  /* Not found */
+        return 1;  /* Not found */
+    }
+    if (result != DB_ROW) {
+        log_error("Failed to look up an organization's PIN");
+        db_finalize(stmt);
+        return -1;
     }
 
     *out_organization_pin = db_column_int64(stmt, 0);
@@ -675,9 +698,14 @@ int organization_key_get_organization_pin(db_handle_t *db,
     db_bind_blob(stmt, 1, key_id, 16);
 
     int result = db_step(stmt);
-    if (result != DB_ROW) {
+    if (result == DB_DONE) {
         db_finalize(stmt);
-        return -1;  /* Not found */
+        return 1;  /* Not found */
+    }
+    if (result != DB_ROW) {
+        log_error("Failed to look up a key's organization");
+        db_finalize(stmt);
+        return -1;
     }
 
     *out_organization_pin = db_column_int64(stmt, 0);
@@ -717,7 +745,11 @@ int organization_key_create(db_handle_t *db,
         db_finalize(lookup_stmt);
     } else {
         db_finalize(lookup_stmt);
-        log_error("Organization not found or inactive: %s", organization_code_name);
+        if (lookup_rc == DB_DONE) {
+            log_info("Organization not found or inactive: %s", organization_code_name);
+            return 1;
+        }
+        log_error("Error looking up the organization for a new key");
         return -1;
     }
 
@@ -733,8 +765,12 @@ int organization_key_create(db_handle_t *db,
     if (hash_rc != 0) {
         OPENSSL_cleanse(salt_hex, sizeof(salt_hex));
         OPENSSL_cleanse(hash_hex, sizeof(hash_hex));
+        if (hash_rc == -2) {
+            log_info("Secret refused: its length is out of range");
+            return -2;
+        }
         log_error("Failed to hash secret");
-        return (hash_rc == -2) ? -2 : -1;
+        return -1;
     }
 
     /* Generate UUID for key */
@@ -851,7 +887,8 @@ int organization_key_list(db_handle_t *db,
     int total_count = 0;
     int first_row = 1;
 
-    while (db_step(stmt) == DB_ROW) {
+    int rc;
+    while ((rc = db_step(stmt)) == DB_ROW) {
         organization_key_data_t key;
         memset(&key, 0, sizeof(key));
 
@@ -884,6 +921,12 @@ int organization_key_list(db_handle_t *db,
     }
 
     db_finalize(stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Error listing organization keys");
+        db_results_free(list);
+        return -1;
+    }
 
     /* Convert list to array */
     int count;
@@ -973,11 +1016,16 @@ int organization_key_verify(db_handle_t *db,
     db_bind_blob(stmt, 1, key_id, 16);
 
     int rc = db_step(stmt);
-    if (rc != DB_ROW) {
+    if (rc == DB_DONE) {
         db_finalize(stmt);
-        log_error("Organization key not found or inactive");
+        log_debug("Organization key not found or inactive");
         /* As long as a wrong secret takes, so key ids aren't told apart by time */
         crypto_password_verify_dummy(SECRET_MACHINE, secret, strlen(secret));
+        return 1;
+    }
+    if (rc != DB_ROW) {
+        log_error("Error looking up organization key");
+        db_finalize(stmt);
         return -1;
     }
 
@@ -1011,9 +1059,12 @@ int organization_key_verify(db_handle_t *db,
     OPENSSL_cleanse(salt, sizeof(salt));
     OPENSSL_cleanse(hash, sizeof(hash));
 
+    if (valid < 0) {
+        return -1;  /* A stored hash that can't be checked (logged) */
+    }
     if (valid != 1) {
-        log_error("Organization key secret verification failed");
-        return -1;
+        log_warn("Organization key secret verification failed");
+        return 1;
     }
 
     *out_organization_pin = org_pin;

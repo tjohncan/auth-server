@@ -23,7 +23,7 @@ int session_authenticate_and_create(db_handle_t *db,
     /* username may be an email address (routed by @ detection below) */
     if (!db || !username || !password || !out_session_token || !out_user_pin) {
         log_error("Invalid arguments to session_authenticate_and_create");
-        return -1;
+        return -2;
     }
 
     /* Step 1: Verify password and get user PIN and ID */
@@ -41,11 +41,11 @@ int session_authenticate_and_create(db_handle_t *db,
 
     if (valid != 1) {
         if (valid == 0) {
-            log_info("Authentication failed (invalid credentials)");
-        } else {
-            log_error("Error verifying password");
+            log_warn("Authentication failed (invalid credentials)");
+            return -1;
         }
-        return -1;
+        log_error("Error verifying password");
+        return -2;
     }
 
     /* Convert user_id to hex for logging */
@@ -57,7 +57,7 @@ int session_authenticate_and_create(db_handle_t *db,
     char *session_token = malloc(token_buf_size);
     if (!session_token) {
         log_error("Failed to allocate memory for session token");
-        return -1;
+        return -2;
     }
 
     int token_len = crypto_random_token(session_token, token_buf_size, SESSION_TOKEN_BYTES);
@@ -65,7 +65,7 @@ int session_authenticate_and_create(db_handle_t *db,
         log_error("Failed to generate session token");
         OPENSSL_cleanse(session_token, token_buf_size);
         free(session_token);
-        return -1;
+        return -2;
     }
 
     /* Step 3: Create session in database */
@@ -80,7 +80,7 @@ int session_authenticate_and_create(db_handle_t *db,
         log_error("Failed to create session for user_id=%s", user_id_hex);
         OPENSSL_cleanse(session_token, token_buf_size);
         free(session_token);
-        return -1;
+        return -2;
     }
 
     /* Success */

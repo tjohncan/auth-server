@@ -1,6 +1,8 @@
 #include "handlers/admin.h"
+#include "db/db_sql.h"
 #include "db/queries/org.h"
 #include "db/queries/client.h"
+#include "db/queries/oauth.h"
 #include "db/queries/resource_server.h"
 #include "db/queries/user.h"
 #include "util/log.h"
@@ -37,7 +39,7 @@ int admin_bootstrap(db_handle_t *db,
     if (user_ex < 0) {
         return -1;
     } else if (user_ex == 1) {
-        log_error("Bootstrap failed: username '%s' already exists", username);
+        log_error("Bootstrap failed: the username already exists");
         return -1;
     }
 
@@ -47,11 +49,21 @@ int admin_bootstrap(db_handle_t *db,
     snprintf(mgmt_api_address, sizeof(mgmt_api_address), "%s/api", config->public_base_url);
     snprintf(mgmt_ui_redirect, sizeof(mgmt_ui_redirect), "%s/callback", config->public_base_url);
 
+    /* Every write or none. A failure part-way would leave an organization behind,
+       and a retry would answer "Organization already exists" until it was removed
+       by hand. None of the steps opens a transaction of its own: user_create does
+       only for an email address, and bootstrap gives none. The admin password is
+       hashed inside, once per bootstrap. */
+    if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
+        log_error("Bootstrap failed: could not begin a transaction");
+        return -1;
+    }
+
     /* Create organization */
     long long org_pin;
     if (org_create(db, org_code_name, org_display_name, "Management API + UI", &org_pin, NULL) != 0) {
         log_error("Bootstrap failed: could not create organization");
-        return -1;
+        goto rollback;
     }
 
     /* Create management API resource server */
@@ -61,7 +73,7 @@ int admin_bootstrap(db_handle_t *db,
                                           "OAuth2 resource server for management operations",
                                           &mgmt_api_pin) != 0) {
         log_error("Bootstrap failed: could not create management API resource server");
-        return -1;
+        goto rollback;
     }
 
     /* Create management UI client (public, universal, authorization_code) */
@@ -79,36 +91,45 @@ int admin_bootstrap(db_handle_t *db,
                                  1,      /* is_universal = true */
                                  mgmt_ui_id, &mgmt_ui_pin) != 0) {
         log_error("Bootstrap failed: could not create management UI client");
-        return -1;
+        goto rollback;
     }
 
     /* Add redirect URI for management UI */
     if (admin_add_client_redirect_uri_bootstrap(db, mgmt_ui_id, mgmt_ui_redirect, "Default callback") != 0) {
         log_error("Bootstrap failed: could not add redirect URI");
-        return -1;
+        goto rollback;
     }
 
     /* Link management UI client to management API resource server */
     if (admin_link_client_resource_server_bootstrap(db, org_code_name, mgmt_ui_id, mgmt_api_address) != 0) {
         log_error("Bootstrap failed: could not link client to resource server");
-        return -1;
+        goto rollback;
     }
 
     /* Create first admin user (email can be added later via user profile) */
     unsigned char user_id[16];
     if (user_create(db, username, NULL, password, user_id) != 0) {
         log_error("Bootstrap failed: could not create admin user");
-        return -1;
+        goto rollback;
     }
 
     /* Make user admin of organization */
     if (user_make_org_admin(db, user_id, org_code_name) != 0) {
         log_error("Bootstrap failed: could not grant org admin privileges");
-        return -1;
+        goto rollback;
+    }
+
+    if (db_execute_trusted(db, "COMMIT") != 0) {
+        log_error("Bootstrap failed: could not commit");
+        goto rollback;
     }
 
     log_info("Bootstrap complete: org='%s', user='%s'", org_code_name, username);
     return 0;
+
+rollback:
+    db_execute_trusted(db, "ROLLBACK");
+    return -1;
 }
 
 /* ============================================================================
@@ -130,7 +151,7 @@ int admin_create_organization(db_handle_t *db,
     if (exists < 0) {
         return -1;
     } else if (exists == 1) {
-        log_error("Organization already exists: code_name='%s'", code_name);
+        log_info("Organization already exists: code_name='%s'", code_name);
         return -1;
     }
 
@@ -290,6 +311,26 @@ int admin_update_resource_server(db_handle_t *db, long long user_account_pin,
         return -1;
     }
 
+    /* One active server per address and per code name in an organization.
+       Checked here, against the row as it stands, so a clash is answered and
+       the update isn't sent. Only a server becoming active, or an active one
+       moving to another address, can clash: a deactivated server keeps an
+       address an active one has taken, and its other edits still save. */
+    int will_be_active = is_active ? (*is_active != 0) : existing.is_active;
+    const char *will_have_address = address ? address : existing.address;
+    if (will_be_active &&
+        (!existing.is_active || strcmp(will_have_address, existing.address) != 0)) {
+        int clash = resource_server_active_clash(db, existing.organization_pin, existing.pin,
+                                                 will_have_address, existing.code_name);
+        if (clash != 0) {
+            if (clash > 0) {
+                log_info("Resource server update refused: another active server has its %s",
+                         clash == 1 ? "address" : "code name");
+            }
+            return clash;
+        }
+    }
+
     if (resource_server_update(db, server_id, user_account_pin, organization_key_pin, display_name, address, note, is_active, allow_user_provisioning) != 0) {
         return -1;
     }
@@ -336,6 +377,27 @@ int admin_create_resource_server(db_handle_t *db, long long user_account_pin,
         return -1;
     }
 
+    /* Checked here, so a refusal is answered and the INSERT isn't sent: the
+       organization, which the caller must administer, and one active server per
+       address and per code name in it */
+    org_data_t org;
+    int found = org_get_by_id(db, organization_id, user_account_pin, organization_key_pin, &org);
+    if (found != 0) {
+        if (found > 0) {
+            log_info("Resource server creation refused: organization not found, or not the caller's");
+            return 3;
+        }
+        return -1;
+    }
+    int clash = resource_server_active_clash(db, org.pin, -1, address, code_name);
+    if (clash != 0) {
+        if (clash > 0) {
+            log_info("Resource server creation refused: an active server has its %s",
+                     clash == 1 ? "address" : "code name");
+        }
+        return clash;
+    }
+
     return resource_server_create(db, user_account_pin, organization_key_pin,
                                    organization_id, code_name, display_name, address, note,
                                    out_id);
@@ -360,6 +422,26 @@ int admin_create_client(db_handle_t *db, long long user_account_pin,
         !client_type || !grant_type || !out_id) {
         log_error("Invalid arguments to admin_create_client");
         return -1;
+    }
+
+    /* Checked here, so a refusal is answered and the INSERT isn't sent: the
+       organization, which the caller must administer, and one active client per
+       code name in it */
+    org_data_t org;
+    int found = org_get_by_id(db, organization_id, user_account_pin, organization_key_pin, &org);
+    if (found != 0) {
+        if (found > 0) {
+            log_info("Client creation refused: organization not found, or not the caller's");
+            return 2;
+        }
+        return -1;
+    }
+    int taken = client_active_code_name_taken(db, org.pin, -1, code_name);
+    if (taken != 0) {
+        if (taken > 0) {
+            log_info("Client creation refused: an active client has its code name");
+        }
+        return taken;
     }
 
     return client_create(db, user_account_pin, organization_key_pin,
@@ -419,6 +501,20 @@ int admin_update_client(db_handle_t *db, long long user_account_pin,
         return -1;
     }
 
+    /* One active client per code name in an organization. A client's code name
+       doesn't change, so only reactivating one can clash; checked here, so the
+       clash is answered and the update isn't sent. */
+    if (is_active && *is_active && !existing.is_active) {
+        int taken = client_active_code_name_taken(db, existing.organization_pin, existing.pin,
+                                                  existing.code_name);
+        if (taken != 0) {
+            if (taken > 0) {
+                log_info("Client update refused: another active client has its code name");
+            }
+            return taken;
+        }
+    }
+
     if (client_update(db, client_id, user_account_pin, organization_key_pin, display_name, note,
                       require_mfa, access_token_ttl_seconds, issue_refresh_tokens,
                       refresh_token_ttl_seconds, maximum_session_seconds,
@@ -461,6 +557,25 @@ int admin_create_client_redirect_uri(db_handle_t *db, long long user_account_pin
                                       const char *note) {
     if (!db || !client_id || !redirect_uri) {
         log_error("Invalid arguments to admin_create_client_redirect_uri");
+        return -1;
+    }
+
+    /* Checked here, so a repeat is answered and the INSERT isn't sent: the
+       client, which the caller must administer, and whether it has the URI */
+    client_data_t client;
+    int found = client_get_by_id(db, client_id, user_account_pin, organization_key_pin, &client);
+    if (found != 0) {
+        if (found > 0) {
+            log_info("Redirect URI not created: client not found or caller not authorized");
+        }
+        return found;
+    }
+    int registered = oauth_redirect_uri_validate(db, client.pin, redirect_uri);
+    if (registered != 0) {
+        if (registered > 0) {
+            log_info("Redirect URI already registered for the client: nothing changed");
+            return 2;
+        }
         return -1;
     }
 
@@ -681,114 +796,8 @@ int admin_revoke_client_key(db_handle_t *db,
 }
 
 /* ============================================================================
- * RESOURCE SERVER OPERATIONS
- * ========================================================================== */
-
-int admin_create_resource_server_bootstrap(db_handle_t *db,
-                                            const char *org_code_name,
-                                            const char *code_name,
-                                            const char *display_name,
-                                            const char *address,
-                                            const char *note) {
-    if (!db || !org_code_name || !code_name || !display_name || !address) {
-        log_error("Invalid arguments to admin_create_resource_server_bootstrap");
-        return -1;
-    }
-
-    /* Validate organization exists */
-    int org_ex = org_exists(db, org_code_name);
-    if (org_ex < 0) {
-        return -1;
-    } else if (org_ex == 0) {
-        log_error("Organization does not exist: code_name='%s'", org_code_name);
-        return -1;
-    }
-
-    /* Check if resource server code_name already exists in this org */
-    int code_ex = resource_server_code_name_exists(db, org_code_name, code_name);
-    if (code_ex < 0) {
-        return -1;
-    } else if (code_ex == 1) {
-        log_error("Resource server code_name already exists in organization");
-        return -1;
-    }
-
-    /* Check if resource server address already exists in this org */
-    int addr_ex = resource_server_address_exists(db, org_code_name, address);
-    if (addr_ex < 0) {
-        return -1;
-    } else if (addr_ex == 1) {
-        log_error("Resource server address already exists in organization");
-        return -1;
-    }
-
-    /* Create resource server */
-    long long rs_pin;
-    if (resource_server_create_bootstrap(db, org_code_name, code_name, display_name, address, note, &rs_pin) != 0) {
-        log_error("Failed to create resource server");
-        return -1;
-    }
-
-    return 0;
-}
-
-/* ============================================================================
  * CLIENT OPERATIONS
  * ========================================================================== */
-
-int admin_create_client_bootstrap(db_handle_t *db,
-                                   const char *org_code_name,
-                                   const char *code_name,
-                                   const char *display_name,
-                                   const char *client_type,
-                                   const char *grant_type,
-                                   const char *note,
-                                   int require_mfa,
-                                   int access_token_ttl_seconds,
-                                   int issue_refresh_tokens,
-                                   int refresh_token_ttl_seconds,
-                                   int maximum_session_seconds,
-                                   int secret_rotation_seconds,
-                                   int is_universal,
-                                   unsigned char *out_client_id) {
-    if (!db || !org_code_name || !code_name || !display_name ||
-        !client_type || !grant_type || !out_client_id) {
-        log_error("Invalid arguments to admin_create_client_bootstrap");
-        return -1;
-    }
-
-    /* Validate organization exists */
-    int org_ex = org_exists(db, org_code_name);
-    if (org_ex < 0) {
-        return -1;
-    } else if (org_ex == 0) {
-        log_error("Organization does not exist: code_name='%s'", org_code_name);
-        return -1;
-    }
-
-    /* Check if client code_name already exists in this org */
-    int code_ex = client_code_name_exists(db, org_code_name, code_name);
-    if (code_ex < 0) {
-        return -1;
-    } else if (code_ex == 1) {
-        log_error("Client code_name already exists in organization");
-        return -1;
-    }
-
-    /* Create client */
-    long long client_pin;
-    if (client_create_bootstrap(db, org_code_name, code_name, display_name,
-                                 client_type, grant_type, note,
-                                 require_mfa, access_token_ttl_seconds,
-                                 issue_refresh_tokens, refresh_token_ttl_seconds,
-                                 maximum_session_seconds, secret_rotation_seconds,
-                                 is_universal, out_client_id, &client_pin) != 0) {
-        log_error("Failed to create client");
-        return -1;
-    }
-
-    return 0;
-}
 
 int admin_add_client_redirect_uri_bootstrap(db_handle_t *db,
                                             const unsigned char *client_id,
@@ -851,7 +860,7 @@ int admin_create_user(db_handle_t *db,
     if (username_taken < 0) {
         return -1;
     } else if (username_taken == 1) {
-        log_error("Username already exists");
+        log_info("Username already exists");
         return -1;
     }
 
@@ -861,7 +870,7 @@ int admin_create_user(db_handle_t *db,
         if (exists < 0) {
             return -1;
         } else if (exists == 1) {
-            log_error("Email already exists");
+            log_info("Email already exists");
             return -1;
         }
     }
@@ -888,7 +897,7 @@ int admin_make_org_admin(db_handle_t *db,
     if (user_ex < 0) {
         return -1;
     } else if (user_ex == 0) {
-        log_error("User does not exist");
+        log_info("User does not exist");
         return -1;
     }
 
@@ -897,7 +906,7 @@ int admin_make_org_admin(db_handle_t *db,
     if (org_ex < 0) {
         return -1;
     } else if (org_ex == 0) {
-        log_error("Organization does not exist: code_name='%s'", org_code_name);
+        log_info("Organization does not exist: code_name='%s'", org_code_name);
         return -1;
     }
 

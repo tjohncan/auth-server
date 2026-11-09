@@ -66,11 +66,13 @@ void oauth_authorize_response_free(oauth_authorize_response_t *resp);
  *   out_response    - Output: Authorization response (caller must free)
  *
  * Returns: 0 on success,
- *          -1 on error or validation failure,
+ *          -1 if the request is invalid (its PKCE parameters),
  *          -2 if session not authenticated (need login),
  *          -3 if MFA required but not completed,
  *          -4 if client not found or redirect_uri not registered (do NOT redirect),
- *          -5 if user is not linked to this client (access denied)
+ *          -5 if user is not linked to this client (access denied),
+ *          -6 if the server failed before redirect_uri was trusted (do NOT redirect),
+ *          -7 if the server failed after it was
  */
 int oauth_authorize(db_handle_t *db,
                     const unsigned char *client_id,
@@ -100,7 +102,10 @@ int oauth_authorize(db_handle_t *db,
  *
  * Returns: 0 on success,
  *          1 if code already exchanged (replay attack - should revoke tokens),
- *          -1 on error or validation failure
+ *          -1 if the grant is refused (the code, client, verifier or user won't do),
+ *          -2 if the server failed, so nothing is known to be wrong with the code,
+ *          -3 if the resource won't do, -5 if the client may not use this grant type:
+ *          the code still holds
  */
 int oauth_exchange_authorization_code(db_handle_t *db,
                                        const unsigned char *client_id,
@@ -127,7 +132,10 @@ int oauth_exchange_authorization_code(db_handle_t *db,
  *
  * Returns: 0 on success,
  *          1 if refresh token already exchanged (replay attack - should revoke chain),
- *          -1 on error or validation failure
+ *          -1 if the grant is refused (the token, client or user won't do),
+ *          -2 if the server failed, so nothing is known to be wrong with the token,
+ *          -3 if the resource won't do, -4 if the scope is beyond the grant: the token
+ *          still holds
  */
 int oauth_refresh_access_token(db_handle_t *db,
                                 const unsigned char *client_id,
@@ -153,7 +161,10 @@ int oauth_refresh_access_token(db_handle_t *db,
  *   user_agent      - Client user agent (optional, for audit logging)
  *   out_response    - Output: Token response (caller must free)
  *
- * Returns: 0 on success, -1 on error or authentication failure
+ * Returns: 0 on success, -1 if the client's authentication is refused,
+ *          -2 if the server failed, so nothing is known to be wrong with the
+ *          credentials, -3 if the resource won't do, -5 if the client may not
+ *          use this grant type
  */
 int oauth_client_credentials(db_handle_t *db,
                               const unsigned char *client_id,
@@ -164,29 +175,6 @@ int oauth_client_credentials(db_handle_t *db,
                               const char *source_ip,
                               const char *user_agent,
                               oauth_token_response_t *out_response);
-
-/*
- * Authenticate client
- *
- * Validates client credentials. Caller is responsible for logging usage
- * via log_key_usage() after successful authentication.
- *
- * Parameters:
- *   db            - Database handle
- *   client_id     - Client UUID (16 bytes)
- *   client_key_id - Client key UUID (16 bytes)
- *   secret        - Client secret (plaintext)
- *   out_pin       - Output: Client PIN if authentication succeeds
- *   out_key_pin   - Output: Client key PIN (for usage logging)
- *
- * Returns: 1 on success (authenticated), 0 on auth failure, -1 on error
- */
-int oauth_handler_client_authenticate(db_handle_t *db,
-                                       const unsigned char *client_id,
-                                       const unsigned char *client_key_id,
-                                       const char *secret,
-                                       long long *out_pin,
-                                       long long *out_key_pin);
 
 /*
  * Authenticate resource server

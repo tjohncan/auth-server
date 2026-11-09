@@ -59,7 +59,9 @@ int mfa_totp_setup(db_handle_t *db,
  *   out_recovery_codes  - Output: array of plaintext recovery codes, or NULL
  *   out_recovery_count  - Output: number of codes, or 0
  *
- * Returns: 0 on success, 1 if code invalid, -1 on error
+ * Returns: 0 on success, 1 if code invalid, 2 if there's no such method or it's
+ *          another user's (the same answer, so ids can't be told apart), 3 if it's
+ *          already confirmed, -1 on error
  * Note: If out_recovery_codes is set, caller must free each string and the array
  */
 int mfa_totp_confirm(db_handle_t *db,
@@ -100,12 +102,14 @@ int mfa_verify(db_handle_t *db,
  * Parameters:
  *   db               - Database handle
  *   user_account_pin - User attempting recovery
+ *   session_id       - The session a valid code completes MFA on (16 bytes)
  *   recovery_code    - Plaintext recovery code
  *
- * Returns: 1 if valid, 0 if invalid, -1 on error
+ * Returns: 1 if valid, 0 if invalid, -1 on error (the code stays unused)
  */
 int mfa_recover(db_handle_t *db,
                 long long user_account_pin,
+                const unsigned char *session_id,
                 const char *recovery_code);
 
 /*
@@ -113,7 +117,8 @@ int mfa_recover(db_handle_t *db,
  *
  * Verifies method belongs to user before deleting.
  *
- * Returns: 0 on success, -1 on error
+ * Returns: 0 on success, 1 if there's no such method or it's another user's,
+ *          -1 on error
  */
 int mfa_delete_method(db_handle_t *db,
                       long long user_account_pin,
@@ -125,7 +130,7 @@ int mfa_delete_method(db_handle_t *db,
  * Revokes existing set and creates new one.
  * Requires at least one confirmed MFA method.
  *
- * Returns: 0 on success, -1 on error
+ * Returns: 0 on success, 1 if the user has no confirmed method, -1 on error
  * Note: Caller must free each string and the array
  */
 int mfa_regenerate_recovery_codes(db_handle_t *db,

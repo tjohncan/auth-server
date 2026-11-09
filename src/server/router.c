@@ -176,6 +176,38 @@ void router_add(Router *router, HttpMethod method, const char *path, RouteHandle
     log_info("  %-7s %s", method_to_string(method), path);
 }
 
+/*
+ * The methods routed at a path, as an Allow header has them ("GET, HEAD, POST").
+ * GET brings HEAD, which router_dispatch serves from the GET route.
+ *
+ * Returns: how many routes the path has, 0 for none
+ */
+static int allowed_methods(Router *router, const char *path, char *out, size_t size) {
+    bool routed[HTTP_UNKNOWN + 1] = { false };
+    int found = 0;
+
+    for (RouteNode *node = router->buckets[hash_path(path)]; node; node = node->next) {
+        if (strcmp(node->route.path_pattern, path) == 0) {
+            routed[node->route.method] = true;
+            found++;
+        }
+    }
+    if (routed[HTTP_GET]) routed[HTTP_HEAD] = true;
+
+    static const HttpMethod order[] = {
+        HTTP_GET, HTTP_HEAD, HTTP_POST, HTTP_PUT, HTTP_PATCH, HTTP_DELETE
+    };
+    size_t pos = 0;
+    out[0] = '\0';
+    for (size_t i = 0; i < sizeof(order) / sizeof(order[0]); i++) {
+        if (!routed[order[i]]) continue;
+        int n = snprintf(out + pos, size - pos, "%s%s", pos ? ", " : "", method_to_string(order[i]));
+        if (n < 0 || (size_t)n >= size - pos) break;
+        pos += (size_t)n;
+    }
+    return found;
+}
+
 static HttpResponse *dispatch_route(Router *router, const HttpRequest *req) {
     log_debug("Dispatching: %s %s", req->method_str, req->path);
 
@@ -200,6 +232,15 @@ static HttpResponse *dispatch_route(Router *router, const HttpRequest *req) {
         }
 
         node = node->next;
+    }
+
+    /* A path routed for other methods answers 405, with Allow naming them
+       (RFC 9110 15.5.6): the client learns what to send, rather than that the
+       path isn't there */
+    char allow[64];
+    if (allowed_methods(router, req->path, allow, sizeof(allow)) > 0) {
+        log_debug("%s not allowed for %s (Allow: %s)", req->method_str, req->path, allow);
+        return response_method_not_allowed(allow);
     }
 
     /* No route matched */
@@ -324,6 +365,10 @@ HttpResponse *router_dispatch(Router *router, const HttpRequest *req) {
      * ways: SQLite stores an invalid sequence and echoes it into later JSON
      * responses, while PostgreSQL refuses it at INSERT and the handler answers
      * 500. Refused here, both answer 400.
+     *
+     * The same goes for what a query string or a form body decodes to, whichever
+     * parameter carries it. An encoded NUL is refused with it: a handler's decode
+     * would read that parameter as left out.
      */
     HttpResponse *resp;
     const char *content_type = http_request_get_header(req, "Content-Type");
@@ -333,29 +378,27 @@ HttpResponse *router_dispatch(Router *router, const HttpRequest *req) {
         resp = response_json_error(400, "Request body is not valid UTF-8");
     } else if (req->body && !is_form && !json_escapes_valid(req->body)) {
         resp = response_json_error(400, "Invalid JSON string escape");
-    } else {
-        resp = dispatch_route(router, req);
-    }
-
-    /*
-     * HEAD: nothing registers it, so fall back to the GET route for the same
-     * path. RFC 7231 4.3.2 wants the same headers GET would send, Content-Length
-     * included, with only the body omitted.
-     *
-     * Deliberately NOT an early return the way OPTIONS is above. The CORS header
-     * is attached below and is keyed on the path, so a HEAD that returned early
-     * would silently lose it on the four public endpoints — and no test that
-     * only checked GET would notice.
-     */
-    if (req->method == HTTP_HEAD && resp && resp->status_code == 404) {
+    } else if ((req->query_string &&
+                !str_url_text_valid(req->query_string, strlen(req->query_string))) ||
+               (req->body && is_form && !str_url_text_valid(req->body, req->body_length))) {
+        resp = response_json_error(400, "Request parameters are not valid UTF-8 text");
+    } else if (req->method == HTTP_HEAD) {
+        /*
+         * HEAD: nothing registers it, so the GET route for the same path answers
+         * it, and its body is dropped below. RFC 9110 9.3.2 wants the same
+         * headers GET would send, Content-Length included. A path without a GET
+         * route answers 405 naming its methods, as a GET there would.
+         *
+         * Deliberately NOT an early return the way OPTIONS is above. The CORS
+         * header is attached below and is keyed on the path, so a HEAD that
+         * returned early would silently lose it on the four public endpoints —
+         * and no test that only checked GET would notice.
+         */
         HttpRequest as_get = *req;
         as_get.method = HTTP_GET;
-
-        HttpResponse *from_get = dispatch_route(router, &as_get);
-        if (from_get) {
-            http_response_free(resp);
-            resp = from_get;
-        }
+        resp = dispatch_route(router, &as_get);
+    } else {
+        resp = dispatch_route(router, req);
     }
 
     /*

@@ -116,7 +116,8 @@ int org_list_all_unscoped(db_handle_t *db,
  * - Session auth (user_account_pin != -1): Verifies user is org admin
  * - Org key auth (user_account_pin == -1): Verifies specific key is active
  *
- * Returns: 0 on success, -1 on error or not found
+ * Returns: 0 on success, 1 if there's no such organization or the caller
+ * can't administer it (the two look alike), -1 on error
  */
 int org_get_by_id(db_handle_t *db, const unsigned char *org_id,
                   long long user_account_pin, long long organization_key_pin,
@@ -174,7 +175,7 @@ typedef struct {
  *   organization_code_name - Organization code name
  *   out_organization_pin - Output: Organization PIN
  *
- * Returns: 0 on success, -1 if not found or error
+ * Returns: 0 on success, 1 if not found, -1 on error
  */
 int organization_get_pin_by_code_name(db_handle_t *db,
                                        const char *organization_code_name,
@@ -191,7 +192,7 @@ int organization_get_pin_by_code_name(db_handle_t *db,
  *   key_id               - Organization key UUID (16 bytes)
  *   out_organization_pin - Output: Organization PIN
  *
- * Returns: 0 on success, -1 if not found or error
+ * Returns: 0 on success, 1 if not found, -1 on error
  */
 int organization_key_get_organization_pin(db_handle_t *db,
                                            const unsigned char *key_id,
@@ -214,7 +215,8 @@ int organization_key_get_organization_pin(db_handle_t *db,
  *   note                 - Optional description
  *   out_key_id           - Output: Generated key UUID (16 bytes)
  *
- * Returns: 0 on success, -1 on error, -2 if secret below minimum length
+ * Returns: 0 on success, 1 if the organization doesn't exist or is deactivated,
+ *          -1 on error, -2 if secret below minimum length
  */
 int organization_key_create(db_handle_t *db,
                             const char *organization_code_name,
@@ -269,7 +271,8 @@ int organization_key_revoke(db_handle_t *db,
  *   out_organization_pin - Output: Organization PIN if valid
  *   out_key_pin          - Output: Organization key PIN (for re-verification)
  *
- * Returns: 0 if valid, -1 if invalid or error
+ * Returns: 0 if valid, 1 if not (no such active key, or the wrong secret), -1 on
+ *          error
  */
 int organization_key_verify(db_handle_t *db,
                             const unsigned char *key_id,

@@ -72,10 +72,13 @@ typedef struct {
     int machine_secret_hash_max_iterations;
 
     /* Password policy */
-    int password_min_length;  /* Minimum password length (default 1, minimum 1) */
+    int password_min_length;  /* Minimum password length (default 1, minimum 1, at most
+                                 PASSWORD_MIN_LENGTH_CAP) */
 
     /* Refuse to start on the shipped defaults fit only for trying the server out
-       (config_check_weak_defaults). Off by default, so a fresh clone runs. */
+       (config_check_weak_defaults). Off by default, so a fresh clone runs. 1 or 0;
+       -1 exists only inside config_load, for a value it couldn't read, and refuses
+       the start. */
     int strict;
 
     /* Patterns a value created or set must match (util/validation.h): NULL for
@@ -118,6 +121,7 @@ typedef struct {
 
     /* Environment variable names (optional overrides) */
     char *log_level_env;   /* ENV var name for log_level */
+    char *strict_env;      /* ENV var name for strict */
     char *db_type_env;     /* ENV var name for db_type */
     char *db_host_env;     /* ENV var name for db_host */
     char *db_port_env;     /* ENV var name for db_port */
@@ -178,6 +182,11 @@ int config_build_pg_connection_string(const config_t *config, char *out, size_t 
 /* The shortest password_min_length strict accepts: NIST SP 800-63B's minimum
    for a password a person chooses */
 #define STRICT_PASSWORD_MIN_LENGTH 8
+
+/* The highest password_min_length the server starts with. The same minimum applies to
+   machine secrets, and a generated key secret is 32 random bytes in base64url, 43
+   characters, so any higher would refuse every key the server generates. */
+#define PASSWORD_MIN_LENGTH_CAP 43
 
 /*
  * config_check_weak_defaults - The shipped defaults fit only for trying the

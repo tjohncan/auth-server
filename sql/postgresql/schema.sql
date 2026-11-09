@@ -2,7 +2,7 @@
 -- Auth System - Core Schema DDL (PostgreSQL)
 -- ============================================================================
 -- This file contains table definitions for the OAuth2 authentication system.
--- Designed for PostgreSQL 14+
+-- Designed for PostgreSQL 15+
 --
 -- Companion files:
 --   - ../sqlite/schema.sql (SQLite version of this schema)
@@ -832,6 +832,13 @@ create index idx_access_token_client_resource_server
 
 create index idx_invitation_token_user
   on session.invitation_token(user_account_pin);
+
+-- A set's codes, found by their set: listing them, counting the unused ones,
+-- spending one, and the cleaner's check that a revoked set is empty. A foreign
+-- key isn't indexed by itself.
+
+create index idx_recovery_code_set
+  on security.recovery_code(recovery_code_set_pin);
 
 -- ============================================================================
 -- SEALED COLUMNS AND SECRET HASHES - No planner statistics

@@ -69,15 +69,16 @@ typedef enum {
  *
  * Returns: 0 with *out_session filled, 1 if there is no session cookie, 2 if it
  *          names no live session, 3 if the session owes the factor the policy
- *          asks for
+ *          asks for, 4 if the check itself failed, which says nothing about the
+ *          cookie
  */
 int session_authenticate(const HttpRequest *req, db_handle_t *db,
                          session_mfa_policy_t policy, oauth_session_info_t *out_session);
 
 /*
  * session_authenticate, answered: NULL with *out_session filled, or the error
- * response, 401 without a live session and 403 "MFA verification required"
- * when it owes a factor
+ * response, 401 without a live session, 403 "MFA verification required" when it
+ * owes a factor, and 500 when the check itself failed
  */
 HttpResponse *session_require(const HttpRequest *req, db_handle_t *db,
                               session_mfa_policy_t policy, oauth_session_info_t *out_session);
@@ -120,6 +121,19 @@ HttpResponse *response_json_ok(const char *json);
 
 /* Create error response with JSON error format: {"error":"message"} */
 HttpResponse *response_json_error(int status_code, const char *message);
+
+/*
+ * The fields of an admin or /api/rs request body. read_int_field and
+ * read_bool_field return 1 if the field is read into *out, and 0 if it's left
+ * out, as json_get_int and json_get_bool count that; read_text_field returns the
+ * text (the caller frees it), or NULL if it's left out. A value of another kind
+ * ("3600" in quotes, 1.5, 1 for true, 12345 for a name) is neither guessed at nor
+ * taken as left out: *bad gets a 400 naming the first such field, which the
+ * caller answers before anything else it checks.
+ */
+int read_int_field(const char *body, const char *field, int *out, HttpResponse **bad);
+int read_bool_field(const char *body, const char *field, int *out, HttpResponse **bad);
+char *read_text_field(const char *body, const char *field, HttpResponse **bad);
 
 /* Create 405 Method Not Allowed with Allow header (RFC 7231 Section 6.5.5) */
 HttpResponse *response_method_not_allowed(const char *allowed);
@@ -207,7 +221,8 @@ char *http_cookie_get_value(const char *cookie_header, const char *name);
  *   out_org_pin - Output: organization pin on success
  *   out_key_pin - Output: key pin on success
  *
- * Returns: 0 on success, -1 on failure
+ * Returns: 0 on success, -1 if refused (no key headers, or not a good key), -2 if
+ *          the check itself failed, which says nothing about the key
  */
 int try_org_key_auth(const HttpRequest *req, const char *operation,
                      long long *out_org_pin, long long *out_key_pin);
@@ -368,6 +383,9 @@ HttpResponse *mfa_list_methods_handler(const HttpRequest *req);
 
 /* DELETE /api/user/mfa/methods - Delete MFA method (method specified via query/body) */
 HttpResponse *mfa_delete_method_handler(const HttpRequest *req);
+
+/* GET /api/user/mfa/recovery-codes - The caller's recovery codes, masked */
+HttpResponse *mfa_list_recovery_codes_handler(const HttpRequest *req);
 
 /* POST /api/user/mfa/recovery-codes/regenerate - Regenerate recovery codes */
 HttpResponse *mfa_regenerate_recovery_codes_handler(const HttpRequest *req);

@@ -36,9 +36,10 @@ int user_username_exists(db_handle_t *db, const char *username) {
         return -1;
     }
 
+    /* Every account, active or not, as the unique index counts them (user.h) */
     const char *sql =
         "SELECT 1 FROM " TBL_USER_ACCOUNT " "
-        "WHERE username_hash = " P"1 AND is_active = " BOOL_TRUE " "
+        "WHERE username_hash = " P"1 "
         "LIMIT 1";
 
     db_stmt_t *stmt = NULL;
@@ -226,9 +227,13 @@ int user_create(db_handle_t *db, const char *username,
                             &iterations,
                             hash, sizeof(hash));
     if (hash_rc != 0) {
-        log_error("Failed to hash password");
         OPENSSL_cleanse(salt, sizeof(salt));
-        return (hash_rc == -2) ? -2 : -1;
+        if (hash_rc == -2) {
+            log_info("Password refused: its length is out of range");
+            return -2;
+        }
+        log_error("Failed to hash password");
+        return -1;
     }
 
     /* Encrypt username and compute hash */
@@ -408,6 +413,10 @@ int user_verify_password(db_handle_t *db, const char *username,
 
     if (rc != DB_ROW) {
         db_finalize(stmt);
+        if (rc != DB_DONE) {
+            log_error("Failed to look up user for password verification");
+            return -1;
+        }
         /* Perform dummy verification to equalize timing (prevents user enumeration) */
         crypto_password_verify_dummy(SECRET_USER, password, strlen(password));
         return 0;  /* User not found = invalid password */
@@ -497,6 +506,10 @@ int user_verify_password_by_email(db_handle_t *db, const char *email,
 
     if (rc != DB_ROW) {
         db_finalize(stmt);
+        if (rc != DB_DONE) {
+            log_error("Failed to look up user by email for password verification");
+            return -1;
+        }
         /* Dummy verification to equalize timing */
         crypto_password_verify_dummy(SECRET_USER, password, strlen(password));
         return 0;
@@ -636,7 +649,8 @@ int user_get_management_ui_setups(db_handle_t *db, long long user_account_pin,
     /* Build linked list */
     db_result_node_t *list = NULL, *list_tail = NULL;
 
-    while (db_step(stmt) == DB_ROW) {
+    int rc;
+    while ((rc = db_step(stmt)) == DB_ROW) {
         management_ui_setup_t setup;
 
         /* Extract row data */
@@ -668,6 +682,12 @@ int user_get_management_ui_setups(db_handle_t *db, long long user_account_pin,
     }
 
     db_finalize(stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Error listing management UI setups");
+        db_results_free(list);
+        return -1;
+    }
 
     /* Convert linked list to array */
     int count;
@@ -792,7 +812,8 @@ int user_get_emails(db_handle_t *db, long long user_account_pin,
     int total_count = 0;
     int first_row = 1;
 
-    while (db_step(stmt) == DB_ROW) {
+    int rc;
+    while ((rc = db_step(stmt)) == DB_ROW) {
         user_email_t email;
         memset(&email, 0, sizeof(email));
 
@@ -832,6 +853,12 @@ int user_get_emails(db_handle_t *db, long long user_account_pin,
     }
 
     db_finalize(stmt);
+
+    if (rc != DB_DONE) {
+        log_error("Error listing user emails");
+        db_results_free(list);
+        return -1;
+    }
 
     /* Convert linked list to array */
     int count;
@@ -1264,8 +1291,11 @@ int user_change_password(db_handle_t *db, long long user_account_pin,
     OPENSSL_cleanse(salt, sizeof(salt));
     OPENSSL_cleanse(hash, sizeof(hash));
 
+    if (valid < 0) {
+        return -1;  /* A stored hash that can't be checked (logged) */
+    }
     if (valid != 1) {
-        log_info("Current password verification failed for password change");
+        log_warn("Current password verification failed for password change");
         return 0;  /* Invalid current password */
     }
 
@@ -1279,9 +1309,13 @@ int user_change_password(db_handle_t *db, long long user_account_pin,
                             &new_iterations,
                             new_hash, sizeof(new_hash));
     if (hash_rc != 0) {
-        log_error("Failed to hash new password");
         OPENSSL_cleanse(new_salt, sizeof(new_salt));
-        return (hash_rc == -2) ? -2 : -1;
+        if (hash_rc == -2) {
+            log_info("Password refused: its length is out of range");
+            return -2;
+        }
+        log_error("Failed to hash new password");
+        return -1;
     }
 
     /* Step 4: Update password in database, and close the sessions the old one
@@ -1361,9 +1395,13 @@ int user_set_password(db_handle_t *db, const unsigned char *user_id,
                             &iterations,
                             hash, sizeof(hash));
     if (hash_rc != 0) {
-        log_error("Failed to hash the password to set");
         OPENSSL_cleanse(salt, sizeof(salt));
-        return (hash_rc == -2) ? -2 : -1;
+        if (hash_rc == -2) {
+            log_info("Password refused: its length is out of range");
+            return -2;
+        }
+        log_error("Failed to hash the password to set");
+        return -1;
     }
 
     if (db_execute_trusted(db, BEGIN_WRITE) != 0) {
@@ -1473,17 +1511,7 @@ int user_change_username(db_handle_t *db, long long user_account_pin,
     char error_msg[256];
     if (validate_username(new_username, error_msg, sizeof(error_msg)) != 0) {
         log_info("Username validation failed: %s", error_msg);
-        return 0;
-    }
-
-    /* Check if username is already taken */
-    int exists = user_username_exists(db, new_username);
-    if (exists < 0) {
-        log_error("Failed to check username existence");
         return -1;
-    }
-    if (exists == 1) {
-        return 0;  /* Username taken */
     }
 
     /* Encrypt new username and compute hash */
@@ -1500,7 +1528,10 @@ int user_change_username(db_handle_t *db, long long user_account_pin,
         return -1;
     }
 
-    /* Update username (NOT EXISTS guards against TOCTOU race on uniqueness) */
+    /* Update username. NOT EXISTS is the uniqueness check, over every other account,
+       deactivated ones included, as the unique index counts them. It leaves out the
+       caller's own account, so changing only the case of your own name goes through;
+       user_username_exists can't, so it isn't asked first. */
     const char *update_sql =
         "UPDATE " TBL_USER_ACCOUNT " "
         "SET username = " P"1, "
@@ -1571,8 +1602,12 @@ int user_get_userinfo_by_id(db_handle_t *db, const unsigned char *user_id,
     int rc = db_step(stmt);
     if (rc != DB_ROW) {
         db_finalize(stmt);
-        log_error("User not found or inactive for userinfo");
-        return -1;
+        if (rc != DB_DONE) {
+            log_error("Failed to look up user for userinfo");
+            return -1;
+        }
+        log_info("User not found or inactive for userinfo");
+        return 1;
     }
 
     /* Decrypt username */
@@ -1636,10 +1671,6 @@ int user_create_email_verification_token(db_handle_t *db,
         return -1;
     }
 
-    /* Format TTL as string for INTERVAL_SECONDS macro */
-    char ttl_str[16];
-    snprintf(ttl_str, sizeof(ttl_str), "%d", ttl_seconds);
-
     /* INSERT-SELECT with rate limit guard:
      * Inserts only if the email exists for this user AND fewer than 5
      * active tokens exist. Uses RETURNING to detect success. */
@@ -1677,7 +1708,7 @@ int user_create_email_verification_token(db_handle_t *db,
 
     db_bind_blob(stmt, 1, id, sizeof(id));
     db_bind_text(stmt, 2, token_hash, -1);
-    db_bind_text(stmt, 3, ttl_str, -1);
+    db_bind_int(stmt, 3, ttl_seconds);
     db_bind_text_or_null(stmt, 4, source_ip);
     db_bind_int64(stmt, 5, user_account_pin);
     db_bind_text(stmt, 6, email_hash, -1);
@@ -2057,9 +2088,6 @@ int user_create_password_reset_token(db_handle_t *db, const char *email,
         return -1;
     }
 
-    char ttl_str[16];
-    snprintf(ttl_str, sizeof(ttl_str), "%d", ttl_seconds);
-
     /* INSERT-SELECT: resolve verified email → user_account_pin, rate limit */
     const char *sql =
         "INSERT INTO " TBL_PASSWORD_RESET_TOKEN " "
@@ -2094,7 +2122,7 @@ int user_create_password_reset_token(db_handle_t *db, const char *email,
 
     db_bind_blob(stmt, 1, id, sizeof(id));
     db_bind_text(stmt, 2, token_hash, -1);
-    db_bind_text(stmt, 3, ttl_str, -1);
+    db_bind_int(stmt, 3, ttl_seconds);
     db_bind_text_or_null(stmt, 4, source_ip);
     db_bind_text(stmt, 5, email_hash, -1);
 
@@ -2212,9 +2240,13 @@ int user_consume_password_reset_token(db_handle_t *db, const char *token,
                             &iterations,
                             hash, sizeof(hash));
     if (hash_rc != 0) {
-        log_error("Failed to hash new password for reset");
         OPENSSL_cleanse(salt, sizeof(salt));
-        return (hash_rc == -2) ? -2 : -1;
+        if (hash_rc == -2) {
+            log_info("Password refused: its length is out of range");
+            return -2;
+        }
+        log_error("Failed to hash new password for reset");
+        return -1;
     }
 
     /* Step 3: Transaction — mark token used + update password (and close the
@@ -2345,9 +2377,6 @@ int user_create_passwordless_login_token(db_handle_t *db, const char *email,
         return -1;
     }
 
-    char ttl_str[16];
-    snprintf(ttl_str, sizeof(ttl_str), "%d", ttl_seconds);
-
     /* Encrypt plaintext email for storage */
     char encrypted_email[512];
     if (encrypt_field(email, encrypted_email, sizeof(encrypted_email)) != 0) {
@@ -2392,7 +2421,7 @@ int user_create_passwordless_login_token(db_handle_t *db, const char *email,
     db_bind_blob(stmt, 1, id, sizeof(id));
     db_bind_text(stmt, 2, encrypted_email, -1);
     db_bind_text(stmt, 3, token_hash, -1);
-    db_bind_text(stmt, 4, ttl_str, -1);
+    db_bind_int(stmt, 4, ttl_seconds);
     db_bind_text_or_null(stmt, 5, source_ip);
     if (return_to && return_to[0]) {
         db_bind_text(stmt, 6, return_to, -1);
@@ -2689,9 +2718,6 @@ int user_create_invitation_token(db_handle_t *db,
         return -1;
     }
 
-    char ttl_str[16];
-    snprintf(ttl_str, sizeof(ttl_str), "%d", ttl_seconds);
-
     char token_hash[SHA256_HEX_LENGTH];
     if (crypto_sha256_hex(token, strlen(token), token_hash, sizeof(token_hash)) != 0) {
         log_error("Failed to hash invitation token");
@@ -2731,7 +2757,7 @@ int user_create_invitation_token(db_handle_t *db,
         db_bind_null(stmt, 3);
     }
     db_bind_text(stmt, 4, token_hash, -1);
-    db_bind_text(stmt, 5, ttl_str, -1);
+    db_bind_int(stmt, 5, ttl_seconds);
     db_bind_text_or_null(stmt, 6, source_ip);
 
     int rc = db_step(stmt);
@@ -2967,9 +2993,13 @@ int user_consume_invitation_token(db_handle_t *db, const char *token,
                             &iterations,
                             hash, sizeof(hash));
     if (hash_rc != 0) {
-        log_error("Failed to hash password for invitation accept");
         OPENSSL_cleanse(salt, sizeof(salt));
-        return (hash_rc == -2) ? -2 : -1;
+        if (hash_rc == -2) {
+            log_info("Password refused: its length is out of range");
+            return -2;
+        }
+        log_error("Failed to hash password for invitation accept");
+        return -1;
     }
 
     /* Step 3: Transaction.

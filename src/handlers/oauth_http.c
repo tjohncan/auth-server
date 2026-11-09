@@ -157,6 +157,7 @@ static HttpResponse *authenticate_token_client(db_handle_t *db,
         return response_json_error(500, "Internal server error");
     }
     if (lookup != 0) {
+        log_info("Unknown client at %s", operation);
         return response_oauth_error(400, "invalid_client", "Client not found");
     }
 
@@ -170,18 +171,25 @@ static HttpResponse *authenticate_token_client(db_handle_t *db,
      * invalid_client, not invalid_request — the request is well-formed, it is the
      * client that failed to authenticate. */
     if (!client_key_id_str || !client_secret) {
+        log_info("Confidential client without a key at %s", operation);
         return response_oauth_error(401, "invalid_client",
             "client_key_id and client_secret required for confidential clients");
     }
 
     unsigned char client_key_id[16];
     if (hex_to_bytes(client_key_id_str, client_key_id, 16) != 0) {
+        log_info("Malformed client_key_id at %s", operation);
         return response_oauth_error(401, "invalid_client", "Invalid client_key_id format");
     }
 
     long long client_pin, key_pin;
-    if (oauth_client_authenticate(db, client_id, client_key_id, client_secret,
-                                   &client_pin, &key_pin) != 1) {
+    int authenticated = oauth_client_authenticate(db, client_id, client_key_id, client_secret,
+                                                  &client_pin, &key_pin);
+    if (authenticated < 0) {
+        return response_json_error(500, "Internal server error");  /* logged */
+    }
+    if (authenticated != 1) {
+        log_warn("Client key refused at %s", operation);
         return response_oauth_error(401, "invalid_client", "Client authentication failed");
     }
 
@@ -194,6 +202,29 @@ static HttpResponse *authenticate_token_client(db_handle_t *db,
 /* ============================================================================
  * Token Endpoint
  * ========================================================================== */
+
+/*
+ * A grant's answer when the code, token or secret isn't what's wrong: the server
+ * failed, or the request asks for something the credential doesn't cover. invalid_grant
+ * would have the client discard a code or token that still holds, as RFC 6749 clients do,
+ * and invalid_client report a good secret as wrong. Each comes after the credential checked
+ * out (PKCE passed, the rotation done and rolled back, the key verified), so it tells nothing
+ * to one who doesn't hold it.
+ *
+ * Returns: the response, or NULL if the credential is what was refused
+ */
+static HttpResponse *grant_not_credential(int rc) {
+    switch (rc) {
+        case -2: return response_json_error(500, "Internal server error");
+        /* RFC 8707 Section 2 */
+        case -3: return response_oauth_error(400, "invalid_target",
+                     "Name a resource server this client is linked to");
+        case -4: return response_oauth_error(400, "invalid_scope", "Scope beyond the grant");
+        case -5: return response_oauth_error(400, "unauthorized_client",
+                     "This client can't use this grant type");
+        default: return NULL;
+    }
+}
 
 /*
  * POST /token
@@ -306,10 +337,11 @@ HttpResponse *token_handler(const HttpRequest *req) {
 
         if (rc != 0) {
             /* rc == 1: replay attack detected (token chain revoked automatically)
-             * rc <  0: invalid, expired, or malformed authorization code
+             * rc == -1: invalid, expired, or malformed authorization code
              * Same response for both — prevents distinguishing replay from invalid */
             free(grant_type);
-            return response_oauth_error(400, "invalid_grant", "Invalid authorization code");
+            HttpResponse *other = grant_not_credential(rc);
+            return other ? other : response_oauth_error(400, "invalid_grant", "Invalid authorization code");
         }
 
         /* Build JSON response */
@@ -387,10 +419,11 @@ HttpResponse *token_handler(const HttpRequest *req) {
 
         if (rc != 0) {
             /* rc == 1: replay attack detected (token chain revoked automatically)
-             * rc <  0: invalid, expired, or malformed refresh token
+             * rc == -1: invalid, expired, or malformed refresh token
              * Same response for both — prevents distinguishing replay from invalid */
             free(grant_type);
-            return response_oauth_error(400, "invalid_grant", "Invalid refresh token");
+            HttpResponse *other = grant_not_credential(rc);
+            return other ? other : response_oauth_error(400, "invalid_grant", "Invalid refresh token");
         }
 
         /* Build JSON response */
@@ -474,7 +507,8 @@ HttpResponse *token_handler(const HttpRequest *req) {
 
         if (rc != 0) {
             free(grant_type);
-            return response_oauth_error(401, "invalid_client", "Client authentication failed");
+            HttpResponse *other = grant_not_credential(rc);
+            return other ? other : response_oauth_error(401, "invalid_client", "Client authentication failed");
         }
 
         /* Build JSON response */
@@ -584,6 +618,30 @@ static int build_error_redirect(const char *redirect_uri,
     return 0;
 }
 
+/* What RFC 6749 Section 4.1.2.1's server_error says, where a 500 couldn't reach the
+ * client through the browser */
+#define SERVER_ERROR_DESCRIPTION "The server failed; try again"
+
+/* An error redirect to a redirect_uri already trusted (RFC 6749 Section 4.1.2.1) */
+static HttpResponse *authorize_error_redirect(const char *redirect_uri, const char *error,
+                                              const char *description, const char *state) {
+    char location[4096];  /* matches the success path in authorize_handler; a maximal state
+                           * encodes to 1533 bytes and would not fit 2048 */
+    if (build_error_redirect(redirect_uri, error, description, state,
+                             location, sizeof(location)) != 0) {
+        return response_json_error(500, "Internal server error");
+    }
+
+    HttpResponse *resp = http_response_new(302);
+    if (!resp) {
+        return response_json_error(500, "Internal server error");
+    }
+
+    http_response_set_header(resp, "Location", location);
+    http_response_set_body_str(resp, "");
+    return resp;
+}
+
 /* ============================================================================
  * Authorization Endpoint
  * ========================================================================== */
@@ -604,11 +662,15 @@ static int build_error_redirect(const char *redirect_uri,
  *
  * Response (not authenticated):
  *   302 Found
- *   Location: /login?redirect=<current_url>
+ *   Location: /login?return=<current_url>
  *
- * Response (error):
- *   400 Bad Request
- *   {"error":"invalid_request","error_description":"..."}
+ * Response (error, once redirect_uri is trusted):
+ *   302 Found
+ *   Location: <redirect_uri>?error=<code>&error_description=<text>&state=<state>
+ *
+ * Response (error, before that):
+ *   400 Bad Request, or 500 if the server failed
+ *   {"error":"..."}
  */
 HttpResponse *authorize_handler(const HttpRequest *req) {
 
@@ -790,7 +852,10 @@ HttpResponse *authorize_handler(const HttpRequest *req) {
     if (rc == -3) {
         /* MFA required - check if user has enrolled MFA methods */
         int mfa_count = 0;
-        mfa_method_count_confirmed(db, auth_response.user_account_pin, &mfa_count);
+        if (mfa_method_count_confirmed(db, auth_response.user_account_pin, &mfa_count) != 0) {
+            return authorize_error_redirect(redirect_uri, "server_error", SERVER_ERROR_DESCRIPTION,
+                                            state[0] ? state : NULL);
+        }
 
         if (mfa_count > 0) {
             /* User has MFA methods - redirect to login page MFA challenge */
@@ -823,23 +888,9 @@ HttpResponse *authorize_handler(const HttpRequest *req) {
         }
 
         /* No MFA methods enrolled - redirect with access_denied */
-        char location[4096];  /* matches the success path below; a maximal state
-                               * encodes to 1533 bytes and would not fit 2048 */
-        if (build_error_redirect(redirect_uri, "access_denied",
-                                  "MFA required but no methods enrolled",
-                                  state[0] ? state : NULL,
-                                  location, sizeof(location)) != 0) {
-            return response_json_error(500, "Internal server error");
-        }
-
-        HttpResponse *resp = http_response_new(302);
-        if (!resp) {
-            return response_json_error(500, "Internal server error");
-        }
-
-        http_response_set_header(resp, "Location", location);
-        http_response_set_body_str(resp, "");
-        return resp;
+        return authorize_error_redirect(redirect_uri, "access_denied",
+                                        "MFA required but no methods enrolled",
+                                        state[0] ? state : NULL);
     }
 
     if (rc == -4) {
@@ -848,46 +899,29 @@ HttpResponse *authorize_handler(const HttpRequest *req) {
         return response_json_error(400, "Invalid client_id or redirect_uri");
     }
 
+    if (rc == -6) {
+        /* The server failed, and redirect_uri isn't trusted yet: as above, no redirect */
+        return response_json_error(500, "Internal server error");
+    }
+
+    if (rc == -7) {
+        return authorize_error_redirect(redirect_uri, "server_error", SERVER_ERROR_DESCRIPTION,
+                                        state[0] ? state : NULL);
+    }
+
     if (rc == -5) {
         /* User not linked to this client — redirect with access_denied
          * (redirect_uri is already validated, post-trust error per RFC 6749 §4.1.2.1) */
-        char location[4096];  /* matches the success path below; a maximal state
-                               * encodes to 1533 bytes and would not fit 2048 */
-        if (build_error_redirect(redirect_uri, "access_denied",
-                                  "User is not authorized for this client",
-                                  state[0] ? state : NULL,
-                                  location, sizeof(location)) != 0) {
-            return response_json_error(500, "Internal server error");
-        }
-
-        HttpResponse *resp = http_response_new(302);
-        if (!resp) {
-            return response_json_error(500, "Internal server error");
-        }
-
-        http_response_set_header(resp, "Location", location);
-        http_response_set_body_str(resp, "");
-        return resp;
+        return authorize_error_redirect(redirect_uri, "access_denied",
+                                        "User is not authorized for this client",
+                                        state[0] ? state : NULL);
     }
 
     if (rc != 0) {
         /* Validation error - redirect with invalid_request */
-        char location[4096];  /* matches the success path below; a maximal state
-                               * encodes to 1533 bytes and would not fit 2048 */
-        if (build_error_redirect(redirect_uri, "invalid_request",
-                                  "Invalid authorization request", state[0] ? state : NULL,
-                                  location, sizeof(location)) != 0) {
-            return response_json_error(500, "Internal server error");
-        }
-
-        HttpResponse *resp = http_response_new(302);
-        if (!resp) {
-            return response_json_error(500, "Internal server error");
-        }
-
-        http_response_set_header(resp, "Location", location);
-        http_response_set_body_str(resp, "");
-        return resp;
+        return authorize_error_redirect(redirect_uri, "invalid_request",
+                                        "Invalid authorization request",
+                                        state[0] ? state : NULL);
     }
 
     /* Build redirect URI with code and state (URL-encoded).
@@ -1203,10 +1237,6 @@ HttpResponse *revoke_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/x-www-form-urlencoded");
     if (ct_err) return ct_err;
 
-    if (req->method != HTTP_POST) {
-        return response_method_not_allowed("POST");
-    }
-
     /* Get database connection */
     db_handle_t *db = db_pool_get_connection();
     if (!db) {
@@ -1273,10 +1303,16 @@ HttpResponse *revoke_handler(const HttpRequest *req) {
          *
          * Swallowing this into a 200 would tell a confidential client that forgot its
          * secret "revoked!" while its token stayed alive — a silent failure at exactly the
-         * moment a user believes they have logged out. */
+         * moment a user believes they have logged out.
+         *
+         * Authentication that couldn't run is the failure below, not this one: the token
+         * may still exist, and the client may retry. */
         cleanse_free(token);
         free(token_type_hint);
-        log_warn("Client authentication failed for revoke request");
+        if (auth_err->status_code >= 500) {
+            http_response_free(auth_err);
+            return response_json_error(503, "Service unavailable");
+        }
         return auth_err;
     }
 
@@ -1332,10 +1368,6 @@ HttpResponse *revoke_handler(const HttpRequest *req) {
 HttpResponse *introspect_handler(const HttpRequest *req) {
     HttpResponse *ct_err = require_content_type(req, "application/x-www-form-urlencoded");
     if (ct_err) return ct_err;
-
-    if (req->method != HTTP_POST) {
-        return response_method_not_allowed("POST");
-    }
 
     /* Get database connection */
     db_handle_t *db = db_pool_get_connection();
@@ -1403,6 +1435,13 @@ HttpResponse *introspect_handler(const HttpRequest *req) {
     OPENSSL_cleanse(resource_server_secret, strlen(resource_server_secret));
     free(resource_server_secret);
 
+    if (auth_result < 0) {
+        /* The server failed: {"active": false} would have the resource server
+           turn away a token that may be live */
+        cleanse_free(token);
+        free(token_type_hint);
+        return response_json_error(500, "Internal server error");  /* logged */
+    }
     if (auth_result != 1) {
         cleanse_free(token);
         free(token_type_hint);
@@ -1434,10 +1473,11 @@ HttpResponse *introspect_handler(const HttpRequest *req) {
     cleanse_free(token);
     free(token_type_hint);
 
+    /* A check that failed says nothing about the token, so it isn't "inactive" */
     if (introspect_result != 0) {
         free(scope);
         log_error("Error during token introspection");
-        return response_json_ok("{\"active\":false}");
+        return response_json_error(500, "Internal server error");
     }
 
     /* Build JSON response */
@@ -1573,7 +1613,11 @@ HttpResponse *userinfo_handler(const HttpRequest *req) {
 
     /* Look up user profile */
     user_userinfo_t info;
-    if (user_get_userinfo_by_id(db, user_id, &info) != 0) {
+    int found = user_get_userinfo_by_id(db, user_id, &info);
+    if (found < 0) {
+        return response_json_error(500, "Internal server error");  /* logged */
+    }
+    if (found != 0) {
         return response_bearer_error("invalid_token", "User not found");
     }
 

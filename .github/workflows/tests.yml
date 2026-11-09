@@ -9,8 +9,8 @@ on:
   workflow_dispatch:
     inputs:
       postgresql:
-        description: "PostgreSQL major versions for test-postgresql, as a JSON list, e.g. [14, 15, 16, 17, 18]"
-        default: "[14, 18]"
+        description: "PostgreSQL major versions for test-postgresql, as a JSON list, e.g. [15, 16, 17, 18]"
+        default: "[15, 18]"
 
 # A new push to the same PR cancels the in-flight run; runs on main are left to finish.
 concurrency:
@@ -22,9 +22,18 @@ permissions:
   contents: read
 
 jobs:
+  # One job at each end of vendor/verify-sqlite.sh's approved list, in parallel:
+  # the oldest SQLite release it approves and the newest, read from the list
+  # itself, so approving a newer release moves the newest job with no change here.
+  # The releases between are taken on the strength of the two ends.
   build-and-test:
+    name: build-and-test (SQLite ${{ matrix.sqlite }})
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        sqlite: [oldest, newest]
     steps:
       - uses: actions/checkout@v7
 
@@ -39,16 +48,20 @@ jobs:
           gcc --version
 
       # SQLite is vendored as a downloaded amalgamation, not committed source.
-      # See vendor/setup_notes.txt — matching commands here proves those instructions.
-      # verify-sqlite.sh checks sqlite3.c against SQLite's published SHA3-256, and
-      # sqlite3.h against a hash pinned from that verified download (see the script).
-      - name: Vendor the SQLite amalgamation
+      # See vendor/setup_notes.txt — matching commands here proves those instructions,
+      # with this job's release named in place of newest. verify-sqlite.sh checks
+      # sqlite3.c against SQLite's published SHA3-256, and sqlite3.h against a hash
+      # pinned from that verified download (see the script). --expect fails the job on
+      # any other release, approved or not, rather than letting it pass in this one's
+      # place.
+      - name: Vendor the SQLite amalgamation (the ${{ matrix.sqlite }} approved release)
         run: |
+          version=$(sh vendor/verify-sqlite.sh --version ${{ matrix.sqlite }})
           mkdir -p vendor/sqlite
-          curl -fsSL -o sqlite3.zip https://www.sqlite.org/2026/sqlite-amalgamation-3510200.zip
+          curl -fsSL -o sqlite3.zip "$(sh vendor/verify-sqlite.sh --url "$version")"
           unzip -jo sqlite3.zip "*/sqlite3.c" "*/sqlite3.h" -d vendor/sqlite
           rm sqlite3.zip
-          sh vendor/verify-sqlite.sh
+          sh vendor/verify-sqlite.sh --expect "$version"
 
       # test-db, test-crypto and test-handlers call config_load("auth.conf"). auth.conf
       # is gitignored (it's the live, per-deployment config); the committed example is
@@ -183,7 +196,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        postgresql: ${{ fromJSON(inputs.postgresql || '[14, 18]') }}
+        postgresql: ${{ fromJSON(inputs.postgresql || '[15, 18]') }}
     steps:
       - uses: actions/checkout@v7
 
