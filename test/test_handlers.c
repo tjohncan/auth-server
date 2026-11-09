@@ -2511,6 +2511,40 @@ static int test_email_links(void) {
     reply_free(&r);
     printf("✓ deactivation voids an outstanding verification link\n");
 
+    /* 3. A request whose query fails isn't "check your inbox", for any address */
+    const char *unknown = "{\"email\":\"nobody@example.com\"}";
+    db_handle_t *conn = db_pool_get_connection();
+    if (db_execute_direct(conn, HIDE_TABLE(SESSION_, "password_reset_token")) != 0) {
+        FAIL("could not hide the reset links");
+    }
+    r = post_json("/request-password-reset", NULL, unknown);
+    int reset = r.status;
+    reply_free(&r);
+    if (db_execute_direct(conn, SHOW_TABLE(SESSION_, "password_reset_token")) != 0 ||
+        db_execute_direct(conn, HIDE_TABLE(SESSION_, "passwordless_login_token")) != 0) {
+        FAIL("could not swap the hidden table");
+    }
+    r = post_json("/request-passwordless-login", NULL, unknown);
+    int passwordless = r.status;
+    reply_free(&r);
+    if (db_execute_direct(conn, SHOW_TABLE(SESSION_, "passwordless_login_token")) != 0) {
+        FAIL("could not show the sign-in links");
+    }
+    if (reset != 500 || passwordless != 500) {
+        FAIL("with the query failing, a reset request answered %d, a sign-in link request %d",
+             reset, passwordless);
+    }
+    r = post_json("/request-password-reset", NULL, unknown);
+    reset = r.status;
+    reply_free(&r);
+    r = post_json("/request-passwordless-login", NULL, unknown);
+    passwordless = r.status;
+    reply_free(&r);
+    if (reset != 200 || passwordless != 200) {
+        FAIL("an unknown address, once the database worked, answered %d and %d", reset, passwordless);
+    }
+    printf("✓ a request for an emailed link answers 500 when its query fails\n");
+
     return 0;
 }
 #endif

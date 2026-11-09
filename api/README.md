@@ -2497,7 +2497,7 @@ Request a password reset email.
 |-------|--------|----------|------------------------------|
 | email | string | Yes      | Email address of the account |
 
-**Response** (200 OK — always, to prevent user enumeration):
+**Response** (200 OK, whether or not the address has an account, to prevent user enumeration):
 ```json
 {
   "message": "If that email belongs to a verified account, a reset link has been sent. Check your inbox."
@@ -2505,7 +2505,8 @@ Request a password reset email.
 ```
 
 **Notes**:
-- Always returns 200 regardless of whether the email exists
+- Returns 200 regardless of whether the email exists
+- **500** when the server's own query fails, which says nothing about the address
 - Only verified email addresses can trigger a reset
 - Rate limited: maximum 5 reset tokens per user per hour
 - Token TTL is configured via `password_reset_token_ttl_seconds`
@@ -2644,7 +2645,7 @@ Request a passwordless login email.
 | email     | string | Yes      | Email address of the account                   |
 | return_to | string | No       | Authorize query string for post-login redirect |
 
-**Response** (200 OK — always, to prevent user enumeration):
+**Response** (200 OK, whether or not the address has an account, to prevent user enumeration):
 ```json
 {
   "message": "If that email belongs to a verified account with passwordless login enabled, a login link has been sent. Check your inbox."
@@ -2652,7 +2653,8 @@ Request a passwordless login email.
 ```
 
 **Notes**:
-- Always returns 200 regardless of whether the email exists or passwordless is enabled
+- Returns 200 regardless of whether the email exists or passwordless is enabled
+- **500** when the server's own query fails, which says nothing about the address
 - Only verified email addresses on accounts with `allow_passwordless_login` can trigger a token
 - Rate limited: maximum 5 tokens per user per hour
 - Token TTL is configured via `passwordless_login_token_ttl_seconds` (default 600s / 10 min)

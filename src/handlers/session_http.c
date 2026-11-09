@@ -89,6 +89,9 @@ static int form_password(const char *encoded, char **out_password) {
  * type would reach them unchecked: a password no sign-in can send, for one. */
 #define FORM_CONTENT_TYPE "application/x-www-form-urlencoded"
 
+/* The answer to a request for an emailed link whose query failed */
+#define EMAIL_NOT_SENT "Something went wrong on our side, so no email was sent. Try it again in a moment."
+
 /* Session token size: 32 bytes (256 bits) — matches session.c */
 #define SESSION_TOKEN_BYTES 32
 
@@ -1031,7 +1034,12 @@ HttpResponse *request_password_reset_handler(const HttpRequest *req) {
 
     free(email);
 
-    /* Always return success to prevent enumeration */
+    /* A failed query says nothing about the address, so it's answered as what it is */
+    if (result < 0) {
+        return response_json_error(500, EMAIL_NOT_SENT);
+    }
+
+    /* The same answer, whether or not the address has an account, to prevent enumeration */
     return response_json_ok(
         "{\"message\":\"If that email belongs to a verified account, "
         "a reset link has been sent. Check your inbox.\"}");
@@ -1433,6 +1441,11 @@ HttpResponse *request_passwordless_login_handler(const HttpRequest *req) {
 
     free(email);
     free(return_to);
+
+    /* A failed query says nothing about the address, so it's answered as what it is */
+    if (result < 0) {
+        return response_json_error(500, EMAIL_NOT_SENT);
+    }
 
     return response_json_ok(
         "{\"message\":\"If that email belongs to a verified account "
